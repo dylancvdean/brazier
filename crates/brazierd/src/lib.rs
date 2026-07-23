@@ -1,4 +1,5 @@
 pub mod api;
+pub mod blob_store;
 pub mod build_recipe;
 pub mod builds;
 pub mod db;
@@ -6,6 +7,7 @@ pub mod download;
 pub mod engine;
 pub mod hardware;
 pub mod hf;
+pub mod hf_auth;
 pub mod js_sandbox;
 pub mod llama;
 pub mod models_store;
@@ -27,4 +29,5 @@ pub struct AppState {
     pub api_key: Option<String>,
     pub http: reqwest::Client,
     pub data_dir: PathBuf,
+    pub active_builds: Arc<builds::ActiveBuilds>,
 }

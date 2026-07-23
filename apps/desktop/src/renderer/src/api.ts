@@ -116,8 +116,59 @@ export async function listModels(): Promise<LocalModel[]> {
   return (await request<{ data: LocalModel[] }>('/v1/models')).data
 }
 
-export async function listConversations(): Promise<Conversation[]> {
-  return (await request<{ data: Conversation[] }>('/api/v1/conversations')).data
+export async function listConversations(query?: string): Promise<Conversation[]> {
+  const suffix =
+    query && query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ''
+  return (await request<{ data: Conversation[] }>(`/api/v1/conversations${suffix}`)).data
+}
+
+export type ConversationExport = {
+  schema_version: number
+  exported_at: string
+  conversation: Conversation
+  messages: Message[]
+}
+
+export async function exportConversation(conversationId: string): Promise<ConversationExport> {
+  return request(`/api/v1/conversations/${conversationId}/export`)
+}
+
+export async function importConversation(exportBundle: ConversationExport): Promise<Conversation> {
+  return request('/api/v1/conversations/import', {
+    method: 'POST',
+    body: JSON.stringify(exportBundle)
+  })
+}
+
+export type ModelTrust = {
+  repo_id: string
+  gated: boolean
+  license: string | null
+  remote_code: boolean
+  requires_acknowledgement: boolean
+}
+
+export async function fetchModelTrust(repoId: string): Promise<ModelTrust> {
+  const [owner, name] = repoId.split('/')
+  return request(`/api/v1/huggingface/models/${owner}/${name}/trust`)
+}
+
+export type DownloadJob = {
+  id: string
+  repo_id: string
+  filename: string
+  revision: string
+  status: string
+  bytes_downloaded: number | null
+  total_bytes: number | null
+  sha256: string | null
+  error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export async function listDownloadJobs(): Promise<DownloadJob[]> {
+  return (await request<{ data: DownloadJob[] }>('/api/v1/models/downloads')).data
 }
 
 export function createConversation(title = 'New conversation'): Promise<Conversation> {
@@ -297,7 +348,13 @@ async function readProgressSse(
       const event = JSON.parse(data) as ProgressEvent
       last = event
       onProgress(event)
-      if (event.error) throw new Error(event.error)
+      if (event.error) {
+      const error = new Error(event.error) as Error & {
+        diagnostics?: Record<string, unknown>
+      }
+      if (event.result) error.diagnostics = event.result
+      throw error
+    }
       if (event.done) return event
     }
   }
@@ -393,7 +450,8 @@ export async function buildRuntime(
   repository: string,
   revision: string,
   target: string,
-  onProgress: (event: ProgressEvent) => void
+  onProgress: (event: ProgressEvent) => void,
+  options?: { onBuildId?: (buildId: string) => void }
 ): Promise<{ binary: string; build_id: string }> {
   const final = await readProgressSse(
     '/api/v1/runtimes/build?stream=true',
@@ -406,11 +464,24 @@ export async function buildRuntime(
         target
       })
     },
-    onProgress
+    (event) => {
+      const buildId = event.result?.build_id
+      if (typeof buildId === 'string') {
+        options?.onBuildId?.(buildId)
+      }
+      onProgress(event)
+    }
   )
   const result = final.result as { binary?: string; build_id?: string } | undefined
   if (!result?.binary) throw new Error('Build completed without a binary path.')
   return { binary: result.binary, build_id: result.build_id ?? '' }
+}
+
+export function cancelBuild(buildId: string): Promise<{ cancelled: string }> {
+  return request('/api/v1/runtimes/build/cancel', {
+    method: 'POST',
+    body: JSON.stringify({ build_id: buildId })
+  })
 }
 
 export function formatBytes(bytes: number | null | undefined): string {
@@ -424,4 +495,87 @@ export function formatBytes(bytes: number | null | undefined): string {
     unit += 1
   }
   return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+
+export type StoredBlob = {
+  sha256: string
+  mime_type: string
+  size_bytes: number
+  original_name?: string | null
+}
+
+const blobUrlCache = new Map<string, string>()
+
+export async function fetchBlobObjectUrl(sha256: string): Promise<string> {
+  const cached = blobUrlCache.get(sha256)
+  if (cached) return cached
+  const daemon = await connection()
+  const headers = new Headers()
+  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
+  const response = await fetch(`${daemon.address}/api/v1/blobs/${sha256}`, { headers })
+  if (!response.ok) throw new Error(`Could not load attachment (${response.status}).`)
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  blobUrlCache.set(sha256, url)
+  return url
+}
+
+export async function uploadAttachmentBlob(file: File): Promise<StoredBlob> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error ?? new Error('Could not read attachment.'))
+    reader.onload = () => resolve(String(reader.result))
+    reader.readAsDataURL(file)
+  })
+  const dataBase64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
+  const stored = await request<StoredBlob>('/api/v1/blobs', {
+    method: 'POST',
+    body: JSON.stringify({
+      mime_type: file.type || 'application/octet-stream',
+      data_base64: dataBase64,
+      filename: file.name
+    })
+  })
+  return stored
+}
+
+export function recordRun(
+  conversationId: string,
+  body: {
+    parent_message_id?: string | null
+    assistant_message_id?: string | null
+    model: string
+    settings: RuntimeSettings
+    tool_calls?: ToolCallRecord[]
+    response_text?: string
+    error?: string
+  }
+): Promise<{ id: string }> {
+  return request(`/api/v1/conversations/${conversationId}/runs`, {
+    method: 'POST',
+    body: JSON.stringify({
+      parent_message_id: body.parent_message_id ?? null,
+      assistant_message_id: body.assistant_message_id ?? null,
+      model: body.model,
+      settings: body.settings,
+      tool_calls: body.tool_calls?.length ? body.tool_calls : null,
+      response_text: body.response_text ?? null,
+      error: body.error ?? null
+    })
+  })
+}
+
+export function huggingFaceTokenStatus(): Promise<{ configured: boolean; source: string }> {
+  return request('/api/v1/huggingface/token')
+}
+
+export function setHuggingFaceToken(token: string): Promise<{ configured: boolean }> {
+  return request('/api/v1/huggingface/token', {
+    method: 'PUT',
+    body: JSON.stringify({ token })
+  })
+}
+
+export function clearHuggingFaceToken(): Promise<{ configured: boolean }> {
+  return request('/api/v1/huggingface/token', { method: 'DELETE' })
 }

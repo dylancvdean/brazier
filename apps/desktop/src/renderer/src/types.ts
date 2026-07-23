@@ -9,6 +9,10 @@ export type Conversation = {
 
 export type ContentPart =
   | { type: 'text'; text: string }
+  | {
+      type: 'brazier_blob'
+      brazier_blob: { sha256: string; mime_type: string; name: string }
+    }
   | { type: 'image_url'; image_url: { url: string } }
   | { type: 'input_audio'; input_audio: { data: string; format: string } }
   | { type: 'input_video'; video_url: { url: string } }
@@ -27,7 +31,7 @@ export type Attachment = {
   id: string
   name: string
   type: string
-  dataUrl: string
+  sha256: string
 }
 
 export type HubModel = {

@@ -16,10 +16,7 @@ const MAX_STACK_BYTES: usize = 256 * 1024;
 
 /// Run user JavaScript synchronously inside a fresh QuickJS runtime.
 pub fn run_javascript(code: &str, timeout: Duration) -> anyhow::Result<String> {
-    anyhow::ensure!(
-        !code.is_empty(),
-        "run_javascript requires non-empty `code`"
-    );
+    anyhow::ensure!(!code.is_empty(), "run_javascript requires non-empty `code`");
     anyhow::ensure!(
         code.len() <= MAX_CODE_BYTES,
         "code exceeds the {MAX_CODE_BYTES} byte limit"
@@ -61,9 +58,7 @@ fn eval_user_code<'js>(ctx: &Ctx<'js>, code: &str) -> rquickjs::Result<String> {
     let json: rquickjs::Object = globals.get("JSON")?;
     let stringify: rquickjs::Function = json.get("stringify")?;
 
-    let script = format!(
-        "(function() {{\n'use strict';\n{code}\n}})()"
-    );
+    let script = format!("(function() {{\n'use strict';\n{code}\n}})()");
     let value: Value = ctx.eval(script.as_bytes())?;
     if value.is_undefined() {
         return Ok(String::new());
@@ -123,10 +118,7 @@ mod tests {
 
     #[test]
     fn sandbox_respects_timeout() {
-        let result = run_javascript(
-            "while (true) {}",
-            Duration::from_millis(50),
-        );
+        let result = run_javascript("while (true) {}", Duration::from_millis(50));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
     }

@@ -148,6 +148,13 @@ pub fn text_from_content(content: &Value) -> String {
                     "image_url" | "input_image" => Some("[image]".to_owned()),
                     "input_audio" | "audio" => Some("[audio]".to_owned()),
                     "input_video" | "video" => Some("[video]".to_owned()),
+                    "brazier_blob" => {
+                        let mime = part
+                            .pointer("/brazier_blob/mime_type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("file");
+                        Some(format!("[attachment: {mime}]"))
+                    }
                     _ => None,
                 }
             })

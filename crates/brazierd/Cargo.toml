@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64 = "0.22.1"
 anyhow.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true

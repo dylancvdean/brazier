@@ -6,8 +6,14 @@
 //! until the user activates the new binary.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -39,6 +45,60 @@ pub struct BuildRecord {
     pub target: String,
     pub created_at: String,
     pub binary: String,
+}
+
+/// Structured failure report streamed to clients and written under the build prefix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildFailureReport {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    pub hints: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub log_excerpt: String,
+}
+
+/// Tracks in-flight source builds so clients can request cancellation.
+#[derive(Default)]
+pub struct ActiveBuilds {
+    builds: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl ActiveBuilds {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&self, build_id: &str) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        self.builds
+            .lock()
+            .expect("active builds lock")
+            .insert(build_id.to_owned(), flag.clone());
+        flag
+    }
+
+    pub fn cancel(&self, build_id: &str) -> bool {
+        let flag = self
+            .builds
+            .lock()
+            .expect("active builds lock")
+            .get(build_id)
+            .cloned();
+        if let Some(flag) = flag {
+            flag.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn finish(&self, build_id: &str) {
+        self.builds
+            .lock()
+            .expect("active builds lock")
+            .remove(build_id);
+    }
 }
 
 pub fn builds_root(data_dir: &Path, engine: &str) -> PathBuf {
@@ -123,7 +183,11 @@ async fn run_step(
     workdir: &Path,
     log: &mut String,
     progress: &mut ProgressCallback,
+    cancel: &Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("build cancelled");
+    }
     progress(ProgressEvent::phase("build", format!("{label}…")));
     log.push_str(&format!("$ {program} {}\n", args.join(" ")));
     let mut child = tokio::process::Command::new(program)
@@ -165,19 +229,36 @@ async fn run_step(
     drop(line_tx);
 
     let mut emitted = 0_usize;
-    while let Some(line) = line_rx.recv().await {
-        log.push_str(&line);
-        log.push('\n');
-        emitted += 1;
-        // Forward a bounded stream of log lines so the UI stays responsive.
-        if emitted.is_multiple_of(5) || emitted < 40 {
-            progress(ProgressEvent::phase("log", line));
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill().await;
+            anyhow::bail!("build cancelled");
+        }
+        let line = tokio::time::timeout(Duration::from_millis(250), line_rx.recv()).await;
+        match line {
+            Ok(Some(line)) => {
+                log.push_str(&line);
+                log.push('\n');
+                emitted += 1;
+                if emitted.is_multiple_of(5) || emitted < 40 {
+                    progress(ProgressEvent::phase("log", line));
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
         }
     }
     for reader in readers {
         let _ = reader.await;
     }
+    if cancel.load(Ordering::Relaxed) {
+        let _ = child.kill().await;
+        anyhow::bail!("build cancelled");
+    }
     let status = child.wait().await.context("wait for build step")?;
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("build cancelled");
+    }
     anyhow::ensure!(status.success(), "{label} failed with {status}");
     Ok(())
 }
@@ -223,37 +304,186 @@ fn install_artifacts(build_dir: &Path, install_bin: &Path) -> anyhow::Result<Pat
     installed_server.context("server binary missing after install")
 }
 
+fn log_excerpt(log: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = log.lines().collect();
+    if lines.len() <= max_lines {
+        return log.trim_end().to_owned();
+    }
+    lines[lines.len() - max_lines..].join("\n")
+}
+
+pub fn diagnose_failure(
+    message: &str,
+    step: Option<&str>,
+    log: &str,
+    target: RuntimeTarget,
+) -> BuildFailureReport {
+    let mut hints = Vec::new();
+    let log_lower = log.to_ascii_lowercase();
+    let message_lower = message.to_ascii_lowercase();
+
+    if message_lower.contains("cancelled") {
+        hints.push(
+            "The build was stopped before it finished. You can start a new build when ready."
+                .into(),
+        );
+    }
+    if message_lower.contains("`git` is required") {
+        hints.push("Install Git and ensure it is available on your PATH.".into());
+    }
+    if message_lower.contains("`cmake` is required") {
+        hints.push("Install CMake (3.20 or newer) and ensure it is available on your PATH.".into());
+    }
+    if log_lower.contains("could not find git")
+        || log_lower.contains("not a git repository")
+        || log_lower.contains("fatal: unable to access")
+        || log_lower.contains("could not read from remote")
+    {
+        hints.push(
+            "Git could not fetch the repository. Check the URL, your network connection, and any authentication required for private forks.".into(),
+        );
+    }
+    if log_lower.contains("could not find cuda")
+        || log_lower.contains("cudatoolkit not found")
+        || log_lower.contains("cuda_toolkit")
+    {
+        hints.push(
+            "CUDA was not detected. Install the NVIDIA CUDA toolkit or switch the build target to CPU.".into(),
+        );
+    }
+    if matches!(target, RuntimeTarget::Vulkan)
+        && (log_lower.contains("vulkan") && log_lower.contains("not found"))
+    {
+        hints.push(
+            "Vulkan was not detected. Install your platform Vulkan SDK/drivers or build with the CPU target.".into(),
+        );
+    }
+    if matches!(target, RuntimeTarget::Rocm)
+        && (log_lower.contains("hip") || log_lower.contains("rocm"))
+        && log_lower.contains("not found")
+    {
+        hints.push(
+            "ROCm/HIP was not detected. Install ROCm or switch the build target to CPU.".into(),
+        );
+    }
+    if log_lower.contains("no cmake_cxx_compiler")
+        || log_lower.contains("no CMAKE_CXX_COMPILER")
+        || log_lower.contains("c++: command not found")
+        || log_lower.contains("g++: command not found")
+    {
+        hints.push(
+            "A C++ toolchain is missing. On Linux install a build-essential or equivalent package; on macOS install Xcode command line tools.".into(),
+        );
+    }
+    if log_lower.contains("ninja: error")
+        || log_lower.contains("make: ***")
+        || log_lower.contains("error: ")
+    {
+        hints.push(
+            "The compiler reported errors. Search the log above for the first `error:` line — it usually points to the root cause.".into(),
+        );
+    }
+    if log_lower.contains("killed") || log_lower.contains("out of memory") {
+        hints.push(
+            "The build may have run out of memory. Close other apps or reduce parallel jobs (for example `cmake --build … --parallel 2`).".into(),
+        );
+    }
+    if message_lower.contains("llama-server was not produced")
+        || message_lower.contains("server binary missing")
+    {
+        hints.push(
+            "The server binary was not produced. Confirm the recipe still builds the `llama-server` target and that the checkout revision is compatible.".into(),
+        );
+    }
+    if step == Some("Clone repository") && hints.is_empty() {
+        hints.push(
+            "Clone failed. Verify the repository URL and that the revision (branch, tag, or commit) exists.".into(),
+        );
+    }
+
+    if hints.is_empty() {
+        hints.push(
+            "Review the build log above, starting from the first error near the failed step."
+                .into(),
+        );
+    }
+
+    BuildFailureReport {
+        message: message.to_owned(),
+        step: step.map(str::to_owned),
+        hints,
+        log_excerpt: log_excerpt(log, 40),
+    }
+}
+
+async fn persist_failure_artifacts(
+    root: &Path,
+    source: &Path,
+    build: &Path,
+    log: &str,
+    report: &BuildFailureReport,
+) {
+    let _ = tokio::fs::write(root.join("build.log"), log).await;
+    if let Ok(bytes) = serde_json::to_vec_pretty(report) {
+        let _ = tokio::fs::write(root.join("failure.json"), bytes).await;
+    }
+    let _ = tokio::fs::remove_dir_all(source).await;
+    let _ = tokio::fs::remove_dir_all(build).await;
+}
+
 /// Execute a full source build with streamed progress. Returns the installed
-/// binary path. The build directory is removed on failure (the log is kept in
-/// the progress stream and daemon log).
+/// binary path. Failed builds keep `build.log` and `failure.json` under the
+/// build prefix (large intermediate trees are removed).
 pub async fn run_build_with_progress(
     data_dir: &Path,
     request: BuildRequest,
+    active_builds: &ActiveBuilds,
     mut progress: ProgressCallback,
-) -> anyhow::Result<PathBuf> {
-    let platform =
-        current_platform().context("source builds are not supported on this platform")?;
-    let plan = build_recipe::plan(BuildPlanRequest {
+) -> Result<PathBuf, BuildFailureReport> {
+    let target = request.target.unwrap_or(RuntimeTarget::Cpu);
+    let fail = |message: String, step: Option<&str>, log: &str| -> BuildFailureReport {
+        diagnose_failure(&message, step, log, target)
+    };
+
+    let platform = match current_platform() {
+        Some(platform) => platform,
+        None => {
+            return Err(fail(
+                "source builds are not supported on this platform".into(),
+                None,
+                "",
+            ));
+        }
+    };
+    let plan = match build_recipe::plan(BuildPlanRequest {
         engine: request.engine.clone(),
         repository: request.repository.clone(),
         revision: request.revision.clone(),
         platform: platform.to_owned(),
-    })?;
-    anyhow::ensure!(
-        plan.engine == "llama.cpp",
-        "only llama.cpp source builds are currently executable"
-    );
+    }) {
+        Ok(plan) => plan,
+        Err(error) => return Err(fail(error.to_string(), None, "")),
+    };
+    if plan.engine != "llama.cpp" {
+        return Err(fail(
+            "only llama.cpp source builds are currently executable".into(),
+            None,
+            "",
+        ));
+    }
     for program in ["git", "cmake"] {
-        anyhow::ensure!(
-            command_available(program),
-            "`{program}` is required to build from source; install it and try again"
-        );
+        if !command_available(program) {
+            return Err(fail(
+                format!("`{program}` is required to build from source; install it and try again"),
+                None,
+                "",
+            ));
+        }
     }
     if let Some(warning) = &plan.warning {
         progress(ProgressEvent::phase("warning", warning.clone()));
     }
 
-    let target = request.target.unwrap_or(RuntimeTarget::Cpu);
     let build_id = format!(
         "{}-{}",
         sanitize_id_segment(&request.revision),
@@ -262,13 +492,21 @@ pub async fn run_build_with_progress(
             .unwrap_or_default()
             .as_secs()
     );
+    let cancel = active_builds.register(&build_id);
+    progress(ProgressEvent::build_started(&build_id));
+
     let root = builds_root(data_dir, &plan.engine).join(&build_id);
-    tokio::fs::create_dir_all(&root)
-        .await
-        .context("create build directory")?;
-    // Steps run with the build root as their working directory, so every
-    // substituted path must be absolute.
-    let root = std::path::absolute(&root).context("resolve build directory")?;
+    if let Err(error) = tokio::fs::create_dir_all(&root).await {
+        active_builds.finish(&build_id);
+        return Err(fail(error.to_string(), None, ""));
+    }
+    let root = match std::path::absolute(&root) {
+        Ok(root) => root,
+        Err(error) => {
+            active_builds.finish(&build_id);
+            return Err(fail(error.to_string(), None, ""));
+        }
+    };
     let source = root.join("source");
     let build = root.join("build");
     let install = root.join("install");
@@ -276,10 +514,15 @@ pub async fn run_build_with_progress(
 
     let flags = target_flags(target);
     let mut log = String::new();
-    let result: anyhow::Result<PathBuf> = async {
+    let mut failed_step: Option<String> = None;
+    let result: Result<PathBuf, anyhow::Error> = async {
         let steps: Vec<&PlannedCommand> = plan.checkout.iter().chain(plan.build.iter()).collect();
         let total = steps.len();
         for (index, step) in steps.into_iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                anyhow::bail!("build cancelled");
+            }
+            failed_step = Some(step.label.clone());
             let args = resolve_command_args(&step.args, &source, &build, &install, &flags);
             progress(ProgressEvent::phase(
                 "build",
@@ -292,6 +535,7 @@ pub async fn run_build_with_progress(
                 &root,
                 &mut log,
                 &mut progress,
+                &cancel,
             )
             .await?;
         }
@@ -299,13 +543,15 @@ pub async fn run_build_with_progress(
             "install",
             "Installing the built server into an isolated prefix",
         ));
+        failed_step = Some("install".into());
         let binary = install_artifacts(&build, &install_bin)?;
-        // The source and intermediate build trees are large; keep only the install.
         let _ = tokio::fs::remove_dir_all(&source).await;
         let _ = tokio::fs::remove_dir_all(&build).await;
         Ok(binary)
     }
     .await;
+
+    active_builds.finish(&build_id);
 
     match result {
         Ok(binary) => {
@@ -323,13 +569,10 @@ pub async fn run_build_with_progress(
                 ),
                 binary: binary.display().to_string(),
             };
-            tokio::fs::write(
-                root.join("build.json"),
-                serde_json::to_vec_pretty(&record).context("encode build record")?,
-            )
-            .await
-            .context("write build record")?;
-            tokio::fs::write(root.join("build.log"), &log).await.ok();
+            if let Ok(bytes) = serde_json::to_vec_pretty(&record) {
+                let _ = tokio::fs::write(root.join("build.json"), bytes).await;
+            }
+            let _ = tokio::fs::write(root.join("build.log"), &log).await;
             progress(ProgressEvent::done(serde_json::json!({
                 "binary": binary.display().to_string(),
                 "build_id": build_id,
@@ -339,8 +582,13 @@ pub async fn run_build_with_progress(
         }
         Err(error) => {
             tracing::error!(error = %error, log = %log, "source build failed");
-            let _ = tokio::fs::remove_dir_all(&root).await;
-            Err(error)
+            let report = fail(error.to_string(), failed_step.as_deref(), &log);
+            persist_failure_artifacts(&root, &source, &build, &log, &report).await;
+            progress(ProgressEvent::build_failed(
+                &serde_json::to_value(&report)
+                    .unwrap_or_else(|_| serde_json::json!({ "message": report.message.clone() })),
+            ));
+            Err(report)
         }
     }
 }
@@ -458,5 +706,38 @@ mod tests {
         assert_eq!(builds.len(), 1);
         assert_eq!(builds[0].0, "main-1");
         assert_eq!(builds[0].1.revision, "main");
+    }
+
+    #[test]
+    fn cancel_flag_is_observed() {
+        let active = ActiveBuilds::new();
+        let flag = active.register("demo-1");
+        assert!(!flag.load(Ordering::Relaxed));
+        assert!(active.cancel("demo-1"));
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(!active.cancel("missing"));
+    }
+
+    #[test]
+    fn diagnostics_surface_missing_cuda() {
+        let report = diagnose_failure(
+            "Configure failed with 1",
+            Some("Configure"),
+            "CMake Error: Could NOT find CUDA (missing: CUDA_TOOLKIT_ROOT_DIR)",
+            RuntimeTarget::Cuda,
+        );
+        assert!(report.hints.iter().any(|hint| hint.contains("CUDA")));
+    }
+
+    #[test]
+    fn diagnostics_mark_cancelled_builds() {
+        let report = diagnose_failure("build cancelled", None, "", RuntimeTarget::Cpu);
+        assert!(report.message.contains("cancelled"));
+        assert!(
+            report
+                .hints
+                .iter()
+                .any(|hint| hint.to_ascii_lowercase().contains("stopped"))
+        );
     }
 }

@@ -1,6 +1,7 @@
 use std::{convert::Infallible, time::Duration};
 
 use async_stream::stream;
+use axum::http::header;
 use axum::{
     Json, Router,
     extract::{Path, Query, Request, State},
@@ -22,13 +23,15 @@ use tower_http::{
 use uuid::Uuid;
 
 use crate::{
-    AppState,
+    AppState, blob_store,
     build_recipe::{self, BuildPlanRequest},
     builds,
-    download::{self, DownloadRequest},
+    db::CreateRunSnapshot,
+    db::ConversationExport,
+    download::{self},
     engine::{Engine, StreamEvent},
     hf::{self, SearchQuery},
-    models_store,
+    hf_auth, models_store,
     progress::ProgressEvent,
     runtimes, tools,
     types::{
@@ -83,10 +86,31 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/conversations/{id}/messages",
             get(list_messages).post(create_message),
         )
+        .route(
+            "/api/v1/conversations/{id}/export",
+            get(export_conversation),
+        )
+        .route("/api/v1/conversations/import", post(import_conversation))
+        .route(
+            "/api/v1/conversations/{id}/runs",
+            get(list_run_snapshots).post(create_run_snapshot),
+        )
+        .route("/api/v1/blobs", post(upload_blob))
+        .route("/api/v1/blobs/{sha256}", get(get_blob))
+        .route(
+            "/api/v1/huggingface/token",
+            get(huggingface_token_status)
+                .put(set_huggingface_token)
+                .delete(clear_huggingface_token),
+        )
         .route("/api/v1/huggingface/models", get(search_hugging_face))
         .route(
             "/api/v1/huggingface/models/{repo_owner}/{repo_name}/files",
             get(list_hub_files),
+        )
+        .route(
+            "/api/v1/huggingface/models/{repo_owner}/{repo_name}/trust",
+            get(model_trust),
         )
         .route("/api/v1/engines/build-plan", post(build_plan))
         .route("/api/v1/engines", get(engine_status))
@@ -103,7 +127,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/runtimes/activate", post(activate_runtime))
         .route("/api/v1/runtimes/build", post(build_runtime))
+        .route("/api/v1/runtimes/build/cancel", post(cancel_build))
         .route("/api/v1/models/download", post(download_model))
+        .route("/api/v1/models/downloads", get(list_download_jobs))
         .route("/api/v1/models", axum::routing::delete(delete_local_model))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -153,10 +179,13 @@ async fn require_auth(
 
 async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     state.db.ping().await.map_err(ApiError::internal)?;
+    let llama = state.runtime.llama_diagnostics().await;
     Ok(Json(json!({
         "status": "healthy",
         "engine": state.runtime.id(),
-        "version": env!("CARGO_PKG_VERSION")
+        "version": env!("CARGO_PKG_VERSION"),
+        "database": "ok",
+        "llama_server": llama,
     })))
 }
 
@@ -171,18 +200,54 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             "model_download": true,
             "llama_cpp_engine": true,
             "openai_chat_completions": true,
-            "openai_responses": true
+            "openai_responses": true,
+            "conversation_search": true,
+            "conversation_import_export": true,
+            "model_download_jobs": true,
+            "model_trust_acknowledgement": true,
         }
     })))
 }
 
-async fn list_conversations(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+async fn list_conversations(
+    State(state): State<AppState>,
+    Query(query): Query<ConversationListQuery>,
+) -> ApiResult<Json<Value>> {
     let conversations = state
         .db
-        .list_conversations()
+        .list_conversations(query.q.as_deref())
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(json!({ "data": conversations })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ConversationListQuery {
+    q: Option<String>,
+}
+
+async fn export_conversation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ConversationExport>> {
+    state
+        .db
+        .export_conversation(&id)
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+async fn import_conversation(
+    State(state): State<AppState>,
+    Json(export): Json<ConversationExport>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let conversation = state
+        .db
+        .import_conversation(export)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok((StatusCode::CREATED, Json(json!(conversation))))
 }
 
 async fn create_conversation(
@@ -228,11 +293,121 @@ async fn create_message(
     Ok((StatusCode::CREATED, Json(json!(message))))
 }
 
+async fn list_run_snapshots(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let runs = state
+        .db
+        .list_run_snapshots(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": runs })))
+}
+
+async fn create_run_snapshot(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<CreateRunSnapshot>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let snapshot = state
+        .db
+        .create_run_snapshot(&id, request)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok((StatusCode::CREATED, Json(json!(snapshot))))
+}
+
+#[derive(Debug, Deserialize)]
+struct UploadBlobRequest {
+    mime_type: String,
+    data_base64: String,
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+async fn upload_blob(
+    State(state): State<AppState>,
+    Json(request): Json<UploadBlobRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(request.data_base64.trim())
+        .map_err(|error| ApiError::bad_request(format!("invalid base64 payload: {error}")))?;
+    let stored = blob_store::store_bytes(
+        &state.data_dir,
+        &bytes,
+        &request.mime_type,
+        request.filename.as_deref(),
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
+    state
+        .db
+        .upsert_attachment(
+            &stored.sha256,
+            &stored.mime_type,
+            stored.size_bytes as i64,
+            stored.original_name.as_deref(),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    Ok((StatusCode::CREATED, Json(json!(stored))))
+}
+
+async fn get_blob(
+    State(state): State<AppState>,
+    Path(sha256): Path<String>,
+) -> ApiResult<Response> {
+    blob_store::validate_sha256(&sha256).map_err(ApiError::bad_request)?;
+    let (bytes, mime_type) = blob_store::read_blob(&state.data_dir, &sha256)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(([(header::CONTENT_TYPE, mime_type)], bytes).into_response())
+}
+
+async fn huggingface_token_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
+        "configured": hf_auth::token_configured(&state.data_dir),
+        "source": if std::env::var("HF_TOKEN").is_ok() || std::env::var("HUGGING_FACE_HUB_TOKEN").is_ok() {
+            "environment"
+        } else if hf_auth::token_file(&state.data_dir).is_file() {
+            "stored"
+        } else {
+            "none"
+        }
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct HuggingFaceTokenRequest {
+    token: String,
+}
+
+async fn set_huggingface_token(
+    State(state): State<AppState>,
+    Json(request): Json<HuggingFaceTokenRequest>,
+) -> ApiResult<Json<Value>> {
+    hf_auth::save_token(&state.data_dir, &request.token)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "configured": true })))
+}
+
+async fn clear_huggingface_token(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    hf_auth::clear_token(&state.data_dir)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(
+        json!({ "configured": hf_auth::token_configured(&state.data_dir) }),
+    ))
+}
+
 async fn search_hugging_face(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> ApiResult<Json<Value>> {
-    let models = hf::search(&state.http, query)
+    let models = hf::search(&state.http, &state.data_dir, query)
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(json!({ "data": models })))
@@ -249,14 +424,39 @@ async fn list_hub_files(
     Query(query): Query<HubFilesQuery>,
 ) -> ApiResult<Json<Value>> {
     let repo_id = format!("{repo_owner}/{repo_name}");
-    let (files, preferred) = hf::list_gguf_files(&state.http, &repo_id, query.revision.as_deref())
-        .await
-        .map_err(ApiError::internal)?;
+    let (files, preferred) = hf::list_gguf_files(
+        &state.http,
+        &state.data_dir,
+        &repo_id,
+        query.revision.as_deref(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
     Ok(Json(json!({
         "repo_id": repo_id,
         "data": files,
         "preferred_filename": preferred
     })))
+}
+
+async fn model_trust(
+    State(state): State<AppState>,
+    Path((repo_owner, repo_name)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let repo_id = format!("{repo_owner}/{repo_name}");
+    let trust = hf::model_trust(&state.http, &state.data_dir, &repo_id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(trust)))
+}
+
+async fn list_download_jobs(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let jobs = state
+        .db
+        .list_download_jobs(30)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": jobs })))
 }
 
 async fn build_plan(Json(request): Json<BuildPlanRequest>) -> ApiResult<Json<Value>> {
@@ -414,8 +614,13 @@ async fn build_runtime(
     Json(request): Json<builds::BuildRequest>,
 ) -> Response {
     if !query.stream {
-        return match builds::run_build_with_progress(&state.data_dir, request, Box::new(|_| {}))
-            .await
+        return match builds::run_build_with_progress(
+            &state.data_dir,
+            request,
+            &state.active_builds,
+            Box::new(|_| {}),
+        )
+        .await
         {
             Ok(binary) => (
                 StatusCode::OK,
@@ -425,36 +630,90 @@ async fn build_runtime(
                 })),
             )
                 .into_response(),
-            Err(error) => ApiError::bad_request(error).into_response(),
+            Err(report) => ApiError::bad_request(format_build_failure(&report)).into_response(),
         };
     }
     let (tx, rx) = mpsc::channel::<ProgressEvent>(256);
     let data_dir = state.data_dir.clone();
+    let active_builds = state.active_builds.clone();
     tokio::spawn(async move {
         let progress_tx = tx.clone();
-        let result = builds::run_build_with_progress(
+        let _result = builds::run_build_with_progress(
             &data_dir,
             request,
+            &active_builds,
             Box::new(move |event| {
-                // Build logs can outpace the client; block briefly rather than drop.
                 let _ = progress_tx.try_send(event);
             }),
         )
         .await;
-        if let Err(error) = result {
-            let _ = tx.send(ProgressEvent::error(error.to_string())).await;
-        }
     });
     progress_sse(rx)
+}
+
+#[derive(Debug, Deserialize)]
+struct CancelBuildRequest {
+    build_id: String,
+}
+
+async fn cancel_build(
+    State(state): State<AppState>,
+    Json(request): Json<CancelBuildRequest>,
+) -> ApiResult<Json<Value>> {
+    if state.active_builds.cancel(&request.build_id) {
+        Ok(Json(json!({ "cancelled": request.build_id })))
+    } else {
+        Err(ApiError::bad_request(format!(
+            "no in-progress build with id `{}`",
+            request.build_id
+        )))
+    }
+}
+
+fn format_build_failure(report: &builds::BuildFailureReport) -> String {
+    if report.hints.is_empty() {
+        report.message.clone()
+    } else {
+        format!(
+            "{}\n\n{}",
+            report.message,
+            report
+                .hints
+                .iter()
+                .map(|hint| format!("- {hint}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    }
 }
 
 async fn download_model(
     State(state): State<AppState>,
     Query(query): Query<StreamQuery>,
-    Json(request): Json<DownloadRequest>,
+    Json(request): Json<download::DownloadRequest>,
 ) -> Response {
     if !query.stream {
-        return match download::download_gguf(&state.http, &state.data_dir, request).await {
+        let job_id = state
+            .db
+            .create_download_job(&request.repo_id, &request.filename, &request.revision)
+            .await
+            .ok()
+            .map(|entry| entry.id);
+        let job_handle = job_id
+            .as_ref()
+            .map(|id| (state.db.clone(), id.clone()));
+        let result = download::download_gguf_with_progress(
+            &state.http,
+            &state.data_dir,
+            request,
+            Box::new(|_| {}),
+            job_handle,
+        )
+        .await;
+        if let (Some(job_id), Err(error)) = (job_id.as_deref(), &result) {
+            let _ = state.db.fail_download_job(job_id, &error.to_string()).await;
+        }
+        return match result {
             Ok(result) => (StatusCode::OK, Json(json!(result))).into_response(),
             Err(error) => ApiError::bad_request(error).into_response(),
         };
@@ -463,17 +722,35 @@ async fn download_model(
     let (tx, rx) = mpsc::channel::<ProgressEvent>(64);
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
+    let db = state.db.clone();
+    let repo_id = request.repo_id.clone();
+    let filename = request.filename.clone();
+    let revision = request.revision.clone();
     tokio::spawn(async move {
         let progress_tx = tx.clone();
+        let job_id = db
+            .create_download_job(&repo_id, &filename, &revision)
+            .await
+            .ok()
+            .map(|entry| entry.id);
+        let job_handle = job_id.as_ref().map(|id| (db.clone(), id.clone()));
         let result = download::download_gguf_with_progress(
             &http,
             &data_dir,
-            request,
+            download::DownloadRequest {
+                repo_id,
+                filename,
+                revision,
+            },
             Box::new(move |event| {
                 let _ = progress_tx.try_send(event);
             }),
+            job_handle,
         )
         .await;
+        if let (Some(job_id), Err(error)) = (job_id.as_deref(), &result) {
+            let _ = db.fail_download_job(job_id, &error.to_string()).await;
+        }
         if let Err(error) = result {
             let _ = tx.send(ProgressEvent::error(error.to_string())).await;
         }
@@ -726,6 +1003,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use std::sync::Arc;
     use tempfile::tempdir;
     use tower::ServiceExt;
 
@@ -748,6 +1026,7 @@ mod tests {
             api_key: None,
             http,
             data_dir: data_dir.to_path_buf(),
+            active_builds: Arc::new(builds::ActiveBuilds::new()),
         }
     }
 

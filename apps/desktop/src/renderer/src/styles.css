@@ -122,9 +122,35 @@ button {
   background: #20241d;
 }
 
+.conversation-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #141613;
+}
+
+.conversation-search input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  color: #e6eadf;
+  font-size: 11px;
+  background: transparent;
+}
+
+.sidebar-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
 .conversation-list {
   flex: 1;
-  margin-top: 22px;
+  margin-top: 14px;
   overflow-y: auto;
 }
 
@@ -917,6 +943,13 @@ button {
 
 .build-form .model-help {
   margin: 0;
+}
+
+.build-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .build-warning {

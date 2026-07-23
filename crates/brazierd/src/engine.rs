@@ -111,11 +111,21 @@ impl Runtime {
             "id": self.id(),
             "llama_binary": binary,
             "llama_server": running,
+            "llama_probe": self.llama_diagnostics().await,
             "managed_binary_path": llama::managed_binary_path(&self.data_dir).display().to_string(),
             "platform_asset_tag": llama::platform_asset_tag(),
             "settings": settings,
             "hardware": crate::hardware::detect(),
         })
+    }
+
+    /// Live capability probe against a running llama-server, if any.
+    pub async fn llama_diagnostics(&self) -> Option<serde_json::Value> {
+        let guard = self.llama.lock().await;
+        let server = guard.server.as_ref()?;
+        let base_url = server.base_url.clone();
+        drop(guard);
+        Some(llama::probe_server(&self.http, &base_url).await)
     }
 
     pub async fn settings(&self) -> RuntimeSettings {

@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
-use brazierd::{AppState, api, db::Database, engine::Runtime};
+use brazierd::{AppState, api, builds, db::Database, engine::Runtime};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -91,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
         api_key: api_key.clone(),
         http,
         data_dir: data_dir.clone(),
+        active_builds: Arc::new(builds::ActiveBuilds::new()),
     };
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.host, args.port))

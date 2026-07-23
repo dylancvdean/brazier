@@ -18,21 +18,27 @@ import { type FormEvent, useEffect, useRef, useState } from 'react'
 import {
   activateRuntime,
   buildRuntime,
+  cancelBuild,
   deleteModel,
   deleteRuntime,
   downloadModel,
   ensureLlamaEngine,
+  fetchModelTrust,
   formatBytes,
+  clearHuggingFaceToken,
+  huggingFaceTokenStatus,
   type HardwareInfo,
   type HubFile,
   type LocalModel,
+  type ModelTrust,
   listHubFiles,
   listRuntimes,
   type ProgressEvent,
   type RuntimeEntry,
   type RuntimeSettings,
   saveRuntimeSettings,
-  searchHub
+  searchHub,
+  setHuggingFaceToken
 } from '../api'
 import type { HubModel } from '../types'
 
@@ -249,6 +255,47 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     event: ProgressEvent | null
   } | null>(null)
   const [enginePhase, setEnginePhase] = useState<string | null>(null)
+  const [trustByRepo, setTrustByRepo] = useState<Record<string, ModelTrust>>({})
+  const [acknowledgedRepos, setAcknowledgedRepos] = useState<Record<string, boolean>>({})
+  const [hfTokenSource, setHfTokenSource] = useState<string>('none')
+  const [hfTokenDraft, setHfTokenDraft] = useState('')
+  const [savingHfToken, setSavingHfToken] = useState(false)
+
+  useEffect(() => {
+    void huggingFaceTokenStatus()
+      .then((status) => setHfTokenSource(status.source))
+      .catch(() => setHfTokenSource('none'))
+  }, [])
+
+  async function saveHubToken(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    setSavingHfToken(true)
+    props.onError(null)
+    try {
+      await setHuggingFaceToken(hfTokenDraft.trim())
+      setHfTokenDraft('')
+      const status = await huggingFaceTokenStatus()
+      setHfTokenSource(status.source)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSavingHfToken(false)
+    }
+  }
+
+  async function removeHubToken(): Promise<void> {
+    setSavingHfToken(true)
+    props.onError(null)
+    try {
+      await clearHuggingFaceToken()
+      const status = await huggingFaceTokenStatus()
+      setHfTokenSource(status.source)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSavingHfToken(false)
+    }
+  }
 
   async function findModels(event?: FormEvent): Promise<void> {
     event?.preventDefault()
@@ -274,9 +321,13 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     setLoadingFilesFor(model.id)
     props.onError(null)
     try {
-      const files = await listHubFiles(model.id)
+      const [files, trust] = await Promise.all([
+        listHubFiles(model.id),
+        fetchModelTrust(model.id)
+      ])
       setRepoFiles((current) => ({ ...current, [model.id]: files.data }))
       setPreferredFiles((current) => ({ ...current, [model.id]: files.preferred_filename }))
+      setTrustByRepo((current) => ({ ...current, [model.id]: trust }))
     } catch (cause) {
       props.onError(errorText(cause))
       setExpandedRepo(null)
@@ -286,6 +337,15 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   }
 
   async function downloadQuant(repoId: string, path: string): Promise<void> {
+    const trust = trustByRepo[repoId]
+    if (trust?.gated && hfTokenSource === 'none') {
+      props.onError('This model is gated on Hugging Face. Save an access token above first.')
+      return
+    }
+    if (trust?.requires_acknowledgement && !acknowledgedRepos[repoId]) {
+      props.onError('Review and acknowledge the license / remote-code notice before downloading.')
+      return
+    }
     const key = `${repoId}::${path}`
     setDownloadProgress({ key, event: null })
     props.onError(null)
@@ -317,6 +377,47 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         <h2>Download models</h2>
         <p>Search Hugging Face for GGUF weights compatible with llama.cpp.</p>
       </header>
+      <form className="build-form" onSubmit={(event) => void saveHubToken(event)}>
+        <label>
+          <span>Hugging Face token (for gated models)</span>
+          <input
+            type="password"
+            autoComplete="off"
+            value={hfTokenDraft}
+            onChange={(event) => setHfTokenDraft(event.target.value)}
+            placeholder={
+              hfTokenSource === 'environment'
+                ? 'Using HF_TOKEN from the environment'
+                : hfTokenSource === 'stored'
+                  ? 'Token saved — paste to replace'
+                  : 'hf_…'
+            }
+          />
+        </label>
+        <p className="model-help">
+          Stored locally under your Brazier data directory (mode 0600). You can also set{' '}
+          <code>HF_TOKEN</code> in the environment.
+        </p>
+        <div className="build-form-actions">
+          <button
+            className="secondary-action"
+            type="submit"
+            disabled={savingHfToken || !hfTokenDraft.trim()}
+          >
+            {savingHfToken ? <LoaderCircle className="spin" size={14} /> : 'Save token'}
+          </button>
+          {hfTokenSource === 'stored' && (
+            <button
+              className="chip-button subtle"
+              type="button"
+              disabled={savingHfToken}
+              onClick={() => void removeHubToken()}
+            >
+              Remove saved token
+            </button>
+          )}
+        </div>
+      </form>
       <form className="model-search" onSubmit={(event) => void findModels(event)}>
         <label>
           <Search size={16} />
@@ -377,6 +478,39 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
               </div>
               {expanded && (
                 <div className="quant-list">
+                  {trustByRepo[model.id]?.requires_acknowledgement && (
+                    <div className="build-warning">
+                      <ShieldAlert size={14} />
+                      <div>
+                        {trustByRepo[model.id]?.license && (
+                          <p>License: {trustByRepo[model.id]?.license}</p>
+                        )}
+                        {trustByRepo[model.id]?.remote_code && (
+                          <p>
+                            This repository includes non-GGUF artifacts (Transformers / Python).
+                            You are downloading weights only; do not execute untrusted code from
+                            the Hub.
+                          </p>
+                        )}
+                        {trustByRepo[model.id]?.gated && hfTokenSource === 'none' && (
+                          <p>A Hugging Face token is required for this gated model.</p>
+                        )}
+                        <label className="toggle-row compact">
+                          <span>I understand and want to download from this repository.</span>
+                          <input
+                            type="checkbox"
+                            checked={acknowledgedRepos[model.id] ?? false}
+                            onChange={(event) =>
+                              setAcknowledgedRepos((current) => ({
+                                ...current,
+                                [model.id]: event.target.checked
+                              }))
+                            }
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  )}
                   {files.length === 0 && (
                     <p className="empty-models-inline">No GGUF files found in this repo.</p>
                   )}
@@ -460,6 +594,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const [revision, setRevision] = useState('master')
   const [buildTarget, setBuildTarget] = useState('cpu')
   const [building, setBuilding] = useState(false)
+  const [activeBuildId, setActiveBuildId] = useState<string | null>(null)
   const [buildLog, setBuildLog] = useState<string[]>([])
   const [buildWarning, setBuildWarning] = useState<string | null>(null)
   const logRef = useRef<HTMLPreElement>(null)
@@ -541,28 +676,72 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     }
   }
 
+  function appendBuildDiagnostics(
+    lines: string[],
+    diagnostics: Record<string, unknown> | undefined
+  ): string[] {
+    if (!diagnostics) return lines
+    const hints = diagnostics.hints
+    const excerpt = diagnostics.log_excerpt
+    const next = [...lines]
+    if (typeof excerpt === 'string' && excerpt.trim()) {
+      next.push('', '--- last log lines ---', excerpt)
+    }
+    if (Array.isArray(hints) && hints.length > 0) {
+      next.push('', 'Suggested fixes:')
+      for (const hint of hints) {
+        if (typeof hint === 'string') next.push(`• ${hint}`)
+      }
+    }
+    return next
+  }
+
   async function runBuild(event: FormEvent): Promise<void> {
     event.preventDefault()
     setBuilding(true)
+    setActiveBuildId(null)
     setBuildLog([])
     setBuildWarning(null)
     props.onError(null)
     try {
-      await buildRuntime(repository.trim(), revision.trim(), buildTarget, (progress) => {
-        if (progress.phase === 'warning' && progress.message) {
-          setBuildWarning(progress.message)
-          return
-        }
-        if (progress.message) {
-          setBuildLog((current) => [...current.slice(-400), progress.message ?? ''])
-        }
-      })
+      await buildRuntime(
+        repository.trim(),
+        revision.trim(),
+        buildTarget,
+        (progress) => {
+          if (progress.phase === 'warning' && progress.message) {
+            setBuildWarning(progress.message)
+            return
+          }
+          if (progress.message) {
+            setBuildLog((current) => [...current.slice(-400), progress.message ?? ''])
+          }
+        },
+        { onBuildId: setActiveBuildId }
+      )
       setBuildLog((current) => [...current, 'Build complete. Activate it below to use it.'])
       await refreshRuntimes()
     } catch (cause) {
+      const diagnostics =
+        cause instanceof Error
+          ? (cause as Error & { diagnostics?: Record<string, unknown> }).diagnostics
+          : undefined
+      setBuildLog((current) => appendBuildDiagnostics(current, diagnostics))
       props.onError(`Build failed: ${errorText(cause)}`)
     } finally {
       setBuilding(false)
+      setActiveBuildId(null)
+    }
+  }
+
+  async function cancelActiveBuild(): Promise<void> {
+    if (!activeBuildId) return
+    props.onError(null)
+    try {
+      await cancelBuild(activeBuildId)
+      setBuildLog((current) => [...current, 'Cancellation requested…'])
+    } catch (cause) {
+      props.onError(errorText(cause))
     }
   }
 
@@ -740,14 +919,25 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
               Builds run locally with git and cmake into an isolated prefix. Non-upstream forks
               execute untrusted native code — only build sources you trust.
             </p>
-            <button
-              className="primary-action"
-              type="submit"
-              disabled={building || !repository.trim() || !revision.trim()}
-            >
-              {building ? <LoaderCircle className="spin" size={15} /> : <Hammer size={15} />}
-              {building ? 'Building…' : 'Start build'}
-            </button>
+            <div className="build-form-actions">
+              <button
+                className="primary-action"
+                type="submit"
+                disabled={building || !repository.trim() || !revision.trim()}
+              >
+                {building ? <LoaderCircle className="spin" size={15} /> : <Hammer size={15} />}
+                {building ? 'Building…' : 'Start build'}
+              </button>
+              {building && activeBuildId && (
+                <button
+                  className="chip-button danger"
+                  type="button"
+                  onClick={() => void cancelActiveBuild()}
+                >
+                  Cancel build
+                </button>
+              )}
+            </div>
             {(building || buildLog.length > 0) && (
               <pre className="build-log" ref={logRef}>
                 {buildLog.join('\n')}

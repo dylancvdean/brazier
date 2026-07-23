@@ -425,7 +425,29 @@ pub fn tool_calls_to_json(calls: &[AccumulatedToolCall]) -> serde_json::Value {
 fn message_to_openai_json(message: &OpenAiMessage) -> serde_json::Value {
     let content = match &message.content {
         serde_json::Value::String(text) => serde_json::Value::String(text.clone()),
-        serde_json::Value::Array(parts) => serde_json::Value::Array(parts.clone()),
+        serde_json::Value::Array(parts) => serde_json::Value::Array(
+            parts
+                .iter()
+                .map(|part| {
+                    if part.get("type").and_then(|value| value.as_str()) == Some("brazier_blob") {
+                        let mime = part
+                            .pointer("/brazier_blob/mime_type")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("application/octet-stream");
+                        let name = part
+                            .pointer("/brazier_blob/name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("attachment");
+                        serde_json::json!({
+                            "type": "text",
+                            "text": format!("[attachment: {name} ({mime})]")
+                        })
+                    } else {
+                        part.clone()
+                    }
+                })
+                .collect(),
+        ),
         other => serde_json::Value::String(other.to_string()),
     };
     let mut json = serde_json::json!({
@@ -928,6 +950,42 @@ impl LlamaServer {
         }
         Ok(())
     }
+}
+
+/// Query a running llama-server for health and loaded models.
+pub async fn probe_server(client: &reqwest::Client, base_url: &str) -> serde_json::Value {
+    use serde_json::json;
+    let mut probe = json!({
+        "base_url": base_url,
+        "health_ok": false,
+        "model_count": 0,
+    });
+    if let Ok(response) = client
+        .get(format!("{base_url}/health"))
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+    {
+        probe["health_ok"] = json!(response.status().is_success());
+        probe["health_status"] = json!(response.status().as_u16());
+    }
+    if let Ok(response) = client
+        .get(format!("{base_url}/v1/models"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        && response.status().is_success()
+        && let Ok(body) = response.json::<serde_json::Value>().await
+    {
+        let count = body
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .map(|models| models.len())
+            .unwrap_or(0);
+        probe["model_count"] = json!(count);
+        probe["models"] = body.get("data").cloned().unwrap_or(json!([]));
+    }
+    probe
 }
 
 /// Send one non-streamed chat completion to a running llama-server and return

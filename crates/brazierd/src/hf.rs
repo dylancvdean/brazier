@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::models_store::prefer_gguf_filename;
+use crate::hf_auth;
 
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
@@ -46,11 +47,18 @@ fn compatible(tags: &[String], engine: &str) -> bool {
     }
 }
 
-pub async fn search(client: &reqwest::Client, query: SearchQuery) -> anyhow::Result<Vec<HubModel>> {
+pub async fn search(
+    client: &reqwest::Client,
+    data_dir: &std::path::Path,
+    query: SearchQuery,
+) -> anyhow::Result<Vec<HubModel>> {
     let limit = query.limit.unwrap_or(30).clamp(1, 100);
-    let mut request = client
-        .get("https://huggingface.co/api/models")
-        .query(&[("limit", limit.to_string()), ("full", "true".to_owned())]);
+    let mut request = hf_auth::apply_auth(
+        client
+            .get("https://huggingface.co/api/models")
+            .query(&[("limit", limit.to_string()), ("full", "true".to_owned())]),
+        data_dir,
+    );
     if let Some(q) = &query.q {
         request = request.query(&[("search", q)]);
     }
@@ -124,14 +132,14 @@ pub struct RepoFile {
 /// List files in a Hugging Face model repository (tree API).
 pub async fn list_repo_files(
     client: &reqwest::Client,
+    data_dir: &std::path::Path,
     repo_id: &str,
     revision: &str,
 ) -> anyhow::Result<Vec<RepoFile>> {
     crate::models_store::validate_repo_id(repo_id)?;
     anyhow::ensure!(!revision.is_empty(), "revision is required");
     let url = format!("https://huggingface.co/api/models/{repo_id}/tree/{revision}");
-    let values: Vec<Value> = client
-        .get(url)
+    let values: Vec<Value> = hf_auth::apply_auth(client.get(url), data_dir)
         .send()
         .await
         .context("contact Hugging Face tree API")?
@@ -157,11 +165,12 @@ pub async fn list_repo_files(
 /// List GGUF filenames for a repository and suggest a default quant.
 pub async fn list_gguf_files(
     client: &reqwest::Client,
+    data_dir: &std::path::Path,
     repo_id: &str,
     revision: Option<&str>,
 ) -> anyhow::Result<(Vec<RepoFile>, Option<String>)> {
     let revision = revision.unwrap_or("main");
-    let files = list_repo_files(client, repo_id, revision).await?;
+    let files = list_repo_files(client, data_dir, repo_id, revision).await?;
     let ggufs: Vec<RepoFile> = files
         .into_iter()
         .filter(|file| file.path.to_ascii_lowercase().ends_with(".gguf"))
@@ -172,6 +181,78 @@ pub async fn list_gguf_files(
         .collect();
     let preferred = prefer_gguf_filename(&names);
     Ok((ggufs, preferred))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelTrust {
+    pub repo_id: String,
+    pub gated: bool,
+    pub license: Option<String>,
+    pub remote_code: bool,
+    pub requires_acknowledgement: bool,
+}
+
+/// Hub metadata used for license and remote-code acknowledgement before download.
+pub async fn model_trust(
+    client: &reqwest::Client,
+    data_dir: &std::path::Path,
+    repo_id: &str,
+) -> anyhow::Result<ModelTrust> {
+    crate::models_store::validate_repo_id(repo_id)?;
+    let url = format!("https://huggingface.co/api/models/{repo_id}");
+    let value: Value = hf_auth::apply_auth(client.get(url), data_dir)
+        .send()
+        .await
+        .context("contact Hugging Face model API")?
+        .error_for_status()
+        .context("Hugging Face model request failed")?
+        .json()
+        .await
+        .context("decode Hugging Face model response")?;
+
+    let gated = value
+        .get("gated")
+        .is_some_and(|gated| gated == &Value::Bool(true) || gated.as_str().is_some());
+    let license = value
+        .get("license")
+        .or_else(|| value.pointer("/cardData/license"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            value
+                .get("tags")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .find(|tag| tag.starts_with("license:"))
+                .map(|tag| tag.trim_start_matches("license:").to_owned())
+        });
+    let tags = value
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let remote_code = tags.iter().any(|tag| {
+        matches!(
+            tag.as_str(),
+            "transformers" | "pytorch" | "safetensors" | "custom_code"
+        )
+    });
+    let requires_acknowledgement = gated || license.is_some() || remote_code;
+
+    Ok(ModelTrust {
+        repo_id: repo_id.to_owned(),
+        gated,
+        license,
+        remote_code,
+        requires_acknowledgement,
+    })
 }
 
 #[cfg(test)]

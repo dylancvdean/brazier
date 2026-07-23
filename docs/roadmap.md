@@ -3,7 +3,7 @@
 ## Implemented foundation
 
 - Rust daemon with authenticated loopback startup and graceful shutdown.
-- SQLite conversation and message-branch persistence.
+- SQLite conversation and message-branch persistence with versioned schema migrations.
 - OpenAI-compatible Chat Completions and Responses, including SSE.
 - Engine capability contracts and deterministic development engine.
 - Hugging Face discovery with engine filtering and Unsloth preference.
@@ -15,27 +15,30 @@
   configuration in a dedicated management panel.
 - Source-build execution for llama.cpp into isolated prefixes with streamed
   logs, plus runtime inventory (managed releases, source builds, system
-  binaries) with activation and deletion.
+  binaries) with activation and deletion, in-flight build cancellation, and
+  structured failure diagnostics with preserved logs.
 - Bundled safe tools (current time, calculator, bounded web fetch with a
   private-network guard, QuickJS JavaScript sandbox) executed server-side in a
   multi-round tool loop for streamed and non-streamed chat.
+- Content-addressed attachment storage with bounded media imports; messages
+  reference blobs by digest instead of inline base64.
+- Hugging Face token storage for gated model downloads (environment override
+  or persisted token).
+- Immutable run snapshots per assistant turn (model, settings, tools, response).
+- llama-server health and capability probes exposed via daemon health/engine status.
+- Conversation search, JSON import/export, persisted model download jobs, and
+  Hub license / remote-code acknowledgement before GGUF downloads.
 
-## Alpha
+## Alpha (remaining)
 
-- Replace in-memory attachment payloads with content-addressed storage and
-  bounded media imports.
-- Add llama.cpp binary discovery, managed releases, process lifecycle, health
-  checks, and capability probes.
-- Add Apple-Silicon mlx-lm and mlx-vlm virtual environments and server adapters.
-- Add model download jobs, resume/checksum support, gated-model authentication,
-  license acknowledgement, and remote-code warnings.
-- Add immutable run snapshots, model settings, reasoning records, tool calls,
-  import/export, search, and database migrations.
+- Apple-Silicon mlx-lm and mlx-vlm virtual environments and server adapters.
+- Richer run snapshot querying in the UI and export bundles that include blob
+  references.
+- Optional download-job cancellation and background download queue beyond the
+  current in-request streaming model.
 
 ## Engine workshop
 
-- Add build cancellation and richer failure diagnostics to source builds
-  (execution, isolated prefixes, and streamed logs are implemented).
 - Detect and install user-scoped toolchains; guide users through platform SDKs
   and drivers without silent elevation.
 - Add Linux vLLM, remote OpenAI-compatible connections, engine diagnostics, and

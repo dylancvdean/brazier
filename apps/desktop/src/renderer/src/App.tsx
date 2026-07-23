@@ -11,10 +11,13 @@ import {
   Menu,
   MessageSquarePlus,
   Paperclip,
+  Download,
+  Search,
   Send,
   Settings2,
   SlidersHorizontal,
   Square,
+  Upload,
   Video,
   Wrench,
   X
@@ -25,15 +28,20 @@ import {
   createMessage,
   engineStatus,
   health,
+  exportConversation,
+  importConversation,
   listConversations,
   listMessages,
   listModels,
+  type ConversationExport,
   type HardwareInfo,
   type LocalModel,
   type RuntimeSettings,
   type ToolCallRecord,
+  recordRun,
   saveRuntimeSettings,
-  streamCompletion
+  streamCompletion,
+  uploadAttachmentBlob
 } from './api'
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
@@ -52,6 +60,12 @@ function contentText(message: Message): string {
 function contentMedia(message: Message): Array<'image' | 'audio' | 'video'> {
   if (typeof message.content === 'string') return []
   return message.content.flatMap((part) => {
+    if (part.type === 'brazier_blob') {
+      if (part.brazier_blob.mime_type.startsWith('image/')) return ['image'] as const
+      if (part.brazier_blob.mime_type.startsWith('audio/')) return ['audio'] as const
+      if (part.brazier_blob.mime_type.startsWith('video/')) return ['video'] as const
+      return []
+    }
     if (part.type === 'image_url') return ['image'] as const
     if (part.type === 'input_audio') return ['audio'] as const
     if (part.type === 'input_video') return ['video'] as const
@@ -70,35 +84,25 @@ function toolRecordsFromMessage(message: Message): ToolCallRecord[] | null {
   }
 }
 
-function fileToAttachment(file: File): Promise<Attachment> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onerror = () => reject(reader.error ?? new Error('Could not read attachment.'))
-    reader.onload = () =>
-      resolve({
-        id: crypto.randomUUID(),
-        name: file.name,
-        type: file.type,
-        dataUrl: String(reader.result)
-      })
-    reader.readAsDataURL(file)
-  })
+async function fileToAttachment(file: File): Promise<Attachment> {
+  const stored = await uploadAttachmentBlob(file)
+  return {
+    id: crypto.randomUUID(),
+    name: file.name,
+    type: file.type || stored.mime_type,
+    sha256: stored.sha256
+  }
 }
 
 function attachmentPart(attachment: Attachment): ContentPart {
-  if (attachment.type.startsWith('image/')) {
-    return { type: 'image_url', image_url: { url: attachment.dataUrl } }
-  }
-  if (attachment.type.startsWith('audio/')) {
-    return {
-      type: 'input_audio',
-      input_audio: {
-        data: attachment.dataUrl.split(',')[1] ?? attachment.dataUrl,
-        format: attachment.type.split('/')[1] ?? 'wav'
-      }
+  return {
+    type: 'brazier_blob',
+    brazier_blob: {
+      sha256: attachment.sha256,
+      mime_type: attachment.type,
+      name: attachment.name
     }
   }
-  return { type: 'input_video', video_url: { url: attachment.dataUrl } }
 }
 
 function modelLabel(modelId: string, models: LocalModel[]): { title: string; subtitle: string } {
@@ -143,6 +147,7 @@ function ToolChips({ records }: { records: ToolCallRecord[] }): React.JSX.Elemen
 
 export function App(): React.JSX.Element {
   const [conversations, setConversations] = useState<Conversation[]>([])
+  const [conversationSearch, setConversationSearch] = useState('')
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [tipId, setTipId] = useState<string | null>(null)
@@ -171,6 +176,7 @@ export function App(): React.JSX.Element {
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const fileInput = useRef<HTMLInputElement>(null)
+  const importInput = useRef<HTMLInputElement>(null)
   const scrollAnchor = useRef<HTMLDivElement>(null)
 
   const chain = useMemo(() => messageChain(messages, tipId), [messages, tipId])
@@ -209,10 +215,44 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function refreshConversations(): Promise<void> {
-    const data = await listConversations()
+  async function refreshConversations(query = conversationSearch): Promise<void> {
+    const data = await listConversations(query)
     setConversations(data)
     if (!conversationId && data[0]) setConversationId(data[0].id)
+  }
+
+  async function exportCurrentConversation(): Promise<void> {
+    if (!conversationId) return
+    setError(null)
+    try {
+      const bundle = await exportConversation(conversationId)
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+        type: 'application/json'
+      })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `brazier-${bundle.conversation.title.replace(/\s+/g, '-').slice(0, 48)}.json`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  async function importConversationFromFile(file: File): Promise<void> {
+    setError(null)
+    try {
+      const bundle = JSON.parse(await file.text()) as ConversationExport
+      const conversation = await importConversation(bundle)
+      await refreshConversations('')
+      setConversationSearch('')
+      setConversationId(conversation.id)
+      await refreshMessages(conversation.id)
+      await refreshConversations('')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
   }
 
   async function refreshMessages(id: string, preferredTip?: string): Promise<void> {
@@ -238,6 +278,15 @@ export function App(): React.JSX.Element {
       setError(cause instanceof Error ? cause.message : String(cause))
     )
   }, [])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void refreshConversations(conversationSearch).catch((cause: unknown) =>
+        setError(cause instanceof Error ? cause.message : String(cause))
+      )
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [conversationSearch])
 
   useEffect(() => {
     let active = true
@@ -302,16 +351,20 @@ export function App(): React.JSX.Element {
   }
 
   async function selectFiles(event: ChangeEvent<HTMLInputElement>): Promise<void> {
-    const files = Array.from(event.target.files ?? [])
-    const accepted = files.filter(
-      (file) =>
-        file.type.startsWith('image/') ||
-        file.type.startsWith('audio/') ||
-        file.type.startsWith('video/')
-    )
-    const loaded = await Promise.all(accepted.map(fileToAttachment))
-    setAttachments((current) => [...current, ...loaded])
-    event.target.value = ''
+    try {
+      const files = Array.from(event.target.files ?? [])
+      const accepted = files.filter(
+        (file) =>
+          file.type.startsWith('image/') ||
+          file.type.startsWith('audio/') ||
+          file.type.startsWith('video/')
+      )
+      const loaded = await Promise.all(accepted.map(fileToAttachment))
+      setAttachments((current) => [...current, ...loaded])
+      event.target.value = ''
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
   }
 
   async function submit(event: FormEvent): Promise<void> {
@@ -386,6 +439,16 @@ export function App(): React.JSX.Element {
         content: responseText,
         model: selectedModel
       })
+      if (runtime) {
+        await recordRun(activeConversationId, {
+          parent_message_id: userMessage.id,
+          assistant_message_id: assistant.id,
+          model: selectedModel,
+          settings: runtime,
+          tool_calls: toolRecords,
+          response_text: responseText
+        })
+      }
       setStreamingText('')
       setStreamingTools([])
       await refreshMessages(activeConversationId, assistant.id)
@@ -414,6 +477,45 @@ export function App(): React.JSX.Element {
           <MessageSquarePlus size={17} />
           New conversation
         </button>
+        <label className="conversation-search">
+          <Search size={14} />
+          <input
+            aria-label="Search conversations"
+            value={conversationSearch}
+            onChange={(event) => setConversationSearch(event.target.value)}
+            placeholder="Search conversations…"
+          />
+        </label>
+        <div className="sidebar-actions">
+          <button
+            className="chip-button subtle"
+            disabled={!conversationId}
+            title="Export this conversation as JSON"
+            onClick={() => void exportCurrentConversation()}
+          >
+            <Download size={13} />
+            Export
+          </button>
+          <button
+            className="chip-button subtle"
+            title="Import a conversation JSON export"
+            onClick={() => importInput.current?.click()}
+          >
+            <Upload size={13} />
+            Import
+          </button>
+          <input
+            ref={importInput}
+            type="file"
+            accept="application/json,.json"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0]
+              if (file) void importConversationFromFile(file)
+              event.target.value = ''
+            }}
+          />
+        </div>
         <div className="conversation-list">
           <div className="section-label">Recent</div>
           {conversations.map((conversation) => (

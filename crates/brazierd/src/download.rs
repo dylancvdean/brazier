@@ -15,6 +15,8 @@ use tokio::{
 };
 
 use crate::{
+    db::Database,
+    hf_auth,
     models_store::{
         download_destination, downloads_dir, model_id_for_path, validate_filename, validate_repo_id,
     },
@@ -64,7 +66,7 @@ pub async fn download_gguf(
     data_dir: &Path,
     request: DownloadRequest,
 ) -> anyhow::Result<DownloadResult> {
-    download_gguf_with_progress(client, data_dir, request, noop_progress()).await
+    download_gguf_with_progress(client, data_dir, request, noop_progress(), None).await
 }
 
 pub async fn download_gguf_with_progress(
@@ -72,6 +74,7 @@ pub async fn download_gguf_with_progress(
     data_dir: &Path,
     request: DownloadRequest,
     mut progress: ProgressCallback,
+    job: Option<(Database, String)>,
 ) -> anyhow::Result<DownloadResult> {
     validate_repo_id(&request.repo_id)?;
     validate_filename(&request.filename)?;
@@ -103,6 +106,11 @@ pub async fn download_gguf_with_progress(
             resumed: false,
         };
         progress(ProgressEvent::done(serde_json::to_value(&result)?));
+        if let Some((db, job_id)) = &job {
+            let _ = db
+                .complete_download_job(job_id, &result.sha256, result.bytes)
+                .await;
+        }
         return Ok(result);
     }
 
@@ -132,13 +140,16 @@ pub async fn download_gguf_with_progress(
     ));
     let url = resolve_url(&request.repo_id, &request.revision, &request.filename);
 
-    let mut builder = client
-        .get(&url)
-        .header(
-            "user-agent",
-            format!("brazier/{}", env!("CARGO_PKG_VERSION")),
-        )
-        .timeout(Duration::from_secs(600));
+    let mut builder = hf_auth::apply_auth(
+        client
+            .get(&url)
+            .header(
+                "user-agent",
+                format!("brazier/{}", env!("CARGO_PKG_VERSION")),
+            )
+            .timeout(Duration::from_secs(600)),
+        data_dir,
+    );
     if existing > 0 {
         builder = builder.header("range", format!("bytes={existing}-"));
     }
@@ -153,6 +164,13 @@ pub async fn download_gguf_with_progress(
     }
     if !(status.is_success() || status.as_u16() == 206) {
         let body = response.text().await.unwrap_or_default();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            if hf_auth::load_token(data_dir).is_none() {
+                anyhow::bail!(
+                    "Hugging Face rejected the download ({status}). This model may be gated — add a Hugging Face token in Manage → Download models."
+                );
+            }
+        }
         anyhow::bail!("Hugging Face download failed ({status}): {body}");
     }
 
@@ -180,9 +198,13 @@ pub async fn download_gguf_with_progress(
             .await
             .context("write download chunk")?;
         written += chunk.len() as u64;
-        // Throttle UI updates to roughly every 256 KiB.
         if written.saturating_sub(last_emit) >= 256 * 1024 || total == Some(written) {
             progress(ProgressEvent::download(written, total));
+            if let Some((db, job_id)) = &job {
+                let _ = db
+                    .update_download_job_progress(job_id, written, total)
+                    .await;
+            }
             last_emit = written;
         }
     }
@@ -204,6 +226,11 @@ pub async fn download_gguf_with_progress(
         resumed,
     };
     progress(ProgressEvent::done(serde_json::to_value(&result)?));
+    if let Some((db, job_id)) = &job {
+        let _ = db
+            .complete_download_job(job_id, &result.sha256, result.bytes)
+            .await;
+    }
     Ok(result)
 }
 

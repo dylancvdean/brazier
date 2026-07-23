@@ -77,6 +77,37 @@ impl ProgressEvent {
             result: None,
         }
     }
+
+    pub fn build_started(build_id: impl Into<String>) -> Self {
+        Self {
+            phase: "build".into(),
+            bytes: None,
+            total: None,
+            percent: None,
+            message: Some("Source build started.".into()),
+            done: None,
+            error: None,
+            result: Some(serde_json::json!({ "build_id": build_id.into() })),
+        }
+    }
+
+    pub fn build_failed(report: &serde_json::Value) -> Self {
+        let message = report
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Source build failed")
+            .to_owned();
+        Self {
+            phase: "error".into(),
+            bytes: None,
+            total: None,
+            percent: None,
+            message: Some(message.clone()),
+            done: Some(true),
+            error: Some(message),
+            result: Some(report.clone()),
+        }
+    }
 }
 
 pub type ProgressCallback = Box<dyn FnMut(ProgressEvent) + Send>;
