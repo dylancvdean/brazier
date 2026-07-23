@@ -1,7 +1,8 @@
 //! Bundled, safe built-in tools the daemon can execute on behalf of a model.
 //!
 //! Tools are intentionally conservative: no filesystem access, no shell, and
-//! web retrieval is bounded (size, time, and private-network guard).
+//! web retrieval is bounded (size, time, and private-network guard). JavaScript
+//! runs in an isolated QuickJS runtime with memory, stack, and time limits.
 
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use serde_json::{Value, json};
 const FETCH_MAX_BYTES: usize = 256 * 1024;
 const FETCH_MAX_OUTPUT_CHARS: usize = 8_000;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+const JS_SANDBOX_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A completed built-in tool invocation, suitable for UI display and for the
 /// `tool` role message returned to the model.
@@ -64,6 +66,23 @@ pub fn definitions() -> Value {
                     "required": ["url"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_javascript",
+                "description": "Run JavaScript in a sandboxed QuickJS environment. No network, filesystem, or host APIs. Use for data transforms, date math, or small algorithms. Use `return` to produce a JSON-serializable result.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "JavaScript source executed inside a strict-mode function body."
+                        }
+                    },
+                    "required": ["code"]
+                }
+            }
         }
     ])
 }
@@ -93,13 +112,26 @@ pub fn catalog() -> Value {
                     FETCH_TIMEOUT.as_secs()
                 ),
                 "network": true
+            },
+            {
+                "name": "run_javascript",
+                "title": "JavaScript sandbox",
+                "description": format!(
+                    "QuickJS sandbox ({} KB code limit, {}s timeout, no I/O).",
+                    crate::js_sandbox::MAX_CODE_BYTES / 1024,
+                    JS_SANDBOX_TIMEOUT.as_secs()
+                ),
+                "network": false
             }
         ]
     })
 }
 
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "get_current_time" | "calculator" | "fetch_url")
+    matches!(
+        name,
+        "get_current_time" | "calculator" | "fetch_url" | "run_javascript"
+    )
 }
 
 /// Execute one bundled tool call. Errors are folded into the output string so
@@ -130,6 +162,25 @@ pub async fn execute(
             Some(url) => fetch_url(client, url).await,
             None => Err(anyhow::anyhow!(
                 "fetch_url requires a `url` string argument"
+            )),
+        },
+        "run_javascript" => match parsed.get("code").and_then(Value::as_str) {
+            Some(code) => {
+                let code = code.to_owned();
+                match tokio::task::spawn_blocking(move || {
+                    crate::js_sandbox::run_javascript(&code, JS_SANDBOX_TIMEOUT)
+                })
+                .await
+                {
+                    Ok(Ok(output)) => Ok(output),
+                    Ok(Err(error)) => Err(error),
+                    Err(join_error) => Err(anyhow::anyhow!(
+                        "javascript sandbox task failed: {join_error}"
+                    )),
+                }
+            }
+            None => Err(anyhow::anyhow!(
+                "run_javascript requires a `code` string argument"
             )),
         },
         other => Err(anyhow::anyhow!("unknown built-in tool `{other}`")),
@@ -548,6 +599,20 @@ mod tests {
     async fn execute_calculator_round_trip() {
         let client = reqwest::Client::new();
         let result = execute(&client, "call_1", "calculator", "{\"expression\": \"6*7\"}").await;
+        assert!(!result.is_error);
+        assert_eq!(result.output, "42");
+    }
+
+    #[tokio::test]
+    async fn execute_javascript_round_trip() {
+        let client = reqwest::Client::new();
+        let result = execute(
+            &client,
+            "call_1",
+            "run_javascript",
+            "{\"code\": \"return 6*7;\"}",
+        )
+        .await;
         assert!(!result.is_error);
         assert_eq!(result.output, "42");
     }
