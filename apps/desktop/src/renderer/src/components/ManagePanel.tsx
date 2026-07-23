@@ -14,7 +14,7 @@ import {
   Trash2,
   X
 } from 'lucide-react'
-import { type FormEvent, useEffect, useRef, useState } from 'react'
+import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
   activateRuntime,
   buildRuntime,
@@ -39,6 +39,7 @@ import {
   type ProgressEvent,
   type RuntimeEntry,
   type RuntimeSettings,
+  type RuntimeTarget,
   saveRuntimeSettings,
   searchHub,
   setHuggingFaceToken,
@@ -786,6 +787,26 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   )
 }
 
+function sourceBuildTargets(hardware: HardwareInfo | null): RuntimeTarget[] {
+  switch (hardware?.os) {
+    case 'macos':
+      return ['cpu', 'metal']
+    case 'windows':
+      return ['cpu', 'cuda', 'vulkan']
+    default:
+      return ['cpu', 'cuda', 'rocm', 'vulkan']
+  }
+}
+
+const BUILD_TARGET_LABELS: Record<RuntimeTarget, string> = {
+  auto: 'Auto',
+  cpu: 'CPU',
+  cuda: 'NVIDIA CUDA',
+  rocm: 'AMD ROCm',
+  metal: 'Apple Metal',
+  vulkan: 'Vulkan'
+}
+
 function RuntimesSection(props: SectionProps): React.JSX.Element {
   const maxBuildJobs = Math.max(1, props.hardware?.logical_cpus ?? 8)
   const initialBuildJobs = Math.max(
@@ -806,7 +827,11 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const [buildOpen, setBuildOpen] = useState(false)
   const [repository, setRepository] = useState('https://github.com/ggml-org/llama.cpp')
   const [revision, setRevision] = useState('master')
-  const [buildTarget, setBuildTarget] = useState('cpu')
+  const [buildTarget, setBuildTarget] = useState<RuntimeTarget>('cpu')
+  const buildTargets = useMemo(
+    () => sourceBuildTargets(props.hardware),
+    [props.hardware?.os]
+  )
   const [buildJobs, setBuildJobs] = useState(initialBuildJobs)
   const [building, setBuilding] = useState(false)
   const [activeBuildId, setActiveBuildId] = useState<string | null>(null)
@@ -843,6 +868,19 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       )
     )
   }, [props.settings?.build_jobs, props.hardware?.logical_cpus, maxBuildJobs])
+
+  useEffect(() => {
+    const recommended = props.hardware?.recommended_target
+    if (recommended && recommended !== 'auto' && buildTargets.includes(recommended)) {
+      setBuildTarget(recommended)
+    }
+  }, [props.hardware?.recommended_target, buildTargets])
+
+  useEffect(() => {
+    if (!buildTargets.includes(buildTarget)) {
+      setBuildTarget('cpu')
+    }
+  }, [buildTarget, buildTargets])
 
   async function persistBuildJobs(jobs: number): Promise<void> {
     if (!props.settings || props.settings.build_jobs === jobs) return
@@ -1167,15 +1205,23 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 <span>Target</span>
                 <select
                   value={buildTarget}
-                  onChange={(event) => setBuildTarget(event.target.value)}
+                  onChange={(event) => setBuildTarget(event.target.value as RuntimeTarget)}
                 >
-                  <option value="cpu">CPU</option>
-                  <option value="cuda">CUDA</option>
-                  <option value="vulkan">Vulkan</option>
-                  <option value="rocm">ROCm</option>
+                  {buildTargets.map((target) => (
+                    <option key={target} value={target}>
+                      {BUILD_TARGET_LABELS[target]}
+                    </option>
+                  ))}
                 </select>
               </label>
             </div>
+            <p className="model-help">
+              {props.hardware?.os === 'macos'
+                ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
+                : props.hardware?.os === 'windows'
+                  ? 'Windows builds need Git, CMake, and Visual Studio 2022 Build Tools with the C++ workload.'
+                  : 'Linux builds need git, cmake, and a distro C++ toolchain. GPU targets also need the matching SDK or driver stack.'}
+            </p>
             <label className="slider-row">
               <span>
                 Parallel jobs (-j) <em>{buildJobs}</em>

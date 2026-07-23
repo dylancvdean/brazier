@@ -64,6 +64,30 @@ fn linux_gpu() -> (bool, bool, Option<String>) {
     (false, false, None)
 }
 
+#[cfg(target_os = "windows")]
+fn windows_gpu() -> (bool, Option<String>) {
+    let nvidia = command_exists("nvidia-smi");
+    (
+        nvidia,
+        nvidia.then(|| "NVIDIA GPU".to_owned()),
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_gpu() -> (bool, Option<String>) {
+    (false, None)
+}
+
+fn gpu_capabilities() -> (bool, bool, Option<String>) {
+    let (mut nvidia, mut amd, mut gpu_name) = linux_gpu();
+    let (windows_nvidia, windows_gpu_name) = windows_gpu();
+    nvidia |= windows_nvidia;
+    if gpu_name.is_none() {
+        gpu_name = windows_gpu_name;
+    }
+    (nvidia, amd, gpu_name)
+}
+
 fn memory_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -93,11 +117,12 @@ pub fn detect() -> HardwareInfo {
 }
 
 fn detect_uncached() -> HardwareInfo {
-    let (nvidia, amd, gpu_name) = linux_gpu();
+    let (nvidia, amd, gpu_name) = gpu_capabilities();
     let metal = cfg!(target_os = "macos");
     let vulkan = command_exists("vulkaninfo")
         || Path::new("/usr/lib/libvulkan.so").exists()
-        || Path::new("/usr/lib64/libvulkan.so").exists();
+        || Path::new("/usr/lib64/libvulkan.so").exists()
+        || (cfg!(target_os = "windows") && Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists());
     let recommended_target = if metal {
         RuntimeTarget::Metal
     } else if nvidia {

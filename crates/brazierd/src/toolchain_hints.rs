@@ -5,17 +5,28 @@ use std::path::Path;
 use crate::runtime_settings::RuntimeTarget;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsFamily {
+    Linux,
+    Windows,
+    Macos,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageManager {
     Pacman,
     Apt,
     Dnf,
     Zypper,
+    Apk,
+    Xbps,
     Brew,
+    Winget,
     Unknown,
 }
 
 #[derive(Debug, Clone)]
 pub struct OsInfo {
+    pub family: OsFamily,
     pub id: String,
     pub id_like: Vec<String>,
     pub pretty_name: String,
@@ -33,6 +44,25 @@ pub enum ToolchainPackage {
 }
 
 pub fn detect_os() -> OsInfo {
+    if cfg!(target_os = "windows") {
+        return OsInfo {
+            family: OsFamily::Windows,
+            id: "windows".into(),
+            id_like: Vec::new(),
+            pretty_name: "Windows".into(),
+            package_manager: PackageManager::Winget,
+        };
+    }
+    if cfg!(target_os = "macos") {
+        return OsInfo {
+            family: OsFamily::Macos,
+            id: "macos".into(),
+            id_like: Vec::new(),
+            pretty_name: "macOS".into(),
+            package_manager: PackageManager::Brew,
+        };
+    }
+
     let content = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
     let mut id = String::new();
     let mut pretty_name = String::new();
@@ -51,13 +81,14 @@ pub fn detect_os() -> OsInfo {
     }
     if pretty_name.is_empty() {
         pretty_name = if id.is_empty() {
-            std::env::consts::OS.to_owned()
+            "Linux".into()
         } else {
             id.clone()
         };
     }
     let package_manager = infer_package_manager(&id, &id_like);
     OsInfo {
+        family: OsFamily::Linux,
         id,
         id_like,
         pretty_name,
@@ -71,26 +102,52 @@ fn trim_os_value(value: &str) -> String {
 
 fn infer_package_manager(id: &str, id_like: &[String]) -> PackageManager {
     let id = id.to_ascii_lowercase();
-    if id == "arch" || id == "manjaro" || id == "endeavouros" {
+    if id == "arch"
+        || id == "manjaro"
+        || id == "endeavouros"
+        || id == "garuda"
+        || id == "cachyos"
+    {
         return PackageManager::Pacman;
     }
-    if id == "ubuntu" || id == "debian" || id == "linuxmint" || id == "pop" {
+    if id == "ubuntu"
+        || id == "debian"
+        || id == "linuxmint"
+        || id == "pop"
+        || id == "elementary"
+        || id == "zorin"
+        || id == "kali"
+    {
         return PackageManager::Apt;
     }
-    if id == "fedora" || id == "centos" || id == "rhel" || id == "rocky" || id == "almalinux" {
+    if id == "fedora"
+        || id == "centos"
+        || id == "rhel"
+        || id == "rocky"
+        || id == "almalinux"
+        || id == "nobara"
+        || id == "ultramarine"
+        || id == "azurelinux"
+    {
         return PackageManager::Dnf;
     }
     if id == "opensuse-leap" || id == "opensuse-tumbleweed" || id == "suse" {
         return PackageManager::Zypper;
     }
-    if id == "macos" || cfg!(target_os = "macos") {
-        return PackageManager::Brew;
+    if id == "alpine" {
+        return PackageManager::Apk;
+    }
+    if id == "void" {
+        return PackageManager::Xbps;
+    }
+    if id == "nixos" {
+        return PackageManager::Unknown;
     }
     for like in id_like {
         match like.as_str() {
             "arch" => return PackageManager::Pacman,
             "debian" | "ubuntu" => return PackageManager::Apt,
-            "fedora" | "rhel" => return PackageManager::Dnf,
+            "fedora" | "rhel" | "centos" => return PackageManager::Dnf,
             "suse" => return PackageManager::Zypper,
             _ => {}
         }
@@ -100,12 +157,8 @@ fn infer_package_manager(id: &str, id_like: &[String]) -> PackageManager {
 
 pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String> {
     match (os.package_manager, package) {
-        (PackageManager::Pacman, ToolchainPackage::Git) => {
-            Some("sudo pacman -S git".into())
-        }
-        (PackageManager::Pacman, ToolchainPackage::Cmake) => {
-            Some("sudo pacman -S cmake".into())
-        }
+        (PackageManager::Pacman, ToolchainPackage::Git) => Some("sudo pacman -S git".into()),
+        (PackageManager::Pacman, ToolchainPackage::Cmake) => Some("sudo pacman -S cmake".into()),
         (PackageManager::Pacman, ToolchainPackage::CppBuild) => {
             Some("sudo pacman -S base-devel".into())
         }
@@ -125,13 +178,13 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
             Some("sudo apt install build-essential".into())
         }
         (PackageManager::Apt, ToolchainPackage::RocmHip) => Some(
-            "Install ROCm for your Ubuntu/Debian release from AMD's docs, then: sudo apt install rocm-hip-sdk git cmake build-essential".into(),
+            "Follow AMD's ROCm install guide for your Ubuntu/Debian release (https://rocm.docs.amd.com), then install git, cmake, and build-essential.".into(),
         ),
         (PackageManager::Apt, ToolchainPackage::Cuda) => Some(
             "Install the NVIDIA CUDA toolkit for your distro from https://developer.nvidia.com/cuda-downloads".into(),
         ),
         (PackageManager::Apt, ToolchainPackage::Vulkan) => {
-            Some("sudo apt install vulkan-tools libvulkan-dev glslang-tools".into())
+            Some("sudo apt install vulkan-tools libvulkan-dev glslang-tools mesa-vulkan-drivers".into())
         }
 
         (PackageManager::Dnf, ToolchainPackage::Git) => Some("sudo dnf install git".into()),
@@ -146,7 +199,7 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
             "Install the NVIDIA CUDA repo for Fedora/RHEL, then: sudo dnf install cuda-toolkit".into(),
         ),
         (PackageManager::Dnf, ToolchainPackage::Vulkan) => {
-            Some("sudo dnf install vulkan-tools vulkan-loader-devel glslang".into())
+            Some("sudo dnf install vulkan-tools vulkan-loader-devel glslang mesa-vulkan-drivers".into())
         }
 
         (PackageManager::Zypper, ToolchainPackage::Git) => Some("sudo zypper install git".into()),
@@ -159,22 +212,80 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         (PackageManager::Zypper, ToolchainPackage::RocmHip) => Some(
             "sudo zypper install rocm-hip-sdk rocm-opencl-sdk git cmake".into(),
         ),
-        (PackageManager::Zypper, ToolchainPackage::Cuda) => Some(
-            "Install NVIDIA CUDA for openSUSE from NVIDIA's repository".into(),
-        ),
+        (PackageManager::Zypper, ToolchainPackage::Cuda) => {
+            Some("Install NVIDIA CUDA for openSUSE from NVIDIA's repository".into())
+        }
         (PackageManager::Zypper, ToolchainPackage::Vulkan) => {
             Some("sudo zypper install vulkan-tools vulkan-devel".into())
         }
 
+        (PackageManager::Apk, ToolchainPackage::Git) => Some("sudo apk add git".into()),
+        (PackageManager::Apk, ToolchainPackage::Cmake) => Some("sudo apk add cmake".into()),
+        (PackageManager::Apk, ToolchainPackage::CppBuild) => {
+            Some("sudo apk add build-base linux-headers".into())
+        }
+        (PackageManager::Apk, ToolchainPackage::RocmHip) => Some(
+            "ROCm on Alpine is unsupported for most GPUs. Use CPU or Vulkan instead.".into(),
+        ),
+        (PackageManager::Apk, ToolchainPackage::Cuda) => Some(
+            "Install NVIDIA drivers and CUDA from Alpine/community docs, or use CPU/Vulkan.".into(),
+        ),
+        (PackageManager::Apk, ToolchainPackage::Vulkan) => {
+            Some("sudo apk add vulkan-dev vulkan-loader mesa-dev".into())
+        }
+
+        (PackageManager::Xbps, ToolchainPackage::Git) => Some("sudo xbps-install -S git".into()),
+        (PackageManager::Xbps, ToolchainPackage::Cmake) => {
+            Some("sudo xbps-install -S cmake".into())
+        }
+        (PackageManager::Xbps, ToolchainPackage::CppBuild) => {
+            Some("sudo xbps-install -S base-devel".into())
+        }
+        (PackageManager::Xbps, ToolchainPackage::RocmHip) => Some(
+            "Install ROCm packages from Void repositories if available, or use CPU/Vulkan.".into(),
+        ),
+        (PackageManager::Xbps, ToolchainPackage::Cuda) => Some(
+            "Install NVIDIA drivers/CUDA from Void docs, or use CPU/Vulkan.".into(),
+        ),
+        (PackageManager::Xbps, ToolchainPackage::Vulkan) => {
+            Some("sudo xbps-install -S vulkan-loader vulkan-headers mesa-dri".into())
+        }
+
         (PackageManager::Brew, ToolchainPackage::Git) => Some("brew install git".into()),
         (PackageManager::Brew, ToolchainPackage::Cmake) => Some("brew install cmake".into()),
-        (PackageManager::Brew, ToolchainPackage::CppBuild) => {
-            Some("xcode-select --install".into())
-        }
+        (PackageManager::Brew, ToolchainPackage::CppBuild) => Some(
+            "xcode-select --install   # Apple Command Line Tools (clang, make, headers)".into(),
+        ),
         (PackageManager::Brew, ToolchainPackage::RocmHip) => None,
         (PackageManager::Brew, ToolchainPackage::Cuda) => None,
-        (PackageManager::Brew, ToolchainPackage::Vulkan) => None,
+        (PackageManager::Brew, ToolchainPackage::Vulkan) => {
+            Some("brew install molten-vk vulkan-loader   # optional; Metal is preferred on macOS".into())
+        }
 
+        (PackageManager::Winget, ToolchainPackage::Git) => Some(
+            "winget install --id Git.Git -e --source winget".into(),
+        ),
+        (PackageManager::Winget, ToolchainPackage::Cmake) => Some(
+            "winget install --id Kitware.CMake -e --source winget".into(),
+        ),
+        (PackageManager::Winget, ToolchainPackage::CppBuild) => Some(
+            "winget install --id Microsoft.VisualStudio.2022.BuildTools -e --source winget   # then add the \"Desktop development with C++\" workload in Visual Studio Installer".into(),
+        ),
+        (PackageManager::Winget, ToolchainPackage::RocmHip) => None,
+        (PackageManager::Winget, ToolchainPackage::Cuda) => Some(
+            "Install the NVIDIA CUDA toolkit from https://developer.nvidia.com/cuda-downloads (Windows x86_64)".into(),
+        ),
+        (PackageManager::Winget, ToolchainPackage::Vulkan) => Some(
+            "Install the LunarG Vulkan SDK from https://vulkan.lunarg.com/sdk/home#windows and ensure your GPU driver is up to date".into(),
+        ),
+
+        (PackageManager::Unknown, ToolchainPackage::Git)
+        | (PackageManager::Unknown, ToolchainPackage::Cmake)
+        | (PackageManager::Unknown, ToolchainPackage::CppBuild) if os.id == "nixos" => {
+            Some(
+                "nix-shell -p git cmake gcc   # or add git, cmake, and a C++ toolchain to your NixOS configuration".into(),
+            )
+        }
         (PackageManager::Unknown, _) => None,
     }
 }
@@ -185,25 +296,115 @@ pub fn install_hint(package: ToolchainPackage) -> String {
 }
 
 pub fn install_hint_for_os(package: ToolchainPackage, os: &OsInfo) -> String {
-    let fallback = match package {
-        ToolchainPackage::Git => "Install Git and ensure it is on your PATH.",
-        ToolchainPackage::Cmake => "Install CMake 3.20+ and ensure it is on your PATH.",
-        ToolchainPackage::CppBuild => "Install a C/C++ toolchain (build-essential, Xcode CLT, or Visual Studio Build Tools).",
-        ToolchainPackage::RocmHip => {
-            "Install AMD ROCm with the HIP compiler (hipcc), or switch the build target to CPU."
-        }
-        ToolchainPackage::Cuda => {
-            "Install the NVIDIA CUDA toolkit, or switch the build target to CPU."
-        }
-        ToolchainPackage::Vulkan => {
-            "Install Vulkan headers/loader and drivers, or switch the build target to CPU."
-        }
-    };
+    let fallback = generic_fallback(package, os.family);
     if let Some(command) = install_command(package, os) {
         format!("On {}: `{}`.", os.pretty_name, command)
     } else {
-        fallback.to_owned()
+        fallback
     }
+}
+
+fn generic_fallback(package: ToolchainPackage, family: OsFamily) -> String {
+    match (package, family) {
+        (ToolchainPackage::Git, OsFamily::Windows) => {
+            "Install Git for Windows and ensure `git.exe` is on your PATH.".into()
+        }
+        (ToolchainPackage::Git, _) => "Install Git and ensure it is on your PATH.".into(),
+        (ToolchainPackage::Cmake, OsFamily::Windows) => {
+            "Install CMake 3.20+ for Windows and ensure `cmake.exe` is on your PATH.".into()
+        }
+        (ToolchainPackage::Cmake, _) => {
+            "Install CMake 3.20+ and ensure it is on your PATH.".into()
+        }
+        (ToolchainPackage::CppBuild, OsFamily::Windows) => {
+            "Install Visual Studio 2022 Build Tools with the Desktop development with C++ workload, or full Visual Studio with C++.".into()
+        }
+        (ToolchainPackage::CppBuild, OsFamily::Macos) => {
+            "Install Xcode Command Line Tools (`xcode-select --install`) or Xcode from the App Store.".into()
+        }
+        (ToolchainPackage::CppBuild, _) => {
+            "Install a C/C++ toolchain (build-essential, Xcode CLT, or Visual Studio Build Tools).".into()
+        }
+        (ToolchainPackage::RocmHip, OsFamily::Windows | OsFamily::Macos) => {
+            "ROCm builds are Linux-only. Switch the build target to CPU, CUDA, Vulkan, or Metal.".into()
+        }
+        (ToolchainPackage::RocmHip, _) => {
+            "Install AMD ROCm with the HIP compiler (hipcc), or switch the build target to CPU.".into()
+        }
+        (ToolchainPackage::Cuda, OsFamily::Macos) => {
+            "CUDA builds are not supported on macOS. Use CPU or Metal instead.".into()
+        }
+        (ToolchainPackage::Cuda, _) => {
+            "Install the NVIDIA CUDA toolkit, or switch the build target to CPU.".into()
+        }
+        (ToolchainPackage::Vulkan, OsFamily::Macos) => {
+            "Vulkan is optional on macOS; Metal is the recommended GPU target.".into()
+        }
+        (ToolchainPackage::Vulkan, _) => {
+            "Install Vulkan headers/loader and drivers, or switch the build target to CPU.".into()
+        }
+    }
+}
+
+pub fn validate_build_target(target: RuntimeTarget) -> Option<String> {
+    validate_build_target_for_os(target, &detect_os())
+}
+
+pub fn validate_build_target_for_os(target: RuntimeTarget, os: &OsInfo) -> Option<String> {
+    match (os.family, target) {
+        (OsFamily::Macos, RuntimeTarget::Rocm | RuntimeTarget::Cuda) => Some(format!(
+            "{} builds are not supported on macOS. Use CPU or Metal.",
+            target.as_str().to_ascii_uppercase()
+        )),
+        (OsFamily::Windows, RuntimeTarget::Rocm) => Some(
+            "ROCm builds are Linux-only. Use CPU, CUDA, or Vulkan on Windows.".into(),
+        ),
+        (OsFamily::Linux | OsFamily::Windows, RuntimeTarget::Metal) => {
+            Some("Metal builds require macOS with Apple Silicon or an Intel Mac with Metal support.".into())
+        }
+        _ => None,
+    }
+}
+
+pub fn cpp_compiler_available() -> bool {
+    ["cl", "clang", "clang++", "g++", "c++"]
+        .into_iter()
+        .any(command_on_path)
+}
+
+pub fn cpp_compiler_preflight_message() -> Option<String> {
+    if cpp_compiler_available() {
+        return None;
+    }
+    Some(format!(
+        "No C/C++ compiler was found on PATH. {}",
+        install_hint(ToolchainPackage::CppBuild)
+    ))
+}
+
+pub fn windows_vs_environment_hint() -> Option<String> {
+    if !matches!(detect_os().family, OsFamily::Windows) || command_on_path("cl") {
+        return None;
+    }
+    Some(
+        "Visual Studio may be installed but `cl.exe` is not on PATH. Open **x64 Native Tools Command Prompt for VS 2022**, or run Brazier from a Developer PowerShell session, then retry the build.".into(),
+    )
+}
+
+pub fn macos_clt_hint() -> Option<String> {
+    if !matches!(detect_os().family, OsFamily::Macos) || cpp_compiler_available() {
+        return None;
+    }
+    Some(install_hint(ToolchainPackage::CppBuild))
+}
+
+pub fn rocm_path_hint() -> Option<String> {
+    if !matches!(detect_os().family, OsFamily::Linux) || hip_compiler_available() {
+        return None;
+    }
+    Some(
+        "After installing ROCm, open a new shell (or log out/in) so `/opt/rocm/bin` is on your PATH, then retry the build.".into(),
+    )
 }
 
 pub fn hip_compiler_available() -> bool {
@@ -211,6 +412,11 @@ pub fn hip_compiler_available() -> bool {
 }
 
 pub fn rocm_preflight_message() -> Option<String> {
+    if !matches!(detect_os().family, OsFamily::Linux) {
+        return Some(
+            "ROCm builds are Linux-only. Switch the build target to CPU, CUDA, or Vulkan.".into(),
+        );
+    }
     if hip_compiler_available() {
         return None;
     }
@@ -251,6 +457,58 @@ pub fn missing_rocm_hip(log_lower: &str, message_lower: &str, target: RuntimeTar
     .any(|marker| log_lower.contains(marker) || message_lower.contains(marker))
 }
 
+pub fn missing_cpp_compiler(log_lower: &str, message_lower: &str) -> bool {
+    [
+        "no cmake_cxx_compiler",
+        "no cmake_c_compiler",
+        "cmake_cxx_compiler",
+        "cmake_c_compiler",
+        "c++: command not found",
+        "g++: command not found",
+        "clang++: command not found",
+        "unable to find a c++ compiler",
+        "could not find any instance of visual studio",
+        "no CMAKE_CXX_COMPILER",
+        "no CMAKE_C_COMPILER",
+        "nmake : fatal error",
+        "cl is not recognized",
+        "cl.exe is not recognized",
+        "cannot open include file: 'windows.h'",
+        "xcrun: error",
+        "xcode-select: error",
+        "command 'clang++' failed",
+        "ld: library not found",
+    ]
+    .iter()
+    .any(|marker| log_lower.contains(marker) || message_lower.contains(marker))
+}
+
+pub fn missing_cuda(log_lower: &str) -> bool {
+    [
+        "could not find cuda",
+        "cudatoolkit not found",
+        "cuda_toolkit",
+        "cuda_toolkit_root_dir",
+        "findcuda",
+    ]
+    .iter()
+    .any(|marker| log_lower.contains(marker))
+}
+
+pub fn missing_vulkan(log_lower: &str, target: RuntimeTarget) -> bool {
+    matches!(target, RuntimeTarget::Vulkan)
+        && log_lower.contains("vulkan")
+        && (log_lower.contains("not found") || log_lower.contains("missing:"))
+}
+
+pub fn missing_cmake_or_vs_generator(log_lower: &str) -> bool {
+    log_lower.contains("could not find any instance of visual studio")
+        || log_lower.contains("generator")
+            && log_lower.contains("visual studio")
+            && log_lower.contains("could not find")
+        || log_lower.contains("no CMAKE_CXX_COMPILER could be found")
+}
+
 fn command_on_path(name: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
         std::env::split_paths(&path).any(|directory| {
@@ -268,6 +526,7 @@ mod tests {
     #[test]
     fn arch_rocm_hint_uses_pacman() {
         let os = OsInfo {
+            family: OsFamily::Linux,
             id: "arch".into(),
             id_like: vec![],
             pretty_name: "Arch Linux".into(),
@@ -276,6 +535,73 @@ mod tests {
         let cmd = install_command(ToolchainPackage::RocmHip, &os).unwrap();
         assert!(cmd.contains("pacman"));
         assert!(cmd.contains("rocm-hip-sdk"));
+    }
+
+    #[test]
+    fn windows_git_uses_winget() {
+        let os = OsInfo {
+            family: OsFamily::Windows,
+            id: "windows".into(),
+            id_like: vec![],
+            pretty_name: "Windows".into(),
+            package_manager: PackageManager::Winget,
+        };
+        let cmd = install_command(ToolchainPackage::Git, &os).unwrap();
+        assert!(cmd.contains("winget"));
+        assert!(cmd.contains("Git.Git"));
+    }
+
+    #[test]
+    fn debian_uses_apt() {
+        let os = OsInfo {
+            family: OsFamily::Linux,
+            id: "debian".into(),
+            id_like: vec![],
+            pretty_name: "Debian GNU/Linux".into(),
+            package_manager: PackageManager::Apt,
+        };
+        let cmd = install_command(ToolchainPackage::CppBuild, &os).unwrap();
+        assert!(cmd.contains("apt"));
+        assert!(cmd.contains("build-essential"));
+    }
+
+    #[test]
+    fn fedora_id_like_maps_to_dnf() {
+        let os = OsInfo {
+            family: OsFamily::Linux,
+            id: "nobara".into(),
+            id_like: vec!["rhel".into(), "fedora".into()],
+            pretty_name: "Nobara Linux".into(),
+            package_manager: PackageManager::Dnf,
+        };
+        let cmd = install_command(ToolchainPackage::Cmake, &os).unwrap();
+        assert!(cmd.contains("dnf"));
+    }
+
+    #[test]
+    fn rejects_rocm_on_windows() {
+        let os = OsInfo {
+            family: OsFamily::Windows,
+            id: "windows".into(),
+            id_like: vec![],
+            pretty_name: "Windows".into(),
+            package_manager: PackageManager::Winget,
+        };
+        let message = validate_build_target_for_os(RuntimeTarget::Rocm, &os).unwrap();
+        assert!(message.contains("Linux-only"));
+    }
+
+    #[test]
+    fn rejects_cuda_on_macos() {
+        let os = OsInfo {
+            family: OsFamily::Macos,
+            id: "macos".into(),
+            id_like: vec![],
+            pretty_name: "macOS".into(),
+            package_manager: PackageManager::Brew,
+        };
+        let message = validate_build_target_for_os(RuntimeTarget::Cuda, &os).unwrap();
+        assert!(message.contains("macOS"));
     }
 
     #[test]
@@ -288,12 +614,19 @@ mod tests {
     }
 
     #[test]
+    fn detects_missing_msvc_from_log() {
+        assert!(missing_cpp_compiler(
+            "cmake error: could not find any instance of visual studio",
+            "configure failed",
+        ));
+    }
+
+    #[test]
     fn preflight_message_mentions_install_when_hipcc_missing() {
-        if hip_compiler_available() {
-            assert!(rocm_preflight_message().is_none());
-        } else {
-            let message = rocm_preflight_message().unwrap();
-            assert!(message.contains("hipcc"));
+        if !matches!(detect_os().family, OsFamily::Linux) || hip_compiler_available() {
+            return;
         }
+        let message = rocm_preflight_message().unwrap();
+        assert!(message.contains("hipcc"));
     }
 }

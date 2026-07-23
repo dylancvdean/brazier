@@ -342,6 +342,18 @@ pub fn diagnose_failure(
     if message_lower.contains("`cmake` is required") {
         hints.push(toolchain_hints::install_hint(ToolchainPackage::Cmake));
     }
+    if toolchain_hints::missing_cpp_compiler(&log_lower, &message_lower) {
+        hints.push(toolchain_hints::install_hint(ToolchainPackage::CppBuild));
+        if let Some(hint) = toolchain_hints::windows_vs_environment_hint() {
+            hints.push(hint);
+        }
+    }
+    if toolchain_hints::missing_cmake_or_vs_generator(&log_lower) {
+        hints.push(toolchain_hints::install_hint(ToolchainPackage::CppBuild));
+        if let Some(hint) = toolchain_hints::windows_vs_environment_hint() {
+            hints.push(hint);
+        }
+    }
     if log_lower.contains("could not find git")
         || log_lower.contains("not a git repository")
         || log_lower.contains("fatal: unable to access")
@@ -351,36 +363,21 @@ pub fn diagnose_failure(
             "Git could not fetch the repository. Check the URL, your network connection, and any authentication required for private forks.".into(),
         );
     }
-    if log_lower.contains("could not find cuda")
-        || log_lower.contains("cudatoolkit not found")
-        || log_lower.contains("cuda_toolkit")
-        || log_lower.contains("could not find cuda")
-    {
+    if toolchain_hints::missing_cuda(&log_lower) {
         hints.push(toolchain_hints::install_hint(ToolchainPackage::Cuda));
     }
-    if matches!(target, RuntimeTarget::Vulkan)
-        && log_lower.contains("vulkan")
-        && (log_lower.contains("not found") || log_lower.contains("missing:"))
-    {
+    if toolchain_hints::missing_vulkan(&log_lower, target) {
         hints.push(toolchain_hints::install_hint(ToolchainPackage::Vulkan));
     }
     if toolchain_hints::missing_rocm_hip(&log_lower, &message_lower, target) {
         hints.push(toolchain_hints::install_hint(ToolchainPackage::RocmHip));
-        if !toolchain_hints::hip_compiler_available() {
-            hints.push(
-                "After installing ROCm, open a new shell (or log out/in) so `/opt/rocm/bin` is on your PATH, then retry the build.".into(),
-            );
+        if let Some(hint) = toolchain_hints::rocm_path_hint() {
+            hints.push(hint);
         }
-    }
-    if log_lower.contains("no cmake_cxx_compiler")
-        || log_lower.contains("no CMAKE_CXX_COMPILER")
-        || log_lower.contains("c++: command not found")
-        || log_lower.contains("g++: command not found")
-    {
-        hints.push(toolchain_hints::install_hint(ToolchainPackage::CppBuild));
     }
     if log_lower.contains("ninja: error")
         || log_lower.contains("make: ***")
+        || log_lower.contains("msbuild : error")
         || log_lower.contains("error: ")
     {
         hints.push(
@@ -487,6 +484,14 @@ pub async fn run_build_with_progress(
                 "",
             ));
         }
+    }
+    if let Some(message) = toolchain_hints::validate_build_target(target) {
+        return Err(fail(message, Some("Preflight"), ""));
+    }
+    if !cfg!(target_os = "windows")
+        && let Some(message) = toolchain_hints::cpp_compiler_preflight_message()
+    {
+        return Err(fail(message, Some("Preflight"), ""));
     }
     if matches!(target, RuntimeTarget::Rocm)
         && let Some(message) = toolchain_hints::rocm_preflight_message()
@@ -729,6 +734,26 @@ mod tests {
         assert!(active.cancel("demo-1"));
         assert!(flag.load(Ordering::Relaxed));
         assert!(!active.cancel("missing"));
+    }
+
+    #[test]
+    fn diagnostics_surface_missing_msvc() {
+        let report = diagnose_failure(
+            "Configure failed with 1",
+            Some("Configure"),
+            "CMake Error: Could not find any instance of Visual Studio",
+            RuntimeTarget::Cpu,
+        );
+        assert!(
+            report.hints.iter().any(|hint| {
+                let lower = hint.to_ascii_lowercase();
+                lower.contains("c++")
+                    || lower.contains("compiler")
+                    || lower.contains("visual studio")
+                    || lower.contains("build-essential")
+                    || lower.contains("base-devel")
+            })
+        );
     }
 
     #[test]
