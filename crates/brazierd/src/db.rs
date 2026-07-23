@@ -15,7 +15,7 @@ use crate::{
     types::{Conversation, CreateMessage, Message, Role},
 };
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunSnapshot {
     pub id: String,
     pub conversation_id: String,
@@ -43,11 +43,24 @@ pub struct CreateRunSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportBlob {
+    pub sha256: String,
+    pub mime_type: String,
+    pub data_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationExport {
     pub schema_version: u32,
     pub exported_at: String,
     pub conversation: Conversation,
     pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blobs: Vec<ExportBlob>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_snapshots: Vec<RunSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -555,11 +568,35 @@ impl Database {
         row.try_into()
     }
 
-    pub async fn export_conversation(&self, id: &str) -> anyhow::Result<ConversationExport> {
+    pub async fn export_conversation(
+        &self,
+        data_dir: &Path,
+        id: &str,
+    ) -> anyhow::Result<ConversationExport> {
         let conversation = self.get_conversation(id).await?;
         let messages = self.list_messages(id).await?;
+        let run_snapshots = self.list_run_snapshots(id).await?;
+        let mut blob_ids = Vec::new();
+        for message in &messages {
+            blob_ids.extend(blob_store::blob_refs_in_content(&message.content));
+        }
+        blob_ids.sort();
+        blob_ids.dedup();
+        let mut blobs = Vec::new();
+        for sha256 in blob_ids {
+            let (bytes, mime_type) = blob_store::read_blob(data_dir, &sha256).await?;
+            blobs.push(ExportBlob {
+                sha256: sha256.clone(),
+                mime_type,
+                data_base64: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &bytes,
+                ),
+                original_name: None,
+            });
+        }
         Ok(ConversationExport {
-            schema_version: 1,
+            schema_version: 2,
             exported_at: format!(
                 "{}",
                 std::time::SystemTime::now()
@@ -569,15 +606,43 @@ impl Database {
             ),
             conversation,
             messages,
+            blobs,
+            run_snapshots,
         })
     }
 
-    pub async fn import_conversation(&self, export: ConversationExport) -> anyhow::Result<Conversation> {
+    pub async fn import_conversation(
+        &self,
+        data_dir: &Path,
+        export: ConversationExport,
+    ) -> anyhow::Result<Conversation> {
         anyhow::ensure!(
-            export.schema_version == 1,
+            export.schema_version == 1 || export.schema_version == 2,
             "unsupported export schema version {}",
             export.schema_version
         );
+        for blob in &export.blobs {
+            blob_store::validate_sha256(&blob.sha256)?;
+            let bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                blob.data_base64.trim(),
+            )
+            .context("decode export blob")?;
+            let stored = blob_store::store_bytes(
+                data_dir,
+                &bytes,
+                &blob.mime_type,
+                blob.original_name.as_deref(),
+            )
+            .await?;
+            self.upsert_attachment(
+                &stored.sha256,
+                &stored.mime_type,
+                stored.size_bytes as i64,
+                stored.original_name.as_deref(),
+            )
+            .await?;
+        }
         let title = export.conversation.title.trim();
         let title = if title.is_empty() {
             "Imported conversation"
@@ -675,6 +740,30 @@ impl Database {
         .bind(sha256)
         .bind(bytes as i64)
         .bind(bytes as i64)
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn start_download_job(&self, job_id: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE download_jobs
+               SET status = 'downloading', updated_at = datetime('now')
+               WHERE id = ?"#,
+        )
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn cancel_download_job(&self, job_id: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE download_jobs
+               SET status = 'cancelled', error = 'cancelled by user', updated_at = datetime('now')
+               WHERE id = ? AND status IN ('pending', 'downloading')"#,
+        )
         .bind(job_id)
         .execute(&self.pool)
         .await?;

@@ -19,6 +19,7 @@ import {
   activateRuntime,
   buildRuntime,
   cancelBuild,
+  cancelDownloadJob,
   deleteModel,
   deleteRuntime,
   downloadModel,
@@ -27,6 +28,8 @@ import {
   formatBytes,
   clearHuggingFaceToken,
   huggingFaceTokenStatus,
+  listDownloadJobs,
+  type DownloadJob,
   type HardwareInfo,
   type HubFile,
   type LocalModel,
@@ -38,7 +41,8 @@ import {
   type RuntimeSettings,
   saveRuntimeSettings,
   searchHub,
-  setHuggingFaceToken
+  setHuggingFaceToken,
+  queueModelDownload
 } from '../api'
 import type { HubModel } from '../types'
 
@@ -260,11 +264,23 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [hfTokenSource, setHfTokenSource] = useState<string>('none')
   const [hfTokenDraft, setHfTokenDraft] = useState('')
   const [savingHfToken, setSavingHfToken] = useState(false)
+  const [downloadJobs, setDownloadJobs] = useState<DownloadJob[]>([])
 
   useEffect(() => {
     void huggingFaceTokenStatus()
       .then((status) => setHfTokenSource(status.source))
       .catch(() => setHfTokenSource('none'))
+  }, [])
+
+  useEffect(() => {
+    const refresh = (): void => {
+      void listDownloadJobs()
+        .then(setDownloadJobs)
+        .catch(() => setDownloadJobs([]))
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 4000)
+    return () => window.clearInterval(timer)
   }, [])
 
   async function saveHubToken(event: FormEvent): Promise<void> {
@@ -371,6 +387,35 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     }
   }
 
+  async function queueQuant(repoId: string, path: string): Promise<void> {
+    const trust = trustByRepo[repoId]
+    if (trust?.gated && hfTokenSource === 'none') {
+      props.onError('This model is gated on Hugging Face. Save an access token above first.')
+      return
+    }
+    if (trust?.requires_acknowledgement && !acknowledgedRepos[repoId]) {
+      props.onError('Review and acknowledge the license / remote-code notice before downloading.')
+      return
+    }
+    props.onError(null)
+    try {
+      await queueModelDownload(repoId, path)
+      setDownloadJobs(await listDownloadJobs())
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function cancelJob(jobId: string): Promise<void> {
+    props.onError(null)
+    try {
+      await cancelDownloadJob(jobId)
+      setDownloadJobs(await listDownloadJobs())
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
   return (
     <section>
       <header className="manage-heading">
@@ -436,6 +481,43 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         <div className="engine-phase-note">
           <LoaderCircle className="spin" size={14} />
           {enginePhase}
+        </div>
+      )}
+      {downloadJobs.length > 0 && (
+        <div className="download-jobs-panel">
+          <div className="section-label">Download queue</div>
+          {downloadJobs.slice(0, 6).map((job) => {
+            const active = job.status === 'pending' || job.status === 'downloading'
+            const basename = job.filename.split('/').at(-1) ?? job.filename
+            const pct =
+              job.bytes_downloaded != null && job.total_bytes
+                ? Math.min(100, (job.bytes_downloaded / job.total_bytes) * 100)
+                : null
+            return (
+              <div className="download-job-row" key={job.id}>
+                <div>
+                  <strong>{basename}</strong>
+                  <span>
+                    {job.repo_id} · {job.status}
+                    {job.bytes_downloaded != null && job.total_bytes
+                      ? ` · ${formatBytes(job.bytes_downloaded)} / ${formatBytes(job.total_bytes)}`
+                      : ''}
+                  </span>
+                  {pct != null && active && (
+                    <div className="progress-track compact">
+                      <div className="progress-fill" style={{ width: `${pct}%` }} />
+                    </div>
+                  )}
+                  {job.error && <span className="run-error-text">{job.error}</span>}
+                </div>
+                {active && (
+                  <button type="button" className="chip-button subtle" onClick={() => void cancelJob(job.id)}>
+                    Cancel
+                  </button>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
       <div className="model-results">
@@ -548,19 +630,32 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                             </div>
                           )}
                         </div>
-                        <button
-                          type="button"
-                          disabled={downloadProgress != null}
-                          onClick={() => void downloadQuant(model.id, file.path)}
-                        >
-                          {active ? (
-                            <LoaderCircle className="spin" size={15} />
-                          ) : isProjector ? (
-                            'Add capability'
-                          ) : (
-                            'Download'
+                        <div className="quant-actions">
+                          <button
+                            type="button"
+                            disabled={downloadProgress != null}
+                            onClick={() => void downloadQuant(model.id, file.path)}
+                          >
+                            {active ? (
+                              <LoaderCircle className="spin" size={15} />
+                            ) : isProjector ? (
+                              'Add capability'
+                            ) : (
+                              'Download'
+                            )}
+                          </button>
+                          {!active && (
+                            <button
+                              type="button"
+                              className="chip-button subtle"
+                              disabled={downloadProgress != null}
+                              title="Download in the background queue"
+                              onClick={() => void queueQuant(model.id, file.path)}
+                            >
+                              Queue
+                            </button>
                           )}
-                        </button>
+                        </div>
                       </div>
                     )
                   })}

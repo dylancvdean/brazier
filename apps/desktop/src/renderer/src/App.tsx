@@ -33,9 +33,11 @@ import {
   listConversations,
   listMessages,
   listModels,
+  listRunSnapshots,
   type ConversationExport,
   type HardwareInfo,
   type LocalModel,
+  type RunSnapshot,
   type RuntimeSettings,
   type ToolCallRecord,
   recordRun,
@@ -145,6 +147,49 @@ function ToolChips({ records }: { records: ToolCallRecord[] }): React.JSX.Elemen
   )
 }
 
+function RunHistory({
+  runs,
+  expandedId,
+  onToggle
+}: {
+  runs: RunSnapshot[]
+  expandedId: string | null
+  onToggle: (id: string) => void
+}): React.JSX.Element | null {
+  if (runs.length === 0) return null
+  return (
+    <div className="run-history">
+      <div className="section-label">Run history</div>
+      {runs.slice(0, 8).map((run) => {
+        const expanded = expandedId === run.id
+        const label = run.created_at.replace('T', ' ').slice(0, 16)
+        return (
+          <div className="run-entry" key={run.id}>
+            <button type="button" className="run-entry-head" onClick={() => onToggle(run.id)}>
+              <span>{label}</span>
+              <span className="run-model">{run.model.split('/').at(-1) ?? run.model}</span>
+              {run.error && <span className="run-error">failed</span>}
+            </button>
+            {expanded && (
+              <div className="run-entry-body">
+                {run.error && <p className="run-error-text">{run.error}</p>}
+                {run.response_text && <p>{run.response_text.slice(0, 400)}</p>}
+                {run.tool_calls && run.tool_calls.length > 0 && (
+                  <ToolChips records={run.tool_calls} />
+                )}
+                <details>
+                  <summary>Settings snapshot</summary>
+                  <pre>{JSON.stringify(run.settings, null, 2)}</pre>
+                </details>
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export function App(): React.JSX.Element {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [conversationSearch, setConversationSearch] = useState('')
@@ -173,6 +218,8 @@ export function App(): React.JSX.Element {
   const [inferenceMenuOpen, setInferenceMenuOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
   const [manageSection, setManageSection] = useState<ManageSection>('library')
+  const [runSnapshots, setRunSnapshots] = useState<RunSnapshot[]>([])
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const fileInput = useRef<HTMLInputElement>(null)
@@ -311,12 +358,17 @@ export function App(): React.JSX.Element {
     if (!conversationId) {
       setMessages([])
       setTipId(null)
+      setRunSnapshots([])
+      setExpandedRunId(null)
       return
     }
     setError(null)
     refreshMessages(conversationId).catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
+    void listRunSnapshots(conversationId)
+      .then(setRunSnapshots)
+      .catch(() => setRunSnapshots([]))
   }, [conversationId])
 
   useEffect(() => {
@@ -453,6 +505,7 @@ export function App(): React.JSX.Element {
       setStreamingTools([])
       await refreshMessages(activeConversationId, assistant.id)
       await refreshConversations()
+      void listRunSnapshots(activeConversationId).then(setRunSnapshots).catch(() => {})
     } catch (cause) {
       if ((cause as Error).name !== 'AbortError') {
         setError(cause instanceof Error ? cause.message : String(cause))
@@ -532,6 +585,11 @@ export function App(): React.JSX.Element {
             <p className="empty-sidebar">Your conversations stay on this device.</p>
           )}
         </div>
+        <RunHistory
+          runs={runSnapshots}
+          expandedId={expandedRunId}
+          onToggle={(id) => setExpandedRunId((current) => (current === id ? null : id))}
+        />
         <div className="privacy-note">
           <span className={`status-dot ${daemonStatus}`} />
           {daemonStatus === 'healthy'

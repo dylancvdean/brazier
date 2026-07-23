@@ -24,18 +24,17 @@
   reference blobs by digest instead of inline base64.
 - Hugging Face token storage for gated model downloads (environment override
   or persisted token).
-- Immutable run snapshots per assistant turn (model, settings, tools, response).
+- Immutable run snapshots per assistant turn (model, settings, tools, response)
+  with sidebar run history in the desktop app.
 - llama-server health and capability probes exposed via daemon health/engine status.
-- Conversation search, JSON import/export, persisted model download jobs, and
-  Hub license / remote-code acknowledgement before GGUF downloads.
+- Conversation search, JSON import/export (including embedded attachment blobs
+  and run metadata), persisted model download jobs, background download queue,
+  in-flight download cancellation, and Hub license / remote-code acknowledgement.
 
 ## Alpha (remaining)
 
-- Apple-Silicon mlx-lm and mlx-vlm virtual environments and server adapters.
-- Richer run snapshot querying in the UI and export bundles that include blob
-  references.
-- Optional download-job cancellation and background download queue beyond the
-  current in-request streaming model.
+- Apple-Silicon mlx-lm and mlx-vlm virtual environments and server adapters
+  (requires macOS hardware for integration testing).
 
 ## Engine workshop
 

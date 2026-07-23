@@ -127,6 +127,28 @@ export type ConversationExport = {
   exported_at: string
   conversation: Conversation
   messages: Message[]
+  blobs?: ExportBlob[]
+  run_snapshots?: RunSnapshot[]
+}
+
+export type ExportBlob = {
+  sha256: string
+  mime_type: string
+  data_base64: string
+  original_name?: string | null
+}
+
+export type RunSnapshot = {
+  id: string
+  conversation_id: string
+  parent_message_id: string | null
+  assistant_message_id: string | null
+  model: string
+  settings: RuntimeSettings
+  tool_calls: ToolCallRecord[] | null
+  response_text: string | null
+  error: string | null
+  created_at: string
 }
 
 export async function exportConversation(conversationId: string): Promise<ConversationExport> {
@@ -169,6 +191,30 @@ export type DownloadJob = {
 
 export async function listDownloadJobs(): Promise<DownloadJob[]> {
   return (await request<{ data: DownloadJob[] }>('/api/v1/models/downloads')).data
+}
+
+export async function cancelDownloadJob(jobId: string): Promise<void> {
+  await request('/api/v1/models/download/cancel', {
+    method: 'POST',
+    body: JSON.stringify({ job_id: jobId })
+  })
+}
+
+export async function queueModelDownload(
+  repoId: string,
+  filename: string,
+  revision = 'main'
+): Promise<{ job_id: string }> {
+  return request('/api/v1/models/download/queue', {
+    method: 'POST',
+    body: JSON.stringify({ repo_id: repoId, filename, revision })
+  })
+}
+
+export async function listRunSnapshots(conversationId: string): Promise<RunSnapshot[]> {
+  return (
+    await request<{ data: RunSnapshot[] }>(`/api/v1/conversations/${conversationId}/runs`)
+  ).data
 }
 
 export function createConversation(title = 'New conversation'): Promise<Conversation> {

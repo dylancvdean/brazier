@@ -2,6 +2,10 @@
 
 use std::{
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -66,7 +70,7 @@ pub async fn download_gguf(
     data_dir: &Path,
     request: DownloadRequest,
 ) -> anyhow::Result<DownloadResult> {
-    download_gguf_with_progress(client, data_dir, request, noop_progress(), None).await
+    download_gguf_with_progress(client, data_dir, request, noop_progress(), None, None).await
 }
 
 pub async fn download_gguf_with_progress(
@@ -75,6 +79,7 @@ pub async fn download_gguf_with_progress(
     request: DownloadRequest,
     mut progress: ProgressCallback,
     job: Option<(Database, String)>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<DownloadResult> {
     validate_repo_id(&request.repo_id)?;
     validate_filename(&request.filename)?;
@@ -138,6 +143,9 @@ pub async fn download_gguf_with_progress(
             format!("Downloading {}", request.filename)
         },
     ));
+    if let Some((db, job_id)) = &job {
+        let _ = db.start_download_job(job_id).await;
+    }
     let url = resolve_url(&request.repo_id, &request.revision, &request.filename);
 
     let mut builder = hf_auth::apply_auth(
@@ -193,6 +201,14 @@ pub async fn download_gguf_with_progress(
     let mut last_emit = 0_u64;
     progress(ProgressEvent::download(written, total));
     while let Some(chunk) = stream.next().await {
+        if cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            drop(file);
+            let _ = tokio::fs::remove_file(&partial).await;
+            anyhow::bail!("download cancelled");
+        }
         let chunk = chunk.context("read download chunk")?;
         file.write_all(&chunk)
             .await

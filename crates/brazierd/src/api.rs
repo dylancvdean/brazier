@@ -129,6 +129,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/runtimes/build", post(build_runtime))
         .route("/api/v1/runtimes/build/cancel", post(cancel_build))
         .route("/api/v1/models/download", post(download_model))
+        .route("/api/v1/models/download/queue", post(queue_model_download))
+        .route("/api/v1/models/download/cancel", post(cancel_model_download))
         .route("/api/v1/models/downloads", get(list_download_jobs))
         .route("/api/v1/models", axum::routing::delete(delete_local_model))
         .route("/v1/models", get(list_models))
@@ -204,6 +206,8 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             "conversation_search": true,
             "conversation_import_export": true,
             "model_download_jobs": true,
+            "model_download_queue": true,
+            "model_download_cancel": true,
             "model_trust_acknowledgement": true,
         }
     })))
@@ -232,7 +236,7 @@ async fn export_conversation(
 ) -> ApiResult<Json<ConversationExport>> {
     state
         .db
-        .export_conversation(&id)
+        .export_conversation(&state.data_dir, &id)
         .await
         .map(Json)
         .map_err(ApiError::bad_request)
@@ -244,7 +248,7 @@ async fn import_conversation(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let conversation = state
         .db
-        .import_conversation(export)
+        .import_conversation(&state.data_dir, export)
         .await
         .map_err(ApiError::bad_request)?;
     Ok((StatusCode::CREATED, Json(json!(conversation))))
@@ -699,6 +703,9 @@ async fn download_model(
             .await
             .ok()
             .map(|entry| entry.id);
+        let cancel = job_id
+            .as_ref()
+            .map(|id| state.active_downloads.register(id));
         let job_handle = job_id
             .as_ref()
             .map(|id| (state.db.clone(), id.clone()));
@@ -708,10 +715,19 @@ async fn download_model(
             request,
             Box::new(|_| {}),
             job_handle,
+            cancel.clone(),
         )
         .await;
+        if let Some(id) = job_id.as_deref() {
+            state.active_downloads.finish(id);
+        }
         if let (Some(job_id), Err(error)) = (job_id.as_deref(), &result) {
-            let _ = state.db.fail_download_job(job_id, &error.to_string()).await;
+            let message = error.to_string();
+            if message.contains("cancelled") {
+                let _ = state.db.cancel_download_job(job_id).await;
+            } else {
+                let _ = state.db.fail_download_job(job_id, &message).await;
+            }
         }
         return match result {
             Ok(result) => (StatusCode::OK, Json(json!(result))).into_response(),
@@ -723,6 +739,7 @@ async fn download_model(
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
     let db = state.db.clone();
+    let active_downloads = state.active_downloads.clone();
     let repo_id = request.repo_id.clone();
     let filename = request.filename.clone();
     let revision = request.revision.clone();
@@ -733,6 +750,9 @@ async fn download_model(
             .await
             .ok()
             .map(|entry| entry.id);
+        let cancel = job_id
+            .as_ref()
+            .map(|id| active_downloads.register(id));
         let job_handle = job_id.as_ref().map(|id| (db.clone(), id.clone()));
         let result = download::download_gguf_with_progress(
             &http,
@@ -746,16 +766,64 @@ async fn download_model(
                 let _ = progress_tx.try_send(event);
             }),
             job_handle,
+            cancel,
         )
         .await;
+        if let Some(id) = job_id.as_deref() {
+            active_downloads.finish(id);
+        }
         if let (Some(job_id), Err(error)) = (job_id.as_deref(), &result) {
-            let _ = db.fail_download_job(job_id, &error.to_string()).await;
+            let message = error.to_string();
+            if message.contains("cancelled") {
+                let _ = db.cancel_download_job(job_id).await;
+            } else {
+                let _ = db.fail_download_job(job_id, &message).await;
+            }
         }
         if let Err(error) = result {
             let _ = tx.send(ProgressEvent::error(error.to_string())).await;
         }
     });
     progress_sse(rx)
+}
+
+#[derive(Debug, Deserialize)]
+struct CancelDownloadRequest {
+    job_id: String,
+}
+
+async fn cancel_model_download(
+    State(state): State<AppState>,
+    Json(request): Json<CancelDownloadRequest>,
+) -> ApiResult<Json<Value>> {
+    let signalled = state.active_downloads.cancel(&request.job_id);
+    if signalled {
+        let _ = state.db.cancel_download_job(&request.job_id).await;
+        Ok(Json(json!({ "cancelled": request.job_id })))
+    } else {
+        let _ = state.db.cancel_download_job(&request.job_id).await;
+        Ok(Json(json!({ "cancelled": request.job_id, "queued_only": true })))
+    }
+}
+
+async fn queue_model_download(
+    State(state): State<AppState>,
+    Json(request): Json<download::DownloadRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let job = state
+        .db
+        .create_download_job(&request.repo_id, &request.filename, &request.revision)
+        .await
+        .map_err(ApiError::bad_request)?;
+    state
+        .download_queue
+        .enqueue(crate::download_queue::QueuedDownload {
+            job_id: job.id.clone(),
+            request,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "job_id": job.id, "status": job.status }))))
 }
 
 async fn list_models(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -996,14 +1064,16 @@ async fn responses(
 mod tests {
     use super::*;
     use crate::{
+        active_downloads::ActiveDownloads,
         db::Database,
+        download_queue::DownloadQueue,
         engine::Runtime,
         models_store::{self, download_destination},
     };
     use axum::body::Body;
+    use std::sync::Arc;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use std::sync::Arc;
     use tempfile::tempdir;
     use tower::ServiceExt;
 
@@ -1015,11 +1085,18 @@ mod tests {
     }
 
     async fn test_state(data_dir: &std::path::Path) -> AppState {
+        let http = reqwest::Client::new();
+        let runtime = Runtime::new(data_dir.to_path_buf(), http.clone());
+        let active_downloads = Arc::new(ActiveDownloads::new());
         let db = Database::open(&data_dir.join("brazier.sqlite"))
             .await
             .unwrap();
-        let http = reqwest::Client::new();
-        let runtime = Runtime::new(data_dir.to_path_buf(), http.clone());
+        let download_queue = DownloadQueue::spawn(
+            http.clone(),
+            data_dir.to_path_buf(),
+            db.clone(),
+            Arc::clone(&active_downloads),
+        );
         AppState {
             db,
             runtime,
@@ -1027,6 +1104,8 @@ mod tests {
             http,
             data_dir: data_dir.to_path_buf(),
             active_builds: Arc::new(builds::ActiveBuilds::new()),
+            active_downloads,
+            download_queue,
         }
     }
 

@@ -5,7 +5,10 @@ use std::{
 };
 
 use anyhow::Context;
-use brazierd::{AppState, api, builds, db::Database, engine::Runtime};
+use brazierd::{
+    active_downloads::ActiveDownloads, AppState, api, builds, db::Database, download_queue::DownloadQueue,
+    engine::Runtime,
+};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -85,6 +88,13 @@ async fn main() -> anyhow::Result<()> {
         .user_agent(format!("brazier/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
     let runtime = Runtime::new(data_dir.clone(), http.clone());
+    let active_downloads = Arc::new(ActiveDownloads::new());
+    let download_queue = DownloadQueue::spawn(
+        http.clone(),
+        data_dir.clone(),
+        db.clone(),
+        Arc::clone(&active_downloads),
+    );
     let state = AppState {
         db,
         runtime: Arc::clone(&runtime),
@@ -92,6 +102,8 @@ async fn main() -> anyhow::Result<()> {
         http,
         data_dir: data_dir.clone(),
         active_builds: Arc::new(builds::ActiveBuilds::new()),
+        active_downloads,
+        download_queue,
     };
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.host, args.port))
