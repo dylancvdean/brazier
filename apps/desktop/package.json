@@ -1,0 +1,57 @@
+{
+  "name": "@brazier/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Brazier desktop application",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "electron-vite build && electron-builder --dir"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.2.8",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.0",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0",
+    "vitest": "^3.2.0"
+  },
+  "build": {
+    "appId": "dev.brazier.desktop",
+    "productName": "Brazier",
+    "files": [
+      "out/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../../target/release",
+        "to": "bin",
+        "filter": ["brazierd", "brazierd.exe"]
+      }
+    ],
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Utility"
+    },
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.utilities"
+    },
+    "win": {
+      "target": ["nsis"]
+    }
+  }
+}

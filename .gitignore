@@ -1,0 +1,17 @@
+.DS_Store
+Thumbs.db
+node_modules/
+dist/
+out/
+.vite/
+target/
+coverage/
+playwright-report/
+test-results/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+!.env.example

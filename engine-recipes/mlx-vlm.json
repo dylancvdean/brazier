@@ -1,0 +1,26 @@
+{
+  "id": "mlx-vlm",
+  "display_name": "MLX-VLM",
+  "upstream_origins": [
+    "https://github.com/Blaizzy/mlx-vlm.git",
+    "https://github.com/Blaizzy/mlx-vlm"
+  ],
+  "supported_platforms": ["macos-arm64"],
+  "steps": [
+    {
+      "label": "Create isolated environment",
+      "program": "uv",
+      "args": ["venv", "--python", "3.12", "{venv}"]
+    },
+    {
+      "label": "Install pinned dependencies",
+      "program": "uv",
+      "args": ["pip", "install", "--python", "{python}", "--requirements", "{recipe}/mlx-vlm.lock"]
+    },
+    {
+      "label": "Build and install selected source",
+      "program": "uv",
+      "args": ["pip", "install", "--python", "{python}", "--no-deps", "{source}"]
+    }
+  ]
+}

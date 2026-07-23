@@ -1,0 +1,26 @@
+{
+  "id": "vllm",
+  "display_name": "vLLM",
+  "upstream_origins": [
+    "https://github.com/vllm-project/vllm.git",
+    "https://github.com/vllm-project/vllm"
+  ],
+  "supported_platforms": ["linux-x64", "linux-arm64"],
+  "steps": [
+    {
+      "label": "Create isolated environment",
+      "program": "uv",
+      "args": ["venv", "--python", "3.12", "{venv}"]
+    },
+    {
+      "label": "Install pinned platform dependencies",
+      "program": "uv",
+      "args": ["pip", "install", "--python", "{python}", "--requirements", "{recipe}/vllm.lock"]
+    },
+    {
+      "label": "Build and install selected source",
+      "program": "uv",
+      "args": ["pip", "install", "--python", "{python}", "--no-deps", "{source}"]
+    }
+  ]
+}

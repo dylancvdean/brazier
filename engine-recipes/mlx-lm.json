@@ -1,0 +1,26 @@
+{
+  "id": "mlx-lm",
+  "display_name": "MLX-LM",
+  "upstream_origins": [
+    "https://github.com/ml-explore/mlx-lm.git",
+    "https://github.com/ml-explore/mlx-lm"
+  ],
+  "supported_platforms": ["macos-arm64"],
+  "steps": [
+    {
+      "label": "Create isolated environment",
+      "program": "uv",
+      "args": ["venv", "--python", "3.12", "{venv}"]
+    },
+    {
+      "label": "Install pinned dependencies",
+      "program": "uv",
+      "args": ["pip", "install", "--python", "{python}", "--requirements", "{recipe}/mlx-lm.lock"]
+    },
+    {
+      "label": "Build and install selected source",
+      "program": "uv",
+      "args": ["pip", "install", "--python", "{python}", "--no-deps", "{source}"]
+    }
+  ]
+}
