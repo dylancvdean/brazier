@@ -33,11 +33,13 @@ import {
   listConversations,
   listMessages,
   listModels,
+  listRuntimes,
   listRunSnapshots,
   type ConversationExport,
   type HardwareInfo,
   type LocalModel,
   type RunSnapshot,
+  type RuntimeEntry,
   type RuntimeSettings,
   type ToolCallRecord,
   recordRun,
@@ -49,6 +51,12 @@ import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
 import { ModelMenu } from './components/ModelMenu'
 import { childCounts, messageChain } from './graph'
+import {
+  readCachedModels,
+  readCachedRuntimes,
+  writeCachedModels,
+  writeCachedRuntimes
+} from './inventoryCache'
 import type { Attachment, ContentPart, Conversation, Message } from './types'
 
 function contentText(message: Message): string {
@@ -203,10 +211,14 @@ export function App(): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [localModels, setLocalModels] = useState<LocalModel[]>([])
-  const [modelsLoading, setModelsLoading] = useState(true)
+  const [localModels, setLocalModels] = useState<LocalModel[]>(() => readCachedModels())
+  const [modelsLoading, setModelsLoading] = useState(() => readCachedModels().length === 0)
   const [modelsLoadFailed, setModelsLoadFailed] = useState(false)
-  const [selectedModel, setSelectedModel] = useState('')
+  const [selectedModel, setSelectedModel] = useState(() => readCachedModels()[0]?.id ?? '')
+  const [prefetchedRuntimes, setPrefetchedRuntimes] = useState<RuntimeEntry[] | null>(() => {
+    const cached = readCachedRuntimes()
+    return cached.length > 0 ? cached : null
+  })
   const [toolsEnabled, setToolsEnabled] = useState(false)
   const [daemonStatus, setDaemonStatus] = useState<'checking' | 'healthy' | 'offline'>('checking')
   const [daemonVersion, setDaemonVersion] = useState('')
@@ -229,7 +241,9 @@ export function App(): React.JSX.Element {
   const chain = useMemo(() => messageChain(messages, tipId), [messages, tipId])
   const branches = useMemo(() => childCounts(messages), [messages])
   const selectedMeta = useMemo(() => {
-    if (modelsLoading) return { title: 'Loading models…', subtitle: 'Starting local daemon' }
+    if (modelsLoading && localModels.length === 0) {
+      return { title: 'Loading models…', subtitle: 'Scanning local library' }
+    }
     return modelLabel(selectedModel, localModels)
   }, [selectedModel, localModels, modelsLoading])
   const canChat = Boolean(selectedModel)
@@ -243,6 +257,7 @@ export function App(): React.JSX.Element {
   async function refreshLocalModels(): Promise<void> {
     const models = await listModels()
     setLocalModels(models)
+    writeCachedModels(models)
     setSelectedModel((current) => {
       if (current && models.some((model) => model.id === current)) return current
       return models[0]?.id ?? ''
@@ -250,15 +265,28 @@ export function App(): React.JSX.Element {
   }
 
   async function loadLocalModels(): Promise<void> {
-    setModelsLoading(true)
+    const hadCache = localModels.length > 0
+    if (!hadCache) {
+      setModelsLoading(true)
+    }
     setModelsLoadFailed(false)
     try {
       await refreshLocalModels()
     } catch (cause) {
-      setModelsLoadFailed(true)
+      if (!hadCache) setModelsLoadFailed(true)
       throw cause
     } finally {
       setModelsLoading(false)
+    }
+  }
+
+  async function prefetchRuntimes(): Promise<void> {
+    try {
+      const response = await listRuntimes()
+      setPrefetchedRuntimes(response.data)
+      writeCachedRuntimes(response.data)
+    } catch {
+      // Best-effort prefetch — Manage panel falls back to its own fetch.
     }
   }
 
@@ -321,6 +349,7 @@ export function App(): React.JSX.Element {
     void loadLocalModels().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
+    void prefetchRuntimes()
     void refreshRuntime().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
@@ -912,6 +941,7 @@ export function App(): React.JSX.Element {
           models={localModels}
           modelsLoading={modelsLoading}
           refreshModels={refreshLocalModels}
+          initialRuntimes={prefetchedRuntimes}
           selectedModel={selectedModel}
           onSelectModel={setSelectedModel}
           settings={runtime}

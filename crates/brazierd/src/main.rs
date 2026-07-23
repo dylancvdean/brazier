@@ -10,6 +10,7 @@ use brazierd::{
     engine::Runtime,
 };
 use clap::Parser;
+use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -104,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
         active_builds: Arc::new(builds::ActiveBuilds::new()),
         active_downloads,
         download_queue,
+        runtimes_cache: Arc::new(Mutex::new(None)),
     };
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.host, args.port))

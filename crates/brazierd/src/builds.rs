@@ -23,7 +23,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::{
     build_recipe::{self, BuildPlanRequest, PlannedCommand},
     progress::{ProgressCallback, ProgressEvent},
-    runtime_settings::RuntimeTarget,
+    runtime_settings::{self, RuntimeTarget},
+    toolchain_hints::{self, ToolchainPackage},
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,6 +35,10 @@ pub struct BuildRequest {
     /// Acceleration flavor to configure (defaults to CPU-only).
     #[serde(default)]
     pub target: Option<RuntimeTarget>,
+    /// Parallel compile jobs (`cmake --build … --parallel N`). Defaults to half
+    /// of available CPU threads when omitted.
+    #[serde(default)]
+    pub jobs: Option<u16>,
 }
 
 /// Metadata persisted next to every completed source build.
@@ -151,7 +156,9 @@ pub fn resolve_command_args(
     build: &Path,
     install: &Path,
     flags: &[String],
+    parallel_jobs: u16,
 ) -> Vec<String> {
+    let parallel = parallel_jobs.to_string();
     let mut resolved = Vec::with_capacity(args.len());
     for arg in args {
         if arg == "{target_flags}" {
@@ -161,7 +168,8 @@ pub fn resolve_command_args(
         resolved.push(
             arg.replace("{source}", &source.display().to_string())
                 .replace("{build}", &build.display().to_string())
-                .replace("{install}", &install.display().to_string()),
+                .replace("{install}", &install.display().to_string())
+                .replace("{parallel}", &parallel),
         );
     }
     resolved
@@ -241,7 +249,7 @@ async fn run_step(
                 log.push('\n');
                 emitted += 1;
                 if emitted.is_multiple_of(5) || emitted < 40 {
-                    progress(ProgressEvent::phase("log", line));
+                    progress(ProgressEvent::log_line(line));
                 }
             }
             Ok(None) => break,
@@ -329,10 +337,10 @@ pub fn diagnose_failure(
         );
     }
     if message_lower.contains("`git` is required") {
-        hints.push("Install Git and ensure it is available on your PATH.".into());
+        hints.push(toolchain_hints::install_hint(ToolchainPackage::Git));
     }
     if message_lower.contains("`cmake` is required") {
-        hints.push("Install CMake (3.20 or newer) and ensure it is available on your PATH.".into());
+        hints.push(toolchain_hints::install_hint(ToolchainPackage::Cmake));
     }
     if log_lower.contains("could not find git")
         || log_lower.contains("not a git repository")
@@ -346,34 +354,30 @@ pub fn diagnose_failure(
     if log_lower.contains("could not find cuda")
         || log_lower.contains("cudatoolkit not found")
         || log_lower.contains("cuda_toolkit")
+        || log_lower.contains("could not find cuda")
     {
-        hints.push(
-            "CUDA was not detected. Install the NVIDIA CUDA toolkit or switch the build target to CPU.".into(),
-        );
+        hints.push(toolchain_hints::install_hint(ToolchainPackage::Cuda));
     }
     if matches!(target, RuntimeTarget::Vulkan)
-        && (log_lower.contains("vulkan") && log_lower.contains("not found"))
+        && log_lower.contains("vulkan")
+        && (log_lower.contains("not found") || log_lower.contains("missing:"))
     {
-        hints.push(
-            "Vulkan was not detected. Install your platform Vulkan SDK/drivers or build with the CPU target.".into(),
-        );
+        hints.push(toolchain_hints::install_hint(ToolchainPackage::Vulkan));
     }
-    if matches!(target, RuntimeTarget::Rocm)
-        && (log_lower.contains("hip") || log_lower.contains("rocm"))
-        && log_lower.contains("not found")
-    {
-        hints.push(
-            "ROCm/HIP was not detected. Install ROCm or switch the build target to CPU.".into(),
-        );
+    if toolchain_hints::missing_rocm_hip(&log_lower, &message_lower, target) {
+        hints.push(toolchain_hints::install_hint(ToolchainPackage::RocmHip));
+        if !toolchain_hints::hip_compiler_available() {
+            hints.push(
+                "After installing ROCm, open a new shell (or log out/in) so `/opt/rocm/bin` is on your PATH, then retry the build.".into(),
+            );
+        }
     }
     if log_lower.contains("no cmake_cxx_compiler")
         || log_lower.contains("no CMAKE_CXX_COMPILER")
         || log_lower.contains("c++: command not found")
         || log_lower.contains("g++: command not found")
     {
-        hints.push(
-            "A C++ toolchain is missing. On Linux install a build-essential or equivalent package; on macOS install Xcode command line tools.".into(),
-        );
+        hints.push(toolchain_hints::install_hint(ToolchainPackage::CppBuild));
     }
     if log_lower.contains("ninja: error")
         || log_lower.contains("make: ***")
@@ -441,6 +445,10 @@ pub async fn run_build_with_progress(
     mut progress: ProgressCallback,
 ) -> Result<PathBuf, BuildFailureReport> {
     let target = request.target.unwrap_or(RuntimeTarget::Cpu);
+    let parallel_jobs = request
+        .jobs
+        .filter(|jobs| *jobs > 0)
+        .unwrap_or_else(runtime_settings::default_build_jobs);
     let fail = |message: String, step: Option<&str>, log: &str| -> BuildFailureReport {
         diagnose_failure(&message, step, log, target)
     };
@@ -479,6 +487,11 @@ pub async fn run_build_with_progress(
                 "",
             ));
         }
+    }
+    if matches!(target, RuntimeTarget::Rocm)
+        && let Some(message) = toolchain_hints::rocm_preflight_message()
+    {
+        return Err(fail(message, Some("Preflight"), ""));
     }
     if let Some(warning) = &plan.warning {
         progress(ProgressEvent::phase("warning", warning.clone()));
@@ -523,11 +536,9 @@ pub async fn run_build_with_progress(
                 anyhow::bail!("build cancelled");
             }
             failed_step = Some(step.label.clone());
-            let args = resolve_command_args(&step.args, &source, &build, &install, &flags);
-            progress(ProgressEvent::phase(
-                "build",
-                format!("[{}/{}] {}", index + 1, total, step.label),
-            ));
+            let args =
+                resolve_command_args(&step.args, &source, &build, &install, &flags, parallel_jobs);
+            progress(ProgressEvent::build_step(index + 1, total, step.label.clone()));
             run_step(
                 &step.label,
                 &step.program,
@@ -639,6 +650,7 @@ mod tests {
             Path::new("/tmp/b"),
             Path::new("/tmp/i"),
             &["-DGGML_CUDA=ON".to_owned()],
+            4,
         );
         assert_eq!(
             resolved,
@@ -663,6 +675,7 @@ mod tests {
             Path::new("/b"),
             Path::new("/i"),
             &[],
+            2,
         );
         assert_eq!(resolved, vec!["ok"]);
     }
@@ -726,7 +739,28 @@ mod tests {
             "CMake Error: Could NOT find CUDA (missing: CUDA_TOOLKIT_ROOT_DIR)",
             RuntimeTarget::Cuda,
         );
-        assert!(report.hints.iter().any(|hint| hint.contains("CUDA")));
+        assert!(
+            report
+                .hints
+                .iter()
+                .any(|hint| hint.to_ascii_lowercase().contains("cuda"))
+        );
+    }
+
+    #[test]
+    fn diagnostics_surface_missing_rocm_hip() {
+        let report = diagnose_failure(
+            "Configure failed with 1",
+            Some("Configure"),
+            "CMake Error: Could NOT find HIP (missing: HIP_LIBRARY HIP_INCLUDE_DIR)",
+            RuntimeTarget::Rocm,
+        );
+        assert!(
+            report
+                .hints
+                .iter()
+                .any(|hint| hint.to_ascii_lowercase().contains("pacman") || hint.contains("ROCm"))
+        );
     }
 
     #[test]

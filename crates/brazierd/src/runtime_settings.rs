@@ -46,6 +46,15 @@ pub struct RuntimeSettings {
     /// Absolute path of an explicitly activated llama-server binary. When set,
     /// it takes precedence over discovery and managed installs.
     pub binary_override: Option<String>,
+    /// Parallel compile jobs for source builds (`cmake --build … --parallel`).
+    #[serde(default = "default_build_jobs")]
+    pub build_jobs: u16,
+}
+
+pub fn default_build_jobs() -> u16 {
+    std::thread::available_parallelism()
+        .map(|count| (count.get() / 2).max(1) as u16)
+        .unwrap_or(4)
 }
 
 impl Default for RuntimeSettings {
@@ -65,6 +74,7 @@ impl Default for RuntimeSettings {
             max_tokens: None,
             enable_reasoning: true,
             binary_override: None,
+            build_jobs: default_build_jobs(),
         }
     }
 }
@@ -104,6 +114,13 @@ impl RuntimeSettings {
                 "unsupported KV cache type `{value}`"
             );
         }
+        let max_jobs = std::thread::available_parallelism()
+            .map(|count| count.get() as u16)
+            .unwrap_or(128);
+        anyhow::ensure!(
+            (1..=max_jobs.max(1)).contains(&self.build_jobs),
+            "build_jobs must be between 1 and {max_jobs}"
+        );
         Ok(())
     }
 }

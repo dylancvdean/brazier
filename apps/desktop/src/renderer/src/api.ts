@@ -60,6 +60,7 @@ export type RuntimeSettings = {
   max_tokens: number | null
   enable_reasoning: boolean
   binary_override: string | null
+  build_jobs: number
 }
 
 export type HardwareInfo = {
@@ -97,8 +98,9 @@ export function hardwareInfo(): Promise<HardwareInfo> {
   return request('/api/v1/hardware')
 }
 
-export function engineStatus(): Promise<EngineStatus> {
-  return request('/api/v1/engines')
+export function engineStatus(options?: { probe?: boolean }): Promise<EngineStatus> {
+  const suffix = options?.probe ? '?probe=true' : ''
+  return request(`/api/v1/engines${suffix}`)
 }
 
 export function runtimeSettings(): Promise<RuntimeSettings> {
@@ -378,36 +380,71 @@ async function readProgressSse(
   let buffer = ''
   let last: ProgressEvent | null = null
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const frames = buffer.split('\n\n')
-    buffer = frames.pop() ?? ''
-    for (const frame of frames) {
-      const data = frame
-        .split('\n')
-        .find((line) => line.startsWith('data:'))
-        ?.slice(5)
-        .trim()
-      if (!data) continue
-      const event = JSON.parse(data) as ProgressEvent
-      last = event
-      onProgress(event)
-      if (event.error) {
+  const consumeFrame = (frame: string): ProgressEvent | null => {
+    const data = frame
+      .split('\n')
+      .find((line) => line.startsWith('data:'))
+      ?.slice(5)
+      .trim()
+    if (!data || data === '[DONE]') return null
+    const event = JSON.parse(data) as ProgressEvent
+    last = event
+    onProgress(event)
+    if (event.error) {
       const error = new Error(event.error) as Error & {
         diagnostics?: Record<string, unknown>
       }
       if (event.result) error.diagnostics = event.result
       throw error
     }
-      if (event.done) return event
+    if (isTerminalProgress(event)) return event
+    return null
+  }
+
+  const drainFrames = (final = false): ProgressEvent | null => {
+    const parts = buffer.split('\n\n')
+    if (final) {
+      buffer = ''
+      for (const frame of parts) {
+        if (!frame.trim()) continue
+        const terminal = consumeFrame(frame)
+        if (terminal) return terminal
+      }
+    } else {
+      buffer = parts.pop() ?? ''
+      for (const frame of parts) {
+        if (!frame.trim()) continue
+        const terminal = consumeFrame(frame)
+        if (terminal) return terminal
+      }
+    }
+    return null
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (value) {
+      buffer += decoder.decode(value, { stream: true })
+      const terminal = drainFrames(false)
+      if (terminal) return terminal
+    }
+    if (done) {
+      buffer += decoder.decode()
+      const terminal = drainFrames(true)
+      if (terminal) return terminal
+      break
     }
   }
 
-  if (last?.error) throw new Error(last.error)
-  if (last?.done) return last
-  throw new Error('Download ended without a completion event.')
+  if (last && isTerminalProgress(last)) return last
+  throw new Error('Operation ended without a completion event.')
+}
+
+function isTerminalProgress(event: ProgressEvent): boolean {
+  if (event.done) return true
+  if (event.phase === 'done' && event.result) return true
+  if (event.phase === 'error') return true
+  return false
 }
 
 export async function downloadModel(
@@ -453,11 +490,14 @@ export type RuntimeEntry = {
   deletable: boolean
 }
 
-export async function listRuntimes(): Promise<{
+export async function listRuntimes(options?: {
+  includeSystem?: boolean
+}): Promise<{
   data: RuntimeEntry[]
   active_binary: string | null
 }> {
-  return request('/api/v1/runtimes')
+  const suffix = options?.includeSystem ? '?include_system=true' : ''
+  return request(`/api/v1/runtimes${suffix}`)
 }
 
 export function activateRuntime(id: string): Promise<{ active_binary: string; id: string }> {
@@ -496,6 +536,7 @@ export async function buildRuntime(
   repository: string,
   revision: string,
   target: string,
+  jobs: number,
   onProgress: (event: ProgressEvent) => void,
   options?: { onBuildId?: (buildId: string) => void }
 ): Promise<{ binary: string; build_id: string }> {
@@ -507,7 +548,8 @@ export async function buildRuntime(
         engine: 'llama.cpp',
         repository,
         revision,
-        target
+        target,
+        jobs
       })
     },
     (event) => {

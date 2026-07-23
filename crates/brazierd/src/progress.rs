@@ -78,6 +78,42 @@ impl ProgressEvent {
         }
     }
 
+    pub fn build_step(current: usize, total: usize, label: impl Into<String>) -> Self {
+        let label = label.into();
+        let percent = if total > 0 {
+            Some(((current as f64 / total as f64) * 100.0).clamp(0.0, 100.0))
+        } else {
+            None
+        };
+        Self {
+            phase: "build".into(),
+            bytes: None,
+            total: None,
+            percent,
+            message: Some(format!("[{current}/{total}] {label}")),
+            done: None,
+            error: None,
+            result: Some(serde_json::json!({
+                "step": current,
+                "total": total,
+                "label": label,
+            })),
+        }
+    }
+
+    pub fn log_line(line: impl Into<String>) -> Self {
+        Self {
+            phase: "log".into(),
+            bytes: None,
+            total: None,
+            percent: None,
+            message: Some(line.into()),
+            done: None,
+            error: None,
+            result: None,
+        }
+    }
+
     pub fn build_started(build_id: impl Into<String>) -> Self {
         Self {
             phase: "build".into(),

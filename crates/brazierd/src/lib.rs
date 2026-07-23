@@ -16,6 +16,7 @@ pub mod models_store;
 pub mod progress;
 pub mod runtime_settings;
 pub mod runtimes;
+pub mod toolchain_hints;
 pub mod tools;
 pub mod types;
 
@@ -25,6 +26,8 @@ use db::Database;
 use download_queue::DownloadQueue;
 use engine::Runtime;
 use active_downloads::ActiveDownloads;
+use runtimes::RuntimeEntry;
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -36,4 +39,15 @@ pub struct AppState {
     pub active_builds: Arc<builds::ActiveBuilds>,
     pub active_downloads: Arc<ActiveDownloads>,
     pub download_queue: DownloadQueue,
+    pub runtimes_cache: Arc<Mutex<Option<Vec<RuntimeEntry>>>>,
+}
+
+impl AppState {
+    pub async fn invalidate_runtimes_cache(&self) {
+        *self.runtimes_cache.lock().await = None;
+    }
+
+    pub async fn invalidate_models_cache(&self) {
+        self.runtime.invalidate_models_cache().await;
+    }
 }

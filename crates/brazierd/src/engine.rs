@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use crate::{
     llama::{self, LlamaServer},
     models_store,
-    progress::ProgressCallback,
+    progress::{ProgressCallback, ProgressEvent},
     runtime_settings::{self, RuntimeSettings},
     tools,
     types::{ChatCompletionRequest, ModelDescriptor, OpenAiMessage},
@@ -53,6 +53,12 @@ pub struct Runtime {
     http: reqwest::Client,
     llama: Mutex<LlamaState>,
     settings: Mutex<RuntimeSettings>,
+    models_cache: Mutex<Option<Vec<ModelDescriptor>>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EngineStatusOptions {
+    pub probe: bool,
 }
 
 impl Runtime {
@@ -89,14 +95,30 @@ impl Runtime {
                 server: None,
             }),
             settings: Mutex::new(settings),
+            models_cache: Mutex::new(None),
         })
+    }
+
+    pub async fn invalidate_models_cache(&self) {
+        *self.models_cache.lock().await = None;
+    }
+
+    pub async fn cached_models(&self) -> anyhow::Result<Vec<ModelDescriptor>> {
+        if let Some(models) = self.models_cache.lock().await.clone() {
+            return Ok(models);
+        }
+        let data_dir = self.data_dir.clone();
+        let models = tokio::task::spawn_blocking(move || models_store::list_gguf_models(&data_dir))
+            .await??;
+        *self.models_cache.lock().await = Some(models.clone());
+        Ok(models)
     }
 
     pub fn data_dir(&self) -> &PathBuf {
         &self.data_dir
     }
 
-    pub async fn engine_status(&self) -> serde_json::Value {
+    pub async fn engine_status(&self, options: EngineStatusOptions) -> serde_json::Value {
         let settings = self.settings.lock().await.clone();
         let guard = self.llama.lock().await;
         let binary = guard.binary.as_ref().map(|path| path.display().to_string());
@@ -107,15 +129,33 @@ impl Runtime {
                 "projector_path": server.projector_path.as_ref().map(|path| path.display().to_string()),
             })
         });
+        drop(guard);
+        let llama_probe = if options.probe {
+            self.llama_diagnostics().await
+        } else {
+            None
+        };
         serde_json::json!({
             "id": self.id(),
             "llama_binary": binary,
             "llama_server": running,
-            "llama_probe": self.llama_diagnostics().await,
+            "llama_probe": llama_probe,
             "managed_binary_path": llama::managed_binary_path(&self.data_dir).display().to_string(),
             "platform_asset_tag": llama::platform_asset_tag(),
             "settings": settings,
             "hardware": crate::hardware::detect(),
+        })
+    }
+
+    /// Lightweight server summary without an HTTP probe (for frequent health checks).
+    pub async fn llama_server_summary(&self) -> Option<serde_json::Value> {
+        let guard = self.llama.lock().await;
+        guard.server.as_ref().map(|server| {
+            serde_json::json!({
+                "base_url": server.base_url,
+                "model_path": server.model_path.display().to_string(),
+                "projector_path": server.projector_path.as_ref().map(|path| path.display().to_string()),
+            })
         })
     }
 
@@ -235,7 +275,7 @@ impl Runtime {
 
     pub async fn ensure_llama_binary_with_progress(
         &self,
-        progress: ProgressCallback,
+        mut progress: ProgressCallback,
     ) -> anyhow::Result<PathBuf> {
         let target = self.settings.lock().await.target;
         {
@@ -244,6 +284,15 @@ impl Runtime {
                 && path.is_file()
                 && llama::binary_appears_runnable(path)
             {
+                progress(ProgressEvent::phase(
+                    "skip",
+                    "Using the active llama-server binary",
+                ));
+                progress(ProgressEvent::done(serde_json::json!({
+                    "binary": path.display().to_string(),
+                    "status": "ready",
+                    "source": "active"
+                })));
                 return Ok(path.clone());
             }
         }
@@ -372,7 +421,7 @@ impl Engine for Runtime {
     }
 
     async fn models(&self) -> anyhow::Result<Vec<ModelDescriptor>> {
-        Ok(models_store::list_gguf_models(&self.data_dir)?)
+        self.cached_models().await
     }
 
     async fn generate(&self, request: &ChatCompletionRequest) -> anyhow::Result<Generation> {

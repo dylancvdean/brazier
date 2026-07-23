@@ -181,7 +181,7 @@ async fn require_auth(
 
 async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     state.db.ping().await.map_err(ApiError::internal)?;
-    let llama = state.runtime.llama_diagnostics().await;
+    let llama = state.runtime.llama_server_summary().await;
     Ok(Json(json!({
         "status": "healthy",
         "engine": state.runtime.id(),
@@ -468,8 +468,87 @@ async fn build_plan(Json(request): Json<BuildPlanRequest>) -> ApiResult<Json<Val
     Ok(Json(json!(plan)))
 }
 
-async fn engine_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    Ok(Json(state.runtime.engine_status().await))
+async fn engine_status(
+    State(state): State<AppState>,
+    Query(query): Query<EngineStatusQuery>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        state
+            .runtime
+            .engine_status(crate::engine::EngineStatusOptions {
+                probe: query.probe.unwrap_or(false),
+            })
+            .await,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct EngineStatusQuery {
+    probe: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListRuntimesQuery {
+    include_system: Option<bool>,
+}
+
+async fn list_runtimes(
+    State(state): State<AppState>,
+    Query(query): Query<ListRuntimesQuery>,
+) -> Json<Value> {
+    let include_system = query.include_system.unwrap_or(false);
+    let active = state.runtime.active_binary().await;
+    let entries = if !include_system {
+        if let Some(cached) = state.runtimes_cache.lock().await.clone() {
+            apply_active_flags(cached, active.as_deref())
+        } else {
+            let loaded = load_runtimes(&state.data_dir, active.as_deref(), false).await;
+            *state.runtimes_cache.lock().await = Some(loaded.clone());
+            loaded
+        }
+    } else {
+        load_runtimes(&state.data_dir, active.as_deref(), true).await
+    };
+    Json(json!({
+        "data": entries,
+        "active_binary": active.map(|path| path.display().to_string())
+    }))
+}
+
+fn apply_active_flags(
+    mut entries: Vec<runtimes::RuntimeEntry>,
+    active: Option<&std::path::Path>,
+) -> Vec<runtimes::RuntimeEntry> {
+    for entry in &mut entries {
+        entry.active = active.is_some_and(|active_path| {
+            std::path::Path::new(&entry.path)
+                .canonicalize()
+                .ok()
+                .zip(active_path.canonicalize().ok())
+                .is_some_and(|(left, right)| left == right)
+                || std::path::Path::new(&entry.path) == active_path
+        });
+    }
+    entries
+}
+
+async fn load_runtimes(
+    data_dir: &std::path::Path,
+    active: Option<&std::path::Path>,
+    include_system: bool,
+) -> Vec<runtimes::RuntimeEntry> {
+    let data_dir = data_dir.to_path_buf();
+    let active = active.map(std::path::Path::to_path_buf);
+    tokio::task::spawn_blocking(move || {
+        runtimes::list(
+            &data_dir,
+            active.as_deref(),
+            std::env::var("PATH").ok().as_deref(),
+            include_system,
+        )
+    })
+    .await
+    .unwrap_or_default()
 }
 
 async fn hardware() -> Json<Value> {
@@ -496,16 +575,6 @@ async fn list_tools() -> Json<Value> {
     Json(tools::catalog())
 }
 
-async fn list_runtimes(State(state): State<AppState>) -> Json<Value> {
-    let active = state.runtime.active_binary().await;
-    let path_env = std::env::var("PATH").ok();
-    let entries = runtimes::list(&state.data_dir, active.as_deref(), path_env.as_deref());
-    Json(json!({
-        "data": entries,
-        "active_binary": active.map(|path| path.display().to_string())
-    }))
-}
-
 #[derive(Debug, Deserialize)]
 struct RuntimeIdRequest {
     id: String,
@@ -516,13 +585,14 @@ async fn activate_runtime(
     Json(request): Json<RuntimeIdRequest>,
 ) -> ApiResult<Json<Value>> {
     let path_env = std::env::var("PATH").ok();
-    let entry = runtimes::find(&state.data_dir, path_env.as_deref(), &request.id)
+    let entry = runtimes::find(&state.data_dir, path_env.as_deref(), &request.id, false)
         .ok_or_else(|| ApiError::bad_request(format!("unknown runtime `{}`", request.id)))?;
     let path = state
         .runtime
         .activate_binary(std::path::PathBuf::from(&entry.path))
         .await
         .map_err(ApiError::bad_request)?;
+    state.invalidate_runtimes_cache().await;
     Ok(Json(json!({
         "active_binary": path.display().to_string(),
         "id": entry.id
@@ -539,6 +609,7 @@ async fn delete_runtime(
         .release_binary(&removed)
         .await
         .map_err(ApiError::internal)?;
+    state.invalidate_runtimes_cache().await;
     Ok(Json(json!({ "deleted": request.id })))
 }
 
@@ -556,6 +627,7 @@ async fn delete_local_model(
     state.runtime.release_model(&path).await;
     models_store::delete_model(&state.data_dir, &request.model_id)
         .map_err(ApiError::bad_request)?;
+    state.invalidate_models_cache().await;
     Ok(Json(json!({ "deleted": request.model_id })))
 }
 
@@ -565,7 +637,18 @@ struct StreamQuery {
     stream: bool,
 }
 
-fn progress_sse(mut rx: mpsc::Receiver<ProgressEvent>) -> Response {
+fn progress_channel() -> (
+    mpsc::UnboundedSender<ProgressEvent>,
+    mpsc::UnboundedReceiver<ProgressEvent>,
+) {
+    mpsc::unbounded_channel()
+}
+
+fn push_progress(tx: &mpsc::UnboundedSender<ProgressEvent>, event: ProgressEvent) {
+    let _ = tx.send(event);
+}
+
+fn progress_sse(mut rx: mpsc::UnboundedReceiver<ProgressEvent>) -> Response {
     let events = stream! {
         while let Some(event) = rx.recv().await {
             let terminal = event.done == Some(true);
@@ -584,29 +667,43 @@ fn progress_sse(mut rx: mpsc::Receiver<ProgressEvent>) -> Response {
 async fn ensure_llama(State(state): State<AppState>, Query(query): Query<StreamQuery>) -> Response {
     if !query.stream {
         return match state.runtime.ensure_llama_binary().await {
-            Ok(path) => (
-                StatusCode::OK,
-                Json(json!({
-                    "binary": path.display().to_string(),
-                    "status": "ready"
-                })),
-            )
-                .into_response(),
+            Ok(path) => {
+                state.invalidate_runtimes_cache().await;
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "binary": path.display().to_string(),
+                        "status": "ready"
+                    })),
+                )
+                    .into_response()
+            }
             Err(error) => ApiError::internal(error).into_response(),
         };
     }
 
-    let (tx, rx) = mpsc::channel::<ProgressEvent>(64);
+    let (tx, rx) = progress_channel();
     let runtime = state.runtime.clone();
+    let cache_state = state.clone();
     tokio::spawn(async move {
         let progress_tx = tx.clone();
         let result = runtime
             .ensure_llama_binary_with_progress(Box::new(move |event| {
-                let _ = progress_tx.try_send(event);
+                push_progress(&progress_tx, event);
             }))
             .await;
+        if let Ok(path) = &result {
+            cache_state.invalidate_runtimes_cache().await;
+            push_progress(
+                &tx,
+                ProgressEvent::done(json!({
+                    "binary": path.display().to_string(),
+                    "status": "ready"
+                })),
+            );
+        }
         if let Err(error) = result {
-            let _ = tx.send(ProgressEvent::error(error.to_string())).await;
+            push_progress(&tx, ProgressEvent::error(error.to_string()));
         }
     });
     progress_sse(rx)
@@ -626,31 +723,57 @@ async fn build_runtime(
         )
         .await
         {
-            Ok(binary) => (
-                StatusCode::OK,
-                Json(json!({
-                    "binary": binary.display().to_string(),
-                    "status": "ready"
-                })),
-            )
-                .into_response(),
+            Ok(binary) => {
+                state.invalidate_runtimes_cache().await;
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "binary": binary.display().to_string(),
+                        "status": "ready"
+                    })),
+                )
+                    .into_response()
+            }
             Err(report) => ApiError::bad_request(format_build_failure(&report)).into_response(),
         };
     }
-    let (tx, rx) = mpsc::channel::<ProgressEvent>(256);
+    let (tx, rx) = progress_channel();
     let data_dir = state.data_dir.clone();
     let active_builds = state.active_builds.clone();
+    let cache_state = state.clone();
     tokio::spawn(async move {
         let progress_tx = tx.clone();
-        let _result = builds::run_build_with_progress(
+        let result = builds::run_build_with_progress(
             &data_dir,
             request,
             &active_builds,
             Box::new(move |event| {
-                let _ = progress_tx.try_send(event);
+                push_progress(&progress_tx, event);
             }),
         )
         .await;
+        match result {
+            Ok(binary) => {
+                cache_state.invalidate_runtimes_cache().await;
+                push_progress(
+                    &tx,
+                    ProgressEvent::done(json!({
+                        "binary": binary.display().to_string(),
+                        "status": "ready"
+                    })),
+                );
+            }
+            Err(report) => {
+                push_progress(
+                    &tx,
+                    ProgressEvent::build_failed(
+                        &serde_json::to_value(&report).unwrap_or_else(|_| {
+                            json!({ "message": report.message })
+                        }),
+                    ),
+                );
+            }
+        }
     });
     progress_sse(rx)
 }
@@ -730,16 +853,20 @@ async fn download_model(
             }
         }
         return match result {
-            Ok(result) => (StatusCode::OK, Json(json!(result))).into_response(),
+            Ok(result) => {
+                state.invalidate_models_cache().await;
+                (StatusCode::OK, Json(json!(result))).into_response()
+            }
             Err(error) => ApiError::bad_request(error).into_response(),
         };
     }
 
-    let (tx, rx) = mpsc::channel::<ProgressEvent>(64);
+    let (tx, rx) = progress_channel();
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
     let db = state.db.clone();
     let active_downloads = state.active_downloads.clone();
+    let cache_state = state.clone();
     let repo_id = request.repo_id.clone();
     let filename = request.filename.clone();
     let revision = request.revision.clone();
@@ -763,7 +890,7 @@ async fn download_model(
                 revision,
             },
             Box::new(move |event| {
-                let _ = progress_tx.try_send(event);
+                push_progress(&progress_tx, event);
             }),
             job_handle,
             cancel,
@@ -780,8 +907,19 @@ async fn download_model(
                 let _ = db.fail_download_job(job_id, &message).await;
             }
         }
-        if let Err(error) = result {
-            let _ = tx.send(ProgressEvent::error(error.to_string())).await;
+        match result {
+            Ok(download_result) => {
+                cache_state.invalidate_models_cache().await;
+                push_progress(
+                    &tx,
+                    ProgressEvent::done(
+                        serde_json::to_value(&download_result).unwrap_or_else(|_| json!({})),
+                    ),
+                );
+            }
+            Err(error) => {
+                push_progress(&tx, ProgressEvent::error(error.to_string()));
+            }
         }
     });
     progress_sse(rx)
@@ -1072,6 +1210,7 @@ mod tests {
     };
     use axum::body::Body;
     use std::sync::Arc;
+    use tokio::sync::Mutex;
     use axum::http::Request;
     use http_body_util::BodyExt;
     use tempfile::tempdir;
@@ -1106,6 +1245,7 @@ mod tests {
             active_builds: Arc::new(builds::ActiveBuilds::new()),
             active_downloads,
             download_queue,
+            runtimes_cache: Arc::new(Mutex::new(None)),
         }
     }
 

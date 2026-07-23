@@ -124,10 +124,21 @@ pub fn projector_for_model(model_path: &Path) -> Option<PathBuf> {
         })
 }
 
-fn gguf_capabilities(path: &Path) -> ModelCapabilities {
-    let multimodal = projector_for_model(path).is_some();
+fn dir_has_projector(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+            && is_projector(&path)
+    })
+}
+
+fn gguf_capabilities(has_projector: bool) -> ModelCapabilities {
     let mut input_modalities = vec!["text".into()];
-    if multimodal {
+    if has_projector {
         input_modalities.extend(["image".into(), "audio".into(), "video".into()]);
     }
     ModelCapabilities {
@@ -152,6 +163,7 @@ pub fn list_gguf_models(data_dir: &Path) -> anyhow::Result<Vec<ModelDescriptor>>
 }
 
 fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> anyhow::Result<()> {
+    let has_projector = dir_has_projector(dir);
     let entries = std::fs::read_dir(dir)
         .map_err(|error| anyhow::anyhow!("read model directory {}: {error}", dir.display()))?;
     for entry in entries {
@@ -179,7 +191,7 @@ fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> a
             id,
             name,
             engine: "llama.cpp".to_owned(),
-            capabilities: gguf_capabilities(&path),
+            capabilities: gguf_capabilities(has_projector),
             size_bytes: std::fs::metadata(&path).ok().map(|meta| meta.len()),
         });
     }

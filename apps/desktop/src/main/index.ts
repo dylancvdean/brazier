@@ -113,6 +113,42 @@ function startDaemon(): Promise<Connection> {
   })
 }
 
+function attachContextMenu(window: BrowserWindow): void {
+  window.webContents.on('context-menu', (_event, params) => {
+    const template: Electron.MenuItemConstructorOptions[] = []
+
+    if (params.isEditable) {
+      template.push(
+        { role: 'cut', enabled: params.editFlags.canCut },
+        { role: 'copy', enabled: params.editFlags.canCopy },
+        { role: 'paste', enabled: params.editFlags.canPaste },
+        { type: 'separator' },
+        { role: 'selectAll', enabled: params.editFlags.canSelectAll }
+      )
+    } else {
+      template.push(
+        {
+          role: 'copy',
+          enabled: params.selectionText.length > 0 || params.editFlags.canCopy
+        },
+        { role: 'selectAll' }
+      )
+    }
+
+    if (params.linkURL) {
+      template.push({ type: 'separator' })
+      template.push({
+        label: 'Open Link',
+        click: () => {
+          void shell.openExternal(params.linkURL)
+        }
+      })
+    }
+
+    Menu.buildFromTemplate(template).popup({ window })
+  })
+}
+
 async function createWindow(): Promise<void> {
   const window = new BrowserWindow({
     width: 1280,
@@ -133,6 +169,8 @@ async function createWindow(): Promise<void> {
       backgroundThrottling: false
     }
   })
+
+  attachContextMenu(window)
 
   window.once('ready-to-show', () => {
     window.show()

@@ -15,7 +15,7 @@
     {
       "label": "Build server",
       "program": "cmake",
-      "args": ["--build", "{build}", "--config", "Release", "--target", "llama-server", "--parallel"]
+      "args": ["--build", "{build}", "--config", "Release", "--target", "llama-server", "--parallel", "{parallel}"]
     }
   ]
 }

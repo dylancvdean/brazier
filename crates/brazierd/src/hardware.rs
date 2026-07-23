@@ -83,7 +83,16 @@ fn memory_bytes() -> Option<u64> {
     }
 }
 
+use std::sync::OnceLock;
+
+static HARDWARE_CACHE: OnceLock<HardwareInfo> = OnceLock::new();
+
+/// Detect hardware once per daemon process (PATH/sysfs scans are expensive).
 pub fn detect() -> HardwareInfo {
+    HARDWARE_CACHE.get_or_init(detect_uncached).clone()
+}
+
+fn detect_uncached() -> HardwareInfo {
     let (nvidia, amd, gpu_name) = linux_gpu();
     let metal = cfg!(target_os = "macos");
     let vulkan = command_exists("vulkaninfo")

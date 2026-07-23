@@ -55,6 +55,7 @@ type ManagePanelProps = {
   models: LocalModel[]
   modelsLoading: boolean
   refreshModels: () => Promise<void>
+  initialRuntimes?: RuntimeEntry[] | null
   selectedModel: string
   onSelectModel: (modelId: string) => void
   settings: RuntimeSettings | null
@@ -77,7 +78,117 @@ function progressLabel(event: ProgressEvent | null): string {
     const percent = event.percent != null ? ` · ${Math.round(event.percent)}%` : ''
     return `Downloading ${formatBytes(event.bytes)}${total}${percent}`
   }
+  if (event.phase === 'discover') return 'Checking for an installed runtime…'
+  if (event.phase === 'resolve') return 'Resolving the latest release…'
+  if (event.phase === 'extract') return 'Extracting the release archive…'
+  if (event.phase === 'hash') return 'Verifying download integrity…'
+  if (event.phase === 'build') return 'Building from source…'
+  if (event.phase === 'install') return 'Installing built artifacts…'
+  if (event.phase === 'log') return 'Compiling…'
+  if (event.phase === 'skip') return 'Already present on disk'
+  if (event.phase === 'start') return 'Starting download…'
   return event.phase
+}
+
+type BuildStep = { current: number; total: number; label: string }
+
+type JobProgressState = {
+  headline: string
+  step: BuildStep | null
+  percent: number | null
+  phase: string
+  logLines: string[]
+  hints: string[]
+}
+
+function emptyJobProgress(headline: string): JobProgressState {
+  return { headline, step: null, percent: null, phase: 'starting', logLines: [], hints: [] }
+}
+
+function stepFromEvent(event: ProgressEvent): BuildStep | null {
+  const result = event.result as { step?: number; total?: number; label?: string } | undefined
+  if (result?.step && result.total && result.label) {
+    return { current: result.step, total: result.total, label: result.label }
+  }
+  const match = event.message?.match(/^\[(\d+)\/(\d+)\]\s*(.+)$/)
+  if (!match) return null
+  return {
+    current: Number(match[1]),
+    total: Number(match[2]),
+    label: match[3]
+  }
+}
+
+function applyJobProgress(current: JobProgressState, event: ProgressEvent): JobProgressState {
+  const next = { ...current, phase: event.phase }
+  if (event.phase === 'build') {
+    next.headline = event.message?.includes('started')
+      ? 'Source build started'
+      : (stepFromEvent(event)?.label ?? event.message ?? 'Building from source')
+    const step = stepFromEvent(event)
+    if (step) next.step = step
+    if (event.percent != null) next.percent = event.percent
+  } else if (event.phase === 'install') {
+    next.headline = event.message ?? 'Installing built server'
+    next.percent = 95
+  } else if (event.phase === 'download') {
+    next.headline = progressLabel(event)
+    next.percent = event.percent ?? next.percent
+  } else if (event.phase === 'discover' || event.phase === 'resolve' || event.phase === 'extract') {
+    next.headline = progressLabel(event)
+  } else if (event.phase === 'log' && event.message) {
+    next.headline = 'Compiling…'
+    next.logLines = [...current.logLines.slice(-400), event.message]
+  } else if (event.message && event.phase !== 'warning') {
+    next.logLines = [...current.logLines.slice(-400), event.message]
+  }
+  return next
+}
+
+function JobProgressPanel({
+  progress,
+  active
+}: {
+  progress: JobProgressState
+  active: boolean
+}): React.JSX.Element | null {
+  if (!active && progress.logLines.length === 0) return null
+  return (
+    <div className="job-progress-panel">
+      <div className="job-progress-head">
+        {active ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+        <div>
+          <strong>{progress.headline}</strong>
+          {progress.step && (
+            <span>
+              Step {progress.step.current} of {progress.step.total}: {progress.step.label}
+            </span>
+          )}
+          {!progress.step && active && progress.phase === 'log' && (
+            <span>Reading compiler output…</span>
+          )}
+        </div>
+      </div>
+      {progress.percent != null && (
+        <div className="progress-track">
+          <div
+            className="progress-fill"
+            style={{ width: `${Math.min(100, Math.max(4, progress.percent))}%` }}
+          />
+        </div>
+      )}
+      {progress.hints.length > 0 && (
+        <ul className="build-hints">
+          {progress.hints.map((hint) => (
+            <li key={hint}>{hint}</li>
+          ))}
+        </ul>
+      )}
+      {progress.logLines.length > 0 && (
+        <pre className="build-log compact">{progress.logLines.slice(-12).join('\n')}</pre>
+      )}
+    </div>
+  )
 }
 
 function errorText(cause: unknown): string {
@@ -676,11 +787,19 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
 }
 
 function RuntimesSection(props: SectionProps): React.JSX.Element {
-  const [runtimes, setRuntimes] = useState<RuntimeEntry[] | null>(null)
+  const maxBuildJobs = Math.max(1, props.hardware?.logical_cpus ?? 8)
+  const initialBuildJobs = Math.max(
+    1,
+    props.settings?.build_jobs ??
+      Math.floor((props.hardware?.logical_cpus ?? maxBuildJobs) / 2)
+  )
+  const [runtimes, setRuntimes] = useState<RuntimeEntry[] | null>(
+    props.initialRuntimes ?? null
+  )
   const [busyRuntime, setBusyRuntime] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<string | null>(null)
   const [installing, setInstalling] = useState(false)
-  const [installPhase, setInstallPhase] = useState<string | null>(null)
+  const [installProgress, setInstallProgress] = useState<JobProgressState | null>(null)
   const [savingTarget, setSavingTarget] = useState(false)
 
   // Build-from-source form.
@@ -688,9 +807,12 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const [repository, setRepository] = useState('https://github.com/ggml-org/llama.cpp')
   const [revision, setRevision] = useState('master')
   const [buildTarget, setBuildTarget] = useState('cpu')
+  const [buildJobs, setBuildJobs] = useState(initialBuildJobs)
   const [building, setBuilding] = useState(false)
   const [activeBuildId, setActiveBuildId] = useState<string | null>(null)
-  const [buildLog, setBuildLog] = useState<string[]>([])
+  const [buildProgress, setBuildProgress] = useState<JobProgressState>(() =>
+    emptyJobProgress('Preparing source build')
+  )
   const [buildWarning, setBuildWarning] = useState<string | null>(null)
   const logRef = useRef<HTMLPreElement>(null)
 
@@ -699,8 +821,12 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       const response = await listRuntimes()
       setRuntimes(response.data)
     } catch (cause) {
-      props.onError(errorText(cause))
-      setRuntimes([])
+      if (props.initialRuntimes?.length) {
+        setRuntimes(props.initialRuntimes)
+      } else {
+        props.onError(errorText(cause))
+        setRuntimes([])
+      }
     }
   }
 
@@ -709,8 +835,28 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    setBuildJobs(
+      Math.max(
+        1,
+        props.settings?.build_jobs ??
+          Math.floor((props.hardware?.logical_cpus ?? maxBuildJobs) / 2)
+      )
+    )
+  }, [props.settings?.build_jobs, props.hardware?.logical_cpus, maxBuildJobs])
+
+  async function persistBuildJobs(jobs: number): Promise<void> {
+    if (!props.settings || props.settings.build_jobs === jobs) return
+    try {
+      const saved = await saveRuntimeSettings({ ...props.settings, build_jobs: jobs })
+      props.onSettingsSaved(saved)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight })
-  }, [buildLog])
+  }, [buildProgress.logLines])
 
   async function activate(id: string): Promise<void> {
     setBusyRuntime(id)
@@ -758,16 +904,19 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
 
   async function installLatest(): Promise<void> {
     setInstalling(true)
-    setInstallPhase(null)
+    setInstallProgress(emptyJobProgress('Installing managed runtime'))
     props.onError(null)
     try {
-      await ensureLlamaEngine((event) => setInstallPhase(progressLabel(event)))
+      await ensureLlamaEngine((event) => {
+        setInstallProgress((current) =>
+          applyJobProgress(current ?? emptyJobProgress('Installing managed runtime'), event)
+        )
+      })
       await refreshRuntimes()
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
       setInstalling(false)
-      setInstallPhase(null)
     }
   }
 
@@ -795,7 +944,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     event.preventDefault()
     setBuilding(true)
     setActiveBuildId(null)
-    setBuildLog([])
+    setBuildProgress(emptyJobProgress('Preparing source build'))
     setBuildWarning(null)
     props.onError(null)
     try {
@@ -803,25 +952,41 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         repository.trim(),
         revision.trim(),
         buildTarget,
+        buildJobs,
         (progress) => {
           if (progress.phase === 'warning' && progress.message) {
             setBuildWarning(progress.message)
             return
           }
-          if (progress.message) {
-            setBuildLog((current) => [...current.slice(-400), progress.message ?? ''])
+          if (progress.result && typeof progress.result === 'object') {
+            const buildId = (progress.result as { build_id?: string }).build_id
+            if (buildId) setActiveBuildId(buildId)
           }
+          setBuildProgress((current) => applyJobProgress(current, progress))
         },
         { onBuildId: setActiveBuildId }
       )
-      setBuildLog((current) => [...current, 'Build complete. Activate it below to use it.'])
+      setBuildProgress((current) => ({
+        ...current,
+        headline: 'Build complete — activate it below to use it.',
+        percent: 100,
+        phase: 'done'
+      }))
       await refreshRuntimes()
     } catch (cause) {
       const diagnostics =
         cause instanceof Error
           ? (cause as Error & { diagnostics?: Record<string, unknown> }).diagnostics
           : undefined
-      setBuildLog((current) => appendBuildDiagnostics(current, diagnostics))
+      setBuildProgress((current) => ({
+        ...current,
+        logLines: appendBuildDiagnostics(current.logLines, diagnostics),
+        hints: Array.isArray(diagnostics?.hints)
+          ? diagnostics.hints.filter((hint): hint is string => typeof hint === 'string')
+          : current.hints,
+        headline: 'Build failed',
+        phase: 'error'
+      }))
       props.onError(`Build failed: ${errorText(cause)}`)
     } finally {
       setBuilding(false)
@@ -834,7 +999,11 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     props.onError(null)
     try {
       await cancelBuild(activeBuildId)
-      setBuildLog((current) => [...current, 'Cancellation requested…'])
+      setBuildProgress((current) => ({
+        ...current,
+        headline: 'Cancellation requested…',
+        logLines: [...current.logLines, 'Cancellation requested…']
+      }))
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -895,7 +1064,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
 
       <div className="settings-group">
         <div className="section-label">Installed runtimes</div>
-        {runtimes == null && (
+        {runtimes == null && !props.initialRuntimes?.length && (
           <div className="manage-placeholder">
             <LoaderCircle className="spin" size={16} />
             Scanning for installed runtimes…
@@ -964,9 +1133,12 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             </article>
           ))}
         </div>
+        {installProgress && (
+          <JobProgressPanel progress={installProgress} active={installing} />
+        )}
         <button className="secondary-action" disabled={installing} onClick={() => void installLatest()}>
           {installing ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
-          {installing ? (installPhase ?? 'Installing…') : 'Install latest release'}
+          {installing ? installProgress?.headline ?? 'Installing…' : 'Install latest release'}
         </button>
       </div>
 
@@ -1004,6 +1176,22 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 </select>
               </label>
             </div>
+            <label className="slider-row">
+              <span>
+                Parallel jobs (-j) <em>{buildJobs}</em>
+              </span>
+              <input
+                type="range"
+                min={1}
+                max={maxBuildJobs}
+                step={1}
+                value={buildJobs}
+                onChange={(event) => setBuildJobs(Number(event.target.value))}
+                onMouseUp={(event) => void persistBuildJobs(Number(event.currentTarget.value))}
+                onTouchEnd={(event) => void persistBuildJobs(Number(event.currentTarget.value))}
+                onKeyUp={(event) => void persistBuildJobs(Number(event.currentTarget.value))}
+              />
+            </label>
             {buildWarning && (
               <div className="build-warning">
                 <ShieldAlert size={14} />
@@ -1033,9 +1221,10 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 </button>
               )}
             </div>
-            {(building || buildLog.length > 0) && (
+            <JobProgressPanel progress={buildProgress} active={building} />
+            {(building || buildProgress.logLines.length > 0) && (
               <pre className="build-log" ref={logRef}>
-                {buildLog.join('\n')}
+                {buildProgress.logLines.join('\n')}
               </pre>
             )}
           </form>

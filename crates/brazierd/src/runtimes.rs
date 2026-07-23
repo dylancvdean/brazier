@@ -41,7 +41,12 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// Enumerate every known llama-server runtime on this machine.
-pub fn list(data_dir: &Path, active: Option<&Path>, path_env: Option<&str>) -> Vec<RuntimeEntry> {
+pub fn list(
+    data_dir: &Path,
+    active: Option<&Path>,
+    path_env: Option<&str>,
+    include_system: bool,
+) -> Vec<RuntimeEntry> {
     let mut entries = Vec::new();
     let engine_dir = llama::managed_engine_dir(data_dir);
     let is_active = |path: &Path| active.is_some_and(|active_path| same_file(path, active_path));
@@ -98,7 +103,10 @@ pub fn list(data_dir: &Path, active: Option<&Path>, path_env: Option<&str>) -> V
         });
     }
 
-    // System binaries on PATH or well-known prefixes.
+    // System binaries on PATH or well-known prefixes (optional — can be slow).
+    if !include_system {
+        return entries;
+    }
     let data_prefix = data_dir
         .canonicalize()
         .unwrap_or_else(|_| data_dir.to_path_buf());
@@ -134,8 +142,13 @@ pub fn list(data_dir: &Path, active: Option<&Path>, path_env: Option<&str>) -> V
 }
 
 /// Resolve a runtime id from `list` back to its binary path.
-pub fn find(data_dir: &Path, path_env: Option<&str>, id: &str) -> Option<RuntimeEntry> {
-    list(data_dir, None, path_env)
+pub fn find(
+    data_dir: &Path,
+    path_env: Option<&str>,
+    id: &str,
+    include_system: bool,
+) -> Option<RuntimeEntry> {
+    list(data_dir, None, path_env, include_system)
         .into_iter()
         .find(|entry| entry.id == id)
 }
@@ -228,7 +241,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = list(dir.path(), Some(&build_binary), None);
+        let entries = list(dir.path(), Some(&build_binary), None, false);
         let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
         assert!(ids.contains(&"managed"));
         assert!(ids.contains(&"managed-cuda"));

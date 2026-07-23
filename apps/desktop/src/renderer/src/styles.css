@@ -34,6 +34,24 @@ button {
   color: inherit;
 }
 
+.message-body,
+.message-body p,
+.message-body pre,
+.message-body code,
+.build-log,
+.build-hints,
+.build-hints li,
+.manage-placeholder,
+.settings-group pre,
+.settings-group code,
+.job-progress-head span,
+.error-banner,
+pre,
+code {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .app-shell {
   display: flex;
   height: 100vh;
@@ -1034,6 +1052,30 @@ button {
   margin: 0;
 }
 
+.build-form .slider-row {
+  padding: 0;
+}
+
+.build-form .slider-row > span {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 5px;
+}
+
+.build-form .slider-row em {
+  color: #d6e7b2;
+  font-style: normal;
+  font-weight: 650;
+}
+
+.build-form .slider-row input[type='range'] {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  accent-color: #a8db5a;
+}
+
 .build-form-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1055,6 +1097,71 @@ button {
 }
 
 .build-log {
+  margin-top: 10px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #0f110e;
+  border: 1px solid #2a2e28;
+  color: #aeb4a9;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.build-log.compact {
+  max-height: 140px;
+  margin-top: 8px;
+}
+
+.job-progress-panel {
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid #3a4034;
+  border-radius: 10px;
+  background: #141613;
+}
+
+.job-progress-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.job-progress-head strong {
+  display: block;
+  font-size: 12px;
+  color: #e6eadf;
+}
+
+.job-progress-head span {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: #8f968a;
+}
+
+.build-hints {
+  margin: 10px 0 0;
+  padding: 10px 12px 10px 28px;
+  border-radius: 8px;
+  background: #2b2418;
+  border: 1px solid #5a4a2e;
+  color: #e9dcc4;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.build-hints li + li {
+  margin-top: 6px;
+}
+
+.job-progress-panel .progress-track {
+  margin-top: 10px;
+}
+
   max-height: 220px;
   margin: 0;
   padding: 11px;
