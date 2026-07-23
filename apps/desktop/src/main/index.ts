@@ -1,7 +1,49 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron'
+
+/**
+ * Linux launch flags must run before app.ready.
+ *
+ * Observed failure mode on this host (KDE Wayland + tmpfs /dev/shm|/tmp with
+ * usrquota): Chromium child processes cannot create POSIX shared memory
+ * (access(W_OK|X_OK) returns ESRCH), the GPU/zygote path melts down, and the
+ * window stays the backgroundColor black shell.
+ *
+ * Mitigations that work in practice:
+ * - no-sandbox: node_modules chrome-sandbox is never setuid
+ * - disable-dev-shm-usage: avoid /dev/shm
+ * - force X11 (XWayland) instead of Ozone/Wayland color-management path
+ * - software compositing + in-process GPU to avoid the crashing GPU process
+ */
+if (process.platform === 'linux') {
+  // Prefer X11 even when WAYLAND_DISPLAY is set. Electron reads the env var.
+  if (!process.env.ELECTRON_OZONE_PLATFORM_HINT) {
+    process.env.ELECTRON_OZONE_PLATFORM_HINT = 'x11'
+  }
+  if (process.env.WAYLAND_DISPLAY && process.env.ELECTRON_OZONE_PLATFORM_HINT === 'x11') {
+    // Keep DISPLAY (XWayland) but stop Chromium auto-selecting Wayland.
+    delete process.env.WAYLAND_DISPLAY
+  }
+
+  app.commandLine.appendSwitch('no-sandbox')
+  app.commandLine.appendSwitch('no-zygote')
+  app.commandLine.appendSwitch('disable-dev-shm-usage')
+  app.commandLine.appendSwitch('disable-gpu-sandbox')
+  app.commandLine.appendSwitch('ozone-platform-hint', process.env.ELECTRON_OZONE_PLATFORM_HINT)
+  if (process.env.ELECTRON_OZONE_PLATFORM_HINT === 'x11') {
+    app.commandLine.appendSwitch('ozone-platform', 'x11')
+  }
+
+  // Default to software GL on Linux. Override with BRAZIER_ELECTRON_SOFTWARE_GL=0
+  // for hardware acceleration once the host paints correctly.
+  if (process.env.BRAZIER_ELECTRON_SOFTWARE_GL !== '0') {
+    app.disableHardwareAcceleration()
+    app.commandLine.appendSwitch('disable-gpu')
+    app.commandLine.appendSwitch('in-process-gpu')
+  }
+}
 
 type Connection = {
   address: string
@@ -77,32 +119,89 @@ async function createWindow(): Promise<void> {
     height: 820,
     minWidth: 880,
     minHeight: 620,
+    show: false,
     backgroundColor: '#10110f',
+    autoHideMenuBar: true,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      // Avoid offscreen compositing paths that need shared memory.
+      offscreen: false,
+      backgroundThrottling: false
     }
   })
+
+  window.once('ready-to-show', () => {
+    window.show()
+    window.focus()
+  })
+  setTimeout(() => {
+    if (!window.isDestroyed() && !window.isVisible()) {
+      window.show()
+      window.focus()
+    }
+  }, 1_500)
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void shell.openExternal(url)
     return { action: 'deny' }
   })
-  window.webContents.on('will-navigate', (event) => event.preventDefault())
+  window.webContents.on('will-navigate', (event, url) => {
+    const allowed = process.env.ELECTRON_RENDERER_URL
+    if (allowed && url.startsWith(allowed)) return
+    if (url.startsWith('file://')) return
+    event.preventDefault()
+  })
+  window.webContents.on('did-fail-load', (_event, code, description, validatedURL) => {
+    console.error(`[brazier] renderer failed to load (${code}): ${description} @ ${validatedURL}`)
+    if (!window.isDestroyed() && !window.isVisible()) window.show()
+  })
+  window.webContents.on('did-finish-load', () => {
+    console.error('[brazier] renderer finished load')
+    if (!window.isDestroyed() && !window.isVisible()) window.show()
+  })
+  window.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[brazier] renderer process gone', details)
+  })
+  window.webContents.on('console-message', (event) => {
+    // Electron ≥39: prefer the event object form.
+    const level = 'level' in event ? Number(event.level) : 0
+    const message = 'message' in event ? String(event.message) : ''
+    const line = 'line' in event ? Number(event.line) : 0
+    const sourceId = 'sourceId' in event ? String(event.sourceId) : ''
+    if (level >= 2) {
+      console.error(`[renderer:${level}] ${message} (${sourceId}:${line})`)
+    }
+  })
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    await window.loadURL(process.env.ELECTRON_RENDERER_URL)
-  } else {
-    await window.loadFile(join(__dirname, '../renderer/index.html'))
+  try {
+    if (process.env.ELECTRON_RENDERER_URL) {
+      await window.loadURL(process.env.ELECTRON_RENDERER_URL)
+    } else {
+      await window.loadFile(join(__dirname, '../renderer/index.html'))
+    }
+  } catch (error) {
+    console.error('[brazier] failed to load renderer', error)
+    if (!window.isDestroyed() && !window.isVisible()) window.show()
+  }
+
+  // DevTools off by default (detach windows can confuse focus); opt-in.
+  if (process.env.BRAZIER_DEVTOOLS === '1') {
+    window.webContents.openDevTools({ mode: 'detach' })
   }
 }
 
 app.whenReady().then(async () => {
+  // No File/Edit/View application menu — the app is a self-contained shell.
+  Menu.setApplicationMenu(null)
   connection = startDaemon()
   ipcMain.handle('brazier:connection', () => connection)
+  connection.catch((error: unknown) => {
+    console.error('[brazier] daemon failed to start', error)
+  })
   await createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow()

@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
-use brazierd::{AppState, api, db::Database, engine::MockEngine};
+use brazierd::{AppState, api, db::Database, engine::Runtime};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -69,6 +69,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
+    tokio::fs::create_dir_all(&data_dir)
+        .await
+        .context("create data directory")?;
     let db = Database::open(&data_dir.join("brazier.sqlite")).await?;
     let api_key = if args.no_auth {
         None
@@ -78,13 +81,16 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| format!("brazier_{}", Uuid::new_v4().simple())),
         )
     };
+    let http = reqwest::Client::builder()
+        .user_agent(format!("brazier/{}", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let runtime = Runtime::new(data_dir.clone(), http.clone());
     let state = AppState {
         db,
-        engine: Arc::new(MockEngine),
+        runtime: Arc::clone(&runtime),
         api_key: api_key.clone(),
-        http: reqwest::Client::builder()
-            .user_agent(format!("brazier/{}", env!("CARGO_PKG_VERSION")))
-            .build()?,
+        http,
+        data_dir: data_dir.clone(),
     };
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.host, args.port))
@@ -100,12 +106,12 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!(%address, data_dir = %data_dir.display(), "brazier daemon ready");
     axum::serve(listener, api::router(state))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(runtime))
         .await
         .context("serve daemon")
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(runtime: Arc<Runtime>) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -124,4 +130,5 @@ async fn shutdown_signal() {
         () = ctrl_c => {},
         () = terminate => {},
     }
+    runtime.shutdown().await;
 }

@@ -1,3 +1,10 @@
 packages:
   - apps/*
   - packages/*
+
+# Allow install scripts for packages that need native binaries.
+# (pnpm no longer reads package.json#pnpm.onlyBuiltDependencies)
+onlyBuiltDependencies:
+  - electron
+  - electron-winstaller
+  - esbuild

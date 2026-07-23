@@ -3,30 +3,43 @@ import {
   Bot,
   Box,
   Brain,
+  Cpu,
+  Gauge,
   GitBranch,
   Image,
   LoaderCircle,
   Menu,
   MessageSquarePlus,
   Paperclip,
-  Search,
   Send,
-  ShieldAlert,
+  Settings2,
+  SlidersHorizontal,
   Square,
   Video,
+  Wrench,
   X
 } from 'lucide-react'
 import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
   createConversation,
   createMessage,
+  engineStatus,
+  health,
   listConversations,
   listMessages,
-  searchHub,
+  listModels,
+  type HardwareInfo,
+  type LocalModel,
+  type RuntimeSettings,
+  type ToolCallRecord,
+  saveRuntimeSettings,
   streamCompletion
 } from './api'
+import { InferenceMenu } from './components/InferenceMenu'
+import { ManagePanel, type ManageSection } from './components/ManagePanel'
+import { ModelMenu } from './components/ModelMenu'
 import { childCounts, messageChain } from './graph'
-import type { Attachment, ContentPart, Conversation, HubModel, Message } from './types'
+import type { Attachment, ContentPart, Conversation, Message } from './types'
 
 function contentText(message: Message): string {
   if (typeof message.content === 'string') return message.content
@@ -44,6 +57,17 @@ function contentMedia(message: Message): Array<'image' | 'audio' | 'video'> {
     if (part.type === 'input_video') return ['video'] as const
     return []
   })
+}
+
+/** Tool records are persisted as a `tool` role message with JSON content. */
+function toolRecordsFromMessage(message: Message): ToolCallRecord[] | null {
+  if (message.role !== 'tool' || typeof message.content !== 'string') return null
+  try {
+    const parsed = JSON.parse(message.content) as { brazier_tool_calls?: ToolCallRecord[] }
+    return Array.isArray(parsed.brazier_tool_calls) ? parsed.brazier_tool_calls : null
+  } catch {
+    return null
+  }
 }
 
 function fileToAttachment(file: File): Promise<Attachment> {
@@ -77,6 +101,46 @@ function attachmentPart(attachment: Attachment): ContentPart {
   return { type: 'input_video', video_url: { url: attachment.dataUrl } }
 }
 
+function modelLabel(modelId: string, models: LocalModel[]): { title: string; subtitle: string } {
+  const match = models.find((model) => model.id === modelId)
+  if (modelId.startsWith('gguf:')) {
+    const file = modelId.slice('gguf:'.length).split('/').at(-1) ?? modelId
+    return {
+      title: file,
+      subtitle: match ? `${match.owned_by.replace('brazier:', '')} · Local GGUF` : 'Local GGUF'
+    }
+  }
+  if (!modelId) {
+    return { title: 'Select a model', subtitle: 'Download a GGUF to get started' }
+  }
+  return { title: modelId, subtitle: match?.owned_by ?? 'Local' }
+}
+
+function ToolChips({ records }: { records: ToolCallRecord[] }): React.JSX.Element {
+  return (
+    <div className="tool-chip-row">
+      {records.map((record, index) => (
+        <details className={record.is_error ? 'tool-chip error' : 'tool-chip'} key={index}>
+          <summary>
+            <Wrench size={12} />
+            {record.name}
+          </summary>
+          <div className="tool-chip-body">
+            <div>
+              <span>Arguments</span>
+              <code>{record.arguments}</code>
+            </div>
+            <div>
+              <span>Result</span>
+              <code>{record.output}</code>
+            </div>
+          </div>
+        </details>
+      ))}
+    </div>
+  )
+}
+
 export function App(): React.JSX.Element {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [conversationId, setConversationId] = useState<string | null>(null)
@@ -85,20 +149,65 @@ export function App(): React.JSX.Element {
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [streamingText, setStreamingText] = useState('')
+  const [streamingTools, setStreamingTools] = useState<ToolCallRecord[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [modelBrowserOpen, setModelBrowserOpen] = useState(false)
-  const [modelQuery, setModelQuery] = useState('Qwen')
-  const [modelEngine, setModelEngine] = useState('llama.cpp')
-  const [hubModels, setHubModels] = useState<HubModel[]>([])
-  const [searchingModels, setSearchingModels] = useState(false)
+  const [localModels, setLocalModels] = useState<LocalModel[]>([])
+  const [modelsLoading, setModelsLoading] = useState(true)
+  const [modelsLoadFailed, setModelsLoadFailed] = useState(false)
+  const [selectedModel, setSelectedModel] = useState('')
+  const [toolsEnabled, setToolsEnabled] = useState(false)
+  const [daemonStatus, setDaemonStatus] = useState<'checking' | 'healthy' | 'offline'>('checking')
+  const [daemonVersion, setDaemonVersion] = useState('')
+  const [hardware, setHardware] = useState<HardwareInfo | null>(null)
+  const [runtime, setRuntime] = useState<RuntimeSettings | null>(null)
+  const [savingInference, setSavingInference] = useState(false)
+
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [inferenceMenuOpen, setInferenceMenuOpen] = useState(false)
+  const [manageOpen, setManageOpen] = useState(false)
+  const [manageSection, setManageSection] = useState<ManageSection>('library')
+
   const abortRef = useRef<AbortController | undefined>(undefined)
   const fileInput = useRef<HTMLInputElement>(null)
   const scrollAnchor = useRef<HTMLDivElement>(null)
 
   const chain = useMemo(() => messageChain(messages, tipId), [messages, tipId])
   const branches = useMemo(() => childCounts(messages), [messages])
+  const selectedMeta = useMemo(() => {
+    if (modelsLoading) return { title: 'Loading models…', subtitle: 'Starting local daemon' }
+    return modelLabel(selectedModel, localModels)
+  }, [selectedModel, localModels, modelsLoading])
+  const canChat = Boolean(selectedModel)
+  const selectedCapabilities = localModels.find((model) => model.id === selectedModel)?.capabilities
+  const canAttach = Boolean(
+    selectedCapabilities?.input_modalities.some((modality) =>
+      ['image', 'audio', 'video'].includes(modality)
+    )
+  )
+
+  async function refreshLocalModels(): Promise<void> {
+    const models = await listModels()
+    setLocalModels(models)
+    setSelectedModel((current) => {
+      if (current && models.some((model) => model.id === current)) return current
+      return models[0]?.id ?? ''
+    })
+  }
+
+  async function loadLocalModels(): Promise<void> {
+    setModelsLoading(true)
+    setModelsLoadFailed(false)
+    try {
+      await refreshLocalModels()
+    } catch (cause) {
+      setModelsLoadFailed(true)
+      throw cause
+    } finally {
+      setModelsLoading(false)
+    }
+  }
 
   async function refreshConversations(): Promise<void> {
     const data = await listConversations()
@@ -112,10 +221,41 @@ export function App(): React.JSX.Element {
     setTipId(preferredTip ?? data.at(-1)?.id ?? null)
   }
 
+  async function refreshRuntime(): Promise<void> {
+    const status = await engineStatus()
+    setRuntime(status.settings)
+    setHardware(status.hardware)
+  }
+
   useEffect(() => {
-    refreshConversations().catch((cause: unknown) =>
+    void refreshConversations().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
+    void loadLocalModels().catch((cause: unknown) =>
+      setError(cause instanceof Error ? cause.message : String(cause))
+    )
+    void refreshRuntime().catch((cause: unknown) =>
+      setError(cause instanceof Error ? cause.message : String(cause))
+    )
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const check = (): void => {
+      void health()
+        .then((result) => {
+          if (!active) return
+          setDaemonStatus('healthy')
+          setDaemonVersion(result.version)
+        })
+        .catch(() => active && setDaemonStatus('offline'))
+    }
+    check()
+    const timer = window.setInterval(check, 10_000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
   }, [])
 
   useEffect(() => {
@@ -143,16 +283,22 @@ export function App(): React.JSX.Element {
     setDraft('')
   }
 
-  async function findModels(): Promise<void> {
-    setSearchingModels(true)
+  async function applyInferenceSettings(next: RuntimeSettings): Promise<void> {
+    setSavingInference(true)
     setError(null)
     try {
-      setHubModels(await searchHub(modelQuery.trim(), modelEngine))
+      const saved = await saveRuntimeSettings(next)
+      setRuntime(saved)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setSearchingModels(false)
+      setSavingInference(false)
     }
+  }
+
+  function openManage(section: ManageSection): void {
+    setManageSection(section)
+    setManageOpen(true)
   }
 
   async function selectFiles(event: ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -172,9 +318,15 @@ export function App(): React.JSX.Element {
     event.preventDefault()
     const text = draft.trim()
     if ((!text && attachments.length === 0) || busy) return
+    if (!selectedModel) {
+      setError('Select or download a local GGUF model first.')
+      setModelMenuOpen(true)
+      return
+    }
     setBusy(true)
     setError(null)
     setStreamingText('')
+    setStreamingTools([])
     const controller = new AbortController()
     abortRef.current = controller
 
@@ -202,17 +354,40 @@ export function App(): React.JSX.Element {
       setAttachments([])
 
       let responseText = ''
-      await streamCompletion(requestMessages, controller.signal, (token) => {
-        responseText += token
-        setStreamingText(responseText)
-      })
+      const toolRecords: ToolCallRecord[] = []
+      await streamCompletion(
+        requestMessages,
+        selectedModel,
+        controller.signal,
+        (token) => {
+          responseText += token
+          setStreamingText(responseText)
+        },
+        {
+          builtinTools: toolsEnabled,
+          onToolCall: (record) => {
+            toolRecords.push(record)
+            setStreamingTools([...toolRecords])
+          }
+        }
+      )
+      let parentId = userMessage.id
+      if (toolRecords.length > 0) {
+        const toolMessage = await createMessage(activeConversationId, {
+          parent_id: parentId,
+          role: 'tool',
+          content: JSON.stringify({ brazier_tool_calls: toolRecords })
+        })
+        parentId = toolMessage.id
+      }
       const assistant = await createMessage(activeConversationId, {
-        parent_id: userMessage.id,
+        parent_id: parentId,
         role: 'assistant',
         content: responseText,
-        model: 'brazier/mock'
+        model: selectedModel
       })
       setStreamingText('')
+      setStreamingTools([])
       await refreshMessages(activeConversationId, assistant.id)
       await refreshConversations()
     } catch (cause) {
@@ -229,7 +404,7 @@ export function App(): React.JSX.Element {
     <main className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="brand">
-          <div className="brand-mark">H</div>
+          <div className="brand-mark">B</div>
           <div>
             <strong>Brazier</strong>
             <span>Local AI workspace</span>
@@ -256,8 +431,12 @@ export function App(): React.JSX.Element {
           )}
         </div>
         <div className="privacy-note">
-          <span className="status-dot" />
-          Local daemon connected
+          <span className={`status-dot ${daemonStatus}`} />
+          {daemonStatus === 'healthy'
+            ? `Daemon ${daemonVersion}`
+            : daemonStatus === 'offline'
+              ? 'Daemon unavailable'
+              : 'Checking daemon…'}
         </div>
       </aside>
 
@@ -266,29 +445,58 @@ export function App(): React.JSX.Element {
           <button className="icon-button" onClick={() => setSidebarOpen((open) => !open)}>
             <Menu size={19} />
           </button>
-          <button className="model-picker" onClick={() => setModelBrowserOpen(true)}>
+          <button
+            className="model-picker"
+            title="Choose which installed model to chat with"
+            onClick={() => setModelMenuOpen(true)}
+          >
             <div className="model-icon">
               <Box size={16} />
             </div>
             <div>
-              <strong>Brazier Development Model</strong>
-              <span>Mock engine · Local</span>
+              <strong>{selectedMeta.title}</strong>
+              <span>{selectedMeta.subtitle}</span>
             </div>
           </button>
+          <button
+            className="icon-button"
+            title="Inference settings (sampling, reasoning)"
+            onClick={() => setInferenceMenuOpen(true)}
+          >
+            <SlidersHorizontal size={17} />
+          </button>
           <div className="capabilities">
-            <span>
+            <span title="Active acceleration target">
+              <Cpu size={14} /> {runtime?.target ?? 'auto'}
+            </span>
+            <span title="Context window">
+              <Gauge size={14} /> {runtime?.context_size ?? 4096} ctx
+            </span>
+            <span className={selectedCapabilities?.reasoning ? '' : 'unavailable'}>
               <Brain size={14} /> Reasoning
             </span>
-            <span>
+            <span
+              className={selectedCapabilities?.input_modalities.includes('image') ? '' : 'unavailable'}
+              title={canAttach ? 'Multimodal projector installed' : 'Install the model mmproj GGUF'}
+            >
               <Image size={14} /> Vision
             </span>
-            <span>
+            <span
+              className={selectedCapabilities?.input_modalities.includes('audio') ? '' : 'unavailable'}
+            >
               <AudioLines size={14} /> Audio
             </span>
-            <span>
-              <Video size={14} /> Video
+            <span className={selectedCapabilities?.tools ? '' : 'unavailable'}>
+              <Wrench size={14} /> Tools
             </span>
           </div>
+          <button
+            className="icon-button"
+            title="Manage models, runtimes, and engine configuration"
+            onClick={() => openManage('library')}
+          >
+            <Settings2 size={18} />
+          </button>
         </header>
 
         <div className="chat">
@@ -299,17 +507,30 @@ export function App(): React.JSX.Element {
               </div>
               <h1>What are we exploring?</h1>
               <p>
-                Chat privately with local models. Attach an image, recording, or video—or start with
-                a simple question.
+                {modelsLoading
+                  ? 'Starting the local runtime and loading your model library…'
+                  : canChat
+                    ? 'Chat privately with local models. Attach media or start with a question.'
+                    : 'Download a GGUF from Hugging Face to start chatting with a local model.'}
               </p>
               <div className="starter-grid">
-                <button onClick={() => setDraft('Explain how speculative decoding works.')}>
-                  <Brain size={18} />
-                  <span>
-                    <strong>Explore a concept</strong>
-                    Speculative decoding
-                  </span>
-                </button>
+                {canChat ? (
+                  <button onClick={() => setDraft('Explain how speculative decoding works.')}>
+                    <Brain size={18} />
+                    <span>
+                      <strong>Explore a concept</strong>
+                      Speculative decoding
+                    </span>
+                  </button>
+                ) : (
+                  <button onClick={() => openManage('discover')}>
+                    <Box size={18} />
+                    <span>
+                      <strong>Browse models</strong>
+                      Find a GGUF on Hugging Face
+                    </span>
+                  </button>
+                )}
                 <button onClick={() => fileInput.current?.click()}>
                   <Paperclip size={18} />
                   <span>
@@ -322,6 +543,23 @@ export function App(): React.JSX.Element {
           ) : (
             <div className="messages">
               {chain.map((message) => {
+                const toolRecords = toolRecordsFromMessage(message)
+                if (toolRecords) {
+                  return (
+                    <article className="message tool" key={message.id}>
+                      <div className="avatar tool-avatar">
+                        <Wrench size={15} />
+                      </div>
+                      <div className="message-body">
+                        <div className="message-meta">
+                          <strong>Tools</strong>
+                        </div>
+                        <ToolChips records={toolRecords} />
+                      </div>
+                    </article>
+                  )
+                }
+                if (message.role === 'tool') return null
                 const media = contentMedia(message)
                 return (
                   <article className={`message ${message.role}`} key={message.id}>
@@ -359,7 +597,7 @@ export function App(): React.JSX.Element {
                   </article>
                 )
               })}
-              {streamingText && (
+              {(streamingText || streamingTools.length > 0) && (
                 <article className="message assistant">
                   <div className="avatar">
                     <Bot />
@@ -369,6 +607,7 @@ export function App(): React.JSX.Element {
                       <strong>Brazier</strong>
                       <LoaderCircle className="spin" size={14} />
                     </div>
+                    {streamingTools.length > 0 && <ToolChips records={streamingTools} />}
                     <p>{streamingText}</p>
                   </div>
                 </article>
@@ -411,7 +650,13 @@ export function App(): React.JSX.Element {
           <form className="composer" onSubmit={(event) => void submit(event)}>
             <textarea
               aria-label="Message"
-              placeholder={tipId ? 'Continue this branch…' : 'Message a local model…'}
+              placeholder={
+                !canChat
+                  ? 'Select a model to start chatting…'
+                  : tipId
+                    ? 'Continue this branch…'
+                    : 'Message a local model…'
+              }
               rows={1}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
@@ -432,9 +677,23 @@ export function App(): React.JSX.Element {
                 onChange={(event) => void selectFiles(event)}
               />
               <button
+                className={toolsEnabled ? 'attach-button tools-on' : 'attach-button'}
+                type="button"
+                title={
+                  toolsEnabled
+                    ? 'Bundled tools enabled: time, calculator, web fetch'
+                    : 'Enable bundled tools (time, calculator, web fetch)'
+                }
+                onClick={() => setToolsEnabled((enabled) => !enabled)}
+              >
+                <Wrench size={17} />
+              </button>
+              <button
                 className="attach-button"
                 type="button"
-                title="Attach media"
+                title={
+                  canAttach ? 'Attach media' : 'Attach media (the model may require an mmproj GGUF)'
+                }
                 onClick={() => fileInput.current?.click()}
               >
                 <Paperclip size={18} />
@@ -453,7 +712,7 @@ export function App(): React.JSX.Element {
                   className="send-button"
                   type="submit"
                   title="Send"
-                  disabled={!draft.trim() && attachments.length === 0}
+                  disabled={(!draft.trim() && attachments.length === 0) || !canChat}
                 >
                   <Send size={17} />
                 </button>
@@ -462,81 +721,43 @@ export function App(): React.JSX.Element {
           </form>
           <p className="composer-hint">
             Local models can be inaccurate. Verify important information.
+            {toolsEnabled ? ' Bundled tools are enabled for this chat.' : ''}
           </p>
         </div>
       </section>
-      {modelBrowserOpen && (
-        <div className="drawer-backdrop" onMouseDown={() => setModelBrowserOpen(false)}>
-          <aside className="model-drawer" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="drawer-heading">
-              <div>
-                <span className="eyebrow">Hugging Face</span>
-                <h2>Discover models</h2>
-              </div>
-              <button className="icon-button" onClick={() => setModelBrowserOpen(false)}>
-                <X size={18} />
-              </button>
-            </div>
-            <form
-              className="model-search"
-              onSubmit={(event) => {
-                event.preventDefault()
-                void findModels()
-              }}
-            >
-              <label>
-                <Search size={16} />
-                <input
-                  aria-label="Search Hugging Face"
-                  value={modelQuery}
-                  onChange={(event) => setModelQuery(event.target.value)}
-                  placeholder="Model name or author"
-                />
-              </label>
-              <select value={modelEngine} onChange={(event) => setModelEngine(event.target.value)}>
-                <option value="llama.cpp">llama.cpp</option>
-                <option value="mlx-lm">MLX-LM</option>
-                <option value="mlx-vlm">MLX-VLM</option>
-                <option value="vllm">vLLM</option>
-              </select>
-              <button type="submit" disabled={searchingModels || !modelQuery.trim()}>
-                {searchingModels ? <LoaderCircle className="spin" size={15} /> : 'Search'}
-              </button>
-            </form>
-            <p className="model-help">
-              Results are compatibility-filtered before Unsloth quantizations receive a preference
-              boost.
-            </p>
-            <div className="model-results">
-              {hubModels.map((model) => (
-                <article className="model-card" key={model.id}>
-                  <div>
-                    <strong>{model.id.split('/').at(-1)}</strong>
-                    <span>{model.author}</span>
-                  </div>
-                  <div className="model-badges">
-                    {model.preferred_quantizer && <span className="unsloth">Unsloth preferred</span>}
-                    {model.gated && (
-                      <span>
-                        <ShieldAlert size={11} /> Gated
-                      </span>
-                    )}
-                    <span>{model.downloads.toLocaleString()} downloads</span>
-                  </div>
-                  <button disabled title="Managed downloads are the next implementation milestone">
-                    Download
-                  </button>
-                </article>
-              ))}
-              {!searchingModels && hubModels.length === 0 && (
-                <div className="empty-models">
-                  <Search size={24} />
-                  <p>Search the Hub for artifacts compatible with your selected engine.</p>
-                </div>
-              )}
-            </div>
-          </aside>
-        </div>
+
+      {modelMenuOpen && (
+        <ModelMenu
+          models={localModels}
+          selectedModel={selectedModel}
+          loading={modelsLoading}
+          onSelect={setSelectedModel}
+          onManage={() => openManage(modelsLoadFailed || localModels.length === 0 ? 'discover' : 'library')}
+          onClose={() => setModelMenuOpen(false)}
+        />
+      )}
+      {inferenceMenuOpen && (
+        <InferenceMenu
+          settings={runtime}
+          saving={savingInference}
+          onApply={(next) => void applyInferenceSettings(next)}
+          onClose={() => setInferenceMenuOpen(false)}
+        />
+      )}
+      {manageOpen && (
+        <ManagePanel
+          section={manageSection}
+          onSectionChange={setManageSection}
+          onClose={() => setManageOpen(false)}
+          models={localModels}
+          modelsLoading={modelsLoading}
+          refreshModels={refreshLocalModels}
+          selectedModel={selectedModel}
+          onSelectModel={setSelectedModel}
+          settings={runtime}
+          onSettingsSaved={setRuntime}
+          hardware={hardware}
+        />
       )}
     </main>
   )

@@ -10,17 +10,12 @@
     {
       "label": "Configure",
       "program": "cmake",
-      "args": ["-S", "{source}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_BUILD_SERVER=ON", "-DLLAMA_BUILD_TESTS=OFF"]
+      "args": ["-S", "{source}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF", "-DLLAMA_BUILD_SERVER=ON", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_EXAMPLES=OFF", "{target_flags}"]
     },
     {
       "label": "Build server",
       "program": "cmake",
-      "args": ["--build", "{build}", "--config", "Release", "--target", "llama-server"]
-    },
-    {
-      "label": "Install",
-      "program": "cmake",
-      "args": ["--install", "{build}", "--prefix", "{install}", "--config", "Release"]
+      "args": ["--build", "{build}", "--config", "Release", "--target", "llama-server", "--parallel"]
     }
   ]
 }

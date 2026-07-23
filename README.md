@@ -5,15 +5,23 @@ models. It is designed around a sandboxed Electron interface and an independent
 Rust daemon so the same model, conversation, and tool infrastructure works in
 the desktop app and in headless deployments.
 
-The project is at the initial implementation stage. The current vertical slice
+The project is at the early implementation stage. On Linux, the vertical slice
 provides:
 
 - local conversation persistence with branching;
 - OpenAI-compatible model, Chat Completions, and Responses endpoints;
-- streaming generation through a deterministic development engine;
+- a deterministic development engine plus **llama.cpp** inference via managed or
+  discovered `llama-server` and on-disk GGUF models;
+- Hugging Face discovery (engine-filtered) and GGUF download into the app data
+  directory;
+- runtime management: managed release installs, llama.cpp builds from source
+  into isolated prefixes, and explicit runtime activation;
+- bundled safe tools (time, calculator, bounded web fetch) executed by the
+  daemon in a multi-round tool loop;
 - a capability model for text, vision, audio, video, reasoning, and tools;
-- a Hugging Face discovery endpoint that ranks compatible Unsloth artifacts;
-- a cross-platform Electron chat interface.
+- a cross-platform Electron chat interface with separate surfaces for usage
+  (model picker, inference settings) and management (library, downloads,
+  runtimes, engine configuration).
 
 See [docs/architecture.md](docs/architecture.md) and
 [docs/roadmap.md](docs/roadmap.md) for the implementation boundaries and

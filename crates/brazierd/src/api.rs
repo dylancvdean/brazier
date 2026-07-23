@@ -12,7 +12,9 @@ use axum::{
     },
     routing::{get, post},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
@@ -22,7 +24,13 @@ use uuid::Uuid;
 use crate::{
     AppState,
     build_recipe::{self, BuildPlanRequest},
+    builds,
+    download::{self, DownloadRequest},
+    engine::{Engine, StreamEvent},
     hf::{self, SearchQuery},
+    models_store,
+    progress::ProgressEvent,
+    runtimes, tools,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
@@ -76,7 +84,27 @@ pub fn router(state: AppState) -> Router {
             get(list_messages).post(create_message),
         )
         .route("/api/v1/huggingface/models", get(search_hugging_face))
+        .route(
+            "/api/v1/huggingface/models/{repo_owner}/{repo_name}/files",
+            get(list_hub_files),
+        )
         .route("/api/v1/engines/build-plan", post(build_plan))
+        .route("/api/v1/engines", get(engine_status))
+        .route(
+            "/api/v1/runtime/settings",
+            get(runtime_settings).put(update_runtime_settings),
+        )
+        .route("/api/v1/hardware", get(hardware))
+        .route("/api/v1/engines/llama.cpp/ensure", post(ensure_llama))
+        .route("/api/v1/tools", get(list_tools))
+        .route(
+            "/api/v1/runtimes",
+            get(list_runtimes).delete(delete_runtime),
+        )
+        .route("/api/v1/runtimes/activate", post(activate_runtime))
+        .route("/api/v1/runtimes/build", post(build_runtime))
+        .route("/api/v1/models/download", post(download_model))
+        .route("/api/v1/models", axum::routing::delete(delete_local_model))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/responses", post(responses))
@@ -127,19 +155,21 @@ async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     state.db.ping().await.map_err(ApiError::internal)?;
     Ok(Json(json!({
         "status": "healthy",
-        "engine": state.engine.id(),
+        "engine": state.runtime.id(),
         "version": env!("CARGO_PKG_VERSION")
     })))
 }
 
 async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let models = state.engine.models().await.map_err(ApiError::internal)?;
+    let models = state.runtime.models().await.map_err(ApiError::internal)?;
     Ok(Json(json!({
         "schema_version": 1,
         "models": models,
         "features": {
             "conversation_branches": true,
             "hugging_face_search": true,
+            "model_download": true,
+            "llama_cpp_engine": true,
             "openai_chat_completions": true,
             "openai_responses": true
         }
@@ -208,13 +238,251 @@ async fn search_hugging_face(
     Ok(Json(json!({ "data": models })))
 }
 
+#[derive(Debug, Deserialize)]
+struct HubFilesQuery {
+    revision: Option<String>,
+}
+
+async fn list_hub_files(
+    State(state): State<AppState>,
+    Path((repo_owner, repo_name)): Path<(String, String)>,
+    Query(query): Query<HubFilesQuery>,
+) -> ApiResult<Json<Value>> {
+    let repo_id = format!("{repo_owner}/{repo_name}");
+    let (files, preferred) = hf::list_gguf_files(&state.http, &repo_id, query.revision.as_deref())
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "repo_id": repo_id,
+        "data": files,
+        "preferred_filename": preferred
+    })))
+}
+
 async fn build_plan(Json(request): Json<BuildPlanRequest>) -> ApiResult<Json<Value>> {
     let plan = build_recipe::plan(request).map_err(ApiError::bad_request)?;
     Ok(Json(json!(plan)))
 }
 
+async fn engine_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(state.runtime.engine_status().await))
+}
+
+async fn hardware() -> Json<Value> {
+    Json(json!(crate::hardware::detect()))
+}
+
+async fn runtime_settings(State(state): State<AppState>) -> Json<Value> {
+    Json(json!(state.runtime.settings().await))
+}
+
+async fn update_runtime_settings(
+    State(state): State<AppState>,
+    Json(settings): Json<crate::runtime_settings::RuntimeSettings>,
+) -> ApiResult<Json<Value>> {
+    let settings = state
+        .runtime
+        .update_settings(settings)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(settings)))
+}
+
+async fn list_tools() -> Json<Value> {
+    Json(tools::catalog())
+}
+
+async fn list_runtimes(State(state): State<AppState>) -> Json<Value> {
+    let active = state.runtime.active_binary().await;
+    let path_env = std::env::var("PATH").ok();
+    let entries = runtimes::list(&state.data_dir, active.as_deref(), path_env.as_deref());
+    Json(json!({
+        "data": entries,
+        "active_binary": active.map(|path| path.display().to_string())
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeIdRequest {
+    id: String,
+}
+
+async fn activate_runtime(
+    State(state): State<AppState>,
+    Json(request): Json<RuntimeIdRequest>,
+) -> ApiResult<Json<Value>> {
+    let path_env = std::env::var("PATH").ok();
+    let entry = runtimes::find(&state.data_dir, path_env.as_deref(), &request.id)
+        .ok_or_else(|| ApiError::bad_request(format!("unknown runtime `{}`", request.id)))?;
+    let path = state
+        .runtime
+        .activate_binary(std::path::PathBuf::from(&entry.path))
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "active_binary": path.display().to_string(),
+        "id": entry.id
+    })))
+}
+
+async fn delete_runtime(
+    State(state): State<AppState>,
+    Json(request): Json<RuntimeIdRequest>,
+) -> ApiResult<Json<Value>> {
+    let removed = runtimes::delete(&state.data_dir, &request.id).map_err(ApiError::bad_request)?;
+    state
+        .runtime
+        .release_binary(&removed)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "deleted": request.id })))
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteModelRequest {
+    model_id: String,
+}
+
+async fn delete_local_model(
+    State(state): State<AppState>,
+    Json(request): Json<DeleteModelRequest>,
+) -> ApiResult<Json<Value>> {
+    let path = models_store::path_for_model_id(&state.data_dir, &request.model_id)
+        .map_err(ApiError::bad_request)?;
+    state.runtime.release_model(&path).await;
+    models_store::delete_model(&state.data_dir, &request.model_id)
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "deleted": request.model_id })))
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamQuery {
+    #[serde(default)]
+    stream: bool,
+}
+
+fn progress_sse(mut rx: mpsc::Receiver<ProgressEvent>) -> Response {
+    let events = stream! {
+        while let Some(event) = rx.recv().await {
+            let terminal = event.done == Some(true);
+            let payload = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
+            yield Ok::<Event, Infallible>(Event::default().data(payload));
+            if terminal {
+                break;
+            }
+        }
+    };
+    Sse::new(events)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
+        .into_response()
+}
+
+async fn ensure_llama(State(state): State<AppState>, Query(query): Query<StreamQuery>) -> Response {
+    if !query.stream {
+        return match state.runtime.ensure_llama_binary().await {
+            Ok(path) => (
+                StatusCode::OK,
+                Json(json!({
+                    "binary": path.display().to_string(),
+                    "status": "ready"
+                })),
+            )
+                .into_response(),
+            Err(error) => ApiError::internal(error).into_response(),
+        };
+    }
+
+    let (tx, rx) = mpsc::channel::<ProgressEvent>(64);
+    let runtime = state.runtime.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let result = runtime
+            .ensure_llama_binary_with_progress(Box::new(move |event| {
+                let _ = progress_tx.try_send(event);
+            }))
+            .await;
+        if let Err(error) = result {
+            let _ = tx.send(ProgressEvent::error(error.to_string())).await;
+        }
+    });
+    progress_sse(rx)
+}
+
+async fn build_runtime(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<builds::BuildRequest>,
+) -> Response {
+    if !query.stream {
+        return match builds::run_build_with_progress(&state.data_dir, request, Box::new(|_| {}))
+            .await
+        {
+            Ok(binary) => (
+                StatusCode::OK,
+                Json(json!({
+                    "binary": binary.display().to_string(),
+                    "status": "ready"
+                })),
+            )
+                .into_response(),
+            Err(error) => ApiError::bad_request(error).into_response(),
+        };
+    }
+    let (tx, rx) = mpsc::channel::<ProgressEvent>(256);
+    let data_dir = state.data_dir.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let result = builds::run_build_with_progress(
+            &data_dir,
+            request,
+            Box::new(move |event| {
+                // Build logs can outpace the client; block briefly rather than drop.
+                let _ = progress_tx.try_send(event);
+            }),
+        )
+        .await;
+        if let Err(error) = result {
+            let _ = tx.send(ProgressEvent::error(error.to_string())).await;
+        }
+    });
+    progress_sse(rx)
+}
+
+async fn download_model(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<DownloadRequest>,
+) -> Response {
+    if !query.stream {
+        return match download::download_gguf(&state.http, &state.data_dir, request).await {
+            Ok(result) => (StatusCode::OK, Json(json!(result))).into_response(),
+            Err(error) => ApiError::bad_request(error).into_response(),
+        };
+    }
+
+    let (tx, rx) = mpsc::channel::<ProgressEvent>(64);
+    let http = state.http.clone();
+    let data_dir = state.data_dir.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let result = download::download_gguf_with_progress(
+            &http,
+            &data_dir,
+            request,
+            Box::new(move |event| {
+                let _ = progress_tx.try_send(event);
+            }),
+        )
+        .await;
+        if let Err(error) = result {
+            let _ = tx.send(ProgressEvent::error(error.to_string())).await;
+        }
+    });
+    progress_sse(rx)
+}
+
 async fn list_models(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let models = state.engine.models().await.map_err(ApiError::internal)?;
+    let models = state.runtime.models().await.map_err(ApiError::internal)?;
     let data = models
         .into_iter()
         .map(|model| {
@@ -222,7 +490,8 @@ async fn list_models(State(state): State<AppState>) -> ApiResult<Json<Value>> {
                 "id": model.id,
                 "object": "model",
                 "owned_by": format!("brazier:{}", model.engine),
-                "capabilities": model.capabilities
+                "capabilities": model.capabilities,
+                "size_bytes": model.size_bytes
             })
         })
         .collect::<Vec<_>>();
@@ -233,14 +502,14 @@ async fn chat_completions(
     State(state): State<AppState>,
     Json(request): Json<ChatCompletionRequest>,
 ) -> ApiResult<Response> {
-    let generation = state
-        .engine
-        .generate(&request)
-        .await
-        .map_err(ApiError::internal)?;
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
 
     if !request.stream {
+        let generation = state
+            .runtime
+            .generate(&request)
+            .await
+            .map_err(ApiError::internal)?;
         return Ok(Json(json!({
             "id": completion_id,
             "object": "chat.completion",
@@ -254,6 +523,7 @@ async fn chat_completions(
                 },
                 "finish_reason": "stop"
             }],
+            "brazier": { "tool_calls": generation.tool_invocations },
             "usage": {
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
@@ -263,40 +533,61 @@ async fn chat_completions(
         .into_response());
     }
 
-    let model = request.model;
-    let reasoning = generation.reasoning;
-    let words = generation
-        .text
-        .split_inclusive(char::is_whitespace)
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
+    let model = request.model.clone();
+    let mut token_rx = state
+        .runtime
+        .generate_stream(&request)
+        .await
+        .map_err(ApiError::internal)?;
     let events = stream! {
-        if let Some(reasoning) = reasoning {
-            let chunk = json!({
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": { "reasoning_content": reasoning },
-                    "finish_reason": null
-                }]
-            });
-            yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
-        }
-        for word in words {
-            let chunk = json!({
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": { "content": word },
-                    "finish_reason": null
-                }]
-            });
-            yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
-            tokio::time::sleep(Duration::from_millis(18)).await;
+        while let Some(item) = token_rx.recv().await {
+            match item {
+                Ok(StreamEvent::Content(content)) => {
+                    let chunk = json!({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": { "content": content },
+                            "finish_reason": null
+                        }]
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
+                }
+                Ok(StreamEvent::Tool(invocation)) => {
+                    // Brazier extension chunk: harmless to standard OpenAI clients.
+                    let chunk = json!({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": null
+                        }],
+                        "brazier": { "tool_call": invocation }
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
+                }
+                Ok(StreamEvent::End) => break,
+                Err(error) => {
+                    tracing::error!(error = %error, "stream generation failed");
+                    let chunk = json!({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "error"
+                        }],
+                        "error": { "message": error.to_string() }
+                    });
+                    yield Ok(Event::default().data(chunk.to_string()));
+                    break;
+                }
+            }
         }
         let final_chunk = json!({
             "id": completion_id,
@@ -355,14 +646,20 @@ async fn responses(
         messages: responses_input_to_messages(&request.input),
         stream: request.stream,
         tools: request.tools,
+        temperature: request.temperature,
+        top_p: request.top_p,
+        max_tokens: request.max_output_tokens,
+        seed: request.seed,
+        enable_reasoning: request.enable_reasoning,
+        builtin_tools: request.builtin_tools,
     };
-    let generation = state
-        .engine
-        .generate(&chat_request)
-        .await
-        .map_err(ApiError::internal)?;
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
     if !request.stream {
+        let generation = state
+            .runtime
+            .generate(&chat_request)
+            .await
+            .map_err(ApiError::internal)?;
         return Ok(Json(json!({
             "id": response_id,
             "object": "response",
@@ -383,20 +680,33 @@ async fn responses(
         .into_response());
     }
 
-    let words = generation
-        .text
-        .split_inclusive(char::is_whitespace)
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
+    let mut token_rx = state
+        .runtime
+        .generate_stream(&chat_request)
+        .await
+        .map_err(ApiError::internal)?;
     let events = stream! {
         yield Ok::<Event, Infallible>(Event::default()
             .event("response.created")
             .data(json!({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}).to_string()));
-        for word in words {
-            yield Ok(Event::default()
-                .event("response.output_text.delta")
-                .data(json!({"type": "response.output_text.delta", "delta": word}).to_string()));
-            tokio::time::sleep(Duration::from_millis(18)).await;
+        while let Some(item) = token_rx.recv().await {
+            match item {
+                Ok(StreamEvent::Content(content)) => {
+                    yield Ok(Event::default()
+                        .event("response.output_text.delta")
+                        .data(json!({"type": "response.output_text.delta", "delta": content}).to_string()));
+                }
+                Ok(StreamEvent::Tool(invocation)) => {
+                    yield Ok(Event::default()
+                        .event("response.brazier.tool_call")
+                        .data(json!({"type": "response.brazier.tool_call", "tool_call": invocation}).to_string()));
+                }
+                Ok(StreamEvent::End) => break,
+                Err(error) => {
+                    tracing::error!(error = %error, "responses stream failed");
+                    break;
+                }
+            }
         }
         yield Ok(Event::default()
             .event("response.completed")
@@ -408,11 +718,95 @@ async fn responses(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        db::Database,
+        engine::Runtime,
+        models_store::{self, download_destination},
+    };
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tempfile::tempdir;
+    use tower::ServiceExt;
 
     #[test]
     fn converts_responses_string_input() {
         let messages = responses_input_to_messages(&json!("hello"));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
+    }
+
+    async fn test_state(data_dir: &std::path::Path) -> AppState {
+        let db = Database::open(&data_dir.join("brazier.sqlite"))
+            .await
+            .unwrap();
+        let http = reqwest::Client::new();
+        let runtime = Runtime::new(data_dir.to_path_buf(), http.clone());
+        AppState {
+            db,
+            runtime,
+            api_key: None,
+            http,
+            data_dir: data_dir.to_path_buf(),
+        }
+    }
+
+    #[tokio::test]
+    async fn lists_disk_gguf_and_rejects_unknown_model() {
+        let dir = tempdir().unwrap();
+        let gguf = download_destination(dir.path(), "acme/demo", "weights.gguf").unwrap();
+        std::fs::create_dir_all(gguf.parent().unwrap()).unwrap();
+        std::fs::write(&gguf, b"not-a-real-gguf").unwrap();
+        let app = router(test_state(dir.path()).await);
+
+        let models_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(models_response.status(), StatusCode::OK);
+        let models_body = models_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let models: Value = serde_json::from_slice(&models_body).unwrap();
+        let ids: Vec<&str> = models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|model| model["id"].as_str())
+            .collect();
+        assert!(!ids.contains(&"brazier/mock"));
+        assert!(ids.contains(&"gguf:acme/demo/weights.gguf"));
+        assert_eq!(
+            models_store::path_for_model_id(dir.path(), "gguf:acme/demo/weights.gguf").unwrap(),
+            gguf
+        );
+
+        let chat_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "brazier/mock",
+                            "messages": [{"role": "user", "content": "hello path"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(chat_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

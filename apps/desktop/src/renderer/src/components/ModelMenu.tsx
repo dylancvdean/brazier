@@ -1,0 +1,91 @@
+import { Box, Check, HardDrive, LoaderCircle } from 'lucide-react'
+import { formatBytes, type LocalModel } from '../api'
+
+type ModelMenuProps = {
+  models: LocalModel[]
+  selectedModel: string
+  loading: boolean
+  onSelect: (modelId: string) => void
+  onManage: () => void
+  onClose: () => void
+}
+
+function displayName(model: LocalModel): { title: string; subtitle: string } {
+  if (model.id.startsWith('gguf:')) {
+    const key = model.id.slice('gguf:'.length)
+    const parts = key.split('/')
+    return {
+      title: parts.at(-1) ?? key,
+      subtitle: parts.slice(0, -1).join('/')
+    }
+  }
+  return { title: model.id, subtitle: model.owned_by }
+}
+
+/**
+ * Lightweight model *selection* popover. Model management (downloading,
+ * deleting) lives in the Manage panel instead.
+ */
+export function ModelMenu({
+  models,
+  selectedModel,
+  loading,
+  onSelect,
+  onManage,
+  onClose
+}: ModelMenuProps): React.JSX.Element {
+  return (
+    <div className="menu-backdrop" onMouseDown={onClose}>
+      <div className="popover model-menu" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="popover-title">Choose a model</div>
+        {loading && (
+          <div className="popover-empty">
+            <LoaderCircle className="spin" size={16} />
+            Loading your library…
+          </div>
+        )}
+        {!loading && models.length === 0 && (
+          <div className="popover-empty">
+            <Box size={16} />
+            No local models yet. Download one from the library.
+          </div>
+        )}
+        <div className="model-menu-list">
+          {models.map((model) => {
+            const meta = displayName(model)
+            const active = model.id === selectedModel
+            return (
+              <button
+                key={model.id}
+                className={active ? 'model-menu-item active' : 'model-menu-item'}
+                onClick={() => {
+                  onSelect(model.id)
+                  onClose()
+                }}
+              >
+                <div className="model-menu-item-name">
+                  <strong>{meta.title}</strong>
+                  <span>
+                    {meta.subtitle}
+                    {model.size_bytes != null ? ` · ${formatBytes(model.size_bytes)}` : ''}
+                  </span>
+                </div>
+                {active && <Check size={15} />}
+              </button>
+            )
+          })}
+        </div>
+        <button
+          className="popover-footer-action"
+          onClick={() => {
+            onClose()
+            onManage()
+          }}
+        >
+          <HardDrive size={14} />
+          Manage model library…
+        </button>
+      </div>
+    </div>
+  )
+}

@@ -6,7 +6,9 @@
   "license": "MIT",
   "packageManager": "pnpm@10.13.1",
   "scripts": {
+    "postinstall": "node scripts/ensure-electron.mjs",
     "dev": "pnpm --filter @brazier/desktop dev",
+    "dev:wayland": "pnpm --filter @brazier/desktop exec env ELECTRON_OZONE_PLATFORM_HINT=wayland electron-vite dev",
     "build": "pnpm -r build",
     "check": "pnpm -r check && cargo check --workspace",
     "test": "pnpm -r test && cargo test --workspace",
@@ -14,12 +16,5 @@
   },
   "engines": {
     "node": ">=24"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "electron",
-      "electron-winstaller",
-      "esbuild"
-    ]
   }
 }

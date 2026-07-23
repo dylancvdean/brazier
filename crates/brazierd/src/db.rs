@@ -242,7 +242,7 @@ mod tests {
                     parent_id: Some(root.id.clone()),
                     role: Role::Assistant,
                     content: json!(text),
-                    model: Some("brazier/mock".into()),
+                    model: Some("gguf:acme/demo/model.gguf".into()),
                 },
             )
             .await

@@ -68,6 +68,8 @@ pub struct ModelDescriptor {
     pub name: String,
     pub engine: String,
     pub capabilities: ModelCapabilities,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,10 +91,24 @@ pub struct ChatCompletionRequest {
     pub stream: bool,
     #[serde(default)]
     pub tools: Option<Value>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub seed: Option<i64>,
+    #[serde(default)]
+    pub enable_reasoning: Option<bool>,
+    /// When true, the daemon offers its bundled tools to the model and
+    /// executes returned tool calls server-side.
+    #[serde(default)]
+    pub builtin_tools: Option<bool>,
 }
 
 fn default_model() -> String {
-    "brazier/mock".to_owned()
+    String::new()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,6 +120,18 @@ pub struct ResponsesRequest {
     pub stream: bool,
     #[serde(default)]
     pub tools: Option<Value>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub seed: Option<i64>,
+    #[serde(default)]
+    pub enable_reasoning: Option<bool>,
+    #[serde(default)]
+    pub builtin_tools: Option<bool>,
 }
 
 pub fn text_from_content(content: &Value) -> String {

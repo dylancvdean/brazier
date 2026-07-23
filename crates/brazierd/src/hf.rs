@@ -4,6 +4,8 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::models_store::prefer_gguf_filename;
+
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
     pub q: Option<String>,
@@ -111,6 +113,65 @@ pub async fn search(client: &reqwest::Client, query: SearchQuery) -> anyhow::Res
         .collect::<Vec<_>>();
     models.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
     Ok(models)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoFile {
+    pub path: String,
+    pub size: Option<u64>,
+}
+
+/// List files in a Hugging Face model repository (tree API).
+pub async fn list_repo_files(
+    client: &reqwest::Client,
+    repo_id: &str,
+    revision: &str,
+) -> anyhow::Result<Vec<RepoFile>> {
+    crate::models_store::validate_repo_id(repo_id)?;
+    anyhow::ensure!(!revision.is_empty(), "revision is required");
+    let url = format!("https://huggingface.co/api/models/{repo_id}/tree/{revision}");
+    let values: Vec<Value> = client
+        .get(url)
+        .send()
+        .await
+        .context("contact Hugging Face tree API")?
+        .error_for_status()
+        .context("Hugging Face tree request failed")?
+        .json()
+        .await
+        .context("decode Hugging Face tree response")?;
+    Ok(values
+        .into_iter()
+        .filter_map(|value| {
+            let path = value.get("path")?.as_str()?.to_owned();
+            let kind = value.get("type").and_then(Value::as_str).unwrap_or("file");
+            if kind != "file" {
+                return None;
+            }
+            let size = value.get("size").and_then(Value::as_u64);
+            Some(RepoFile { path, size })
+        })
+        .collect())
+}
+
+/// List GGUF filenames for a repository and suggest a default quant.
+pub async fn list_gguf_files(
+    client: &reqwest::Client,
+    repo_id: &str,
+    revision: Option<&str>,
+) -> anyhow::Result<(Vec<RepoFile>, Option<String>)> {
+    let revision = revision.unwrap_or("main");
+    let files = list_repo_files(client, repo_id, revision).await?;
+    let ggufs: Vec<RepoFile> = files
+        .into_iter()
+        .filter(|file| file.path.to_ascii_lowercase().ends_with(".gguf"))
+        .collect();
+    let names: Vec<String> = ggufs
+        .iter()
+        .filter_map(|file| file.path.rsplit('/').next().map(ToOwned::to_owned))
+        .collect();
+    let preferred = prefer_gguf_filename(&names);
+    Ok((ggufs, preferred))
 }
 
 #[cfg(test)]
