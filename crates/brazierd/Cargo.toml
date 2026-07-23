@@ -15,6 +15,7 @@ flate2 = "1.1.9"
 futures.workspace = true
 hex = "0.4.3"
 reqwest.workspace = true
+rquickjs = "0.12.1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

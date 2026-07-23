@@ -681,8 +681,8 @@ export function App(): React.JSX.Element {
                 type="button"
                 title={
                   toolsEnabled
-                    ? 'Bundled tools enabled: time, calculator, web fetch'
-                    : 'Enable bundled tools (time, calculator, web fetch)'
+                    ? 'Bundled tools enabled: time, calculator, web fetch, JS sandbox'
+                    : 'Enable bundled tools (time, calculator, web fetch, JS sandbox)'
                 }
                 onClick={() => setToolsEnabled((enabled) => !enabled)}
               >

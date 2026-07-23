@@ -16,8 +16,8 @@ provides:
   directory;
 - runtime management: managed release installs, llama.cpp builds from source
   into isolated prefixes, and explicit runtime activation;
-- bundled safe tools (time, calculator, bounded web fetch) executed by the
-  daemon in a multi-round tool loop;
+- bundled safe tools (time, calculator, bounded web fetch, QuickJS sandbox)
+  executed by the daemon in a multi-round tool loop;
 - a capability model for text, vision, audio, video, reasoning, and tools;
 - a cross-platform Electron chat interface with separate surfaces for usage
   (model picker, inference settings) and management (library, downloads,

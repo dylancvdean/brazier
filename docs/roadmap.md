@@ -17,8 +17,8 @@
   logs, plus runtime inventory (managed releases, source builds, system
   binaries) with activation and deletion.
 - Bundled safe tools (current time, calculator, bounded web fetch with a
-  private-network guard) executed server-side in a multi-round tool loop for
-  streamed and non-streamed chat.
+  private-network guard, QuickJS JavaScript sandbox) executed server-side in a
+  multi-round tool loop for streamed and non-streamed chat.
 
 ## Alpha
 

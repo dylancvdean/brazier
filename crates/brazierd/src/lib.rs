@@ -6,6 +6,7 @@ pub mod download;
 pub mod engine;
 pub mod hardware;
 pub mod hf;
+pub mod js_sandbox;
 pub mod llama;
 pub mod models_store;
 pub mod progress;
