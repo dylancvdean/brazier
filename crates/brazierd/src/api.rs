@@ -36,7 +36,7 @@ use crate::{
     llama,
     mcp,
     progress::ProgressEvent,
-    runtimes, streaming_asr, tool_registry, whisper,
+    runtimes, streaming_asr, tool_registry, toolchain_hints, whisper,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
@@ -145,6 +145,7 @@ pub fn router(state: AppState) -> Router {
             get(runtime_settings).put(update_runtime_settings),
         )
         .route("/api/v1/hardware", get(hardware))
+        .route("/api/v1/toolchain", get(toolchain_status))
         .route("/api/v1/engines/llama.cpp/ensure", post(ensure_llama))
         .route(
             "/api/v1/engines/llama.cpp/managed-status",
@@ -674,6 +675,10 @@ async fn load_runtimes(
 
 async fn hardware() -> Json<Value> {
     Json(json!(crate::hardware::detect()))
+}
+
+async fn toolchain_status() -> Json<Value> {
+    Json(toolchain_hints::toolchain_status())
 }
 
 async fn runtime_settings(State(state): State<AppState>) -> Json<Value> {

@@ -7,6 +7,9 @@ declare global {
         address: string
         api_key: string | null
       }>
+      getFlags(): Promise<{
+        forceWelcome: boolean
+      }>
       platform: NodeJS.Platform
       selectDirectory(): Promise<string | null>
     }

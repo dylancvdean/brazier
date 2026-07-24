@@ -57,6 +57,8 @@ import {
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
 import { ModelMenu } from './components/ModelMenu'
+import { WelcomeScreen } from './components/WelcomeScreen'
+import { hasCompletedWelcome, markWelcomeCompleted } from './welcomePrefs'
 import {
   isChatModel,
   modelDisplayName,
@@ -252,6 +254,7 @@ export function App(): React.JSX.Element {
   const [manageSection, setManageSection] = useState<ManageSection>('library')
   const [runSnapshots, setRunSnapshots] = useState<RunSnapshot[]>([])
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
+  const [showWelcome, setShowWelcome] = useState<boolean | null>(null)
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
@@ -450,6 +453,22 @@ export function App(): React.JSX.Element {
     setRuntime(status.settings)
     setHardware(status.hardware)
   }
+
+  useEffect(() => {
+    let cancelled = false
+    void window.brazier
+      .getFlags()
+      .then((flags) => {
+        if (cancelled) return
+        setShowWelcome(Boolean(flags.forceWelcome) || !hasCompletedWelcome())
+      })
+      .catch(() => {
+        if (!cancelled) setShowWelcome(!hasCompletedWelcome())
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     void refreshConversations().catch((cause: unknown) =>
@@ -736,6 +755,29 @@ export function App(): React.JSX.Element {
       setModelLoadStatus(null)
       abortRef.current = undefined
     }
+  }
+
+  if (showWelcome === null) {
+    return <main className="app-shell first-run-boot" aria-busy="true" />
+  }
+
+  if (showWelcome) {
+    return (
+      <main className="app-shell">
+        <WelcomeScreen
+          onContinue={() => {
+            markWelcomeCompleted()
+            setShowWelcome(false)
+          }}
+          onOpenRuntimes={() => {
+            markWelcomeCompleted()
+            setManageSection('runtimes')
+            setManageOpen(true)
+            setShowWelcome(false)
+          }}
+        />
+      </main>
+    )
   }
 
   return (

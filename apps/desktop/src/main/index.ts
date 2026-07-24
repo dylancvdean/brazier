@@ -235,11 +235,19 @@ async function createWindow(): Promise<void> {
   }
 }
 
+function forceWelcomeRequested(): boolean {
+  if (process.env.BRAZIER_FORCE_WELCOME === '1') return true
+  return process.argv.some((arg) => arg === '--welcome' || arg === '--force-welcome')
+}
+
 app.whenReady().then(async () => {
   // No File/Edit/View application menu — the app is a self-contained shell.
   Menu.setApplicationMenu(null)
   connection = startDaemon()
   ipcMain.handle('brazier:connection', () => connection)
+  ipcMain.handle('brazier:flags', () => ({
+    forceWelcome: forceWelcomeRequested()
+  }))
   ipcMain.handle('brazier:select-directory', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)
     const options = {

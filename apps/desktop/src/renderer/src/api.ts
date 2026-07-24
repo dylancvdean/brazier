@@ -139,6 +139,33 @@ export function hardwareInfo(): Promise<HardwareInfo> {
   return request('/api/v1/hardware')
 }
 
+export type ToolchainTool = {
+  id: string
+  label: string
+  available: boolean
+  required_for: string
+  install_hint: string | null
+}
+
+export type ToolchainStatus = {
+  os: {
+    family: string
+    id: string
+    pretty_name: string
+  }
+  tools: ToolchainTool[]
+  platforms: {
+    mlx: boolean
+    streaming_asr: boolean
+    whisper_cpp: boolean
+    llama_cpp: boolean
+  }
+}
+
+export function fetchToolchainStatus(): Promise<ToolchainStatus> {
+  return request('/api/v1/toolchain')
+}
+
 export function engineStatus(options?: { probe?: boolean }): Promise<EngineStatus> {
   const suffix = options?.probe ? '?probe=true' : ''
   return request(`/api/v1/engines${suffix}`)

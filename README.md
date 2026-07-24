@@ -39,6 +39,14 @@ cargo test --workspace
 pnpm dev
 ```
 
+The first launch shows a welcome checklist for host tools (git, cmake, a C++
+toolchain, uv, ffmpeg). To reopen it during development:
+
+```sh
+pnpm dev:welcome
+# or: BRAZIER_FORCE_WELCOME=1 pnpm dev
+```
+
 Run the daemon independently:
 
 ```sh

@@ -42,6 +42,7 @@ pub enum ToolchainPackage {
     Cuda,
     Vulkan,
     Uv,
+    Ffmpeg,
 }
 
 pub fn detect_os() -> OsInfo {
@@ -172,6 +173,7 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         (PackageManager::Pacman, ToolchainPackage::Vulkan) => {
             Some("sudo pacman -S vulkan-devel cmake extra/glslang".into())
         }
+        (PackageManager::Pacman, ToolchainPackage::Ffmpeg) => Some("sudo pacman -S ffmpeg".into()),
 
         (PackageManager::Apt, ToolchainPackage::Git) => Some("sudo apt install git".into()),
         (PackageManager::Apt, ToolchainPackage::Cmake) => Some("sudo apt install cmake".into()),
@@ -187,6 +189,7 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         (PackageManager::Apt, ToolchainPackage::Vulkan) => {
             Some("sudo apt install vulkan-tools libvulkan-dev glslang-tools mesa-vulkan-drivers".into())
         }
+        (PackageManager::Apt, ToolchainPackage::Ffmpeg) => Some("sudo apt install ffmpeg".into()),
 
         (PackageManager::Dnf, ToolchainPackage::Git) => Some("sudo dnf install git".into()),
         (PackageManager::Dnf, ToolchainPackage::Cmake) => Some("sudo dnf install cmake".into()),
@@ -202,6 +205,7 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         (PackageManager::Dnf, ToolchainPackage::Vulkan) => {
             Some("sudo dnf install vulkan-tools vulkan-loader-devel glslang mesa-vulkan-drivers".into())
         }
+        (PackageManager::Dnf, ToolchainPackage::Ffmpeg) => Some("sudo dnf install ffmpeg".into()),
 
         (PackageManager::Zypper, ToolchainPackage::Git) => Some("sudo zypper install git".into()),
         (PackageManager::Zypper, ToolchainPackage::Cmake) => {
@@ -219,6 +223,9 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         (PackageManager::Zypper, ToolchainPackage::Vulkan) => {
             Some("sudo zypper install vulkan-tools vulkan-devel".into())
         }
+        (PackageManager::Zypper, ToolchainPackage::Ffmpeg) => {
+            Some("sudo zypper install ffmpeg".into())
+        }
 
         (PackageManager::Apk, ToolchainPackage::Git) => Some("sudo apk add git".into()),
         (PackageManager::Apk, ToolchainPackage::Cmake) => Some("sudo apk add cmake".into()),
@@ -234,6 +241,7 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         (PackageManager::Apk, ToolchainPackage::Vulkan) => {
             Some("sudo apk add vulkan-dev vulkan-loader mesa-dev".into())
         }
+        (PackageManager::Apk, ToolchainPackage::Ffmpeg) => Some("sudo apk add ffmpeg".into()),
 
         (PackageManager::Xbps, ToolchainPackage::Git) => Some("sudo xbps-install -S git".into()),
         (PackageManager::Xbps, ToolchainPackage::Cmake) => {
@@ -251,6 +259,9 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         (PackageManager::Xbps, ToolchainPackage::Vulkan) => {
             Some("sudo xbps-install -S vulkan-loader vulkan-headers mesa-dri".into())
         }
+        (PackageManager::Xbps, ToolchainPackage::Ffmpeg) => {
+            Some("sudo xbps-install -S ffmpeg".into())
+        }
 
         (PackageManager::Brew, ToolchainPackage::Git) => Some("brew install git".into()),
         (PackageManager::Brew, ToolchainPackage::Cmake) => Some("brew install cmake".into()),
@@ -265,6 +276,7 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         (PackageManager::Brew, ToolchainPackage::Uv) => {
             Some("brew install uv   # or: curl -LsSf https://astral.sh/uv/install.sh | sh".into())
         }
+        (PackageManager::Brew, ToolchainPackage::Ffmpeg) => Some("brew install ffmpeg".into()),
 
         (PackageManager::Winget, ToolchainPackage::Git) => Some(
             "winget install --id Git.Git -e --source winget".into(),
@@ -284,6 +296,9 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         ),
         (PackageManager::Winget, ToolchainPackage::Uv) => Some(
             "winget install --id astral-sh.uv -e --source winget".into(),
+        ),
+        (PackageManager::Winget, ToolchainPackage::Ffmpeg) => Some(
+            "winget install --id Gyan.FFmpeg -e --source winget".into(),
         ),
 
         (PackageManager::Pacman, ToolchainPackage::Uv)
@@ -366,7 +381,86 @@ fn generic_fallback(package: ToolchainPackage, family: OsFamily) -> String {
         (ToolchainPackage::Uv, _) => {
             "Install uv from https://docs.astral.sh/uv/ and ensure it is on your PATH.".into()
         }
+        (ToolchainPackage::Ffmpeg, OsFamily::Macos) => {
+            "Install ffmpeg with Homebrew (`brew install ffmpeg`) and ensure `ffmpeg` / `ffprobe` are on your PATH.".into()
+        }
+        (ToolchainPackage::Ffmpeg, _) => {
+            "Install ffmpeg (and ffprobe) from your package manager and ensure both are on your PATH.".into()
+        }
     }
+}
+
+/// Snapshot of host toolchain tools used by the welcome / setup screen.
+pub fn toolchain_status() -> serde_json::Value {
+    let os = detect_os();
+    let tool = |id: &str, label: &str, available: bool, package: ToolchainPackage, summary: &str| {
+        serde_json::json!({
+            "id": id,
+            "label": label,
+            "available": available,
+            "required_for": summary,
+            "install_hint": if available {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(install_hint_for_os(package, &os))
+            },
+        })
+    };
+    let ffmpeg = command_on_path("ffmpeg") && command_on_path("ffprobe");
+    serde_json::json!({
+        "os": {
+            "family": match os.family {
+                OsFamily::Linux => "linux",
+                OsFamily::Windows => "windows",
+                OsFamily::Macos => "macos",
+            },
+            "id": os.id,
+            "pretty_name": os.pretty_name,
+        },
+        "tools": [
+            tool(
+                "git",
+                "Git",
+                command_on_path("git"),
+                ToolchainPackage::Git,
+                "Cloning engine sources for llama.cpp, whisper.cpp, and MLX builds"
+            ),
+            tool(
+                "cmake",
+                "CMake",
+                command_on_path("cmake"),
+                ToolchainPackage::Cmake,
+                "Configuring llama.cpp and whisper.cpp source builds"
+            ),
+            tool(
+                "cpp",
+                "C/C++ toolchain",
+                cpp_compiler_available(),
+                ToolchainPackage::CppBuild,
+                "Compiling llama.cpp and whisper.cpp from source"
+            ),
+            tool(
+                "uv",
+                "uv",
+                command_on_path("uv"),
+                ToolchainPackage::Uv,
+                "Creating Python environments for MLX and streaming ASR"
+            ),
+            tool(
+                "ffmpeg",
+                "ffmpeg",
+                ffmpeg,
+                ToolchainPackage::Ffmpeg,
+                "Video frame sampling and converting audio for transcription"
+            ),
+        ],
+        "platforms": {
+            "mlx": matches!(os.family, OsFamily::Macos) && cfg!(target_arch = "aarch64"),
+            "streaming_asr": !matches!(os.family, OsFamily::Windows),
+            "whisper_cpp": true,
+            "llama_cpp": true,
+        }
+    })
 }
 
 pub fn validate_build_target(target: RuntimeTarget) -> Option<String> {
@@ -545,6 +639,22 @@ fn command_on_path(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolchain_status_lists_core_tools() {
+        let status = toolchain_status();
+        let tools = status["tools"].as_array().unwrap();
+        let ids: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"git"));
+        assert!(ids.contains(&"cmake"));
+        assert!(ids.contains(&"cpp"));
+        assert!(ids.contains(&"uv"));
+        assert!(ids.contains(&"ffmpeg"));
+        assert!(status["platforms"]["llama_cpp"].as_bool().unwrap());
+    }
 
     #[test]
     fn arch_rocm_hint_uses_pacman() {

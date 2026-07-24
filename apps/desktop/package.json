@@ -6,6 +6,7 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "env -u WAYLAND_DISPLAY ELECTRON_OZONE_PLATFORM_HINT=x11 electron-vite dev",
+    "dev:welcome": "env -u WAYLAND_DISPLAY ELECTRON_OZONE_PLATFORM_HINT=x11 BRAZIER_FORCE_WELCOME=1 electron-vite dev",
     "build": "electron-vite build",
     "check": "tsc --noEmit",
     "test": "vitest run",
