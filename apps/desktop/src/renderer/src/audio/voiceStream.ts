@@ -7,7 +7,9 @@
  * Opus work, two AudioWorklets move samples on the audio thread, and this
  * class glues them together so the UI only sees levels, text, and state.
  */
+import captureWorkletUrl from './captureWorklet.js?url'
 import { OggOpusDemuxer, OggOpusMuxer } from './oggOpus'
+import playbackWorkletUrl from './playbackWorklet.js?url'
 
 const TAG_HANDSHAKE = 0x00
 const TAG_AUDIO = 0x01
@@ -38,84 +40,6 @@ export function voiceStreamSupported(): boolean {
   )
 }
 
-/** Collects 20 ms mono frames on the audio thread and ships them to the encoder. */
-const CAPTURE_WORKLET = `
-class CaptureProcessor extends AudioWorkletProcessor {
-  constructor(options) {
-    super()
-    this.frameSize = options.processorOptions.frameSize
-    this.buffer = new Float32Array(this.frameSize)
-    this.filled = 0
-  }
-  process(inputs) {
-    const input = inputs[0]?.[0]
-    if (!input) return true
-    for (let index = 0; index < input.length; index += 1) {
-      this.buffer[this.filled] = input[index]
-      this.filled += 1
-      if (this.filled === this.frameSize) {
-        this.port.postMessage(this.buffer.slice())
-        this.filled = 0
-      }
-    }
-    return true
-  }
-}
-registerProcessor('brazier-capture', CaptureProcessor)
-`
-
-/**
- * Plays decoded frames through a ring buffer so network jitter does not
- * stall the audio thread; underruns render silence instead of glitching.
- */
-const PLAYBACK_WORKLET = `
-class PlaybackProcessor extends AudioWorkletProcessor {
-  constructor(options) {
-    super()
-    this.capacity = options.processorOptions.capacity
-    this.ring = new Float32Array(this.capacity)
-    this.read = 0
-    this.write = 0
-    this.available = 0
-    this.port.onmessage = (event) => {
-      if (event.data === 'flush') {
-        this.read = this.write = this.available = 0
-        return
-      }
-      const chunk = event.data
-      for (let index = 0; index < chunk.length; index += 1) {
-        this.ring[this.write] = chunk[index]
-        this.write = (this.write + 1) % this.capacity
-        if (this.available < this.capacity) {
-          this.available += 1
-        } else {
-          this.read = (this.read + 1) % this.capacity
-        }
-      }
-    }
-  }
-  process(_inputs, outputs) {
-    const output = outputs[0][0]
-    if (!output) return true
-    for (let index = 0; index < output.length; index += 1) {
-      if (this.available > 0) {
-        output[index] = this.ring[this.read]
-        this.read = (this.read + 1) % this.capacity
-        this.available -= 1
-      } else {
-        output[index] = 0
-      }
-    }
-    return true
-  }
-}
-registerProcessor('brazier-playback', PlaybackProcessor)
-`
-
-function workletUrl(source: string): string {
-  return URL.createObjectURL(new Blob([source], { type: 'application/javascript' }))
-}
-
 function rms(samples: Float32Array): number {
   let sum = 0
   for (let index = 0; index < samples.length; index += 1) sum += samples[index] * samples[index]
@@ -128,6 +52,7 @@ export class VoiceStream {
   private captureCtx: AudioContext | null = null
   private playbackCtx: AudioContext | null = null
   private playbackNode: AudioWorkletNode | null = null
+  private playbackReady: Promise<void> | null = null
   private media: MediaStream | null = null
   private encoder: AudioEncoder | null = null
   private decoder: AudioDecoder | null = null
@@ -252,49 +177,47 @@ export class VoiceStream {
 
   private playDecoded(data: AudioData): void {
     const samples = new Float32Array(data.numberOfFrames)
+    // Read the rate before closing: a closed AudioData reports zero.
+    const sampleRate = data.sampleRate
     try {
       data.copyTo(samples, { planeIndex: 0, format: 'f32-planar' })
     } finally {
       data.close()
     }
     this.handlers.onOutputLevel?.(Math.min(1, rms(samples) * 4))
-    void this.pushPlayback(samples, data.sampleRate)
+    void this.pushPlayback(samples, sampleRate)
   }
 
   private async pushPlayback(samples: Float32Array, sampleRate: number): Promise<void> {
     if (this.stopped) return
-    if (!this.playbackCtx) {
-      // Match the decoder's output rate so no resampling is needed.
-      const context = new AudioContext({ sampleRate })
-      this.playbackCtx = context
-      const url = workletUrl(PLAYBACK_WORKLET)
-      try {
-        await context.audioWorklet.addModule(url)
-      } finally {
-        URL.revokeObjectURL(url)
-      }
-      if (this.stopped) return
-      const node = new AudioWorkletNode(context, 'brazier-playback', {
-        numberOfInputs: 0,
-        outputChannelCount: [1],
-        processorOptions: { capacity: sampleRate * 4 }
-      })
-      node.connect(context.destination)
-      this.playbackNode = node
-    }
-    await this.playbackCtx.resume().catch(() => {})
+    // Frames arrive faster than the graph can be built, so the first caller
+    // owns setup and the rest await the same promise.
+    this.playbackReady ??= this.startPlayback(sampleRate)
+    await this.playbackReady
+    if (this.stopped) return
     this.playbackNode?.port.postMessage(samples)
+  }
+
+  private async startPlayback(sampleRate: number): Promise<void> {
+    // Match the decoder's output rate so no resampling is needed.
+    const context = new AudioContext({ sampleRate })
+    this.playbackCtx = context
+    await context.audioWorklet.addModule(playbackWorkletUrl)
+    if (this.stopped) return
+    const node = new AudioWorkletNode(context, 'brazier-playback', {
+      numberOfInputs: 0,
+      outputChannelCount: [1],
+      processorOptions: { capacity: sampleRate * 4 }
+    })
+    node.connect(context.destination)
+    this.playbackNode = node
+    await context.resume().catch(() => {})
   }
 
   private async startCapture(): Promise<void> {
     const context = new AudioContext({ sampleRate: SAMPLE_RATE })
     this.captureCtx = context
-    const url = workletUrl(CAPTURE_WORKLET)
-    try {
-      await context.audioWorklet.addModule(url)
-    } finally {
-      URL.revokeObjectURL(url)
-    }
+    await context.audioWorklet.addModule(captureWorkletUrl)
     if (this.stopped) return
 
     this.encoder = new AudioEncoder({
@@ -372,6 +295,7 @@ export class VoiceStream {
     this.decoder = null
     this.playbackNode?.port.postMessage('flush')
     this.playbackNode = null
+    this.playbackReady = null
     await this.captureCtx?.close().catch(() => {})
     this.captureCtx = null
     await this.playbackCtx?.close().catch(() => {})
