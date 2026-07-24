@@ -70,6 +70,10 @@ pub struct ModelDescriptor {
     pub capabilities: ModelCapabilities,
     #[serde(default)]
     pub size_bytes: Option<u64>,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

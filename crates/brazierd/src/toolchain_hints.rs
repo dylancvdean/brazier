@@ -41,6 +41,7 @@ pub enum ToolchainPackage {
     RocmHip,
     Cuda,
     Vulkan,
+    Uv,
 }
 
 pub fn detect_os() -> OsInfo {
@@ -261,6 +262,9 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         (PackageManager::Brew, ToolchainPackage::Vulkan) => {
             Some("brew install molten-vk vulkan-loader   # optional; Metal is preferred on macOS".into())
         }
+        (PackageManager::Brew, ToolchainPackage::Uv) => {
+            Some("brew install uv   # or: curl -LsSf https://astral.sh/uv/install.sh | sh".into())
+        }
 
         (PackageManager::Winget, ToolchainPackage::Git) => Some(
             "winget install --id Git.Git -e --source winget".into(),
@@ -277,6 +281,19 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         ),
         (PackageManager::Winget, ToolchainPackage::Vulkan) => Some(
             "Install the LunarG Vulkan SDK from https://vulkan.lunarg.com/sdk/home#windows and ensure your GPU driver is up to date".into(),
+        ),
+        (PackageManager::Winget, ToolchainPackage::Uv) => Some(
+            "winget install --id astral-sh.uv -e --source winget".into(),
+        ),
+
+        (PackageManager::Pacman, ToolchainPackage::Uv)
+        | (PackageManager::Apt, ToolchainPackage::Uv)
+        | (PackageManager::Dnf, ToolchainPackage::Uv)
+        | (PackageManager::Zypper, ToolchainPackage::Uv)
+        | (PackageManager::Apk, ToolchainPackage::Uv)
+        | (PackageManager::Xbps, ToolchainPackage::Uv)
+        | (PackageManager::Unknown, ToolchainPackage::Uv) => Some(
+            "Install uv from https://docs.astral.sh/uv/ and ensure it is on your PATH.".into(),
         ),
 
         (PackageManager::Unknown, ToolchainPackage::Git)
@@ -342,6 +359,12 @@ fn generic_fallback(package: ToolchainPackage, family: OsFamily) -> String {
         }
         (ToolchainPackage::Vulkan, _) => {
             "Install Vulkan headers/loader and drivers, or switch the build target to CPU.".into()
+        }
+        (ToolchainPackage::Uv, OsFamily::Macos) => {
+            "Install uv with Homebrew (`brew install uv`) or Astral's installer script, then ensure `uv` is on your PATH.".into()
+        }
+        (ToolchainPackage::Uv, _) => {
+            "Install uv from https://docs.astral.sh/uv/ and ensure it is on your PATH.".into()
         }
     }
 }

@@ -1,12 +1,18 @@
-//! On-disk GGUF model layout and listing.
+//! On-disk model layout and listing for GGUF and MLX weights.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::types::{ModelCapabilities, ModelDescriptor};
+use crate::{model_library, mlx::MlxKind, types::{ModelCapabilities, ModelDescriptor}};
 
 /// Content-keyed root for downloaded GGUF weights.
 pub fn gguf_root(data_dir: &Path) -> PathBuf {
     data_dir.join("models").join("gguf")
+}
+
+/// Root for downloaded MLX model snapshots (`owner/repo` directories).
+pub fn mlx_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("models").join("mlx")
 }
 
 /// Temporary directory for partial downloads.
@@ -31,17 +37,146 @@ pub fn model_id_for_path(gguf_root: &Path, file: &Path) -> anyhow::Result<String
     Ok(format!("gguf:{key}"))
 }
 
-/// Resolve a `gguf:...` model id to an absolute path under the data directory.
-pub fn path_for_model_id(data_dir: &Path, model_id: &str) -> anyhow::Result<PathBuf> {
-    let Some(key) = model_id.strip_prefix("gguf:") else {
-        anyhow::bail!("not a local GGUF model id: {model_id}");
-    };
-    anyhow::ensure!(!key.is_empty(), "empty GGUF model key");
+/// Resolve a local model id to an on-disk path.
+pub fn path_for_model_id(
+    data_dir: &Path,
+    model_id: &str,
+    extra_library_paths: &[PathBuf],
+) -> anyhow::Result<PathBuf> {
+    if let Some(path) = model_id.strip_prefix("gguf-ext:") {
+        return path_for_external_gguf_id(extra_library_paths, path);
+    }
+    if let Some(key) = model_id.strip_prefix("gguf:") {
+        return path_for_gguf_id(data_dir, key);
+    }
+    if let Some(payload) = model_id.strip_prefix("mlx-vlm-ext:") {
+        return path_for_external_mlx_id(extra_library_paths, payload);
+    }
+    if let Some(payload) = model_id.strip_prefix("mlx-ext:") {
+        return path_for_external_mlx_id(extra_library_paths, payload);
+    }
+    if let Some(key) = model_id.strip_prefix("mlx-vlm:") {
+        return path_for_mlx_id(data_dir, key);
+    }
+    if let Some(key) = model_id.strip_prefix("mlx:") {
+        return path_for_mlx_id(data_dir, key);
+    }
+    anyhow::bail!("unknown local model id: {model_id}");
+}
+
+fn validate_library_relative_key(key: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!key.is_empty(), "empty model key");
     anyhow::ensure!(
         !key.split('/')
             .any(|part| part.is_empty() || part == "." || part == ".."),
-        "invalid GGUF model key"
+        "invalid model key"
     );
+    Ok(())
+}
+
+fn validate_gguf_key(key: &str) -> anyhow::Result<()> {
+    validate_library_relative_key(key)
+}
+
+fn model_id_for_external_path(index: usize, root: &Path, file: &Path) -> anyhow::Result<String> {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let relative = file
+        .strip_prefix(&root)
+        .map_err(|_| anyhow::anyhow!("model path is outside the library root"))?;
+    let key = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    validate_gguf_key(&key)?;
+    Ok(format!("gguf-ext:{index}:{key}"))
+}
+
+pub fn path_for_external_gguf_id(
+    extra_library_paths: &[PathBuf],
+    payload: &str,
+) -> anyhow::Result<PathBuf> {
+    let (index_str, key) = payload
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid external GGUF model id"))?;
+    let index: usize = index_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid external library index"))?;
+    validate_gguf_key(key)?;
+    let root = extra_library_paths
+        .get(index)
+        .ok_or_else(|| anyhow::anyhow!("unknown external library index {index}"))?;
+    let path = root.join(key);
+    anyhow::ensure!(
+        path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf")),
+        "model path must end in .gguf"
+    );
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| anyhow::anyhow!("library root {}: {error}", root.display()))?;
+    let canonical_path = std::fs::canonicalize(&path)
+        .map_err(|_| anyhow::anyhow!("external model file not found for gguf-ext:{index}:{key}"))?;
+    anyhow::ensure!(
+        canonical_path.starts_with(&canonical_root),
+        "external model path escapes its library root"
+    );
+    Ok(canonical_path)
+}
+
+fn model_id_for_external_mlx(
+    kind: MlxKind,
+    index: usize,
+    root: &Path,
+    dir: &Path,
+) -> anyhow::Result<String> {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let relative = dir
+        .strip_prefix(&root)
+        .map_err(|_| anyhow::anyhow!("model path is outside the library root"))?;
+    let key = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    validate_library_relative_key(&key)?;
+    Ok(format!("{}-ext:{index}:{key}", engine_prefix(kind)))
+}
+
+pub fn path_for_external_mlx_id(
+    extra_library_paths: &[PathBuf],
+    payload: &str,
+) -> anyhow::Result<PathBuf> {
+    let (index_str, key) = payload
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid external MLX model id"))?;
+    let index: usize = index_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid external library index"))?;
+    validate_library_relative_key(key)?;
+    let root = extra_library_paths
+        .get(index)
+        .ok_or_else(|| anyhow::anyhow!("unknown external library index {index}"))?;
+    let path = root.join(key);
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| anyhow::anyhow!("library root {}: {error}", root.display()))?;
+    let canonical_path = std::fs::canonicalize(&path)
+        .map_err(|_| anyhow::anyhow!("external MLX model directory not found for {payload}"))?;
+    anyhow::ensure!(
+        canonical_path.starts_with(&canonical_root),
+        "external model path escapes its library root"
+    );
+    anyhow::ensure!(
+        directory_is_mlx_model(&canonical_path),
+        "external MLX model directory is missing config/weights"
+    );
+    Ok(canonical_path)
+}
+
+/// Resolve a `gguf:...` model id to an absolute path under the data directory.
+pub fn path_for_gguf_id(data_dir: &Path, key: &str) -> anyhow::Result<PathBuf> {
+    validate_gguf_key(key)?;
     let path = gguf_root(data_dir).join(key);
     anyhow::ensure!(
         path.extension()
@@ -49,6 +184,58 @@ pub fn path_for_model_id(data_dir: &Path, model_id: &str) -> anyhow::Result<Path
         "model path must end in .gguf"
     );
     Ok(path)
+}
+
+fn path_for_mlx_id(data_dir: &Path, key: &str) -> anyhow::Result<PathBuf> {
+    validate_repo_id(key)?;
+    Ok(mlx_root(data_dir).join(key))
+}
+
+pub fn mlx_model_id(engine: MlxKind, repo_id: &str) -> anyhow::Result<String> {
+    validate_repo_id(repo_id)?;
+    Ok(format!("{}:{repo_id}", engine_prefix(engine)))
+}
+
+fn engine_prefix(engine: MlxKind) -> &'static str {
+    match engine {
+        MlxKind::Lm => "mlx",
+        MlxKind::Vlm => "mlx-vlm",
+    }
+}
+
+pub fn mlx_kind_for_model_id(model_id: &str) -> Option<MlxKind> {
+    MlxKind::from_model_id(model_id)
+}
+
+pub fn mlx_repo_id(model_id: &str) -> anyhow::Result<&str> {
+    if model_id.starts_with("mlx-ext:") || model_id.starts_with("mlx-vlm-ext:") {
+        anyhow::bail!("not a managed MLX repo id: {model_id}");
+    }
+    let key = model_id
+        .strip_prefix("mlx-vlm:")
+        .or_else(|| model_id.strip_prefix("mlx:"))
+        .ok_or_else(|| anyhow::anyhow!("not an MLX model id: {model_id}"))?;
+    validate_repo_id(key)?;
+    Ok(key)
+}
+
+/// Server argument for an MLX model (local directory or Hugging Face repo id).
+pub fn mlx_server_model_ref(
+    data_dir: &Path,
+    model_id: &str,
+    extra_library_paths: &[PathBuf],
+) -> anyhow::Result<String> {
+    if model_id.starts_with("mlx-ext:") || model_id.starts_with("mlx-vlm-ext:") {
+        let local = path_for_model_id(data_dir, model_id, extra_library_paths)?;
+        return Ok(local.display().to_string());
+    }
+    let repo_id = mlx_repo_id(model_id)?;
+    let local = mlx_root(data_dir).join(repo_id);
+    if local.is_dir() && directory_is_mlx_model(&local) {
+        Ok(local.display().to_string())
+    } else {
+        Ok(repo_id.to_owned())
+    }
 }
 
 /// Destination path for a Hugging Face GGUF artifact.
@@ -60,6 +247,41 @@ pub fn download_destination(
     validate_repo_id(repo_id)?;
     validate_filename(filename)?;
     Ok(gguf_root(data_dir).join(repo_id).join(filename))
+}
+
+/// Destination directory for an MLX model snapshot.
+pub fn mlx_download_root(data_dir: &Path, repo_id: &str) -> anyhow::Result<PathBuf> {
+    validate_repo_id(repo_id)?;
+    Ok(mlx_root(data_dir).join(repo_id))
+}
+
+/// Destination path for one file inside an MLX snapshot.
+pub fn mlx_download_destination(
+    data_dir: &Path,
+    repo_id: &str,
+    filename: &str,
+) -> anyhow::Result<PathBuf> {
+    validate_repo_id(repo_id)?;
+    validate_relative_path(filename)?;
+    Ok(mlx_root(data_dir).join(repo_id).join(filename))
+}
+
+fn validate_relative_path(path: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !path.is_empty() && path.len() <= 260,
+        "invalid relative path"
+    );
+    anyhow::ensure!(
+        !path.starts_with('/') && !path.contains('\\'),
+        "path must be relative"
+    );
+    anyhow::ensure!(
+        !path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == ".."),
+        "path must not contain empty or parent segments"
+    );
+    Ok(())
 }
 
 pub fn validate_repo_id(repo_id: &str) -> anyhow::Result<()> {
@@ -109,6 +331,10 @@ fn is_projector(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.to_ascii_lowercase().contains("mmproj"))
+}
+
+pub fn is_projector_file(path: &Path) -> bool {
+    is_projector(path)
 }
 
 pub fn projector_for_model(model_path: &Path) -> Option<PathBuf> {
@@ -162,6 +388,302 @@ pub fn list_gguf_models(data_dir: &Path) -> anyhow::Result<Vec<ModelDescriptor>>
     Ok(models)
 }
 
+pub fn directory_is_mlx_model(dir: &Path) -> bool {
+    if !dir.join("config.json").is_file() {
+        return false;
+    }
+    std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            name.ends_with(".safetensors")
+                || name.ends_with(".npz")
+                || name == "model.safetensors.index.json"
+        })
+}
+
+/// Classify a local MLX snapshot as text (mlx-lm) or vision (mlx-vlm).
+pub fn detect_mlx_kind(dir: &Path) -> MlxKind {
+    let Ok(text) = std::fs::read_to_string(dir.join("config.json")) else {
+        return MlxKind::Lm;
+    };
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+        if config_value_indicates_vlm(&value) {
+            return MlxKind::Vlm;
+        }
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("\"vision_config\"")
+        || lower.contains("\"mm_projector\"")
+        || lower.contains("\"multi_modal_projector\"")
+        || lower.contains("\"image_processor_config\"")
+        || lower.contains("\"model_type\": \"llava")
+        || lower.contains("\"model_type\": \"paligemma")
+        || lower.contains("\"model_type\": \"qwen2_vl")
+        || lower.contains("\"model_type\": \"idefics")
+        || lower.contains("\"model_type\": \"mllama")
+    {
+        MlxKind::Vlm
+    } else {
+        MlxKind::Lm
+    }
+}
+
+/// Resolve which MLX server to launch for a model, preferring on-disk config over id prefix.
+pub fn resolve_mlx_launch_kind(
+    data_dir: &Path,
+    model_id: &str,
+    extra_library_paths: &[PathBuf],
+) -> anyhow::Result<(MlxKind, Option<String>)> {
+    let id_kind = MlxKind::from_model_id(model_id)
+        .ok_or_else(|| anyhow::anyhow!("not an MLX model id: {model_id}"))?;
+    let detected = match path_for_model_id(data_dir, model_id, extra_library_paths) {
+        Ok(path) if path.is_dir() && directory_is_mlx_model(&path) => detect_mlx_kind(&path),
+        _ => id_kind,
+    };
+    let notice = if detected != id_kind {
+        Some(format!(
+            "Model id says {} but config indicates {}; using {}.",
+            id_kind.engine_id(),
+            detected.engine_id(),
+            detected.engine_id()
+        ))
+    } else {
+        None
+    };
+    Ok((detected, notice))
+}
+
+fn config_value_indicates_vlm(value: &serde_json::Value) -> bool {
+    if value.get("vision_config").is_some()
+        || value.get("mm_projector").is_some()
+        || value.get("multi_modal_projector").is_some()
+        || value.get("image_processor_config").is_some()
+    {
+        return true;
+    }
+    if let Some(model_type) = value.get("model_type").and_then(|entry| entry.as_str()) {
+        let model_type = model_type.to_ascii_lowercase();
+        if model_type.contains("vl")
+            || model_type.contains("vision")
+            || model_type.contains("llava")
+            || model_type.contains("paligemma")
+            || model_type.contains("idefics")
+            || model_type.contains("mllama")
+        {
+            return true;
+        }
+    }
+    if let Some(architectures) = value.get("architectures").and_then(|entry| entry.as_array()) {
+        if architectures.iter().filter_map(|entry| entry.as_str()).any(|name| {
+            let name = name.to_ascii_lowercase();
+            name.contains("vision") || name.contains("vl") || name.contains("llava")
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn mlx_capabilities(kind: MlxKind, dir: &Path) -> ModelCapabilities {
+    let mut input_modalities = vec!["text".into()];
+    if matches!(kind, MlxKind::Vlm) {
+        input_modalities.push("image".into());
+    }
+    let config = std::fs::read_to_string(dir.join("config.json")).ok();
+    if config.as_deref().is_some_and(|text| {
+        let lower = text.to_ascii_lowercase();
+        lower.contains("vision") || lower.contains("image") || lower.contains("vl")
+    }) {
+        if !input_modalities.iter().any(|value| value == "image") {
+            input_modalities.push("image".into());
+        }
+    }
+    ModelCapabilities {
+        input_modalities,
+        output_modalities: vec!["text".into()],
+        streaming: true,
+        tools: true,
+        reasoning: true,
+    }
+}
+
+fn directory_size_bytes(dir: &Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            total += std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        }
+    }
+    total
+}
+
+pub fn list_mlx_models(data_dir: &Path) -> anyhow::Result<Vec<ModelDescriptor>> {
+    let root = mlx_root(data_dir);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut models = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Ok(models);
+    };
+    for owner_entry in entries.flatten() {
+        let owner_path = owner_entry.path();
+        if !owner_path.is_dir() {
+            continue;
+        }
+        let owner = owner_entry.file_name().to_string_lossy().into_owned();
+        let Ok(name_entries) = std::fs::read_dir(&owner_path) else {
+            continue;
+        };
+        for name_entry in name_entries.flatten() {
+            let model_dir = name_entry.path();
+            if !model_dir.is_dir() || !directory_is_mlx_model(&model_dir) {
+                continue;
+            }
+            let repo_id = format!(
+                "{}/{}",
+                owner,
+                name_entry.file_name().to_string_lossy()
+            );
+            validate_repo_id(&repo_id).ok();
+            let kind = detect_mlx_kind(&model_dir);
+            let id = mlx_model_id(kind, &repo_id).unwrap_or_else(|_| {
+                format!("{}:{repo_id}", engine_prefix(kind))
+            });
+            models.push(ModelDescriptor {
+                id,
+                name: repo_id.clone(),
+                engine: kind.engine_id().to_owned(),
+                capabilities: mlx_capabilities(kind, &model_dir),
+                size_bytes: Some(directory_size_bytes(&model_dir)),
+                read_only: false,
+                library_label: None,
+            });
+        }
+    }
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(models)
+}
+
+/// Scan all on-disk model stores.
+pub fn list_local_models(
+    data_dir: &Path,
+    extra_library_paths: &[PathBuf],
+) -> anyhow::Result<Vec<ModelDescriptor>> {
+    let mut models = list_gguf_models(data_dir)?;
+    let mut seen_paths = models
+        .iter()
+        .filter_map(|model| path_for_model_id(data_dir, &model.id, extra_library_paths).ok())
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .collect::<HashSet<_>>();
+    for model in list_mlx_models(data_dir)? {
+        if let Ok(path) = path_for_model_id(data_dir, &model.id, extra_library_paths) {
+            if let Ok(canonical) = std::fs::canonicalize(path) {
+                seen_paths.insert(canonical);
+            }
+        }
+        models.push(model);
+    }
+    for (index, root) in extra_library_paths.iter().enumerate() {
+        if !root.is_dir() {
+            continue;
+        }
+        let label = model_library::label_for_library_path(&root.display().to_string());
+        list_external_models_from_root(root, index, &label, &mut models, &mut seen_paths)?;
+    }
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(models)
+}
+
+fn list_external_models_from_root(
+    root: &Path,
+    index: usize,
+    label: &str,
+    models: &mut Vec<ModelDescriptor>,
+    seen_paths: &mut HashSet<PathBuf>,
+) -> anyhow::Result<()> {
+    collect_external_library(root, root, index, label, models, seen_paths)
+}
+
+fn collect_external_library(
+    root: &Path,
+    dir: &Path,
+    index: usize,
+    label: &str,
+    models: &mut Vec<ModelDescriptor>,
+    seen_paths: &mut HashSet<PathBuf>,
+) -> anyhow::Result<()> {
+    let has_projector = dir_has_projector(dir);
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| anyhow::anyhow!("read model directory {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            if directory_is_mlx_model(&path) {
+                let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if !seen_paths.insert(canonical.clone()) {
+                    continue;
+                }
+                let kind = detect_mlx_kind(&path);
+                let id = model_id_for_external_mlx(kind, index, root, &canonical)?;
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| id.clone());
+                models.push(ModelDescriptor {
+                    id,
+                    name,
+                    engine: kind.engine_id().to_owned(),
+                    capabilities: mlx_capabilities(kind, &path),
+                    size_bytes: Some(directory_size_bytes(&path)),
+                    read_only: true,
+                    library_label: Some(label.to_owned()),
+                });
+                continue;
+            }
+            collect_external_library(root, &path, index, label, models, seen_paths)?;
+            continue;
+        }
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        {
+            continue;
+        }
+        if is_projector(&path) {
+            continue;
+        }
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if !seen_paths.insert(canonical.clone()) {
+            continue;
+        }
+        let id = model_id_for_external_path(index, root, &canonical)?;
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| id.clone());
+        models.push(ModelDescriptor {
+            id,
+            name,
+            engine: "llama.cpp".to_owned(),
+            capabilities: gguf_capabilities(has_projector),
+            size_bytes: std::fs::metadata(&path).ok().map(|meta| meta.len()),
+            read_only: true,
+            library_label: Some(label.to_owned()),
+        });
+    }
+    Ok(())
+}
+
 fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> anyhow::Result<()> {
     let has_projector = dir_has_projector(dir);
     let entries = std::fs::read_dir(dir)
@@ -193,33 +715,58 @@ fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> a
             engine: "llama.cpp".to_owned(),
             capabilities: gguf_capabilities(has_projector),
             size_bytes: std::fs::metadata(&path).ok().map(|meta| meta.len()),
+            read_only: false,
+            library_label: None,
         });
     }
     Ok(())
 }
 
-/// Delete a downloaded model file and prune empty parent directories.
-pub fn delete_model(data_dir: &Path, model_id: &str) -> anyhow::Result<PathBuf> {
-    let path = path_for_model_id(data_dir, model_id)?;
-    anyhow::ensure!(path.is_file(), "model file not found for {model_id}");
-    std::fs::remove_file(&path)
-        .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
-    let root = gguf_root(data_dir);
-    let mut directory = path.parent().map(Path::to_path_buf);
+/// Delete a downloaded model and prune empty parent directories.
+pub fn delete_model(
+    data_dir: &Path,
+    model_id: &str,
+    extra_library_paths: &[PathBuf],
+) -> anyhow::Result<PathBuf> {
+    if model_id.starts_with("gguf-ext:") {
+        anyhow::bail!("external library models cannot be deleted from Brazier");
+    }
+    if model_id.starts_with("mlx-ext:") || model_id.starts_with("mlx-vlm-ext:") {
+        anyhow::bail!("external library models cannot be deleted from Brazier");
+    }
+    if model_id.starts_with("gguf:") {
+        let path = path_for_gguf_id(data_dir, model_id.strip_prefix("gguf:").unwrap())?;
+        anyhow::ensure!(path.is_file(), "model file not found for {model_id}");
+        std::fs::remove_file(&path)
+            .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
+        prune_empty_parents(path.parent(), &gguf_root(data_dir));
+        return Ok(path);
+    }
+    if model_id.starts_with("mlx:") || model_id.starts_with("mlx-vlm:") {
+        let path = path_for_model_id(data_dir, model_id, extra_library_paths)?;
+        anyhow::ensure!(path.is_dir(), "model directory not found for {model_id}");
+        std::fs::remove_dir_all(&path)
+            .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
+        prune_empty_parents(path.parent(), &mlx_root(data_dir));
+        return Ok(path);
+    }
+    anyhow::bail!("unknown local model id: {model_id}");
+}
+
+fn prune_empty_parents(mut directory: Option<&Path>, root: &Path) {
     while let Some(current) = directory {
-        if current == root || !current.starts_with(&root) {
+        if current == root || !current.starts_with(root) {
             break;
         }
-        let empty = std::fs::read_dir(&current)
+        let empty = std::fs::read_dir(current)
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(false);
         if !empty {
             break;
         }
-        let _ = std::fs::remove_dir(&current);
-        directory = current.parent().map(Path::to_path_buf);
+        let _ = std::fs::remove_dir(current);
+        directory = current.parent();
     }
-    Ok(path)
 }
 
 /// Prefer a practical default quant from a list of GGUF filenames.
@@ -262,7 +809,7 @@ mod tests {
         std::fs::write(&file, b"gguf").unwrap();
         let id = model_id_for_path(&root, &file).unwrap();
         assert_eq!(id, "gguf:unsloth/Tiny-GGUF/model-Q4_K_M.gguf");
-        let resolved = path_for_model_id(dir.path(), &id).unwrap();
+        let resolved = path_for_model_id(dir.path(), &id, &[]).unwrap();
         assert_eq!(resolved, file);
     }
 
@@ -301,8 +848,8 @@ mod tests {
     #[test]
     fn rejects_path_traversal_in_model_id() {
         let dir = tempdir().unwrap();
-        assert!(path_for_model_id(dir.path(), "gguf:../escape.gguf").is_err());
-        assert!(path_for_model_id(dir.path(), "gguf:/abs.gguf").is_err());
+        assert!(path_for_model_id(dir.path(), "gguf:../escape.gguf", &[]).is_err());
+        assert!(path_for_model_id(dir.path(), "gguf:/abs.gguf", &[]).is_err());
         assert!(validate_filename("../x.gguf").is_err());
         assert!(validate_filename("ok/nested-q4_k_m.gguf").is_ok());
         assert!(validate_repo_id("../evil/name").is_err());
@@ -320,5 +867,104 @@ mod tests {
             prefer_gguf_filename(&names).as_deref(),
             Some("model-q4_k_m.gguf")
         );
+    }
+
+    #[test]
+    fn resolve_mlx_launch_kind_prefers_config() {
+        let dir = tempdir().unwrap();
+        let root = mlx_root(dir.path());
+        let model = root.join("acme/vision");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(
+            model.join("config.json"),
+            r#"{"model_type":"llava","vision_config":{"hidden_size":1024}}"#,
+        )
+        .unwrap();
+        std::fs::write(model.join("weights.safetensors"), b"mlx").unwrap();
+        let (kind, notice) =
+            resolve_mlx_launch_kind(dir.path(), "mlx:acme/vision", &[]).unwrap();
+        assert_eq!(kind, MlxKind::Vlm);
+        assert!(notice.is_some());
+    }
+
+    #[test]
+    fn detect_mlx_kind_reads_config() {
+        let dir = tempdir().unwrap();
+        let text = dir.path().join("text");
+        std::fs::create_dir_all(&text).unwrap();
+        std::fs::write(text.join("config.json"), r#"{"model_type":"qwen2"}"#).unwrap();
+        std::fs::write(text.join("weights.safetensors"), b"mlx").unwrap();
+        assert_eq!(detect_mlx_kind(&text), MlxKind::Lm);
+
+        let vision = dir.path().join("vision");
+        std::fs::create_dir_all(&vision).unwrap();
+        std::fs::write(
+            vision.join("config.json"),
+            r#"{"model_type":"llava","vision_config":{"hidden_size":1024}}"#,
+        )
+        .unwrap();
+        std::fs::write(vision.join("weights.safetensors"), b"mlx").unwrap();
+        assert_eq!(detect_mlx_kind(&vision), MlxKind::Vlm);
+    }
+
+    #[test]
+    fn lists_mlx_models_with_correct_engine() {
+        let dir = tempdir().unwrap();
+        let root = mlx_root(dir.path());
+        let text = root.join("acme/text");
+        std::fs::create_dir_all(&text).unwrap();
+        std::fs::write(text.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
+        std::fs::write(text.join("model.safetensors"), b"mlx").unwrap();
+        let models = list_mlx_models(dir.path()).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "mlx:acme/text");
+        assert_eq!(models[0].engine, "mlx-lm");
+    }
+
+    #[test]
+    fn lists_external_mlx_model_dirs() {
+        let dir = tempdir().unwrap();
+        let external = dir.path().join("external");
+        let model_dir = external.join("vendor/my-mlx");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
+        std::fs::write(model_dir.join("weights.safetensors"), b"mlx").unwrap();
+        let extra = vec![external.clone()];
+        let models = list_local_models(dir.path(), &extra).unwrap();
+        assert_eq!(models.len(), 1);
+        assert!(models[0].id.starts_with("mlx-ext:0:"));
+        assert_eq!(models[0].engine, "mlx-lm");
+        assert!(models[0].read_only);
+    }
+
+    #[test]
+    fn lists_external_library_gguf_files() {
+        let dir = tempdir().unwrap();
+        let external = dir.path().join("external");
+        let file = external.join("vendor/model-q4_k_m.gguf");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"gguf").unwrap();
+        let extra = vec![external.clone()];
+        let models = list_local_models(dir.path(), &extra).unwrap();
+        assert_eq!(models.len(), 1);
+        assert!(models[0].id.starts_with("gguf-ext:0:"));
+        assert!(models[0].read_only);
+        assert_eq!(
+            path_for_model_id(dir.path(), &models[0].id, &extra).unwrap(),
+            std::fs::canonicalize(&file).unwrap()
+        );
+    }
+
+    #[test]
+    fn dedupes_when_library_path_overlaps_primary_store() {
+        let dir = tempdir().unwrap();
+        let root = gguf_root(dir.path());
+        let file = root.join("shared/model.gguf");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"gguf").unwrap();
+        let models = list_local_models(dir.path(), &[root.clone()]).unwrap();
+        assert_eq!(models.len(), 1);
+        assert!(models[0].id.starts_with("gguf:"));
+        assert!(!models[0].read_only);
     }
 }

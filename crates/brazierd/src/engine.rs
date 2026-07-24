@@ -2,14 +2,17 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use anyhow::Context;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::{
     llama::{self, LlamaServer},
+    mlx::{self, MlxKind, MlxServer},
     models_store,
     progress::{ProgressCallback, ProgressEvent},
     runtime_settings::{self, RuntimeSettings},
+    runtimes,
     tools,
     types::{ChatCompletionRequest, ModelDescriptor, OpenAiMessage},
 };
@@ -47,11 +50,23 @@ struct LlamaState {
     server: Option<LlamaServer>,
 }
 
+struct MlxState {
+    lm_python: Option<PathBuf>,
+    vlm_python: Option<PathBuf>,
+    server: Option<MlxServer>,
+}
+
+enum ActiveBackend {
+    Llama(String),
+    Mlx(String),
+}
+
 /// Runtime that lists on-disk GGUF models and serves them through llama-server.
 pub struct Runtime {
     data_dir: PathBuf,
     http: reqwest::Client,
     llama: Mutex<LlamaState>,
+    mlx: Mutex<MlxState>,
     settings: Mutex<RuntimeSettings>,
     models_cache: Mutex<Option<Vec<ModelDescriptor>>>,
 }
@@ -94,6 +109,11 @@ impl Runtime {
                 binary: discovered,
                 server: None,
             }),
+            mlx: Mutex::new(MlxState {
+                lm_python: settings.mlx_lm_python.as_ref().map(PathBuf::from),
+                vlm_python: settings.mlx_vlm_python.as_ref().map(PathBuf::from),
+                server: None,
+            }),
             settings: Mutex::new(settings),
             models_cache: Mutex::new(None),
         })
@@ -107,11 +127,29 @@ impl Runtime {
         if let Some(models) = self.models_cache.lock().await.clone() {
             return Ok(models);
         }
+        let settings = self.settings.lock().await.clone();
+        let extra_paths: Vec<PathBuf> = settings
+            .extra_model_library_paths
+            .iter()
+            .map(PathBuf::from)
+            .collect();
         let data_dir = self.data_dir.clone();
-        let models = tokio::task::spawn_blocking(move || models_store::list_gguf_models(&data_dir))
-            .await??;
+        let models = tokio::task::spawn_blocking(move || {
+            models_store::list_local_models(&data_dir, &extra_paths)
+        })
+        .await??;
         *self.models_cache.lock().await = Some(models.clone());
         Ok(models)
+    }
+
+    async fn extra_library_paths(&self) -> Vec<PathBuf> {
+        self.settings
+            .lock()
+            .await
+            .extra_model_library_paths
+            .iter()
+            .map(PathBuf::from)
+            .collect()
     }
 
     pub fn data_dir(&self) -> &PathBuf {
@@ -135,11 +173,20 @@ impl Runtime {
         } else {
             None
         };
+        let mlx_probe = if options.probe {
+            self.mlx_diagnostics().await
+        } else {
+            None
+        };
         serde_json::json!({
             "id": self.id(),
             "llama_binary": binary,
             "llama_server": running,
             "llama_probe": llama_probe,
+            "mlx_lm_python": self.mlx.lock().await.lm_python.as_ref().map(|path| path.display().to_string()),
+            "mlx_vlm_python": self.mlx.lock().await.vlm_python.as_ref().map(|path| path.display().to_string()),
+            "mlx_server": self.mlx_server_summary().await,
+            "mlx_probe": mlx_probe,
             "managed_binary_path": llama::managed_binary_path(&self.data_dir).display().to_string(),
             "platform_asset_tag": llama::platform_asset_tag(),
             "settings": settings,
@@ -168,29 +215,73 @@ impl Runtime {
         Some(llama::probe_server(&self.http, &base_url).await)
     }
 
+    pub async fn mlx_server_summary(&self) -> Option<serde_json::Value> {
+        let guard = self.mlx.lock().await;
+        guard.server.as_ref().map(|server| {
+            serde_json::json!({
+                "base_url": server.base_url,
+                "model_ref": server.model_ref,
+                "engine": server.kind.engine_id(),
+                "python": server.python.display().to_string(),
+            })
+        })
+    }
+
+    pub async fn mlx_diagnostics(&self) -> Option<serde_json::Value> {
+        let guard = self.mlx.lock().await;
+        let server = guard.server.as_ref()?;
+        let base_url = server.base_url.clone();
+        drop(guard);
+        Some(mlx::probe_server(&self.http, &base_url).await)
+    }
+
+    pub async fn active_runtimes(&self) -> runtimes::ActiveRuntimes {
+        let llama = self.llama.lock().await.binary.clone();
+        let mlx = self.mlx.lock().await;
+        runtimes::ActiveRuntimes {
+            llama,
+            mlx_lm: mlx.lm_python.clone(),
+            mlx_vlm: mlx.vlm_python.clone(),
+        }
+    }
+
     pub async fn settings(&self) -> RuntimeSettings {
         self.settings.lock().await.clone()
     }
 
     pub async fn update_settings(
         &self,
-        settings: RuntimeSettings,
+        mut settings: RuntimeSettings,
     ) -> anyhow::Result<RuntimeSettings> {
+        settings.extra_model_library_paths =
+            crate::model_library::normalize_library_paths(&settings.extra_model_library_paths)?;
         settings.validate()?;
         runtime_settings::save(&self.data_dir, &settings).await?;
         let mut current = self.settings.lock().await;
         let target_changed = current.target != settings.target;
+        let library_paths_changed =
+            current.extra_model_library_paths != settings.extra_model_library_paths;
         if *current != settings {
             let mut llama = self.llama.lock().await;
             if let Some(mut server) = llama.server.take() {
+                let _ = server.stop().await;
+            }
+            let mut mlx = self.mlx.lock().await;
+            if let Some(mut server) = mlx.server.take() {
                 let _ = server.stop().await;
             }
             // A pinned binary survives target changes; otherwise re-resolve.
             if target_changed && settings.binary_override.is_none() {
                 llama.binary = None;
             }
+            mlx.lm_python = settings.mlx_lm_python.as_ref().map(PathBuf::from);
+            mlx.vlm_python = settings.mlx_vlm_python.as_ref().map(PathBuf::from);
         }
         *current = settings.clone();
+        drop(current);
+        if library_paths_changed {
+            self.invalidate_models_cache().await;
+        }
         Ok(settings)
     }
 
@@ -230,6 +321,71 @@ impl Runtime {
         Ok(path)
     }
 
+    /// Pin a MLX Python interpreter and persist the choice.
+    pub async fn activate_python(&self, kind: MlxKind, path: PathBuf) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            path.is_file(),
+            "runtime Python interpreter not found: {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            mlx::python_appears_runnable(&path, kind),
+            "{} failed an import check for {}",
+            path.display(),
+            kind.engine_id()
+        );
+        let mut settings = self.settings.lock().await;
+        match kind {
+            MlxKind::Lm => settings.mlx_lm_python = Some(path.display().to_string()),
+            MlxKind::Vlm => settings.mlx_vlm_python = Some(path.display().to_string()),
+        }
+        runtime_settings::save(&self.data_dir, &settings).await?;
+        drop(settings);
+        let mut mlx = self.mlx.lock().await;
+        if let Some(mut server) = mlx.server.take() {
+            let _ = server.stop().await;
+        }
+        match kind {
+            MlxKind::Lm => mlx.lm_python = Some(path.clone()),
+            MlxKind::Vlm => mlx.vlm_python = Some(path.clone()),
+        }
+        Ok(path)
+    }
+
+    /// Forget a runtime that was removed from disk.
+    pub async fn release_runtime(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.release_binary(path).await?;
+        let mut mlx = self.mlx.lock().await;
+        let served_from_deleted = mlx
+            .server
+            .as_ref()
+            .is_some_and(|server| server.python == path);
+        if served_from_deleted && let Some(mut server) = mlx.server.take() {
+            let _ = server.stop().await;
+        }
+        if mlx.lm_python.as_deref() == Some(path) {
+            mlx.lm_python = None;
+        }
+        if mlx.vlm_python.as_deref() == Some(path) {
+            mlx.vlm_python = None;
+        }
+        drop(mlx);
+        let mut settings = self.settings.lock().await;
+        let mut changed = false;
+        if settings.mlx_lm_python.as_deref() == Some(&path.display().to_string()) {
+            settings.mlx_lm_python = None;
+            changed = true;
+        }
+        if settings.mlx_vlm_python.as_deref() == Some(&path.display().to_string()) {
+            settings.mlx_vlm_python = None;
+            changed = true;
+        }
+        if changed {
+            runtime_settings::save(&self.data_dir, &settings).await?;
+        }
+        Ok(())
+    }
+
     /// Forget a binary that was removed from disk. Clears the pin if it pointed
     /// at the deleted path and stops any server running from it.
     pub async fn release_binary(&self, path: &std::path::Path) -> anyhow::Result<()> {
@@ -253,32 +409,61 @@ impl Runtime {
         Ok(())
     }
 
-    /// Stop the server if it is serving the given model file (used before the
-    /// model is deleted from the library).
-    pub async fn release_model(&self, model_path: &std::path::Path) {
-        let mut guard = self.llama.lock().await;
-        if guard
-            .server
-            .as_ref()
-            .is_some_and(|server| server.model_path == model_path)
-            && let Some(mut server) = guard.server.take()
-        {
-            let _ = server.stop().await;
+    /// Stop the server if it is serving the given model (used before deletion).
+    pub async fn release_model(&self, model_id: &str) {
+        if model_id.starts_with("gguf:") || model_id.starts_with("gguf-ext:") {
+            let extra = self.extra_library_paths().await;
+            if let Ok(model_path) =
+                models_store::path_for_model_id(&self.data_dir, model_id, &extra)
+            {
+                let mut guard = self.llama.lock().await;
+                if guard
+                    .server
+                    .as_ref()
+                    .is_some_and(|server| server.model_path == model_path)
+                    && let Some(mut server) = guard.server.take()
+                {
+                    let _ = server.stop().await;
+                }
+            }
+            return;
+        }
+        if model_id.starts_with("mlx:") || model_id.starts_with("mlx-vlm:") || model_id.starts_with("mlx-ext:") || model_id.starts_with("mlx-vlm-ext:") {
+            if let Ok(model_ref) = models_store::mlx_server_model_ref(
+                &self.data_dir,
+                model_id,
+                &self.extra_library_paths().await,
+            ) {
+                let mut guard = self.mlx.lock().await;
+                if guard
+                    .server
+                    .as_ref()
+                    .is_some_and(|server| server.model_ref == model_ref)
+                    && let Some(mut server) = guard.server.take()
+                {
+                    let _ = server.stop().await;
+                }
+            }
         }
     }
 
     /// Discover an existing binary or download a managed release.
     pub async fn ensure_llama_binary(&self) -> anyhow::Result<PathBuf> {
-        self.ensure_llama_binary_with_progress(Box::new(|_| {}))
+        self.ensure_llama_binary_with_progress(None, Box::new(|_| {}))
             .await
     }
 
     pub async fn ensure_llama_binary_with_progress(
         &self,
+        target_override: Option<crate::runtime_settings::RuntimeTarget>,
         mut progress: ProgressCallback,
     ) -> anyhow::Result<PathBuf> {
-        let target = self.settings.lock().await.target;
-        {
+        let target = if let Some(target) = target_override {
+            target
+        } else {
+            self.settings.lock().await.target
+        };
+        if target_override.is_none() {
             let guard = self.llama.lock().await;
             if let Some(path) = &guard.binary
                 && path.is_file()
@@ -298,8 +483,10 @@ impl Runtime {
         }
         let path = llama::ensure_binary_with_progress(&self.http, &self.data_dir, target, progress)
             .await?;
-        let mut guard = self.llama.lock().await;
-        guard.binary = Some(path.clone());
+        if target_override.is_none() {
+            let mut guard = self.llama.lock().await;
+            guard.binary = Some(path.clone());
+        }
         Ok(path)
     }
 
@@ -335,48 +522,156 @@ impl Runtime {
         Ok(())
     }
 
-    fn resolve_model_path(&self, model: &str) -> anyhow::Result<std::path::PathBuf> {
-        if model.is_empty() {
-            anyhow::bail!("a model id is required; download a GGUF and select it first");
+    async fn ensure_mlx_server_for_model(
+        &self,
+        model_id: &str,
+        kind: MlxKind,
+    ) -> anyhow::Result<()> {
+        let settings = self.settings.lock().await.clone();
+        let python = {
+            let guard = self.mlx.lock().await;
+            let selected = match kind {
+                MlxKind::Lm => guard.lm_python.clone(),
+                MlxKind::Vlm => guard.vlm_python.clone(),
+            };
+            if let Some(path) = selected.filter(|path| path.is_file()) {
+                path
+            } else {
+                drop(guard);
+                anyhow::bail!(
+                    "no active {} runtime; build and activate one in Runtimes first",
+                    kind.engine_id()
+                );
+            }
+        };
+        let extra = self.extra_library_paths().await;
+        let model_ref =
+            models_store::mlx_server_model_ref(&self.data_dir, model_id, &extra)?;
+
+        let mut guard = self.mlx.lock().await;
+        if let Some(server) = guard.server.as_mut() {
+            if server.kind == kind
+                && server.model_ref == model_ref
+                && server.python == python
+                && server.is_running()
+            {
+                return Ok(());
+            }
+            let _ = server.stop().await;
+            guard.server = None;
         }
-        if !model.starts_with("gguf:") {
-            anyhow::bail!(
-                "unknown model `{model}`; download a GGUF model (ids look like `gguf:…`)"
-            );
+
+        let server = MlxServer::start(&python, kind, &model_ref, &settings).await?;
+        guard.server = Some(server);
+        match kind {
+            MlxKind::Lm => guard.lm_python = Some(python),
+            MlxKind::Vlm => guard.vlm_python = Some(python),
         }
-        let model_path = models_store::path_for_model_id(&self.data_dir, model)?;
-        anyhow::ensure!(model_path.is_file(), "model file not found for {model}");
-        Ok(model_path)
+        Ok(())
     }
 
-    /// Base URL of the running llama-server for the requested model.
+    fn resolve_model(
+        &self,
+        model: &str,
+        extra_library_paths: &[PathBuf],
+    ) -> anyhow::Result<(ActiveBackend, String)> {
+        if model.is_empty() {
+            anyhow::bail!("a model id is required; download a model and select it first");
+        }
+        if model.starts_with("gguf:") || model.starts_with("gguf-ext:") {
+            let model_path =
+                models_store::path_for_model_id(&self.data_dir, model, extra_library_paths)?;
+            anyhow::ensure!(model_path.is_file(), "model file not found for {model}");
+            return Ok((ActiveBackend::Llama(model_path.display().to_string()), model.to_owned()));
+        }
+        if MlxKind::from_model_id(model).is_some() {
+            if model.starts_with("mlx-ext:") || model.starts_with("mlx-vlm-ext:") {
+                let model_path =
+                    models_store::path_for_model_id(&self.data_dir, model, extra_library_paths)?;
+                anyhow::ensure!(
+                    model_path.is_dir(),
+                    "MLX model directory not found for {model}"
+                );
+            } else {
+                models_store::mlx_repo_id(model)?;
+            }
+            return Ok((ActiveBackend::Mlx(model.to_owned()), model.to_owned()));
+        }
+        anyhow::bail!(
+            "unknown model `{model}`; download a GGUF (`gguf:…`) or MLX (`mlx:…`) model first"
+        );
+    }
+
     async fn prepare_generation(
         &self,
         request: &ChatCompletionRequest,
-    ) -> anyhow::Result<(String, RuntimeSettings, ChatCompletionRequest)> {
-        let model_path = self.resolve_model_path(&request.model)?;
-        if let Err(error) = self.ensure_server_for_model(&model_path).await {
-            // Engine crash / startup failure must not poison the daemon.
-            let mut guard = self.llama.lock().await;
-            guard.server = None;
-            return Err(error);
+    ) -> anyhow::Result<(ActiveBackend, RuntimeSettings, ChatCompletionRequest)> {
+        let extra = self.extra_library_paths().await;
+        let (backend, model_id) = self.resolve_model(&request.model, &extra)?;
+        match &backend {
+            ActiveBackend::Llama(model_path) => {
+                if let Err(error) = self
+                    .ensure_server_for_model(std::path::Path::new(model_path))
+                    .await
+                {
+                    let mut guard = self.llama.lock().await;
+                    guard.server = None;
+                    return Err(error);
+                }
+            }
+            ActiveBackend::Mlx(_) => {
+                let (kind, mismatch) = models_store::resolve_mlx_launch_kind(
+                    &self.data_dir,
+                    &model_id,
+                    &extra,
+                )
+                .context("MLX model kind could not be resolved")?;
+                if let Some(notice) = mismatch {
+                    tracing::warn!("{notice}");
+                }
+                if let Err(error) = self.ensure_mlx_server_for_model(&model_id, kind).await {
+                    let mut guard = self.mlx.lock().await;
+                    guard.server = None;
+                    return Err(error);
+                }
+            }
         }
         let settings = self.settings.lock().await.clone();
-        let guard = self.llama.lock().await;
-        let Some(server) = guard.server.as_ref() else {
-            anyhow::bail!("llama-server is not running");
-        };
-        let base_url = server.base_url.clone();
         let mut request = request.clone();
         if request.builtin_tools.unwrap_or(false) {
             request.tools = Some(tools::definitions());
         }
-        Ok((base_url, settings, request))
+        Ok((backend, settings, request))
     }
 
-    /// Drop the llama-server handle if the child process died.
+    async fn backend_base_url(&self, backend: &ActiveBackend) -> anyhow::Result<String> {
+        match backend {
+            ActiveBackend::Llama(_) => {
+                let guard = self.llama.lock().await;
+                let Some(server) = guard.server.as_ref() else {
+                    anyhow::bail!("llama-server is not running");
+                };
+                Ok(server.base_url.clone())
+            }
+            ActiveBackend::Mlx(_) => {
+                let guard = self.mlx.lock().await;
+                let Some(server) = guard.server.as_ref() else {
+                    anyhow::bail!("MLX server is not running");
+                };
+                Ok(server.base_url.clone())
+            }
+        }
+    }
+
     async fn reap_dead_server(&self) {
         let mut guard = self.llama.lock().await;
+        if let Some(server) = guard.server.as_mut()
+            && !server.is_running()
+        {
+            guard.server = None;
+        }
+        drop(guard);
+        let mut guard = self.mlx.lock().await;
         if let Some(server) = guard.server.as_mut()
             && !server.is_running()
         {
@@ -391,7 +686,8 @@ impl Runtime {
         &self,
         request: &ChatCompletionRequest,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<StreamEvent>>> {
-        let (base_url, settings, request) = self.prepare_generation(request).await?;
+        let (backend, settings, request) = self.prepare_generation(request).await?;
+        let base_url = self.backend_base_url(&backend).await?;
         let builtin = request.builtin_tools.unwrap_or(false);
         let http = self.http.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -405,9 +701,14 @@ impl Runtime {
         Ok(rx)
     }
 
-    /// Stop any child llama-server (called on daemon shutdown).
+    /// Stop any child inference servers (called on daemon shutdown).
     pub async fn shutdown(&self) {
         let mut guard = self.llama.lock().await;
+        if let Some(mut server) = guard.server.take() {
+            let _ = server.stop().await;
+        }
+        drop(guard);
+        let mut guard = self.mlx.lock().await;
         if let Some(mut server) = guard.server.take() {
             let _ = server.stop().await;
         }
@@ -425,7 +726,8 @@ impl Engine for Runtime {
     }
 
     async fn generate(&self, request: &ChatCompletionRequest) -> anyhow::Result<Generation> {
-        let (base_url, settings, mut request) = self.prepare_generation(request).await?;
+        let (backend, settings, mut request) = self.prepare_generation(request).await?;
+        let base_url = self.backend_base_url(&backend).await?;
         let builtin = request.builtin_tools.unwrap_or(false);
         let mut invocations = Vec::new();
         for round in 0..MAX_TOOL_ROUNDS {

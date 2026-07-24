@@ -17,6 +17,8 @@
   logs, plus runtime inventory (managed releases, source builds, system
   binaries) with activation and deletion, in-flight build cancellation, and
   structured failure diagnostics with preserved logs.
+- Apple-Silicon mlx-lm and mlx-vlm virtual environments (uv) and OpenAI-compatible
+  server adapters, including MLX snapshot downloads and runtime activation.
 - Bundled safe tools (current time, calculator, bounded web fetch with a
   private-network guard, QuickJS JavaScript sandbox) executed server-side in a
   multi-round tool loop for streamed and non-streamed chat.
@@ -31,10 +33,10 @@
   and run metadata), persisted model download jobs, background download queue,
   in-flight download cancellation, and Hub license / remote-code acknowledgement.
 
-## Alpha (remaining)
+## Alpha
 
-- Apple-Silicon mlx-lm and mlx-vlm virtual environments and server adapters
-  (requires macOS hardware for integration testing).
+- Alpha scope is complete on macOS Apple Silicon (MLX) and cross-platform for
+  llama.cpp. Remaining engine work moves to the workshop track below.
 
 ## Engine workshop
 

@@ -1,9 +1,32 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 const LLAMA_CPP: &str = include_str!("../../../engine-recipes/llama.cpp.json");
 const MLX_LM: &str = include_str!("../../../engine-recipes/mlx-lm.json");
 const MLX_VLM: &str = include_str!("../../../engine-recipes/mlx-vlm.json");
 const VLLM: &str = include_str!("../../../engine-recipes/vllm.json");
+const MLX_LM_LOCK: &str = include_str!("../../../engine-recipes/mlx-lm.lock");
+const MLX_VLM_LOCK: &str = include_str!("../../../engine-recipes/mlx-vlm.lock");
+
+pub fn is_python_engine(engine: &str) -> bool {
+    matches!(engine, "mlx-lm" | "mlx-vlm" | "vllm")
+}
+
+/// Directory containing shipped lock files for Python engine builds.
+pub fn recipe_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("engine-recipes")
+}
+
+/// Write bundled recipe lock files into the application data directory.
+pub fn ensure_recipe_files(data_dir: &Path) -> anyhow::Result<PathBuf> {
+    let dir = recipe_root(data_dir);
+    std::fs::create_dir_all(&dir).context("create engine-recipes directory")?;
+    std::fs::write(dir.join("mlx-lm.lock"), MLX_LM_LOCK).context("write mlx-lm.lock")?;
+    std::fs::write(dir.join("mlx-vlm.lock"), MLX_VLM_LOCK).context("write mlx-vlm.lock")?;
+    Ok(dir)
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BuildRecipe {

@@ -6,5 +6,7 @@ export type BrazierConnection = {
 }
 
 contextBridge.exposeInMainWorld('brazier', {
-  getConnection: (): Promise<BrazierConnection> => ipcRenderer.invoke('brazier:connection')
+  getConnection: (): Promise<BrazierConnection> => ipcRenderer.invoke('brazier:connection'),
+  platform: process.platform,
+  selectDirectory: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-directory')
 })

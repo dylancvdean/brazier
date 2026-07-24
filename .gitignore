@@ -16,3 +16,4 @@ test-results/
 .env
 .env.*
 !.env.example
+.uv-cache/

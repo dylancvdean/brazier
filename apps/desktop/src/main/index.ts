@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 
 /**
  * Linux launch flags must run before app.ready.
@@ -159,6 +159,9 @@ async function createWindow(): Promise<void> {
     backgroundColor: '#10110f',
     autoHideMenuBar: true,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    ...(process.platform === 'darwin'
+      ? { trafficLightPosition: { x: 16, y: 18 } }
+      : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -237,6 +240,20 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
   connection = startDaemon()
   ipcMain.handle('brazier:connection', () => connection)
+  ipcMain.handle('brazier:select-directory', async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    const options = {
+      properties: ['openDirectory'] as ('openDirectory')[],
+      title: 'Choose a model folder'
+    }
+    const result = window
+      ? await dialog.showOpenDialog(window, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+    return result.filePaths[0] ?? null
+  })
   connection.catch((error: unknown) => {
     console.error('[brazier] daemon failed to start', error)
   })

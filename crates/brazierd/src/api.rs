@@ -1,4 +1,4 @@
-use std::{convert::Infallible, time::Duration};
+use std::{convert::Infallible, path::PathBuf, time::Duration};
 
 use async_stream::stream;
 use axum::http::header;
@@ -129,9 +129,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/runtimes/build", post(build_runtime))
         .route("/api/v1/runtimes/build/cancel", post(cancel_build))
         .route("/api/v1/models/download", post(download_model))
+        .route("/api/v1/models/download/mlx", post(download_mlx_model))
         .route("/api/v1/models/download/queue", post(queue_model_download))
         .route("/api/v1/models/download/cancel", post(cancel_model_download))
         .route("/api/v1/models/downloads", get(list_download_jobs))
+        .route(
+            "/api/v1/models/library-paths/suggestions",
+            get(model_library_path_suggestions),
+        )
         .route("/api/v1/models", axum::routing::delete(delete_local_model))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -497,36 +502,43 @@ async fn list_runtimes(
     Query(query): Query<ListRuntimesQuery>,
 ) -> Json<Value> {
     let include_system = query.include_system.unwrap_or(false);
-    let active = state.runtime.active_binary().await;
+    let active = state.runtime.active_runtimes().await;
     let entries = if !include_system {
         if let Some(cached) = state.runtimes_cache.lock().await.clone() {
-            apply_active_flags(cached, active.as_deref())
+            apply_active_flags(cached, &active)
         } else {
-            let loaded = load_runtimes(&state.data_dir, active.as_deref(), false).await;
+            let loaded = load_runtimes(&state.data_dir, &active, false).await;
             *state.runtimes_cache.lock().await = Some(loaded.clone());
             loaded
         }
     } else {
-        load_runtimes(&state.data_dir, active.as_deref(), true).await
+        load_runtimes(&state.data_dir, &active, true).await
     };
     Json(json!({
         "data": entries,
-        "active_binary": active.map(|path| path.display().to_string())
+        "active_binary": active.llama.map(|path| path.display().to_string()),
+        "active_mlx_lm_python": active.mlx_lm.map(|path| path.display().to_string()),
+        "active_mlx_vlm_python": active.mlx_vlm.map(|path| path.display().to_string()),
     }))
 }
 
 fn apply_active_flags(
     mut entries: Vec<runtimes::RuntimeEntry>,
-    active: Option<&std::path::Path>,
+    active: &runtimes::ActiveRuntimes,
 ) -> Vec<runtimes::RuntimeEntry> {
     for entry in &mut entries {
-        entry.active = active.is_some_and(|active_path| {
+        let selected = match entry.engine.as_str() {
+            "mlx-lm" => &active.mlx_lm,
+            "mlx-vlm" => &active.mlx_vlm,
+            _ => &active.llama,
+        };
+        entry.active = selected.as_ref().is_some_and(|active_path| {
             std::path::Path::new(&entry.path)
                 .canonicalize()
                 .ok()
                 .zip(active_path.canonicalize().ok())
                 .is_some_and(|(left, right)| left == right)
-                || std::path::Path::new(&entry.path) == active_path
+                || active_path == std::path::Path::new(&entry.path)
         });
     }
     entries
@@ -534,15 +546,15 @@ fn apply_active_flags(
 
 async fn load_runtimes(
     data_dir: &std::path::Path,
-    active: Option<&std::path::Path>,
+    active: &runtimes::ActiveRuntimes,
     include_system: bool,
 ) -> Vec<runtimes::RuntimeEntry> {
     let data_dir = data_dir.to_path_buf();
-    let active = active.map(std::path::Path::to_path_buf);
+    let active = active.clone();
     tokio::task::spawn_blocking(move || {
         runtimes::list(
             &data_dir,
-            active.as_deref(),
+            &active,
             std::env::var("PATH").ok().as_deref(),
             include_system,
         )
@@ -580,21 +592,53 @@ struct RuntimeIdRequest {
     id: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct EnsureLlamaRequest {
+    #[serde(default)]
+    target: Option<crate::runtime_settings::RuntimeTarget>,
+}
+
 async fn activate_runtime(
     State(state): State<AppState>,
     Json(request): Json<RuntimeIdRequest>,
 ) -> ApiResult<Json<Value>> {
     let path_env = std::env::var("PATH").ok();
-    let entry = runtimes::find(&state.data_dir, path_env.as_deref(), &request.id, false)
-        .ok_or_else(|| ApiError::bad_request(format!("unknown runtime `{}`", request.id)))?;
-    let path = state
-        .runtime
-        .activate_binary(std::path::PathBuf::from(&entry.path))
-        .await
-        .map_err(ApiError::bad_request)?;
+    let active = state.runtime.active_runtimes().await;
+    let entry = runtimes::find(
+        &state.data_dir,
+        path_env.as_deref(),
+        &request.id,
+        false,
+        &active,
+    )
+    .ok_or_else(|| ApiError::bad_request(format!("unknown runtime `{}`", request.id)))?;
+    let path = match entry.engine.as_str() {
+        "mlx-lm" => state
+            .runtime
+            .activate_python(
+                crate::mlx::MlxKind::Lm,
+                std::path::PathBuf::from(&entry.path),
+            )
+            .await
+            .map_err(ApiError::bad_request)?,
+        "mlx-vlm" => state
+            .runtime
+            .activate_python(
+                crate::mlx::MlxKind::Vlm,
+                std::path::PathBuf::from(&entry.path),
+            )
+            .await
+            .map_err(ApiError::bad_request)?,
+        _ => state
+            .runtime
+            .activate_binary(std::path::PathBuf::from(&entry.path))
+            .await
+            .map_err(ApiError::bad_request)?,
+    };
     state.invalidate_runtimes_cache().await;
     Ok(Json(json!({
         "active_binary": path.display().to_string(),
+        "engine": entry.engine,
         "id": entry.id
     })))
 }
@@ -606,7 +650,7 @@ async fn delete_runtime(
     let removed = runtimes::delete(&state.data_dir, &request.id).map_err(ApiError::bad_request)?;
     state
         .runtime
-        .release_binary(&removed)
+        .release_runtime(&removed)
         .await
         .map_err(ApiError::internal)?;
     state.invalidate_runtimes_cache().await;
@@ -622,13 +666,31 @@ async fn delete_local_model(
     State(state): State<AppState>,
     Json(request): Json<DeleteModelRequest>,
 ) -> ApiResult<Json<Value>> {
-    let path = models_store::path_for_model_id(&state.data_dir, &request.model_id)
-        .map_err(ApiError::bad_request)?;
-    state.runtime.release_model(&path).await;
-    models_store::delete_model(&state.data_dir, &request.model_id)
+    let settings = state.runtime.settings().await;
+    let extra_paths: Vec<PathBuf> = settings
+        .extra_model_library_paths
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    let _path = models_store::path_for_model_id(
+        &state.data_dir,
+        &request.model_id,
+        &extra_paths,
+    )
+    .map_err(ApiError::bad_request)?;
+    state.runtime.release_model(&request.model_id).await;
+    models_store::delete_model(&state.data_dir, &request.model_id, &extra_paths)
         .map_err(ApiError::bad_request)?;
     state.invalidate_models_cache().await;
     Ok(Json(json!({ "deleted": request.model_id })))
+}
+
+async fn model_library_path_suggestions(State(state): State<AppState>) -> Json<Value> {
+    let settings = state.runtime.settings().await;
+    Json(json!({
+        "configured": settings.extra_model_library_paths,
+        "suggestions": crate::model_library::library_path_suggestions(&settings.extra_model_library_paths),
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -664,9 +726,18 @@ fn progress_sse(mut rx: mpsc::UnboundedReceiver<ProgressEvent>) -> Response {
         .into_response()
 }
 
-async fn ensure_llama(State(state): State<AppState>, Query(query): Query<StreamQuery>) -> Response {
+async fn ensure_llama(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<EnsureLlamaRequest>,
+) -> Response {
+    let target = request.target;
     if !query.stream {
-        return match state.runtime.ensure_llama_binary().await {
+        return match state
+            .runtime
+            .ensure_llama_binary_with_progress(target, Box::new(|_| {}))
+            .await
+        {
             Ok(path) => {
                 state.invalidate_runtimes_cache().await;
                 (
@@ -688,7 +759,7 @@ async fn ensure_llama(State(state): State<AppState>, Query(query): Query<StreamQ
     tokio::spawn(async move {
         let progress_tx = tx.clone();
         let result = runtime
-            .ensure_llama_binary_with_progress(Box::new(move |event| {
+            .ensure_llama_binary_with_progress(target, Box::new(move |event| {
                 push_progress(&progress_tx, event);
             }))
             .await;
@@ -925,6 +996,65 @@ async fn download_model(
     progress_sse(rx)
 }
 
+async fn download_mlx_model(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<download::MlxDownloadRequest>,
+) -> Response {
+    if !query.stream {
+        let result = download::download_mlx_snapshot_with_progress(
+            &state.http,
+            &state.data_dir,
+            request,
+            Box::new(|_| {}),
+            None,
+            None,
+        )
+        .await;
+        return match result {
+            Ok(result) => {
+                state.invalidate_models_cache().await;
+                (StatusCode::OK, Json(json!(result))).into_response()
+            }
+            Err(error) => ApiError::bad_request(error).into_response(),
+        };
+    }
+
+    let (tx, rx) = progress_channel();
+    let http = state.http.clone();
+    let data_dir = state.data_dir.clone();
+    let cache_state = state.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let result = download::download_mlx_snapshot_with_progress(
+            &http,
+            &data_dir,
+            request,
+            Box::new(move |event| {
+                push_progress(&progress_tx, event);
+            }),
+            None,
+            None,
+        )
+        .await;
+        match result {
+            Ok(download_result) => {
+                cache_state.invalidate_models_cache().await;
+                push_progress(
+                    &tx,
+                    ProgressEvent::done(
+                        serde_json::to_value(&download_result).unwrap_or_else(|_| json!({})),
+                    ),
+                );
+            }
+            Err(error) => {
+                push_progress(&tx, ProgressEvent::error(error.to_string()));
+            }
+        }
+    });
+    progress_sse(rx)
+}
+
 #[derive(Debug, Deserialize)]
 struct CancelDownloadRequest {
     job_id: String,
@@ -973,8 +1103,11 @@ async fn list_models(State(state): State<AppState>) -> ApiResult<Json<Value>> {
                 "id": model.id,
                 "object": "model",
                 "owned_by": format!("brazier:{}", model.engine),
+                "engine": model.engine,
                 "capabilities": model.capabilities,
-                "size_bytes": model.size_bytes
+                "size_bytes": model.size_bytes,
+                "read_only": model.read_only,
+                "library_label": model.library_label,
             })
         })
         .collect::<Vec<_>>();
@@ -1284,7 +1417,7 @@ mod tests {
         assert!(!ids.contains(&"brazier/mock"));
         assert!(ids.contains(&"gguf:acme/demo/weights.gguf"));
         assert_eq!(
-            models_store::path_for_model_id(dir.path(), "gguf:acme/demo/weights.gguf").unwrap(),
+            models_store::path_for_model_id(dir.path(), "gguf:acme/demo/weights.gguf", &[]).unwrap(),
             gguf
         );
 

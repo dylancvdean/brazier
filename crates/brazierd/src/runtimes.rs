@@ -1,8 +1,7 @@
-//! Inventory and lifecycle of installed llama-server runtimes.
+//! Inventory and lifecycle of installed inference runtimes.
 //!
-//! Three kinds are tracked: `managed` (prebuilt releases installed by the
-//! daemon, one per acceleration flavor), `source` (user-approved builds from
-//! source), and `system` (binaries discovered on PATH, never managed here).
+//! Tracks llama-server binaries and MLX Python virtual environments built from
+//! approved source recipes.
 
 use std::path::{Path, PathBuf};
 
@@ -13,10 +12,19 @@ use crate::{builds, llama};
 
 pub const ENGINE: &str = "llama.cpp";
 const MANAGED_FLAVORS: &[&str] = &["cuda", "rocm", "vulkan"];
+const PYTHON_ENGINES: &[&str] = &["mlx-lm", "mlx-vlm"];
+
+#[derive(Debug, Clone, Default)]
+pub struct ActiveRuntimes {
+    pub llama: Option<PathBuf>,
+    pub mlx_lm: Option<PathBuf>,
+    pub mlx_vlm: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeEntry {
     pub id: String,
+    pub engine: String,
     pub kind: String,
     pub label: String,
     pub target: Option<String>,
@@ -40,28 +48,33 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Enumerate every known llama-server runtime on this machine.
+/// Enumerate every known runtime on this machine.
 pub fn list(
     data_dir: &Path,
-    active: Option<&Path>,
+    active: &ActiveRuntimes,
     path_env: Option<&str>,
     include_system: bool,
 ) -> Vec<RuntimeEntry> {
     let mut entries = Vec::new();
     let engine_dir = llama::managed_engine_dir(data_dir);
-    let is_active = |path: &Path| active.is_some_and(|active_path| same_file(path, active_path));
+    let is_active = |path: &Path, selected: &Option<PathBuf>| {
+        selected
+            .as_deref()
+            .is_some_and(|active_path| same_file(path, active_path))
+    };
 
     // Managed default (CPU / Metal) install.
     let default_binary = llama::managed_binary_path(data_dir);
     if default_binary.is_file() {
         entries.push(RuntimeEntry {
             id: "managed".to_owned(),
+            engine: ENGINE.to_owned(),
             kind: "managed".to_owned(),
             label: "Managed release".to_owned(),
             target: Some("cpu".to_owned()),
             version: read_version(&engine_dir),
             path: default_binary.display().to_string(),
-            active: is_active(&default_binary),
+            active: is_active(&default_binary, &active.llama),
             deletable: true,
         });
     }
@@ -77,12 +90,13 @@ pub fn list(
         if binary.is_file() {
             entries.push(RuntimeEntry {
                 id: format!("managed-{flavor}"),
+                engine: ENGINE.to_owned(),
                 kind: "managed".to_owned(),
                 label: format!("Managed release ({flavor})"),
                 target: Some((*flavor).to_owned()),
                 version: read_version(&flavor_dir),
                 path: binary.display().to_string(),
-                active: is_active(&binary),
+                active: is_active(&binary, &active.llama),
                 deletable: true,
             });
         }
@@ -93,14 +107,44 @@ pub fn list(
         let path = PathBuf::from(&record.binary);
         entries.push(RuntimeEntry {
             id: format!("source-{build_id}"),
+            engine: ENGINE.to_owned(),
             kind: "source".to_owned(),
             label: format!("Source build · {}", record.revision),
             target: Some(record.target.clone()),
             version: Some(record.revision.clone()),
             path: record.binary.clone(),
-            active: is_active(&path),
+            active: is_active(&path, &active.llama),
             deletable: true,
         });
+    }
+
+    for engine in PYTHON_ENGINES {
+        for (build_id, record) in builds::list_builds(data_dir, engine) {
+            let path = PathBuf::from(&record.binary);
+            let display = if *engine == "mlx-lm" {
+                "MLX-LM"
+            } else {
+                "MLX-VLM"
+            };
+            entries.push(RuntimeEntry {
+                id: format!("{engine}-source-{build_id}"),
+                engine: (*engine).to_owned(),
+                kind: "source".to_owned(),
+                label: format!("{display} · {}", record.revision),
+                target: Some(record.target.clone()),
+                version: Some(record.revision.clone()),
+                path: record.binary.clone(),
+                active: is_active(
+                    &path,
+                    if *engine == "mlx-lm" {
+                        &active.mlx_lm
+                    } else {
+                        &active.mlx_vlm
+                    },
+                ),
+                deletable: true,
+            });
+        }
     }
 
     // System binaries on PATH or well-known prefixes (optional — can be slow).
@@ -129,26 +173,28 @@ pub fn list(
         }
         entries.push(RuntimeEntry {
             id: format!("system-{}", canonical.display()),
+            engine: ENGINE.to_owned(),
             kind: "system".to_owned(),
             label: "System binary".to_owned(),
             target: None,
             version: None,
             path: candidate.display().to_string(),
-            active: is_active(&candidate),
+            active: is_active(&candidate, &active.llama),
             deletable: false,
         });
     }
     entries
 }
 
-/// Resolve a runtime id from `list` back to its binary path.
+/// Resolve a runtime id from `list` back to its entry.
 pub fn find(
     data_dir: &Path,
     path_env: Option<&str>,
     id: &str,
     include_system: bool,
+    active: &ActiveRuntimes,
 ) -> Option<RuntimeEntry> {
-    list(data_dir, None, path_env, include_system)
+    list(data_dir, active, path_env, include_system)
         .into_iter()
         .find(|entry| entry.id == id)
 }
@@ -203,6 +249,24 @@ pub fn delete(data_dir: &Path, id: &str) -> anyhow::Result<PathBuf> {
         std::fs::remove_dir_all(&root).context("remove source build")?;
         return Ok(binary);
     }
+    for engine in PYTHON_ENGINES {
+        let prefix = format!("{engine}-source-");
+        if let Some(build_id) = id.strip_prefix(&prefix) {
+            anyhow::ensure!(
+                !build_id.is_empty()
+                    && !build_id.contains('/')
+                    && !build_id.contains('\\')
+                    && build_id != "."
+                    && build_id != "..",
+                "invalid build id"
+            );
+            let root = builds::builds_root(data_dir, engine).join(build_id);
+            anyhow::ensure!(root.is_dir(), "source build `{build_id}` does not exist");
+            let python = crate::mlx::venv_python(&root.join("venv"));
+            std::fs::remove_dir_all(&root).context("remove source build")?;
+            return Ok(python);
+        }
+    }
     anyhow::bail!("runtime `{id}` cannot be deleted");
 }
 
@@ -241,7 +305,15 @@ mod tests {
         )
         .unwrap();
 
-        let entries = list(dir.path(), Some(&build_binary), None, false);
+        let entries = list(
+            dir.path(),
+            &ActiveRuntimes {
+                llama: Some(build_binary),
+                ..ActiveRuntimes::default()
+            },
+            None,
+            false,
+        );
         let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
         assert!(ids.contains(&"managed"));
         assert!(ids.contains(&"managed-cuda"));

@@ -46,9 +46,18 @@ pub struct RuntimeSettings {
     /// Absolute path of an explicitly activated llama-server binary. When set,
     /// it takes precedence over discovery and managed installs.
     pub binary_override: Option<String>,
+    /// Absolute path of an activated mlx-lm Python interpreter.
+    #[serde(default)]
+    pub mlx_lm_python: Option<String>,
+    /// Absolute path of an activated mlx-vlm Python interpreter.
+    #[serde(default)]
+    pub mlx_vlm_python: Option<String>,
     /// Parallel compile jobs for source builds (`cmake --build … --parallel`).
     #[serde(default = "default_build_jobs")]
     pub build_jobs: u16,
+    /// Additional directories to scan for GGUF models (read-only; not used for downloads).
+    #[serde(default)]
+    pub extra_model_library_paths: Vec<String>,
 }
 
 pub fn default_build_jobs() -> u16 {
@@ -74,7 +83,10 @@ impl Default for RuntimeSettings {
             max_tokens: None,
             enable_reasoning: true,
             binary_override: None,
+            mlx_lm_python: None,
+            mlx_vlm_python: None,
             build_jobs: default_build_jobs(),
+            extra_model_library_paths: Vec::new(),
         }
     }
 }
@@ -121,6 +133,19 @@ impl RuntimeSettings {
             (1..=max_jobs.max(1)).contains(&self.build_jobs),
             "build_jobs must be between 1 and {max_jobs}"
         );
+        for path in &self.extra_model_library_paths {
+            let path = PathBuf::from(path);
+            anyhow::ensure!(
+                path.is_absolute(),
+                "library path must be absolute: {}",
+                path.display()
+            );
+            anyhow::ensure!(
+                path.is_dir(),
+                "library path must be an existing directory: {}",
+                path.display()
+            );
+        }
         Ok(())
     }
 }

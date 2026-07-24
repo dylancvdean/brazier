@@ -148,13 +148,15 @@ fn sanitize_id_segment(value: &str) -> String {
     cleaned.trim_matches('-').chars().take(48).collect()
 }
 
-/// Substitute `{source}` / `{build}` / `{install}` placeholders and expand the
-/// `{target_flags}` pseudo-argument.
+/// Substitute build placeholders and expand the `{target_flags}` pseudo-argument.
 pub fn resolve_command_args(
     args: &[String],
     source: &Path,
     build: &Path,
     install: &Path,
+    venv: &Path,
+    python: &Path,
+    recipe: &Path,
     flags: &[String],
     parallel_jobs: u16,
 ) -> Vec<String> {
@@ -169,6 +171,9 @@ pub fn resolve_command_args(
             arg.replace("{source}", &source.display().to_string())
                 .replace("{build}", &build.display().to_string())
                 .replace("{install}", &install.display().to_string())
+                .replace("{venv}", &venv.display().to_string())
+                .replace("{python}", &python.display().to_string())
+                .replace("{recipe}", &recipe.display().to_string())
                 .replace("{parallel}", &parallel),
         );
     }
@@ -312,6 +317,24 @@ fn install_artifacts(build_dir: &Path, install_bin: &Path) -> anyhow::Result<Pat
     installed_server.context("server binary missing after install")
 }
 
+fn install_python_env(venv: &Path, engine: &str) -> anyhow::Result<PathBuf> {
+    let python = crate::mlx::venv_python(venv);
+    anyhow::ensure!(
+        python.is_file(),
+        "build completed but the virtual environment Python was not created at {}",
+        python.display()
+    );
+    let kind = crate::mlx::MlxKind::from_engine_id(engine)
+        .ok_or_else(|| anyhow::anyhow!("unsupported Python engine `{engine}`"))?;
+    anyhow::ensure!(
+        crate::mlx::python_appears_runnable(&python, kind),
+        "Python environment at {} failed an import check for {}",
+        python.display(),
+        kind.engine_id()
+    );
+    Ok(python)
+}
+
 fn log_excerpt(log: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = log.lines().collect();
     if lines.len() <= max_lines {
@@ -338,6 +361,9 @@ pub fn diagnose_failure(
     }
     if message_lower.contains("`git` is required") {
         hints.push(toolchain_hints::install_hint(ToolchainPackage::Git));
+    }
+    if message_lower.contains("`uv` is required") {
+        hints.push(toolchain_hints::install_hint(ToolchainPackage::Uv));
     }
     if message_lower.contains("`cmake` is required") {
         hints.push(toolchain_hints::install_hint(ToolchainPackage::Cmake));
@@ -394,6 +420,13 @@ pub fn diagnose_failure(
     {
         hints.push(
             "The server binary was not produced. Confirm the recipe still builds the `llama-server` target and that the checkout revision is compatible.".into(),
+        );
+    }
+    if message_lower.contains("virtual environment python was not created")
+        || message_lower.contains("failed an import check")
+    {
+        hints.push(
+            "The Python environment did not finish correctly. Confirm `uv` is installed and retry the build; the log usually shows the first pip or import error.".into(),
         );
     }
     if step == Some("Clone repository") && hints.is_empty() {
@@ -469,34 +502,54 @@ pub async fn run_build_with_progress(
         Ok(plan) => plan,
         Err(error) => return Err(fail(error.to_string(), None, "")),
     };
-    if plan.engine != "llama.cpp" {
-        return Err(fail(
-            "only llama.cpp source builds are currently executable".into(),
-            None,
-            "",
-        ));
-    }
-    for program in ["git", "cmake"] {
-        if !command_available(program) {
+    let python_engine = build_recipe::is_python_engine(&plan.engine);
+    if python_engine {
+        if !command_available("uv") {
             return Err(fail(
-                format!("`{program}` is required to build from source; install it and try again"),
+                "`uv` is required to build MLX Python environments; install it and try again"
+                    .into(),
                 None,
                 "",
             ));
         }
+    } else if plan.engine != "llama.cpp" {
+        return Err(fail(
+            format!("source builds for `{}` are not executable yet", plan.engine),
+            None,
+            "",
+        ));
     }
-    if let Some(message) = toolchain_hints::validate_build_target(target) {
-        return Err(fail(message, Some("Preflight"), ""));
-    }
-    if !cfg!(target_os = "windows")
-        && let Some(message) = toolchain_hints::cpp_compiler_preflight_message()
-    {
-        return Err(fail(message, Some("Preflight"), ""));
-    }
-    if matches!(target, RuntimeTarget::Rocm)
-        && let Some(message) = toolchain_hints::rocm_preflight_message()
-    {
-        return Err(fail(message, Some("Preflight"), ""));
+    if !python_engine {
+        for program in ["git", "cmake"] {
+            if !command_available(program) {
+                return Err(fail(
+                    format!(
+                        "`{program}` is required to build from source; install it and try again"
+                    ),
+                    None,
+                    "",
+                ));
+            }
+        }
+        if let Some(message) = toolchain_hints::validate_build_target(target) {
+            return Err(fail(message, Some("Preflight"), ""));
+        }
+        if !cfg!(target_os = "windows")
+            && let Some(message) = toolchain_hints::cpp_compiler_preflight_message()
+        {
+            return Err(fail(message, Some("Preflight"), ""));
+        }
+        if matches!(target, RuntimeTarget::Rocm)
+            && let Some(message) = toolchain_hints::rocm_preflight_message()
+        {
+            return Err(fail(message, Some("Preflight"), ""));
+        }
+    } else if !command_available("git") {
+        return Err(fail(
+            "`git` is required to build from source; install it and try again".into(),
+            None,
+            "",
+        ));
     }
     if let Some(warning) = &plan.warning {
         progress(ProgressEvent::phase("warning", warning.clone()));
@@ -529,6 +582,15 @@ pub async fn run_build_with_progress(
     let build = root.join("build");
     let install = root.join("install");
     let install_bin = install.join("bin");
+    let venv = root.join("venv");
+    let python = crate::mlx::venv_python(&venv);
+    let recipe_dir = match build_recipe::ensure_recipe_files(data_dir) {
+        Ok(dir) => dir,
+        Err(error) => {
+            active_builds.finish(&build_id);
+            return Err(fail(error.to_string(), None, ""));
+        }
+    };
 
     let flags = target_flags(target);
     let mut log = String::new();
@@ -541,8 +603,17 @@ pub async fn run_build_with_progress(
                 anyhow::bail!("build cancelled");
             }
             failed_step = Some(step.label.clone());
-            let args =
-                resolve_command_args(&step.args, &source, &build, &install, &flags, parallel_jobs);
+            let args = resolve_command_args(
+                &step.args,
+                &source,
+                &build,
+                &install,
+                &venv,
+                &python,
+                &recipe_dir,
+                &flags,
+                parallel_jobs,
+            );
             progress(ProgressEvent::build_step(index + 1, total, step.label.clone()));
             run_step(
                 &step.label,
@@ -557,12 +628,22 @@ pub async fn run_build_with_progress(
         }
         progress(ProgressEvent::phase(
             "install",
-            "Installing the built server into an isolated prefix",
+            if python_engine {
+                "Verifying the Python virtual environment"
+            } else {
+                "Installing the built server into an isolated prefix"
+            },
         ));
         failed_step = Some("install".into());
-        let binary = install_artifacts(&build, &install_bin)?;
+        let binary = if python_engine {
+            install_python_env(&venv, &plan.engine)?
+        } else {
+            install_artifacts(&build, &install_bin)?
+        };
         let _ = tokio::fs::remove_dir_all(&source).await;
-        let _ = tokio::fs::remove_dir_all(&build).await;
+        if !python_engine {
+            let _ = tokio::fs::remove_dir_all(&build).await;
+        }
         Ok(binary)
     }
     .await;
@@ -654,6 +735,9 @@ mod tests {
             Path::new("/tmp/s"),
             Path::new("/tmp/b"),
             Path::new("/tmp/i"),
+            Path::new("/tmp/v"),
+            Path::new("/tmp/v/bin/python"),
+            Path::new("/tmp/recipes"),
             &["-DGGML_CUDA=ON".to_owned()],
             4,
         );
@@ -679,6 +763,9 @@ mod tests {
             Path::new("/s"),
             Path::new("/b"),
             Path::new("/i"),
+            Path::new("/v"),
+            Path::new("/v/bin/python"),
+            Path::new("/recipes"),
             &[],
             2,
         );

@@ -27,7 +27,10 @@ export type LocalModel = {
   id: string
   object: string
   owned_by: string
+  engine?: string
   size_bytes?: number | null
+  read_only?: boolean
+  library_label?: string | null
   capabilities?: {
     input_modalities: string[]
     output_modalities: string[]
@@ -61,6 +64,7 @@ export type RuntimeSettings = {
   enable_reasoning: boolean
   binary_override: string | null
   build_jobs: number
+  extra_model_library_paths: string[]
 }
 
 export type HardwareInfo = {
@@ -116,6 +120,23 @@ export function saveRuntimeSettings(settings: RuntimeSettings): Promise<RuntimeS
 
 export async function listModels(): Promise<LocalModel[]> {
   return (await request<{ data: LocalModel[] }>('/v1/models')).data
+}
+
+export type ModelLibraryPathSuggestion = {
+  id: string
+  label: string
+  path: string
+  exists: boolean
+  gguf_count: number
+  mlx_count: number
+  configured: boolean
+}
+
+export async function modelLibraryPathSuggestions(): Promise<{
+  configured: string[]
+  suggestions: ModelLibraryPathSuggestion[]
+}> {
+  return request('/api/v1/models/library-paths/suggestions')
 }
 
 export async function listConversations(query?: string): Promise<Conversation[]> {
@@ -348,6 +369,8 @@ export type DownloadResult = {
   bytes: number
   sha256: string
   resumed: boolean
+  engine?: string
+  notice?: string
 }
 
 export type ProgressEvent = {
@@ -466,12 +489,33 @@ export async function downloadModel(
   return result
 }
 
+export async function downloadMlxModel(
+  repoId: string,
+  engine: 'mlx-lm' | 'mlx-vlm',
+  onProgress: (event: ProgressEvent) => void,
+  revision = 'main'
+): Promise<DownloadResult> {
+  const final = await readProgressSse(
+    '/api/v1/models/download/mlx?stream=true',
+    {
+      method: 'POST',
+      body: JSON.stringify({ repo_id: repoId, engine, revision })
+    },
+    onProgress
+  )
+  const result = final.result as DownloadResult | undefined
+  if (!result?.model_id) throw new Error('Download completed without a model id.')
+  return result
+}
+
 export async function ensureLlamaEngine(
-  onProgress: (event: ProgressEvent) => void
+  onProgress: (event: ProgressEvent) => void,
+  options?: { target?: RuntimeTarget }
 ): Promise<{ binary: string; status: string }> {
+  const body = options?.target ? JSON.stringify({ target: options.target }) : '{}'
   const final = await readProgressSse(
     '/api/v1/engines/llama.cpp/ensure?stream=true',
-    { method: 'POST', body: '{}' },
+    { method: 'POST', body },
     onProgress
   )
   const result = final.result as { binary?: string; status?: string } | undefined
@@ -481,6 +525,7 @@ export async function ensureLlamaEngine(
 
 export type RuntimeEntry = {
   id: string
+  engine: string
   kind: 'managed' | 'source' | 'system'
   label: string
   target: string | null
@@ -533,6 +578,7 @@ export async function listTools(): Promise<BundledTool[]> {
 }
 
 export async function buildRuntime(
+  engine: string,
   repository: string,
   revision: string,
   target: string,
@@ -545,7 +591,7 @@ export async function buildRuntime(
     {
       method: 'POST',
       body: JSON.stringify({
-        engine: 'llama.cpp',
+        engine,
         repository,
         revision,
         target,

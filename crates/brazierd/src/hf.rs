@@ -27,16 +27,49 @@ pub struct HubModel {
     pub preferred_quantizer: bool,
 }
 
+fn tag_matches(tag: &str, needle: &str) -> bool {
+    tag.to_ascii_lowercase().contains(needle)
+}
+
+fn tags_contain_any<'a>(tags: impl IntoIterator<Item = &'a String>, needles: &[&str]) -> bool {
+    tags.into_iter()
+        .any(|tag| needles.iter().any(|needle| tag_matches(tag, needle)))
+}
+
+fn mlx_vlm_tags(tags: &[String]) -> bool {
+    tags_contain_any(
+        tags,
+        &[
+            "image-text-to-text",
+            "image-to-text",
+            "multimodal",
+            "vision-language",
+            "vision_language",
+            "vlm",
+            "llava",
+            "paligemma",
+        ],
+    ) || tags.iter().any(|tag| {
+        let tag = tag.to_ascii_lowercase();
+        tag == "vision" || tag.ends_with("-vision")
+    })
+}
+
+fn mlx_lm_tags(tags: &[String]) -> bool {
+    tags.iter().any(|tag| {
+        let tag = tag.to_ascii_lowercase();
+        tag.contains("mlx") || tag.contains("mlx-community")
+    })
+}
+
 fn compatible(tags: &[String], engine: &str) -> bool {
     match engine {
         "llama.cpp" => tags.iter().any(|tag| {
             let tag = tag.to_ascii_lowercase();
             tag.contains("gguf") || tag.contains("llama.cpp")
         }),
-        "mlx-lm" | "mlx-vlm" => tags.iter().any(|tag| {
-            let tag = tag.to_ascii_lowercase();
-            tag.contains("mlx") || tag.contains("mlx-community")
-        }),
+        "mlx-lm" => mlx_lm_tags(tags) && !mlx_vlm_tags(tags),
+        "mlx-vlm" => mlx_lm_tags(tags) && mlx_vlm_tags(tags),
         "vllm" => tags.iter().any(|tag| {
             matches!(
                 tag.as_str(),
@@ -183,6 +216,39 @@ pub async fn list_gguf_files(
     Ok((ggufs, preferred))
 }
 
+fn is_mlx_snapshot_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".md")
+        || lower.ends_with(".onnx")
+        || lower.ends_with(".gguf")
+        || lower.ends_with(".bin")
+        || lower.ends_with(".pt")
+        || lower.ends_with(".pth")
+    {
+        return false;
+    }
+    lower.ends_with(".safetensors")
+        || lower.ends_with(".json")
+        || lower.ends_with(".txt")
+        || lower.ends_with(".model")
+        || lower.ends_with(".tiktoken")
+        || lower.ends_with("tokenizer.model")
+}
+
+/// List files needed for a local MLX snapshot download.
+pub async fn list_mlx_snapshot_files(
+    client: &reqwest::Client,
+    data_dir: &std::path::Path,
+    repo_id: &str,
+    revision: &str,
+) -> anyhow::Result<Vec<RepoFile>> {
+    let files = list_repo_files(client, data_dir, repo_id, revision).await?;
+    Ok(files
+        .into_iter()
+        .filter(|file| is_mlx_snapshot_file(&file.path))
+        .collect())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelTrust {
     pub repo_id: String,
@@ -263,6 +329,15 @@ mod tests {
     fn engine_compatibility_is_a_hard_filter() {
         assert!(compatible(&["gguf".into()], "llama.cpp"));
         assert!(!compatible(&["mlx".into()], "llama.cpp"));
-        assert!(compatible(&["mlx".into()], "mlx-lm"));
+        assert!(compatible(&["mlx".into(), "text-generation".into()], "mlx-lm"));
+        assert!(!compatible(
+            &["mlx".into(), "image-text-to-text".into()],
+            "mlx-lm"
+        ));
+        assert!(compatible(
+            &["mlx".into(), "image-text-to-text".into()],
+            "mlx-vlm"
+        ));
+        assert!(!compatible(&["mlx".into(), "text-generation".into()], "mlx-vlm"));
     }
 }

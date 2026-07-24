@@ -1,5 +1,6 @@
 import { Box, Check, HardDrive, LoaderCircle } from 'lucide-react'
 import { formatBytes, type LocalModel } from '../api'
+import { modelDisplayName } from '../model-utils'
 
 type ModelMenuProps = {
   models: LocalModel[]
@@ -8,18 +9,6 @@ type ModelMenuProps = {
   onSelect: (modelId: string) => void
   onManage: () => void
   onClose: () => void
-}
-
-function displayName(model: LocalModel): { title: string; subtitle: string } {
-  if (model.id.startsWith('gguf:')) {
-    const key = model.id.slice('gguf:'.length)
-    const parts = key.split('/')
-    return {
-      title: parts.at(-1) ?? key,
-      subtitle: parts.slice(0, -1).join('/')
-    }
-  }
-  return { title: model.id, subtitle: model.owned_by }
 }
 
 /**
@@ -52,7 +41,7 @@ export function ModelMenu({
         )}
         <div className="model-menu-list">
           {models.map((model) => {
-            const meta = displayName(model)
+            const meta = modelDisplayName(model.id, model)
             const active = model.id === selectedModel
             return (
               <button

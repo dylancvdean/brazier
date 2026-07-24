@@ -50,6 +50,11 @@ import {
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
 import { ModelMenu } from './components/ModelMenu'
+import {
+  modelDisplayName,
+  runtimeNoticeForModel,
+  visionCapabilityTitle
+} from './model-utils'
 import { childCounts, messageChain } from './graph'
 import {
   readCachedModels,
@@ -113,21 +118,6 @@ function attachmentPart(attachment: Attachment): ContentPart {
       name: attachment.name
     }
   }
-}
-
-function modelLabel(modelId: string, models: LocalModel[]): { title: string; subtitle: string } {
-  const match = models.find((model) => model.id === modelId)
-  if (modelId.startsWith('gguf:')) {
-    const file = modelId.slice('gguf:'.length).split('/').at(-1) ?? modelId
-    return {
-      title: file,
-      subtitle: match ? `${match.owned_by.replace('brazier:', '')} · Local GGUF` : 'Local GGUF'
-    }
-  }
-  if (!modelId) {
-    return { title: 'Select a model', subtitle: 'Download a GGUF to get started' }
-  }
-  return { title: modelId, subtitle: match?.owned_by ?? 'Local' }
 }
 
 function ToolChips({ records }: { records: ToolCallRecord[] }): React.JSX.Element {
@@ -244,10 +234,14 @@ export function App(): React.JSX.Element {
     if (modelsLoading && localModels.length === 0) {
       return { title: 'Loading models…', subtitle: 'Scanning local library' }
     }
-    return modelLabel(selectedModel, localModels)
+    return modelDisplayName(selectedModel, localModels.find((m) => m.id === selectedModel))
   }, [selectedModel, localModels, modelsLoading])
   const canChat = Boolean(selectedModel)
   const selectedCapabilities = localModels.find((model) => model.id === selectedModel)?.capabilities
+  const runtimeWarning = useMemo(
+    () => runtimeNoticeForModel(selectedModel, localModels, prefetchedRuntimes),
+    [selectedModel, localModels, prefetchedRuntimes]
+  )
   const canAttach = Boolean(
     selectedCapabilities?.input_modalities.some((modality) =>
       ['image', 'audio', 'video'].includes(modality)
@@ -453,8 +447,13 @@ export function App(): React.JSX.Element {
     const text = draft.trim()
     if ((!text && attachments.length === 0) || busy) return
     if (!selectedModel) {
-      setError('Select or download a local GGUF model first.')
+      setError('Select or download a local model first.')
       setModelMenuOpen(true)
+      return
+    }
+    if (runtimeWarning) {
+      setError(runtimeWarning)
+      openManage('runtimes')
       return
     }
     setBusy(true)
@@ -666,7 +665,7 @@ export function App(): React.JSX.Element {
             </span>
             <span
               className={selectedCapabilities?.input_modalities.includes('image') ? '' : 'unavailable'}
-              title={canAttach ? 'Multimodal projector installed' : 'Install the model mmproj GGUF'}
+              title={visionCapabilityTitle(selectedModel, localModels, canAttach)}
             >
               <Image size={14} /> Vision
             </span>
@@ -688,6 +687,15 @@ export function App(): React.JSX.Element {
           </button>
         </header>
 
+        {runtimeWarning && (
+          <div className="runtime-notice">
+            <span>{runtimeWarning}</span>
+            <button type="button" onClick={() => openManage('runtimes')}>
+              Open Runtimes
+            </button>
+          </div>
+        )}
+
         <div className="chat">
           {chain.length === 0 && !streamingText ? (
             <div className="welcome">
@@ -700,7 +708,7 @@ export function App(): React.JSX.Element {
                   ? 'Starting the local runtime and loading your model library…'
                   : canChat
                     ? 'Chat privately with local models. Attach media or start with a question.'
-                    : 'Download a GGUF from Hugging Face to start chatting with a local model.'}
+                    : 'Download a model from Hugging Face to start chatting locally.'}
               </p>
               <div className="starter-grid">
                 {canChat ? (
@@ -716,7 +724,7 @@ export function App(): React.JSX.Element {
                     <Box size={18} />
                     <span>
                       <strong>Browse models</strong>
-                      Find a GGUF on Hugging Face
+                      Find models on Hugging Face
                     </span>
                   </button>
                 )}
@@ -937,7 +945,10 @@ export function App(): React.JSX.Element {
         <ManagePanel
           section={manageSection}
           onSectionChange={setManageSection}
-          onClose={() => setManageOpen(false)}
+          onClose={() => {
+            setManageOpen(false)
+            void prefetchRuntimes()
+          }}
           models={localModels}
           modelsLoading={modelsLoading}
           refreshModels={refreshLocalModels}

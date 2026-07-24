@@ -21,8 +21,10 @@ use tokio::{
 use crate::{
     db::Database,
     hf_auth,
+    mlx::MlxKind,
     models_store::{
-        download_destination, downloads_dir, model_id_for_path, validate_filename, validate_repo_id,
+        self, download_destination, downloads_dir, mlx_download_destination, mlx_model_id,
+        model_id_for_path, validate_filename, validate_repo_id,
     },
     progress::{ProgressCallback, ProgressEvent},
 };
@@ -31,6 +33,14 @@ use crate::{
 pub struct DownloadRequest {
     pub repo_id: String,
     pub filename: String,
+    #[serde(default = "default_revision")]
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MlxDownloadRequest {
+    pub repo_id: String,
+    pub engine: String,
     #[serde(default = "default_revision")]
     pub revision: String,
 }
@@ -46,6 +56,10 @@ pub struct DownloadResult {
     pub bytes: u64,
     pub sha256: String,
     pub resumed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 /// Content-addressed partial file for resumable downloads.
@@ -109,6 +123,8 @@ pub async fn download_gguf_with_progress(
             bytes,
             sha256,
             resumed: false,
+            engine: Some("llama.cpp".to_owned()),
+            notice: None,
         };
         progress(ProgressEvent::done(serde_json::to_value(&result)?));
         if let Some((db, job_id)) = &job {
@@ -240,6 +256,8 @@ pub async fn download_gguf_with_progress(
         bytes: written,
         sha256,
         resumed,
+        engine: Some("llama.cpp".to_owned()),
+        notice: None,
     };
     progress(ProgressEvent::done(serde_json::to_value(&result)?));
     if let Some((db, job_id)) = &job {
@@ -295,6 +313,251 @@ async fn hash_file(path: &Path) -> anyhow::Result<String> {
 /// Hash bytes (used by tests and small fixture writes).
 pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
+}
+
+async fn download_file_to(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    repo_id: &str,
+    revision: &str,
+    filename: &str,
+    destination: &Path,
+    progress: &mut ProgressCallback,
+    job: Option<(&Database, &str)>,
+    cancel: Option<&Arc<AtomicBool>>,
+) -> anyhow::Result<u64> {
+    if destination.is_file() {
+        return Ok(tokio::fs::metadata(destination).await?.len());
+    }
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("create model directory")?;
+    }
+    tokio::fs::create_dir_all(downloads_dir(data_dir))
+        .await
+        .context("create downloads directory")?;
+
+    let partial = partial_path(data_dir, repo_id, filename);
+    let existing = if partial.is_file() {
+        tokio::fs::metadata(&partial).await?.len()
+    } else {
+        0
+    };
+    progress(ProgressEvent::phase(
+        "start",
+        if existing > 0 {
+            format!("Resuming download of {filename}")
+        } else {
+            format!("Downloading {filename}")
+        },
+    ));
+    let url = resolve_url(repo_id, revision, filename);
+
+    let mut builder = hf_auth::apply_auth(
+        client
+            .get(&url)
+            .header(
+                "user-agent",
+                format!("brazier/{}", env!("CARGO_PKG_VERSION")),
+            )
+            .timeout(Duration::from_secs(600)),
+        data_dir,
+    );
+    if existing > 0 {
+        builder = builder.header("range", format!("bytes={existing}-"));
+    }
+
+    let response = builder
+        .send()
+        .await
+        .context("start Hugging Face download")?;
+    let status = response.status();
+    if status.as_u16() == 416 {
+        anyhow::bail!("server rejected resume range; delete the partial and retry");
+    }
+    if !(status.is_success() || status.as_u16() == 206) {
+        let body = response.text().await.unwrap_or_default();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            if hf_auth::load_token(data_dir).is_none() {
+                anyhow::bail!(
+                    "Hugging Face rejected the download ({status}). This model may be gated — add a Hugging Face token in Manage → Download models."
+                );
+            }
+        }
+        anyhow::bail!("Hugging Face download failed ({status}): {body}");
+    }
+
+    let total = content_length_total(&response, existing, status.as_u16() == 206);
+    let append = status.as_u16() == 206 && existing > 0;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(&partial)
+        .await
+        .context("open partial download")?;
+    if append {
+        file.seek(std::io::SeekFrom::End(0)).await?;
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut written = existing;
+    let mut last_emit = 0_u64;
+    progress(ProgressEvent::download(written, total));
+    while let Some(chunk) = stream.next().await {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            drop(file);
+            let _ = tokio::fs::remove_file(&partial).await;
+            anyhow::bail!("download cancelled");
+        }
+        let chunk = chunk.context("read download chunk")?;
+        file.write_all(&chunk)
+            .await
+            .context("write download chunk")?;
+        written += chunk.len() as u64;
+        if written.saturating_sub(last_emit) >= 256 * 1024 || total == Some(written) {
+            progress(ProgressEvent::download(written, total));
+            if let Some((db, job_id)) = job {
+                let _ = db
+                    .update_download_job_progress(job_id, written, total)
+                    .await;
+            }
+            last_emit = written;
+        }
+    }
+    progress(ProgressEvent::download(written, total.or(Some(written))));
+    file.flush().await?;
+    drop(file);
+
+    tokio::fs::rename(&partial, destination)
+        .await
+        .context("promote partial download")?;
+    Ok(written)
+}
+
+/// Download the files required for a local MLX model snapshot.
+pub async fn download_mlx_snapshot_with_progress(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    request: MlxDownloadRequest,
+    mut progress: ProgressCallback,
+    job: Option<(Database, String)>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> anyhow::Result<DownloadResult> {
+    validate_repo_id(&request.repo_id)?;
+    anyhow::ensure!(
+        !request.revision.is_empty()
+            && request.revision.len() <= 200
+            && request
+                .revision
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')),
+        "invalid revision"
+    );
+    let requested = MlxKind::from_engine_id(&request.engine)
+        .ok_or_else(|| anyhow::anyhow!("unsupported MLX engine `{}`", request.engine))?;
+    let files = crate::hf::list_mlx_snapshot_files(client, data_dir, &request.repo_id, &request.revision)
+        .await?;
+    anyhow::ensure!(
+        !files.is_empty(),
+        "no MLX snapshot files were found for {}",
+        request.repo_id
+    );
+    progress(ProgressEvent::phase(
+        "start",
+        format!("Downloading {} MLX files for {}", files.len(), request.repo_id),
+    ));
+    if let Some((db, job_id)) = &job {
+        let _ = db.start_download_job(job_id).await;
+    }
+    let mut total_bytes = 0_u64;
+    for (index, file) in files.iter().enumerate() {
+        if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            anyhow::bail!("download cancelled");
+        }
+        progress(ProgressEvent::phase(
+            "download",
+            format!("Fetching {} ({}/{})", file.path, index + 1, files.len()),
+        ));
+        let destination =
+            mlx_download_destination(data_dir, &request.repo_id, &file.path)?;
+        let bytes = download_file_to(
+            client,
+            data_dir,
+            &request.repo_id,
+            &request.revision,
+            &file.path,
+            &destination,
+            &mut progress,
+            job.as_ref().map(|(db, id)| (db, id.as_str())),
+            cancel.as_ref(),
+        )
+        .await?;
+        total_bytes += bytes;
+    }
+    let root = models_store::mlx_download_root(data_dir, &request.repo_id)?;
+    let detected = models_store::detect_mlx_kind(&root);
+    let notice = if detected != requested {
+        Some(format!(
+            "This model is {} (you selected {}). It was saved for {}.",
+            detected.engine_id(),
+            requested.engine_id(),
+            detected.engine_id()
+        ))
+    } else {
+        None
+    };
+    if let Some(message) = &notice {
+        progress(ProgressEvent::phase("warning", message.clone()));
+    }
+    let model_id = mlx_model_id(detected, &request.repo_id)?;
+    let sha256 = hash_directory(&root).await?;
+    let result = DownloadResult {
+        model_id: model_id.clone(),
+        path: root.display().to_string(),
+        bytes: total_bytes,
+        sha256,
+        resumed: false,
+        engine: Some(detected.engine_id().to_owned()),
+        notice,
+    };
+    progress(ProgressEvent::done(serde_json::to_value(&result)?));
+    if let Some((db, job_id)) = &job {
+        let _ = db
+            .complete_download_job(job_id, &result.sha256, result.bytes)
+            .await;
+    }
+    Ok(result)
+}
+
+async fn hash_directory(dir: &Path) -> anyhow::Result<String> {
+    let mut entries = Vec::new();
+    collect_files(dir, dir, &mut entries)?;
+    entries.sort();
+    let mut digest = Sha256::new();
+    for path in entries {
+        let relative = path.strip_prefix(dir).unwrap_or(&path);
+        digest.update(relative.to_string_lossy().as_bytes());
+        digest.update([0]);
+        let bytes = tokio::fs::read(&path).await?;
+        digest.update(bytes);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+fn collect_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(root, &path, files)?;
+        } else {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

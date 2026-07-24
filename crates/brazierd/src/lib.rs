@@ -12,6 +12,8 @@ pub mod hf;
 pub mod hf_auth;
 pub mod js_sandbox;
 pub mod llama;
+pub mod mlx;
+pub mod model_library;
 pub mod models_store;
 pub mod progress;
 pub mod runtime_settings;

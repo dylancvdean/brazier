@@ -6,12 +6,14 @@
  *
  * Electron's own install.js uses extract-zip, which can hang or partially
  * extract on some Linux setups. We download with @electron/get and extract
- * with Python's zipfile (reliable fallback).
+ * with unzip on macOS (preserves framework symlinks) or Python's zipfile on
+ * Linux (reliable fallback, but breaks macOS .framework symlinks).
  */
 import { createRequire } from 'node:module'
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -44,6 +46,15 @@ function platformBinaryName() {
   return 'electron'
 }
 
+function extractWithUnzip(zipPath, destDir) {
+  const result = spawnSync('unzip', ['-o', '-q', zipPath, '-d', destDir], {
+    encoding: 'utf8'
+  })
+  if (result.status !== 0) {
+    throw new Error(result.stderr || result.stdout || 'unzip failed')
+  }
+}
+
 function extractWithPython(zipPath, destDir) {
   const result = spawnSync(
     'python3',
@@ -67,6 +78,14 @@ with zipfile.ZipFile(zip_path) as z:
   }
 }
 
+function extractZip(zipPath, destDir) {
+  if (process.platform === 'darwin') {
+    extractWithUnzip(zipPath, destDir)
+    return
+  }
+  extractWithPython(zipPath, destDir)
+}
+
 async function downloadAndExtract(root, version) {
   const requireFromElectron = createRequire(join(root, 'package.json'))
   const { downloadArtifact } = requireFromElectron('@electron/get')
@@ -83,7 +102,7 @@ async function downloadAndExtract(root, version) {
   const dist = join(root, 'dist')
   rmSync(dist, { recursive: true, force: true })
   mkdirSync(dist, { recursive: true })
-  extractWithPython(zipPath, dist)
+  extractZip(zipPath, dist)
 
   writeFileSync(join(root, 'path.txt'), platformBinaryName())
   const binary = join(dist, platformBinaryName())
@@ -96,18 +115,44 @@ async function downloadAndExtract(root, version) {
   }
 }
 
+function isDarwinFrameworkHealthy(root) {
+  const frameworkRoot = join(
+    root,
+    'dist/Electron.app/Contents/Frameworks/Electron Framework.framework'
+  )
+  const current = join(frameworkRoot, 'Versions/Current')
+  const frameworkBinary = join(frameworkRoot, 'Electron Framework')
+  try {
+    return (
+      lstatSync(current).isSymbolicLink() &&
+      (lstatSync(frameworkBinary).isSymbolicLink() ||
+        spawnSync('file', ['-b', frameworkBinary], { encoding: 'utf8' }).stdout.includes(
+          'Mach-O'
+        ))
+    )
+  } catch {
+    return false
+  }
+}
+
 function isHealthy(root, version) {
   const platformPath = platformBinaryName()
   const binary = join(root, 'dist', platformPath)
   const versionFile = join(root, 'dist', 'version')
   const pathTxt = join(root, 'path.txt')
   try {
-    return (
+    const baseHealthy =
       existsSync(binary) &&
       existsSync(pathTxt) &&
       readFileSync(versionFile, 'utf8').replace(/^v/, '').trim() === version &&
       readFileSync(pathTxt, 'utf8').trim() === platformPath
-    )
+    if (!baseHealthy) {
+      return false
+    }
+    if (process.platform === 'darwin') {
+      return isDarwinFrameworkHealthy(root)
+    }
+    return true
   } catch {
     return false
   }

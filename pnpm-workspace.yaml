@@ -2,9 +2,19 @@ packages:
   - apps/*
   - packages/*
 
+# minimatch@10 pulls brace-expansion@5, which can fail pnpm 11's default
+# minimumReleaseAge lockfile check until the release is 24h old.
+overrides:
+  minimatch@>=10.0.0: 9.0.9
+
 # Allow install scripts for packages that need native binaries.
 # (pnpm no longer reads package.json#pnpm.onlyBuiltDependencies)
 onlyBuiltDependencies:
   - electron
   - electron-winstaller
   - esbuild
+
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true

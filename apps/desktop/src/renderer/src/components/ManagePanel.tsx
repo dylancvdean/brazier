@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Cpu,
   Download,
+  FolderOpen,
   Hammer,
   HardDrive,
   LoaderCircle,
@@ -23,6 +24,7 @@ import {
   deleteModel,
   deleteRuntime,
   downloadModel,
+  downloadMlxModel,
   ensureLlamaEngine,
   fetchModelTrust,
   formatBytes,
@@ -36,6 +38,8 @@ import {
   type ModelTrust,
   listHubFiles,
   listRuntimes,
+  modelLibraryPathSuggestions,
+  type ModelLibraryPathSuggestion,
   type ProgressEvent,
   type RuntimeEntry,
   type RuntimeSettings,
@@ -45,7 +49,54 @@ import {
   setHuggingFaceToken,
   queueModelDownload
 } from '../api'
+import {
+  engineBadgeClass,
+  engineLabel,
+  modelEngine,
+  modelLibraryKey,
+  runtimeNoticeForModel
+} from '../model-utils'
 import type { HubModel } from '../types'
+
+type DiscoverEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm'
+type BuildEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm'
+
+const DISCOVER_ENGINE_HELP: Record<DiscoverEngine, string> = {
+  'llama.cpp': 'GGUF weights for llama.cpp on CPU, CUDA, Metal, or Vulkan.',
+  'mlx-lm': 'Text-only MLX models for Apple Silicon (chat, tools, reasoning).',
+  'mlx-vlm': 'Vision MLX models for Apple Silicon (image + text input).'
+}
+
+const DISCOVER_ENGINE_LABELS: Record<DiscoverEngine, string> = {
+  'llama.cpp': 'GGUF · llama.cpp',
+  'mlx-lm': 'MLX · text',
+  'mlx-vlm': 'MLX · vision'
+}
+
+const BUILD_ENGINE_DEFAULTS: Record<
+  BuildEngine,
+  { repository: string; revision: string }
+> = {
+  'llama.cpp': {
+    repository: 'https://github.com/ggml-org/llama.cpp',
+    revision: 'master'
+  },
+  'mlx-lm': {
+    repository: 'https://github.com/ml-explore/mlx-lm',
+    revision: 'main'
+  },
+  'mlx-vlm': {
+    repository: 'https://github.com/Blaizzy/mlx-vlm',
+    revision: 'main'
+  }
+}
+
+function defaultDiscoverEngine(hardware: HardwareInfo | null): DiscoverEngine {
+  if (hardware?.os === 'macos' && hardware.architecture === 'aarch64') {
+    return 'mlx-lm'
+  }
+  return 'llama.cpp'
+}
 
 export type ManageSection = 'library' | 'discover' | 'runtimes' | 'engine'
 
@@ -88,6 +139,7 @@ function progressLabel(event: ProgressEvent | null): string {
   if (event.phase === 'log') return 'Compiling…'
   if (event.phase === 'skip') return 'Already present on disk'
   if (event.phase === 'start') return 'Starting download…'
+  if (event.phase === 'warning') return event.message ?? 'Notice'
   return event.phase
 }
 
@@ -249,9 +301,107 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
 
 type SectionProps = ManagePanelProps & { onError: (message: string | null) => void }
 
+function modelCountSummary(ggufCount: number, mlxCount: number): string {
+  const parts: string[] = []
+  if (ggufCount > 0) {
+    parts.push(`${ggufCount} GGUF file${ggufCount === 1 ? '' : 's'}`)
+  }
+  if (mlxCount > 0) {
+    parts.push(`${mlxCount} MLX model${mlxCount === 1 ? '' : 's'}`)
+  }
+  if (parts.length === 0) {
+    return 'No models found'
+  }
+  return parts.join(' · ')
+}
+
+function isExternalModel(model: LocalModel): boolean {
+  return Boolean(model.read_only) || model.id.includes('-ext:')
+}
+
 function LibrarySection(props: SectionProps): React.JSX.Element {
   const [confirming, setConfirming] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [browseOpen, setBrowseOpen] = useState(false)
+  const [suggestions, setSuggestions] = useState<ModelLibraryPathSuggestion[]>([])
+  const [configuredPaths, setConfiguredPaths] = useState<string[]>([])
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false)
+  const [addingPath, setAddingPath] = useState<string | null>(null)
+  const [runtimes, setRuntimes] = useState<RuntimeEntry[] | null>(props.initialRuntimes ?? null)
+
+  useEffect(() => {
+    void listRuntimes()
+      .then((response) => setRuntimes(response.data))
+      .catch(() => {
+        if (props.initialRuntimes?.length) setRuntimes(props.initialRuntimes)
+      })
+  }, [props.initialRuntimes])
+
+  useEffect(() => {
+    setConfiguredPaths(props.settings?.extra_model_library_paths ?? [])
+  }, [props.settings?.extra_model_library_paths])
+
+  async function loadSuggestions(): Promise<void> {
+    setLoadingSuggestions(true)
+    props.onError(null)
+    try {
+      const response = await modelLibraryPathSuggestions()
+      setSuggestions(response.suggestions)
+      setConfiguredPaths(response.configured)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setLoadingSuggestions(false)
+    }
+  }
+
+  async function openBrowse(): Promise<void> {
+    setBrowseOpen(true)
+    await loadSuggestions()
+  }
+
+  async function addLibraryPath(path: string): Promise<void> {
+    if (!props.settings) return
+    setAddingPath(path)
+    props.onError(null)
+    try {
+      const nextPaths = [...(props.settings.extra_model_library_paths ?? [])]
+      if (!nextPaths.includes(path)) {
+        nextPaths.push(path)
+      }
+      const saved = await saveRuntimeSettings({
+        ...props.settings,
+        extra_model_library_paths: nextPaths
+      })
+      props.onSettingsSaved(saved)
+      setConfiguredPaths(saved.extra_model_library_paths ?? [])
+      setSuggestions((current) =>
+        current.map((entry) =>
+          entry.path === path ? { ...entry, configured: true } : entry
+        )
+      )
+      await props.refreshModels()
+      await loadSuggestions()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setAddingPath(null)
+    }
+  }
+
+  async function chooseCustomFolder(): Promise<void> {
+    props.onError(null)
+    try {
+      const path = await window.brazier.selectDirectory()
+      if (!path) return
+      setBrowseOpen(true)
+      await addLibraryPath(path)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  const visibleSuggestions = suggestions.filter((entry) => entry.exists)
 
   async function removeModel(modelId: string): Promise<void> {
     setDeleting(modelId)
@@ -271,8 +421,94 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
     <section>
       <header className="manage-heading">
         <h2>Model library</h2>
-        <p>GGUF weights installed on this device. Deleting frees disk space immediately.</p>
+        <p>
+          Models downloaded by Brazier and models found in folders you add (GGUF and MLX from
+          LM Studio, Hugging Face cache, and others). External folders are read-only here.
+        </p>
       </header>
+
+      <div className="settings-group">
+        <div className="section-label">Other model folders</div>
+        <p className="model-help">
+          Add directories that already contain GGUF or MLX weights. Brazier scans them alongside
+          your local downloads.
+        </p>
+        {configuredPaths.length > 0 && (
+          <div className="library-path-list">
+            {configuredPaths.map((path) => (
+              <div className="library-path-row" key={path}>
+                <code>{path}</code>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="library-path-actions">
+          <button className="secondary-action" onClick={() => void openBrowse()}>
+            <Search size={15} />
+            Browse common folders…
+          </button>
+          <button className="secondary-action" onClick={() => void chooseCustomFolder()}>
+            <FolderOpen size={15} />
+            Choose folder…
+          </button>
+        </div>
+        {browseOpen && (
+          <div className="library-suggestions">
+            {loadingSuggestions && (
+              <div className="manage-placeholder">
+                <LoaderCircle className="spin" size={16} />
+                Checking common model locations…
+              </div>
+            )}
+            {!loadingSuggestions && visibleSuggestions.length === 0 && (
+              <div className="manage-placeholder">
+                <Box size={16} />
+                No common model folders were found. Use Choose folder to pick one manually.
+              </div>
+            )}
+            <div className="runtime-offer-list">
+              {visibleSuggestions.map((entry) => (
+                <article className="runtime-offer" key={entry.id}>
+                  <div className="runtime-offer-info">
+                    <strong>
+                      {entry.label}
+                      {entry.configured && <span className="installed-badge">Added</span>}
+                    </strong>
+                    <span>
+                      {entry.path}
+                      {` · ${modelCountSummary(entry.gguf_count, entry.mlx_count)}`}
+                    </span>
+                  </div>
+                  <button
+                    className="chip-button"
+                    disabled={
+                      entry.configured ||
+                      (entry.gguf_count === 0 && entry.mlx_count === 0) ||
+                      addingPath === entry.path
+                    }
+                    onClick={() => void addLibraryPath(entry.path)}
+                  >
+                    {addingPath === entry.path ? (
+                      <LoaderCircle className="spin" size={13} />
+                    ) : entry.configured ? (
+                      <>
+                        <Check size={13} />
+                        Added
+                      </>
+                    ) : (
+                      'Add'
+                    )}
+                  </button>
+                </article>
+              ))}
+            </div>
+            <p className="model-help">
+              Use Choose folder for any other directory. Remove added folders in Engine
+              configuration → Model library folders.
+            </p>
+          </div>
+        )}
+      </div>
       {props.modelsLoading && (
         <div className="manage-placeholder">
           <LoaderCircle className="spin" size={18} />
@@ -293,20 +529,33 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
       )}
       <div className="library-list">
         {props.models.map((model) => {
-          const key = model.id.startsWith('gguf:') ? model.id.slice('gguf:'.length) : model.id
+          const key = modelLibraryKey(model.id)
           const parts = key.split('/')
           const name = parts.at(-1) ?? key
           const repo = parts.slice(0, -1).join('/')
           const caps = model.capabilities
           const isSelected = model.id === props.selectedModel
+          const isExternal = isExternalModel(model)
+          const engine = modelEngine(model)
+          const runtimeNotice = runtimeNoticeForModel(model.id, props.models, runtimes)
           return (
             <article className="library-card" key={model.id}>
               <div className="library-card-info">
-                <strong>{name}</strong>
+                <strong>
+                  {name}
+                  <span className={engineBadgeClass(engine)}>{engineLabel(engine)}</span>
+                  {isExternal && model.library_label && (
+                    <span className="installed-badge">{model.library_label}</span>
+                  )}
+                </strong>
                 <span>
                   {repo}
                   {model.size_bytes != null ? ` · ${formatBytes(model.size_bytes)}` : ''}
+                  {isExternal ? ' · read-only' : ''}
                 </span>
+                {runtimeNotice && (
+                  <span className="library-runtime-note">{runtimeNotice}</span>
+                )}
                 <div className="library-caps">
                   {caps?.input_modalities.includes('image') && <span>vision</span>}
                   {caps?.tools && <span>tools</span>}
@@ -327,28 +576,29 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                     'Use'
                   )}
                 </button>
-                {confirming === model.id ? (
-                  <button
-                    className="chip-button danger"
-                    disabled={deleting === model.id}
-                    onClick={() => void removeModel(model.id)}
-                  >
-                    {deleting === model.id ? (
-                      <LoaderCircle className="spin" size={13} />
-                    ) : (
+                {!isExternal &&
+                  (confirming === model.id ? (
+                    <button
+                      className="chip-button danger"
+                      disabled={deleting === model.id}
+                      onClick={() => void removeModel(model.id)}
+                    >
+                      {deleting === model.id ? (
+                        <LoaderCircle className="spin" size={13} />
+                      ) : (
+                        <Trash2 size={13} />
+                      )}
+                      Confirm delete
+                    </button>
+                  ) : (
+                    <button
+                      className="chip-button subtle"
+                      title="Delete this model from disk"
+                      onClick={() => setConfirming(model.id)}
+                    >
                       <Trash2 size={13} />
-                    )}
-                    Confirm delete
-                  </button>
-                ) : (
-                  <button
-                    className="chip-button subtle"
-                    title="Delete this model from disk"
-                    onClick={() => setConfirming(model.id)}
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                )}
+                    </button>
+                  ))}
               </div>
             </article>
           )
@@ -360,6 +610,9 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
 
 function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [query, setQuery] = useState('Qwen')
+  const [discoverEngine, setDiscoverEngine] = useState<DiscoverEngine>(() =>
+    defaultDiscoverEngine(props.hardware)
+  )
   const [results, setResults] = useState<HubModel[]>([])
   const [searching, setSearching] = useState(false)
   const [expandedRepo, setExpandedRepo] = useState<string | null>(null)
@@ -425,17 +678,68 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     }
   }
 
+  useEffect(() => {
+    setDiscoverEngine(defaultDiscoverEngine(props.hardware))
+  }, [props.hardware?.os, props.hardware?.architecture])
+
   async function findModels(event?: FormEvent): Promise<void> {
     event?.preventDefault()
     setSearching(true)
     props.onError(null)
     setExpandedRepo(null)
     try {
-      setResults(await searchHub(query.trim(), 'llama.cpp'))
+      setResults(await searchHub(query.trim(), discoverEngine))
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
       setSearching(false)
+    }
+  }
+
+  async function downloadSnapshot(repoId: string): Promise<void> {
+    if (discoverEngine === 'llama.cpp') return
+    const trust = trustByRepo[repoId]
+    if (trust?.gated && hfTokenSource === 'none') {
+      props.onError('This model is gated on Hugging Face. Save an access token above first.')
+      return
+    }
+    if (trust?.requires_acknowledgement && !acknowledgedRepos[repoId]) {
+      props.onError('Review and acknowledge the license / remote-code notice before downloading.')
+      return
+    }
+    const key = `${repoId}::snapshot`
+    setDownloadProgress({ key, event: null })
+    props.onError(null)
+    try {
+      const result = await downloadMlxModel(repoId, discoverEngine, (event) =>
+        setDownloadProgress({ key, event })
+      )
+      await props.refreshModels()
+      if (result.model_id) {
+        props.onSelectModel(result.model_id)
+      }
+      const engine = result.engine ?? discoverEngine
+      setEnginePhase('Checking the MLX runtime…')
+      try {
+        const runtimeResponse = await listRuntimes()
+        const hasMlx = runtimeResponse.data.some(
+          (entry) => entry.engine === engine && entry.active
+        )
+        if (result.notice) {
+          props.onError(result.notice)
+        } else if (!hasMlx) {
+          props.onError(
+            `Model downloaded for ${engineLabel(engine)}, but that runtime is not active yet. ` +
+              'Build and activate it in the Runtimes section.'
+          )
+        }
+      } finally {
+        setEnginePhase(null)
+      }
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setDownloadProgress(null)
     }
   }
 
@@ -445,6 +749,21 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       return
     }
     setExpandedRepo(model.id)
+    if (discoverEngine !== 'llama.cpp') {
+      if (trustByRepo[model.id]) return
+      setLoadingFilesFor(model.id)
+      props.onError(null)
+      try {
+        const trust = await fetchModelTrust(model.id)
+        setTrustByRepo((current) => ({ ...current, [model.id]: trust }))
+      } catch (cause) {
+        props.onError(errorText(cause))
+        setExpandedRepo(null)
+      } finally {
+        setLoadingFilesFor(null)
+      }
+      return
+    }
     if (repoFiles[model.id]) return
     setLoadingFilesFor(model.id)
     props.onError(null)
@@ -532,8 +851,36 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     <section>
       <header className="manage-heading">
         <h2>Download models</h2>
-        <p>Search Hugging Face for GGUF weights compatible with llama.cpp.</p>
+        <p>
+          Search Hugging Face for{' '}
+          {discoverEngine === 'llama.cpp'
+            ? 'GGUF weights compatible with llama.cpp'
+            : `${engineLabel(discoverEngine)} models for Apple Silicon`}
+          .
+        </p>
+        <p className="manage-subtext">{DISCOVER_ENGINE_HELP[discoverEngine]}</p>
       </header>
+      {props.hardware?.os === 'macos' && props.hardware.architecture === 'aarch64' && (
+        <div className="build-form-row">
+          <label>
+            <span>Model type</span>
+            <select
+              value={discoverEngine}
+              onChange={(event) => {
+                setDiscoverEngine(event.target.value as DiscoverEngine)
+                setResults([])
+                setExpandedRepo(null)
+              }}
+            >
+              {(Object.keys(DISCOVER_ENGINE_LABELS) as DiscoverEngine[]).map((engine) => (
+                <option key={engine} value={engine}>
+                  {DISCOVER_ENGINE_LABELS[engine]}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
       <form className="build-form" onSubmit={(event) => void saveHubToken(event)}>
         <label>
           <span>Hugging Face token (for gated models)</span>
@@ -665,7 +1012,13 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                   ) : (
                     <>
                       {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                      {expanded ? 'Hide quants' : 'Choose quant'}
+                      {expanded
+                        ? discoverEngine === 'llama.cpp'
+                          ? 'Hide quants'
+                          : 'Hide details'
+                        : discoverEngine === 'llama.cpp'
+                          ? 'Choose quant'
+                          : 'Download'}
                     </>
                   )}
                 </button>
@@ -705,10 +1058,35 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                       </div>
                     </div>
                   )}
-                  {files.length === 0 && (
+                  {discoverEngine !== 'llama.cpp' ? (
+                    <div className="quant-row">
+                      <div>
+                        <strong>Full MLX snapshot</strong>
+                        <span>
+                          Downloads config, tokenizer, and weights. Brazier detects whether this
+                          is {engineLabel('mlx-lm')} or {engineLabel('mlx-vlm')} from the model
+                          config — you do not need to match the dropdown exactly.
+                        </span>
+                      </div>
+                      <div className="quant-actions">
+                        <button
+                          type="button"
+                          disabled={downloadProgress?.key === `${model.id}::snapshot`}
+                          onClick={() => void downloadSnapshot(model.id)}
+                        >
+                          {downloadProgress?.key === `${model.id}::snapshot` ? (
+                            <LoaderCircle className="spin" size={14} />
+                          ) : (
+                            <Download size={14} />
+                          )}
+                          Download
+                        </button>
+                      </div>
+                    </div>
+                  ) : files.length === 0 ? (
                     <p className="empty-models-inline">No GGUF files found in this repo.</p>
-                  )}
-                  {files.map((file) => {
+                  ) : (
+                    files.map((file) => {
                     const key = `${model.id}::${file.path}`
                     const active = downloadProgress?.key === key
                     const basename = file.path.split('/').at(-1) ?? file.path
@@ -770,7 +1148,8 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                         </div>
                       </div>
                     )
-                  })}
+                  })
+                  )}
                 </div>
               )}
             </article>
@@ -807,6 +1186,30 @@ const BUILD_TARGET_LABELS: Record<RuntimeTarget, string> = {
   vulkan: 'Vulkan'
 }
 
+function llamaRuntimeLabel(target: RuntimeTarget): string {
+  return `llama.cpp · ${BUILD_TARGET_LABELS[target]}`
+}
+
+function managedRuntimeInstalled(
+  runtimes: RuntimeEntry[],
+  target: RuntimeTarget
+): boolean {
+  if (target === 'cpu') {
+    return runtimes.some(
+      (runtime) =>
+        runtime.kind === 'managed' &&
+        (runtime.target === 'cpu' || runtime.id === 'managed')
+    )
+  }
+  return runtimes.some(
+    (runtime) => runtime.kind === 'managed' && runtime.target === target
+  )
+}
+
+function pythonRuntimeInstalled(runtimes: RuntimeEntry[], engine: BuildEngine): boolean {
+  return runtimes.some((runtime) => runtime.engine === engine)
+}
+
 function RuntimesSection(props: SectionProps): React.JSX.Element {
   const maxBuildJobs = Math.max(1, props.hardware?.logical_cpus ?? 8)
   const initialBuildJobs = Math.max(
@@ -819,19 +1222,38 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   )
   const [busyRuntime, setBusyRuntime] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<string | null>(null)
-  const [installing, setInstalling] = useState(false)
+  const [installingTarget, setInstallingTarget] = useState<RuntimeTarget | null>(null)
   const [installProgress, setInstallProgress] = useState<JobProgressState | null>(null)
   const [savingTarget, setSavingTarget] = useState(false)
 
   // Build-from-source form.
   const [buildOpen, setBuildOpen] = useState(false)
-  const [repository, setRepository] = useState('https://github.com/ggml-org/llama.cpp')
-  const [revision, setRevision] = useState('master')
+  const isAppleSilicon =
+    props.hardware?.os === 'macos' && props.hardware.architecture === 'aarch64'
+  const [buildEngine, setBuildEngine] = useState<BuildEngine>(() =>
+    isAppleSilicon ? 'mlx-lm' : 'llama.cpp'
+  )
+  const [repository, setRepository] = useState(
+    BUILD_ENGINE_DEFAULTS[isAppleSilicon ? 'mlx-lm' : 'llama.cpp'].repository
+  )
+  const [revision, setRevision] = useState(
+    BUILD_ENGINE_DEFAULTS[isAppleSilicon ? 'mlx-lm' : 'llama.cpp'].revision
+  )
   const [buildTarget, setBuildTarget] = useState<RuntimeTarget>('cpu')
   const buildTargets = useMemo(
     () => sourceBuildTargets(props.hardware),
     [props.hardware?.os]
   )
+  const managedTargets = useMemo(
+    () => (props.hardware?.targets ?? []).filter((target) => target.managed_install),
+    [props.hardware?.targets]
+  )
+  const buildEngineOptions = useMemo((): BuildEngine[] => {
+    if (props.hardware?.os === 'macos' && props.hardware.architecture === 'aarch64') {
+      return ['mlx-lm', 'mlx-vlm']
+    }
+    return []
+  }, [props.hardware?.os, props.hardware?.architecture])
   const [buildJobs, setBuildJobs] = useState(initialBuildJobs)
   const [building, setBuilding] = useState(false)
   const [activeBuildId, setActiveBuildId] = useState<string | null>(null)
@@ -940,22 +1362,31 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     }
   }
 
-  async function installLatest(): Promise<void> {
-    setInstalling(true)
-    setInstallProgress(emptyJobProgress('Installing managed runtime'))
+  async function installManaged(target: RuntimeTarget): Promise<void> {
+    const label = llamaRuntimeLabel(target)
+    setInstallingTarget(target)
+    setInstallProgress(emptyJobProgress(`Installing ${label}`))
     props.onError(null)
     try {
-      await ensureLlamaEngine((event) => {
-        setInstallProgress((current) =>
-          applyJobProgress(current ?? emptyJobProgress('Installing managed runtime'), event)
-        )
-      })
+      await ensureLlamaEngine(
+        (event) => {
+          setInstallProgress((current) =>
+            applyJobProgress(current ?? emptyJobProgress(`Installing ${label}`), event)
+          )
+        },
+        { target }
+      )
       await refreshRuntimes()
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
-      setInstalling(false)
+      setInstallingTarget(null)
     }
+  }
+
+  function openBuildForEngine(engine: BuildEngine): void {
+    setBuildEngine(engine)
+    setBuildOpen(true)
   }
 
   function appendBuildDiagnostics(
@@ -978,6 +1409,14 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     return next
   }
 
+  useEffect(() => {
+    const defaults = BUILD_ENGINE_DEFAULTS[buildEngine]
+    setRepository(defaults.repository)
+    setRevision(defaults.revision)
+  }, [buildEngine])
+
+  const isPythonBuild = buildEngine === 'mlx-lm' || buildEngine === 'mlx-vlm'
+
   async function runBuild(event: FormEvent): Promise<void> {
     event.preventDefault()
     setBuilding(true)
@@ -987,6 +1426,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     props.onError(null)
     try {
       await buildRuntime(
+        buildEngine,
         repository.trim(),
         revision.trim(),
         buildTarget,
@@ -1048,14 +1488,15 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   }
 
   const targets = props.hardware?.targets ?? []
+  const runtimeList = runtimes ?? []
 
   return (
     <section>
       <header className="manage-heading">
         <h2>Runtimes</h2>
         <p>
-          Install, build, and choose the llama-server binary that powers local inference. The
-          active runtime is used for every generation.
+          Install or build an inference engine for your hardware, then activate it below. GGUF models
+          use llama.cpp; MLX models on Apple Silicon use MLX-LM or MLX-VLM.
         </p>
       </header>
 
@@ -1101,6 +1542,100 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       </div>
 
       <div className="settings-group">
+        <div className="section-label">Available for your hardware</div>
+        {managedTargets.length === 0 && buildEngineOptions.length === 0 && (
+          <div className="manage-placeholder">
+            <Cpu size={16} />
+            Detecting supported runtimes…
+          </div>
+        )}
+        {installProgress && (
+          <JobProgressPanel progress={installProgress} active={installingTarget != null} />
+        )}
+        <div className="runtime-offer-list">
+          {managedTargets.map((target) => {
+            const installed = managedRuntimeInstalled(runtimeList, target.id)
+            const installing = installingTarget === target.id
+            return (
+              <article
+                className={`runtime-offer ${target.available ? '' : 'unavailable'}`}
+                key={target.id}
+              >
+                <div className="runtime-offer-info">
+                  <strong>
+                    {llamaRuntimeLabel(target.id)}
+                    {target.recommended && <span className="active-badge">Recommended</span>}
+                    {installed && <span className="installed-badge">Installed</span>}
+                  </strong>
+                  <span>{target.detail}</span>
+                </div>
+                <button
+                  className="chip-button"
+                  disabled={!target.available || installing || installed}
+                  title={
+                    !target.available
+                      ? target.detail
+                      : installed
+                        ? 'Already downloaded'
+                        : `Download managed ${llamaRuntimeLabel(target.id)}`
+                  }
+                  onClick={() => void installManaged(target.id)}
+                >
+                  {installing ? (
+                    <LoaderCircle className="spin" size={13} />
+                  ) : installed ? (
+                    <>
+                      <Check size={13} />
+                      Installed
+                    </>
+                  ) : (
+                    <>
+                      <Download size={13} />
+                      Download
+                    </>
+                  )}
+                </button>
+              </article>
+            )
+          })}
+          {buildEngineOptions.map((engine) => {
+            const installed = pythonRuntimeInstalled(runtimeList, engine)
+            return (
+              <article className="runtime-offer" key={engine}>
+                <div className="runtime-offer-info">
+                  <strong>
+                    {DISCOVER_ENGINE_LABELS[engine]}
+                    {engine === 'mlx-lm' && isAppleSilicon && (
+                      <span className="active-badge">Recommended</span>
+                    )}
+                    {installed && <span className="installed-badge">Built</span>}
+                  </strong>
+                  <span>
+                    Build a local Python environment with uv. Required for MLX models on Apple
+                    Silicon.
+                  </span>
+                </div>
+                <button
+                  className="chip-button"
+                  title={`Build ${DISCOVER_ENGINE_LABELS[engine]} from source`}
+                  onClick={() => openBuildForEngine(engine)}
+                >
+                  <Hammer size={13} />
+                  {installed ? 'Build again' : 'Build'}
+                </button>
+              </article>
+            )
+          })}
+        </div>
+        {managedTargets.some((target) => !target.available) && (
+          <p className="model-help">
+            Grayed-out options need hardware or drivers that were not detected on this machine. You
+            can still build llama.cpp for them from source below.
+          </p>
+        )}
+      </div>
+
+      <div className="settings-group">
         <div className="section-label">Installed runtimes</div>
         {runtimes == null && !props.initialRuntimes?.length && (
           <div className="manage-placeholder">
@@ -1111,7 +1646,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         {runtimes != null && runtimes.length === 0 && (
           <div className="manage-placeholder">
             <Cpu size={16} />
-            No runtime installed yet. Install a release below or build one from source.
+            No runtime installed yet. Download one above or build from source.
           </div>
         )}
         <div className="runtime-list">
@@ -1171,13 +1706,6 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             </article>
           ))}
         </div>
-        {installProgress && (
-          <JobProgressPanel progress={installProgress} active={installing} />
-        )}
-        <button className="secondary-action" disabled={installing} onClick={() => void installLatest()}>
-          {installing ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
-          {installing ? installProgress?.headline ?? 'Installing…' : 'Install latest release'}
-        </button>
       </div>
 
       <div className="settings-group">
@@ -1188,12 +1716,27 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         </button>
         {buildOpen && (
           <form className="build-form" onSubmit={(event) => void runBuild(event)}>
+            {isAppleSilicon && (
+              <label>
+                <span>Engine</span>
+                <select
+                  value={buildEngine}
+                  onChange={(event) => setBuildEngine(event.target.value as BuildEngine)}
+                >
+                  {(Object.keys(BUILD_ENGINE_DEFAULTS) as BuildEngine[]).map((engine) => (
+                    <option key={engine} value={engine}>
+                      {DISCOVER_ENGINE_LABELS[engine]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label>
               <span>Repository</span>
               <input
                 value={repository}
                 onChange={(event) => setRepository(event.target.value)}
-                placeholder="https://github.com/ggml-org/llama.cpp"
+                placeholder={BUILD_ENGINE_DEFAULTS[buildEngine].repository}
               />
             </label>
             <div className="build-form-row">
@@ -1201,43 +1744,49 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 <span>Branch, tag, or commit</span>
                 <input value={revision} onChange={(event) => setRevision(event.target.value)} />
               </label>
-              <label>
-                <span>Target</span>
-                <select
-                  value={buildTarget}
-                  onChange={(event) => setBuildTarget(event.target.value as RuntimeTarget)}
-                >
-                  {buildTargets.map((target) => (
-                    <option key={target} value={target}>
-                      {BUILD_TARGET_LABELS[target]}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {!isPythonBuild && (
+                <label>
+                  <span>Target</span>
+                  <select
+                    value={buildTarget}
+                    onChange={(event) => setBuildTarget(event.target.value as RuntimeTarget)}
+                  >
+                    {buildTargets.map((target) => (
+                      <option key={target} value={target}>
+                        {BUILD_TARGET_LABELS[target]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </div>
             <p className="model-help">
-              {props.hardware?.os === 'macos'
-                ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
-                : props.hardware?.os === 'windows'
-                  ? 'Windows builds need Git, CMake, and Visual Studio 2022 Build Tools with the C++ workload.'
-                  : 'Linux builds need git, cmake, and a distro C++ toolchain. GPU targets also need the matching SDK or driver stack.'}
+              {isPythonBuild
+                ? 'MLX builds create an isolated Python environment with uv. Install uv (`brew install uv`) before starting the build.'
+                : props.hardware?.os === 'macos'
+                  ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
+                  : props.hardware?.os === 'windows'
+                    ? 'Windows builds need Git, CMake, and Visual Studio 2022 Build Tools with the C++ workload.'
+                    : 'Linux builds need git, cmake, and a distro C++ toolchain. GPU targets also need the matching SDK or driver stack.'}
             </p>
-            <label className="slider-row">
-              <span>
-                Parallel jobs (-j) <em>{buildJobs}</em>
-              </span>
-              <input
-                type="range"
-                min={1}
-                max={maxBuildJobs}
-                step={1}
-                value={buildJobs}
-                onChange={(event) => setBuildJobs(Number(event.target.value))}
-                onMouseUp={(event) => void persistBuildJobs(Number(event.currentTarget.value))}
-                onTouchEnd={(event) => void persistBuildJobs(Number(event.currentTarget.value))}
-                onKeyUp={(event) => void persistBuildJobs(Number(event.currentTarget.value))}
-              />
-            </label>
+            {!isPythonBuild && (
+              <label className="slider-row">
+                <span>
+                  Parallel jobs (-j) <em>{buildJobs}</em>
+                </span>
+                <input
+                  type="range"
+                  min={1}
+                  max={maxBuildJobs}
+                  step={1}
+                  value={buildJobs}
+                  onChange={(event) => setBuildJobs(Number(event.target.value))}
+                  onMouseUp={(event) => void persistBuildJobs(Number(event.currentTarget.value))}
+                  onTouchEnd={(event) => void persistBuildJobs(Number(event.currentTarget.value))}
+                  onKeyUp={(event) => void persistBuildJobs(Number(event.currentTarget.value))}
+                />
+              </label>
+            )}
             {buildWarning && (
               <div className="build-warning">
                 <ShieldAlert size={14} />
@@ -1294,9 +1843,15 @@ function EngineSection(props: SectionProps): React.JSX.Element {
     if (!draft) return
     setSaving(true)
     props.onError(null)
+    const pathsChanged =
+      JSON.stringify(props.settings?.extra_model_library_paths ?? []) !==
+      JSON.stringify(draft.extra_model_library_paths ?? [])
     try {
       const saved = await saveRuntimeSettings(draft)
       props.onSettingsSaved(saved)
+      if (pathsChanged) {
+        await props.refreshModels()
+      }
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -1327,6 +1882,41 @@ function EngineSection(props: SectionProps): React.JSX.Element {
           generation. Sampling defaults live in the inference menu next to the model picker.
         </p>
       </header>
+      <div className="settings-group">
+        <div className="section-label">Model library folders</div>
+        <p className="model-help">
+          Extra directories scanned for GGUF models. Removing a folder hides those models in Brazier
+          but does not delete files on disk.
+        </p>
+        {draft.extra_model_library_paths.length === 0 ? (
+          <div className="manage-placeholder">
+            <Box size={16} />
+            No external folders added. Browse common locations from the Model library section.
+          </div>
+        ) : (
+          <div className="library-path-list">
+            {draft.extra_model_library_paths.map((path) => (
+              <div className="library-path-row" key={path}>
+                <code>{path}</code>
+                <button
+                  className="chip-button subtle"
+                  onClick={() =>
+                    setDraft({
+                      ...draft,
+                      extra_model_library_paths: draft.extra_model_library_paths.filter(
+                        (entry) => entry !== path
+                      )
+                    })
+                  }
+                >
+                  <X size={13} />
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
       <div className="settings-grid">
         <label>
           <span>Context size</span>

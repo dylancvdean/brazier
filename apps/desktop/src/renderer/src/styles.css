@@ -71,6 +71,10 @@ code {
   transition: width 180ms ease, transform 180ms ease;
 }
 
+.platform-darwin .sidebar.open {
+  position: relative;
+}
+
 .sidebar:not(.open) {
   width: 0;
   flex-basis: 0;
@@ -356,6 +360,55 @@ code {
   border-bottom: 1px solid rgba(43, 46, 40, 0.8);
   background: rgba(16, 17, 15, 0.78);
   backdrop-filter: blur(14px);
+}
+
+/* hiddenInset title bar: drag region plus local clearance for traffic lights only */
+.platform-darwin .topbar {
+  -webkit-app-region: drag;
+  height: 72px;
+  flex-basis: 72px;
+  padding-top: 8px;
+}
+
+.platform-darwin .sidebar:not(.open) ~ .workspace .topbar > .icon-button:first-child {
+  margin-left: 58px;
+}
+
+.platform-darwin .topbar :is(button, input, select, a, label) {
+  -webkit-app-region: no-drag;
+}
+
+.platform-darwin .sidebar.open {
+  -webkit-app-region: drag;
+}
+
+.platform-darwin .sidebar.open::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  width: 72px;
+  height: 48px;
+  -webkit-app-region: drag;
+}
+
+.platform-darwin .sidebar.open .brand {
+  margin-top: 12px;
+  padding-left: 58px;
+}
+
+.platform-darwin .sidebar.open :is(button, input, select, a, label) {
+  -webkit-app-region: no-drag;
+}
+
+.platform-darwin .drawer-backdrop {
+  -webkit-app-region: drag;
+}
+
+.platform-darwin .manage-panel,
+.platform-darwin .manage-panel :is(button, input, select, a, label) {
+  -webkit-app-region: no-drag;
 }
 
 .icon-button,
@@ -849,11 +902,83 @@ code {
   cursor: pointer;
 }
 
-.library-list,
-.runtime-list {
+.library-path-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.library-path-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-bottom: 10px;
+}
+
+.library-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #191b18;
+}
+
+.library-path-row code {
+  overflow: hidden;
+  color: #9aa18f;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.library-list,
+.runtime-list,
+.runtime-offer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.runtime-offer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 14px;
+  align-items: center;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #191b18;
+}
+
+.runtime-offer.unavailable {
+  opacity: 0.52;
+}
+
+.runtime-offer-info strong {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.runtime-offer-info > span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .library-card,
@@ -914,6 +1039,79 @@ code {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   background: #25321c;
+}
+
+.engine-badge {
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.engine-badge.gguf {
+  color: #b8c4a8;
+  background: #25321c;
+}
+
+.engine-badge.mlx-lm {
+  color: #9eb6d8;
+  background: #1c2430;
+}
+
+.engine-badge.mlx-vlm {
+  color: #d4b8e8;
+  background: #2a1f30;
+}
+
+.runtime-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 16px 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  color: #d8c89a;
+  font-size: 13px;
+  background: #2a2418;
+  border: 1px solid #3d3420;
+}
+
+.runtime-notice button {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 6px;
+  color: #e8dcc0;
+  font-size: 12px;
+  background: #3d3420;
+  border: none;
+  cursor: pointer;
+}
+
+.library-runtime-note {
+  display: block;
+  margin-top: 4px;
+  color: #d8c89a;
+  font-size: 11px;
+}
+
+.manage-subtext {
+  margin-top: 6px;
+  color: #8c9385;
+  font-size: 13px;
+}
+
+.installed-badge {
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: #9eb6d8;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: #1c2430;
 }
 
 .library-caps {

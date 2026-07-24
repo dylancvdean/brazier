@@ -5,13 +5,15 @@ models. It is designed around a sandboxed Electron interface and an independent
 Rust daemon so the same model, conversation, and tool infrastructure works in
 the desktop app and in headless deployments.
 
-The project is at the early implementation stage. On Linux, the vertical slice
+The project is at the early implementation stage. On Linux and macOS Apple Silicon, the vertical slice
 provides:
 
 - local conversation persistence with branching;
 - OpenAI-compatible model, Chat Completions, and Responses endpoints;
 - a deterministic development engine plus **llama.cpp** inference via managed or
   discovered `llama-server` and on-disk GGUF models;
+- on **macOS Apple Silicon**, **mlx-lm** and **mlx-vlm** Python runtimes built into
+  isolated virtual environments with OpenAI-compatible HTTP servers;
 - Hugging Face discovery (engine-filtered) and GGUF download into the app data
   directory;
 - runtime management: managed release installs, llama.cpp builds from source
@@ -29,7 +31,7 @@ remaining engine work.
 
 ## Development
 
-Prerequisites are Node.js 24+, pnpm 10, and Rust 1.93.
+Prerequisites are Node.js 24+, pnpm 11, and Rust 1.93.
 
 ```sh
 pnpm install
