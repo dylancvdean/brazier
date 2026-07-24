@@ -61,11 +61,11 @@ code {
 }
 
 .sidebar {
-  width: 264px;
-  flex: 0 0 264px;
+  width: 258px;
+  flex: 0 0 258px;
   display: flex;
   flex-direction: column;
-  padding: 22px 14px 14px;
+  padding: 16px 12px 12px;
   background: #121411;
   border-right: 1px solid var(--line);
   transition: width 180ms ease, transform 180ms ease;
@@ -88,7 +88,7 @@ code {
   display: flex;
   gap: 11px;
   align-items: center;
-  padding: 0 8px 24px;
+  padding: 0 6px 16px;
 }
 
 .brand-mark,
@@ -351,27 +351,26 @@ code {
 }
 
 .topbar {
-  height: 66px;
-  flex: 0 0 66px;
+  height: 54px;
+  flex: 0 0 54px;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 0 22px;
+  gap: 12px;
+  padding: 0 16px;
   border-bottom: 1px solid rgba(43, 46, 40, 0.8);
   background: rgba(16, 17, 15, 0.78);
   backdrop-filter: blur(14px);
 }
 
-/* hiddenInset title bar: drag region plus local clearance for traffic lights only */
+/* hiddenInset title bar: the whole bar is a drag region; interactive
+   children opt back out below. Height is uniform across platforms. */
 .platform-darwin .topbar {
   -webkit-app-region: drag;
-  height: 72px;
-  flex-basis: 72px;
-  padding-top: 8px;
 }
 
+/* Clear the traffic-light cluster when the sidebar is collapsed. */
 .platform-darwin .sidebar:not(.open) ~ .workspace .topbar > .icon-button:first-child {
-  margin-left: 58px;
+  margin-left: 72px;
 }
 
 .platform-darwin .topbar :is(button, input, select, a, label) {
@@ -394,8 +393,8 @@ code {
 }
 
 .platform-darwin .sidebar.open .brand {
-  margin-top: 12px;
-  padding-left: 58px;
+  margin-top: 6px;
+  padding-left: 72px;
 }
 
 .platform-darwin .sidebar.open :is(button, input, select, a, label) {
@@ -475,7 +474,7 @@ code {
 
 .capabilities {
   display: flex;
-  gap: 6px;
+  gap: 5px;
   margin-left: auto;
 }
 
@@ -484,7 +483,7 @@ code {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 5px 7px;
+  padding: 4px 7px;
   border: 1px solid var(--line);
   border-radius: 7px;
   color: #a7ad9f;
@@ -500,7 +499,7 @@ code {
 .chat {
   flex: 1;
   overflow-y: auto;
-  padding: 42px max(28px, calc((100% - 780px) / 2));
+  padding: 32px max(28px, calc((100% - 780px) / 2));
 }
 
 .welcome {
@@ -1059,9 +1058,9 @@ code {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  width: 208px;
-  flex: 0 0 208px;
-  padding: 22px 12px;
+  width: 200px;
+  flex: 0 0 200px;
+  padding: 16px 10px;
   border-right: 1px solid var(--line);
   background: #111310;
 }
@@ -1106,19 +1105,19 @@ code {
 .manage-content {
   flex: 1;
   min-width: 0;
-  padding: 26px 28px;
+  padding: 20px 24px;
   overflow-y: auto;
 }
 
 .manage-content section {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
 }
 
 .manage-heading h2 {
   margin: 0;
-  font-size: 22px;
+  font-size: 18px;
   letter-spacing: -0.03em;
 }
 
@@ -1389,6 +1388,41 @@ code {
   background: #1c2430;
 }
 
+.installed-badge.update {
+  color: #e6c877;
+  background: #2f2716;
+}
+
+.pinned-badge {
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: #9aa192;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: #22251f;
+}
+
+.settings-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-group-head .section-label {
+  padding-bottom: 0;
+}
+
+.runtime-update-note {
+  display: block;
+  margin-top: 4px;
+  color: #b39f74;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .library-caps {
   display: flex;
   gap: 5px;
@@ -1635,21 +1669,6 @@ code {
   margin-top: 10px;
 }
 
-  max-height: 220px;
-  margin: 0;
-  padding: 11px;
-  overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: #9aa192;
-  font-family: ui-monospace, monospace;
-  font-size: 9.5px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-all;
-  background: #0e100d;
-}
-
 .engine-phase-note {
   display: flex;
   align-items: center;
@@ -1669,7 +1688,7 @@ code {
 
 .popover {
   position: absolute;
-  top: 62px;
+  top: 52px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -1808,6 +1827,40 @@ code {
   accent-color: #a8db5a;
 }
 
+.context-slider input[type='range'] {
+  margin-top: 2px;
+}
+
+.slider-ticks {
+  display: flex;
+  justify-content: space-between;
+  gap: 2px;
+  margin-top: 5px;
+}
+
+.slider-ticks button {
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 5px;
+  color: #6f756a;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: transparent;
+  cursor: pointer;
+  transition: color 100ms ease, background 100ms ease;
+}
+
+.slider-ticks button:hover {
+  color: #c3c8bc;
+  background: #20241d;
+}
+
+.slider-ticks button.active {
+  color: #18200f;
+  background: var(--accent);
+}
+
 .field-row input {
   padding: 8px 9px;
   border: 1px solid var(--line);
@@ -1874,6 +1927,181 @@ code {
 .attach-button.tools-on {
   color: #c6e88a;
   background: #1e2617;
+}
+
+/* --- Tools popover (granular per-tool selection) ----------------------- */
+
+.tool-menu-anchor {
+  position: relative;
+  display: flex;
+}
+
+.tool-menu-anchor .attach-button {
+  position: relative;
+}
+
+.tool-count {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  color: #18200f;
+  font-size: 9px;
+  font-weight: 700;
+  background: var(--accent);
+}
+
+.tool-menu-backdrop {
+  position: fixed;
+  z-index: 29;
+  inset: 0;
+}
+
+.tool-menu-popover {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: min(340px, calc(100vw - 32px));
+  max-height: min(460px, calc(100vh - 150px));
+  padding: 10px;
+  overflow-y: auto;
+  border: 1px solid #34382f;
+  border-radius: 13px;
+  background: #171a15;
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.45);
+}
+
+.tool-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tool-menu-head .popover-title {
+  padding: 4px 6px;
+}
+
+.tool-menu-bulk {
+  display: flex;
+  gap: 4px;
+}
+
+.tool-menu-bulk button {
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--soft);
+  font-size: 10px;
+  font-weight: 600;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tool-menu-bulk button:hover:not(:disabled) {
+  border-color: #59644b;
+  color: #e6eadf;
+}
+
+.tool-menu-bulk button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.tool-menu-note {
+  margin: 4px 6px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.tool-menu-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 4px;
+}
+
+.tool-menu-group .section-label {
+  padding: 6px 6px 4px;
+}
+
+.tool-menu-item {
+  display: flex;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 8px;
+  border: 0;
+  border-radius: 8px;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tool-menu-item:hover:not(:disabled) {
+  background: #1d201b;
+}
+
+.tool-menu-item.on {
+  background: #1a1f14;
+}
+
+.tool-menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.tool-menu-check {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin-top: 1px;
+  border: 1px solid #3f463a;
+  border-radius: 5px;
+  color: #18200f;
+  background: transparent;
+}
+
+.tool-menu-check.on {
+  border-color: #a8d45f;
+  background: var(--accent);
+}
+
+.tool-menu-item-body {
+  min-width: 0;
+}
+
+.tool-menu-item-body strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #dfe4d6;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tool-menu-item-body span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.tool-menu-net {
+  display: inline-flex;
+  color: #8fa3c8;
 }
 
 .message.tool .message-body {
@@ -2132,7 +2360,7 @@ code {
   display: grid;
   grid-template-columns: 1fr auto auto;
   gap: 7px;
-  margin-top: 24px;
+  margin-top: 16px;
 }
 
 .model-search label {
@@ -2545,7 +2773,7 @@ code {
 
 .mode-panel-header h2 {
   margin: 0 0 6px;
-  font-size: 22px;
+  font-size: 18px;
 }
 
 .mode-panel-header p,

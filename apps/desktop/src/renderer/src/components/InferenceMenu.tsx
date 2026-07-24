@@ -24,6 +24,27 @@ function contextPresets(maxContext: number | null | undefined): number[] {
   return capped.sort((a, b) => a - b)
 }
 
+/** Compact token label, e.g. 4096 -> "4K", 131072 -> "128K". */
+function formatTokens(value: number): string {
+  if (value >= 1024 && value % 1024 === 0) return `${value / 1024}K`
+  if (value >= 1000) return `${Math.round(value / 1000)}K`
+  return String(value)
+}
+
+/** Index of the preset closest to `value`, so the slider snaps sensibly. */
+function nearestPresetIndex(value: number, options: number[]): number {
+  let best = 0
+  let bestDelta = Number.POSITIVE_INFINITY
+  options.forEach((option, index) => {
+    const delta = Math.abs(option - value)
+    if (delta < bestDelta) {
+      bestDelta = delta
+      best = index
+    }
+  })
+  return best
+}
+
 function reasoningModeFromSettings(settings: RuntimeSettings): ReasoningMode {
   if (!settings.enable_reasoning) return 'off'
   if (settings.reasoning_budget_tokens != null) return 'budget'
@@ -114,27 +135,44 @@ export function InferenceMenu({
           </div>
         ) : (
           <>
-            <label className="field-row">
+            <label className="slider-row context-slider">
               <span>
-                Context length
-                {maxContext ? ` · max ${maxContext.toLocaleString()}` : ''}
+                <span>Context length</span>
+                <em>{draft.context_size.toLocaleString()} tokens</em>
               </span>
-              <select
-                value={draft.context_size}
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0, contextOptions.length - 1)}
+                step={1}
+                value={nearestPresetIndex(draft.context_size, contextOptions)}
                 onChange={(event) =>
-                  setDraft({ ...draft, context_size: Number(event.target.value) })
+                  setDraft({
+                    ...draft,
+                    context_size: contextOptions[Number(event.target.value)] ?? draft.context_size
+                  })
                 }
-              >
-                {contextOptions.map((value) => (
-                  <option key={value} value={value}>
-                    {value.toLocaleString()} tokens
-                  </option>
+              />
+              <div className="slider-ticks" aria-hidden="true">
+                {contextOptions.map((value, index) => (
+                  <button
+                    type="button"
+                    key={value}
+                    className={
+                      index === nearestPresetIndex(draft.context_size, contextOptions)
+                        ? 'active'
+                        : ''
+                    }
+                    onClick={() => setDraft({ ...draft, context_size: value })}
+                  >
+                    {formatTokens(value)}
+                  </button>
                 ))}
-              </select>
+              </div>
             </label>
             <p className="inference-help">
-              Applies on the next generation. Larger context uses more memory; stay at or below
-              the model&apos;s trained window when known.
+              Snaps to common windows{maxContext ? ` · max ${formatTokens(maxContext)}` : ''}. Larger
+              context uses more memory; stay at or below the model&apos;s trained window.
             </p>
             <label className="slider-row">
               <span>

@@ -1230,6 +1230,7 @@ mod tests {
             reasoning_budget_tokens: None,
             tool_choice: None,
             builtin_tools: None,
+            builtin_tool_names: None,
         };
         let settings = RuntimeSettings::default();
         let body = translate_chat_request(&request, &settings, "local", false);

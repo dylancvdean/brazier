@@ -27,6 +27,21 @@ impl RuntimeTarget {
     }
 }
 
+/// How to manage memory when image/video generation runs while a chat model is
+/// resident. Generation engines load their own weights; on shared-memory
+/// machines both models can exceed RAM at once.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationMemoryPolicy {
+    /// Evict the chat model only when it will not fit alongside the gen model.
+    #[default]
+    Auto,
+    /// Always keep both models resident (never evict for generation).
+    Coresident,
+    /// Always evict chat models before generation, reload after.
+    Exclusive,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct RuntimeSettings {
@@ -91,12 +106,29 @@ pub struct RuntimeSettings {
     /// Additional directories to scan for GGUF models (read-only; not used for downloads).
     #[serde(default)]
     pub extra_model_library_paths: Vec<String>,
+    /// Memory arbitration between chat and image/video generation models.
+    #[serde(default)]
+    pub generation_memory_policy: GenerationMemoryPolicy,
+    /// RAM headroom (MiB) to preserve when deciding co-residency in `auto`.
+    #[serde(default = "default_generation_headroom_mb")]
+    pub generation_memory_headroom_mb: u32,
+    /// Reload the evicted chat model after generation completes.
+    #[serde(default = "default_true")]
+    pub reload_llm_after_generation: bool,
 }
 
 pub fn default_build_jobs() -> u16 {
     std::thread::available_parallelism()
         .map(|count| (count.get() / 2).max(1) as u16)
         .unwrap_or(4)
+}
+
+pub fn default_generation_headroom_mb() -> u32 {
+    1024
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for RuntimeSettings {
@@ -131,6 +163,9 @@ impl Default for RuntimeSettings {
             default_voice_persona: None,
             build_jobs: default_build_jobs(),
             extra_model_library_paths: Vec::new(),
+            generation_memory_policy: GenerationMemoryPolicy::Auto,
+            generation_memory_headroom_mb: default_generation_headroom_mb(),
+            reload_llm_after_generation: true,
         }
     }
 }
@@ -184,6 +219,10 @@ impl RuntimeSettings {
         anyhow::ensure!(
             (1..=max_jobs.max(1)).contains(&self.build_jobs),
             "build_jobs must be between 1 and {max_jobs}"
+        );
+        anyhow::ensure!(
+            self.generation_memory_headroom_mb <= 1_048_576,
+            "generation_memory_headroom_mb must be at most 1048576"
         );
         for path in &self.extra_model_library_paths {
             let path = PathBuf::from(path);

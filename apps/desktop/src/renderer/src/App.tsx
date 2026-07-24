@@ -37,6 +37,8 @@ import {
   listModels,
   listRuntimes,
   listRunSnapshots,
+  listTools,
+  type BundledTool,
   GenerationFailure,
   prepareModel,
   setModelBinding,
@@ -58,6 +60,7 @@ import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
 import { ModelMenu } from './components/ModelMenu'
+import { ToolsMenu } from './components/ToolsMenu'
 import { VoiceMode } from './components/VoiceMode'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { hasCompletedWelcome, markWelcomeCompleted } from './welcomePrefs'
@@ -75,6 +78,27 @@ import {
   writeCachedRuntimes
 } from './inventoryCache'
 import type { Attachment, ContentPart, Conversation, Message, Role } from './types'
+
+const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
+
+function readEnabledTools(): string[] {
+  try {
+    const raw = localStorage.getItem(ENABLED_TOOLS_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writeEnabledTools(names: string[]): void {
+  try {
+    localStorage.setItem(ENABLED_TOOLS_KEY, JSON.stringify(names))
+  } catch {
+    // Best-effort persistence.
+  }
+}
 
 function contentText(message: Message): string {
   if (typeof message.content === 'string') return message.content
@@ -243,7 +267,10 @@ export function App(): React.JSX.Element {
     const cached = readCachedRuntimes()
     return cached.length > 0 ? cached : null
   })
-  const [toolsEnabled, setToolsEnabled] = useState(false)
+  const [enabledTools, setEnabledTools] = useState<string[]>(() => readEnabledTools())
+  const [availableTools, setAvailableTools] = useState<BundledTool[]>([])
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false)
+  const toolsEnabled = enabledTools.length > 0
   const [daemonStatus, setDaemonStatus] = useState<'checking' | 'healthy' | 'offline'>('checking')
   const [daemonVersion, setDaemonVersion] = useState('')
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
@@ -299,6 +326,27 @@ export function App(): React.JSX.Element {
       : pipelineFeatures.streaming_asr
         ? 'Streaming ASR is available via /v1/audio/transcriptions?stream=true; chat attachments still use batch ASR or native audio'
         : 'No audio path yet — build whisper.cpp + download a Whisper model, install streaming ASR, or select a native-audio chat model.'
+
+  const updateEnabledTools = useCallback((next: string[]): void => {
+    setEnabledTools(next)
+    writeEnabledTools(next)
+  }, [])
+
+  async function refreshTools(): Promise<void> {
+    try {
+      const tools = await listTools()
+      setAvailableTools(tools)
+      // Drop selections for tools that no longer exist (e.g. removed MCP server).
+      setEnabledTools((current) => {
+        const names = new Set(tools.map((tool) => tool.name))
+        const filtered = current.filter((name) => names.has(name))
+        if (filtered.length !== current.length) writeEnabledTools(filtered)
+        return filtered
+      })
+    } catch {
+      // Non-fatal: the tools popover simply shows what it last loaded.
+    }
+  }
 
   async function refreshLocalModels(): Promise<void> {
     const models = await listModels()
@@ -483,6 +531,7 @@ export function App(): React.JSX.Element {
       setError(cause instanceof Error ? cause.message : String(cause))
     )
     void prefetchRuntimes()
+    void refreshTools()
     void fetchModelBindings().then(setModelBindings).catch(() => {})
     void refreshRuntime().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -695,6 +744,7 @@ export function App(): React.JSX.Element {
           },
           {
             builtinTools: toolsEnabled,
+            builtinToolNames: toolsEnabled ? enabledTools : undefined,
             toolChoice: toolsEnabled ? 'auto' : undefined,
             onLoad: (event) => setModelLoadStatus(event.message),
             onToolCall: (record) => {
@@ -1226,21 +1276,46 @@ export function App(): React.JSX.Element {
                 hidden
                 onChange={(event) => void selectFiles(event)}
               />
-              <button
-                className={toolsEnabled ? 'attach-button tools-on' : 'attach-button'}
-                type="button"
-                disabled={!canUseTools}
-                title={
-                  !canUseTools
-                    ? 'This model does not advertise tool support'
-                    : toolsEnabled
-                      ? 'Tools enabled: bundled tools and MCP servers'
-                      : 'Enable tools (bundled + MCP)'
-                }
-                onClick={() => setToolsEnabled((enabled) => !enabled)}
-              >
-                <Wrench size={17} />
-              </button>
+              <div className="tool-menu-anchor">
+                <button
+                  className={toolsEnabled ? 'attach-button tools-on' : 'attach-button'}
+                  type="button"
+                  disabled={!canUseTools}
+                  title={
+                    !canUseTools
+                      ? 'This model does not advertise tool support'
+                      : toolsEnabled
+                        ? `Tools: ${enabledTools.length} enabled`
+                        : 'Choose tools (bundled + MCP)'
+                  }
+                  onClick={() => setToolsMenuOpen((open) => !open)}
+                >
+                  <Wrench size={17} />
+                  {toolsEnabled && <span className="tool-count">{enabledTools.length}</span>}
+                </button>
+                {toolsMenuOpen && (
+                  <ToolsMenu
+                    tools={availableTools}
+                    enabled={enabledTools}
+                    disabled={!canUseTools}
+                    onToggle={(name, on) =>
+                      updateEnabledTools(
+                        on
+                          ? Array.from(new Set([...enabledTools, name]))
+                          : enabledTools.filter((entry) => entry !== name)
+                      )
+                    }
+                    onSetAll={(names, on) =>
+                      updateEnabledTools(
+                        on
+                          ? Array.from(new Set([...enabledTools, ...names]))
+                          : enabledTools.filter((entry) => !names.includes(entry))
+                      )
+                    }
+                    onClose={() => setToolsMenuOpen(false)}
+                  />
+                )}
+              </div>
               <button
                 className="attach-button"
                 type="button"
@@ -1320,6 +1395,7 @@ export function App(): React.JSX.Element {
           onClose={() => {
             setManageOpen(false)
             void prefetchRuntimes()
+            void refreshTools()
           }}
           pendingBuild={pendingBuild}
           onPendingBuildConsumed={() => setPendingBuild(null)}

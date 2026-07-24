@@ -50,6 +50,10 @@ pub struct BuildRecord {
     pub target: String,
     pub created_at: String,
     pub binary: String,
+    /// Resolved upstream commit at build time (`git rev-parse HEAD`). Absent for
+    /// builds made before commit capture, and for checkout-less Python recipes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 /// Structured failure report streamed to clients and written under the build prefix.
@@ -634,6 +638,7 @@ pub async fn run_build_with_progress(
     let flags = target_flags(target);
     let mut log = String::new();
     let mut failed_step: Option<String> = None;
+    let mut built_commit: Option<String> = None;
     let result: Result<PathBuf, anyhow::Error> = async {
         let steps: Vec<&PlannedCommand> = plan.checkout.iter().chain(plan.build.iter()).collect();
         let total = steps.len();
@@ -679,6 +684,23 @@ pub async fn run_build_with_progress(
         } else {
             install_artifacts(&build, &install_bin, &plan.engine)?
         };
+        // Record the exact commit that was built so update checks can compare it
+        // against the upstream ref later, before the checkout is discarded.
+        if source.join(".git").exists()
+            && let Ok(output) = tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .arg("rev-parse")
+                .arg("HEAD")
+                .output()
+                .await
+            && output.status.success()
+        {
+            let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if !sha.is_empty() {
+                built_commit = Some(sha);
+            }
+        }
         let _ = tokio::fs::remove_dir_all(&source).await;
         if !python_engine {
             let _ = tokio::fs::remove_dir_all(&build).await;
@@ -704,6 +726,7 @@ pub async fn run_build_with_progress(
                         .as_secs()
                 ),
                 binary: binary.display().to_string(),
+                commit: built_commit,
             };
             if let Ok(bytes) = serde_json::to_vec_pretty(&record) {
                 let _ = tokio::fs::write(root.join("build.json"), bytes).await;
@@ -839,6 +862,7 @@ mod tests {
                 target: "cpu".into(),
                 created_at: "1".into(),
                 binary: binary.display().to_string(),
+                commit: None,
             })
             .unwrap(),
         )

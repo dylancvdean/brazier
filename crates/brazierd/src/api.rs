@@ -186,6 +186,7 @@ pub fn router(state: AppState) -> Router {
             get(list_runtimes).delete(delete_runtime),
         )
         .route("/api/v1/runtimes/activate", post(activate_runtime))
+        .route("/api/v1/runtimes/check-updates", post(check_runtime_updates))
         .route("/api/v1/runtimes/build", post(build_runtime))
         .route("/api/v1/runtimes/build/cancel", post(cancel_build))
         .route("/api/v1/models/download", post(download_model))
@@ -876,6 +877,14 @@ struct EnsureLlamaRequest {
     force: bool,
 }
 
+async fn check_runtime_updates(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let data_dir = state.data_dir.clone();
+    let updates = tokio::task::spawn_blocking(move || runtimes::check_source_updates(&data_dir))
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": updates })))
+}
+
 async fn activate_runtime(
     State(state): State<AppState>,
     Json(request): Json<RuntimeIdRequest>,
@@ -1451,6 +1460,16 @@ struct GenerateVideoApiRequest {
     video_frames: Option<u32>,
 }
 
+/// On-disk size of a generation checkpoint, used as a memory proxy for
+/// pre-generation arbitration. Returns 0 when the path cannot be resolved.
+fn generation_model_bytes(data_dir: &std::path::Path, model_id: &str) -> u64 {
+    sdcpp::path_for_model_id(data_dir, model_id)
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .unwrap_or(0)
+}
+
 async fn generate_image(
     State(state): State<AppState>,
     Json(request): Json<GenerateImageApiRequest>,
@@ -1468,6 +1487,7 @@ async fn generate_image(
     } else {
         None
     };
+    let gen_bytes = generation_model_bytes(&state.data_dir, &model_id);
     let job = sdcpp::GenerateImageRequest {
         prompt: request.prompt,
         model_id,
@@ -1479,13 +1499,15 @@ async fn generate_image(
         cfg_scale: request.cfg_scale,
         init_image,
     };
-    let result = sdcpp::generate_image(
+    let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
+    let generated = sdcpp::generate_image(
         &state.data_dir,
         settings.sdcpp_binary.as_deref(),
         &job,
     )
-    .await
-    .map_err(|e| {
+    .await;
+    state.runtime.restore_after_generation(memory_plan).await;
+    let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
             ApiError::bad_request(e.to_string())
         } else {
@@ -1528,6 +1550,7 @@ async fn generate_video(
     } else {
         None
     };
+    let gen_bytes = generation_model_bytes(&state.data_dir, &model_id);
     let job = sdcpp::GenerateVideoRequest {
         prompt: request.prompt,
         model_id,
@@ -1540,13 +1563,15 @@ async fn generate_video(
         init_image,
         video_frames: request.video_frames.unwrap_or(16),
     };
-    let result = sdcpp::generate_video(
+    let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
+    let generated = sdcpp::generate_video(
         &state.data_dir,
         settings.sdcpp_binary.as_deref(),
         &job,
     )
-    .await
-    .map_err(|e| {
+    .await;
+    state.runtime.restore_after_generation(memory_plan).await;
+    let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
             ApiError::bad_request(e.to_string())
         } else {
@@ -2600,6 +2625,7 @@ async fn responses(
         reasoning_budget_tokens: request.reasoning_budget_tokens,
         tool_choice: request.tool_choice,
         builtin_tools: request.builtin_tools,
+        builtin_tool_names: None,
     };
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
     if !request.stream {

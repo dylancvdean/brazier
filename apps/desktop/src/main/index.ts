@@ -160,7 +160,7 @@ async function createWindow(): Promise<void> {
     autoHideMenuBar: true,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     ...(process.platform === 'darwin'
-      ? { trafficLightPosition: { x: 16, y: 18 } }
+      ? { trafficLightPosition: { x: 15, y: 20 } }
       : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

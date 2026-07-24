@@ -26,12 +26,25 @@ pub fn merge_definitions(
     let tools_on = request.builtin_tools.unwrap_or(false);
 
     if tools_on {
+        let def_name = |def: &Value| {
+            def.pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        };
         if let Some(items) = crate::tools::definitions().as_array() {
-            defs.extend(items.iter().cloned());
+            for item in items {
+                if request.tool_name_allowed(&def_name(item)) {
+                    defs.push(item.clone());
+                }
+            }
         }
         for server in mcp::enabled_servers(data_dir) {
             for tool in &server.tools {
-                defs.push(mcp::tool_to_openai(&server.id, tool));
+                let def = mcp::tool_to_openai(&server.id, tool);
+                if request.tool_name_allowed(&def_name(&def)) {
+                    defs.push(def);
+                }
             }
         }
     }
@@ -136,6 +149,7 @@ mod tests {
             reasoning_budget_tokens: None,
             tool_choice: None,
             builtin_tools: None,
+            builtin_tool_names: None,
         };
         assert!(merge_definitions(dir.path(), &request, false).is_none());
     }
@@ -176,6 +190,7 @@ mod tests {
             reasoning_budget_tokens: None,
             tool_choice: None,
             builtin_tools: Some(true),
+            builtin_tool_names: None,
         };
         let merged = merge_definitions(dir.path(), &request, false).unwrap();
         let names: Vec<_> = merged
@@ -186,6 +201,34 @@ mod tests {
             .collect();
         assert!(names.contains(&"get_current_time"));
         assert!(names.contains(&"mcp/demo/ping"));
+    }
+
+    #[test]
+    fn allowlist_restricts_builtin_tools() {
+        let dir = tempdir().unwrap();
+        let request = crate::types::ChatCompletionRequest {
+            model: "gguf:test".into(),
+            messages: Vec::new(),
+            stream: false,
+            tools: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            seed: None,
+            enable_reasoning: None,
+            reasoning_budget_tokens: None,
+            tool_choice: None,
+            builtin_tools: Some(true),
+            builtin_tool_names: Some(vec!["calculator".into()]),
+        };
+        let merged = merge_definitions(dir.path(), &request, false).unwrap();
+        let names: Vec<_> = merged
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(names, vec!["calculator"]);
     }
 
     #[test]
@@ -227,6 +270,7 @@ mod tests {
             reasoning_budget_tokens: None,
             tool_choice: None,
             builtin_tools: None,
+            builtin_tool_names: None,
         };
         let merged = merge_definitions(dir.path(), &request, false).unwrap();
         let names: Vec<_> = merged

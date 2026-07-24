@@ -103,6 +103,35 @@ enum ActiveBackend {
     Mlx(String),
 }
 
+/// Fraction of total RAM treated as usable for model residency in `auto`
+/// memory arbitration. The remainder absorbs the OS, other apps, and runtime
+/// overhead beyond raw weight size.
+const USABLE_MEMORY_FRACTION: f64 = 0.85;
+
+/// Outcome of pre-generation memory arbitration, returned so the caller can
+/// restore the evicted chat model after the generation finishes.
+pub struct GenerationMemoryPlan {
+    /// Whether a chat model was evicted to make room.
+    pub ejected: bool,
+    /// Human-readable explanation of the decision (for logs/telemetry).
+    pub reason: String,
+    reload_llama_path: Option<PathBuf>,
+}
+
+impl GenerationMemoryPlan {
+    fn noop(reason: impl Into<String>) -> Self {
+        Self {
+            ejected: false,
+            reason: reason.into(),
+            reload_llama_path: None,
+        }
+    }
+}
+
+fn file_size(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
 /// Runtime that lists on-disk GGUF models and serves them through llama-server.
 pub struct Runtime {
     data_dir: PathBuf,
@@ -673,6 +702,90 @@ impl Runtime {
                     let _ = server.stop().await;
                 }
             }
+        }
+    }
+
+    /// Decide whether resident chat servers must be evicted to fit a generation
+    /// model of `gen_bytes`, act on the configured policy, and return a plan the
+    /// caller passes to [`Runtime::restore_after_generation`] once done.
+    pub async fn prepare_generation_memory(&self, gen_bytes: u64) -> GenerationMemoryPlan {
+        use crate::runtime_settings::GenerationMemoryPolicy;
+        let settings = self.settings.lock().await.clone();
+        let policy = settings.generation_memory_policy;
+        if matches!(policy, GenerationMemoryPolicy::Coresident) {
+            return GenerationMemoryPlan::noop("policy: keep chat and generation models resident");
+        }
+
+        let (llama_path, resident_bytes) = {
+            let guard = self.llama.lock().await;
+            match guard.server.as_ref() {
+                Some(server) => {
+                    let path = server.model_path.clone();
+                    let bytes = file_size(&path);
+                    (Some(path), bytes)
+                }
+                None => (None, 0),
+            }
+        };
+        let mlx_resident = self.mlx.lock().await.server.is_some();
+        if llama_path.is_none() && !mlx_resident {
+            return GenerationMemoryPlan::noop("no chat model resident");
+        }
+
+        let must_evict = match policy {
+            GenerationMemoryPolicy::Exclusive => true,
+            GenerationMemoryPolicy::Coresident => false,
+            GenerationMemoryPolicy::Auto => {
+                let total = crate::hardware::detect().memory_bytes.unwrap_or(0);
+                if total == 0 {
+                    // Unknown system memory: keep the chat model to avoid churn.
+                    false
+                } else {
+                    let headroom =
+                        u64::from(settings.generation_memory_headroom_mb) * 1024 * 1024;
+                    let budget = (total as f64 * USABLE_MEMORY_FRACTION) as u64;
+                    resident_bytes
+                        .saturating_add(gen_bytes)
+                        .saturating_add(headroom)
+                        > budget
+                }
+            }
+        };
+        if !must_evict {
+            return GenerationMemoryPlan::noop("chat and generation models fit together");
+        }
+
+        let reason = if matches!(policy, GenerationMemoryPolicy::Exclusive) {
+            "policy: exclusive generation — evicted chat model".to_owned()
+        } else {
+            "evicted chat model so the generation model fits in memory".to_owned()
+        };
+        let reload_llama_path = if settings.reload_llm_after_generation {
+            llama_path.clone()
+        } else {
+            None
+        };
+        if let Some(mut server) = self.llama.lock().await.server.take() {
+            let _ = server.stop().await;
+        }
+        if let Some(mut server) = self.mlx.lock().await.server.take() {
+            let _ = server.stop().await;
+        }
+        tracing::info!(reason = %reason, "pre-generation memory arbitration evicted chat model");
+        GenerationMemoryPlan {
+            ejected: true,
+            reason,
+            reload_llama_path,
+        }
+    }
+
+    /// Reload a chat model evicted by [`Runtime::prepare_generation_memory`].
+    /// MLX servers are left to reload lazily on the next chat request.
+    pub async fn restore_after_generation(&self, plan: GenerationMemoryPlan) {
+        if let Some(path) = plan.reload_llama_path
+            && let Err(error) = self.ensure_server_for_model(&path).await
+        {
+            tracing::warn!(%error, "failed to reload chat model after generation");
         }
     }
 
@@ -1332,6 +1445,7 @@ impl Runtime {
             reasoning_budget_tokens: None,
             tool_choice: None,
             builtin_tools: None,
+            builtin_tool_names: None,
         };
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         tokio::spawn(async move {
@@ -1674,6 +1788,7 @@ mod tests {
                 reasoning_budget_tokens: None,
                 tool_choice: None,
                 builtin_tools: None,
+                builtin_tool_names: None,
             })
             .await
             .unwrap_err();
@@ -1703,6 +1818,7 @@ mod tests {
                 reasoning_budget_tokens: None,
                 tool_choice: None,
                 builtin_tools: None,
+                builtin_tool_names: None,
             })
             .await
             .unwrap_err();

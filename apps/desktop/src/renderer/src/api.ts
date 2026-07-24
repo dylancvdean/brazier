@@ -83,6 +83,9 @@ export type RuntimeSettings = {
   default_voice_persona?: string | null
   build_jobs: number
   extra_model_library_paths: string[]
+  generation_memory_policy: 'auto' | 'coresident' | 'exclusive'
+  generation_memory_headroom_mb: number
+  reload_llm_after_generation: boolean
 }
 
 export type PipelineFeatures = {
@@ -414,6 +417,7 @@ export async function streamCompletion(
   onToken: (token: string) => void,
   options?: {
     builtinTools?: boolean
+    builtinToolNames?: string[]
     toolChoice?: 'auto' | 'none' | { type: 'function'; function: { name: string } }
     onToolCall?: (record: ToolCallRecord) => void
     onLoad?: (event: { phase: string; message: string }) => void
@@ -437,6 +441,9 @@ export async function streamCompletion(
       model,
       stream: true,
       ...(options?.builtinTools ? { builtin_tools: true } : {}),
+      ...(options?.builtinTools && options.builtinToolNames
+        ? { builtin_tool_names: options.builtinToolNames }
+        : {}),
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
       messages: messagesForCompletion(messages)
     })
@@ -914,6 +921,28 @@ export function activateRuntime(id: string): Promise<{ active_binary: string; id
     method: 'POST',
     body: JSON.stringify({ id })
   })
+}
+
+export type SourceRuntimeUpdate = {
+  id: string
+  engine: string
+  label: string
+  repository: string
+  revision: string
+  current_commit: string | null
+  upstream_commit: string | null
+  update_available: boolean
+  pinned: boolean
+  error: string | null
+}
+
+/** Query upstream refs for every source-built runtime (network; on demand). */
+export async function checkRuntimeUpdates(): Promise<SourceRuntimeUpdate[]> {
+  return (
+    await request<{ data: SourceRuntimeUpdate[] }>('/api/v1/runtimes/check-updates', {
+      method: 'POST'
+    })
+  ).data
 }
 
 export function deleteRuntime(id: string): Promise<{ deleted: string }> {

@@ -139,12 +139,23 @@ pub struct ChatCompletionRequest {
     /// executes returned tool calls server-side.
     #[serde(default)]
     pub builtin_tools: Option<bool>,
+    /// Optional allowlist of tool names (bundled + `mcp/<server>/<tool>`) to
+    /// offer when `builtin_tools` is on. `None` offers every enabled tool.
+    #[serde(default)]
+    pub builtin_tool_names: Option<Vec<String>>,
 }
 
 impl ChatCompletionRequest {
     /// Whether any server-side tools (bundled, MCP, or request-supplied schemas) are active.
     pub fn tools_active(&self) -> bool {
         self.builtin_tools.unwrap_or(false) || self.tools.is_some()
+    }
+
+    /// Whether a tool name passes the request's allowlist (all when unset).
+    pub fn tool_name_allowed(&self, name: &str) -> bool {
+        self.builtin_tool_names
+            .as_ref()
+            .is_none_or(|names| names.iter().any(|allowed| allowed == name))
     }
 }
 

@@ -10,6 +10,7 @@ import {
   HardDrive,
   LoaderCircle,
   Plug,
+  RefreshCw,
   Search,
   Settings2,
   ShieldAlert,
@@ -22,6 +23,8 @@ import {
   buildRuntime,
   cancelBuild,
   cancelDownloadJob,
+  checkRuntimeUpdates,
+  type SourceRuntimeUpdate,
   deleteModel,
   createMcpServer,
   deleteMcpServer,
@@ -1451,6 +1454,31 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     null
   )
   const logRef = useRef<HTMLPreElement>(null)
+  const [updates, setUpdates] = useState<Record<string, SourceRuntimeUpdate>>({})
+  const [checkingUpdates, setCheckingUpdates] = useState(false)
+  const [updatesChecked, setUpdatesChecked] = useState(false)
+
+  async function checkUpdates(): Promise<void> {
+    setCheckingUpdates(true)
+    props.onError(null)
+    try {
+      const results = await checkRuntimeUpdates()
+      const map: Record<string, SourceRuntimeUpdate> = {}
+      for (const entry of results) map[entry.id] = entry
+      setUpdates(map)
+      setUpdatesChecked(true)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setCheckingUpdates(false)
+    }
+  }
+
+  function rebuildFromUpdate(update: SourceRuntimeUpdate): void {
+    applyBuildEngine(update.engine as BuildEngine, update.repository)
+    setRevision(update.revision)
+    setBuildOpen(true)
+  }
 
   function applyBuildEngine(engine: BuildEngine, repositoryOverride?: string): void {
     const defaults = BUILD_ENGINE_DEFAULTS[engine]
@@ -1935,7 +1963,24 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       </div>
 
       <div className="settings-group">
-        <div className="section-label">Custom runtimes</div>
+        <div className="settings-group-head">
+          <div className="section-label">Custom runtimes</div>
+          {customRuntimes.length > 0 && (
+            <button
+              className="chip-button subtle"
+              disabled={checkingUpdates}
+              title="Query upstream git refs for source builds"
+              onClick={() => void checkUpdates()}
+            >
+              {checkingUpdates ? (
+                <LoaderCircle className="spin" size={13} />
+              ) : (
+                <RefreshCw size={13} />
+              )}
+              Check for updates
+            </button>
+          )}
+        </div>
         {runtimes == null && !props.initialRuntimes?.length && (
           <div className="manage-placeholder">
             <LoaderCircle className="spin" size={16} />
@@ -1949,7 +1994,14 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
           </div>
         )}
         <div className="runtime-list">
-          {customRuntimes.map((runtime) => (
+          {customRuntimes.map((runtime) => {
+            const update = updates[runtime.id]
+            const canRebuild =
+              update != null &&
+              !update.pinned &&
+              !update.error &&
+              (update.update_available || (!update.current_commit && update.upstream_commit != null))
+            return (
             <article
               className={runtime.active ? 'runtime-card active' : 'runtime-card'}
               key={runtime.id}
@@ -1958,13 +2010,47 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 <strong>
                   {runtime.label}
                   {runtime.active && <span className="active-badge">Active</span>}
+                  {update?.update_available && (
+                    <span className="installed-badge update">Update</span>
+                  )}
+                  {update != null &&
+                    !update.update_available &&
+                    !update.pinned &&
+                    !update.error &&
+                    update.current_commit != null && (
+                      <span className="active-badge">Up to date</span>
+                    )}
+                  {update?.pinned && <span className="pinned-badge">Pinned</span>}
                 </strong>
                 <span>
                   {[runtime.version, runtime.target].filter(Boolean).join(' · ')}
                 </span>
+                {update != null && (
+                  <span className="runtime-update-note">
+                    {update.error
+                      ? `Update check failed: ${update.error}`
+                      : update.pinned
+                        ? `Pinned to ${update.revision}`
+                        : update.update_available
+                          ? `Upstream ${update.upstream_commit ?? '?'} · built ${update.current_commit ?? 'unknown'}`
+                          : update.current_commit != null
+                            ? `Up to date at ${update.current_commit}`
+                            : `Upstream ${update.upstream_commit ?? '?'} · rebuild to track the commit`}
+                  </span>
+                )}
                 <code title={runtime.path}>{runtime.path}</code>
               </div>
               <div className="library-card-actions">
+                {canRebuild && (
+                  <button
+                    className="chip-button"
+                    title={`Rebuild from ${update.repository} @ ${update.revision}`}
+                    onClick={() => rebuildFromUpdate(update)}
+                  >
+                    <Hammer size={13} />
+                    Rebuild
+                  </button>
+                )}
                 {!runtime.active && (
                   <button
                     className="chip-button"
@@ -2003,8 +2089,15 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                   ))}
               </div>
             </article>
-          ))}
+            )
+          })}
         </div>
+        {updatesChecked && customRuntimes.length > 0 && (
+          <p className="model-help">
+            Update checks compare each source build against the current upstream ref via git.
+            Builds made before commit tracking show the latest upstream commit and offer a rebuild.
+          </p>
+        )}
       </div>
 
       <div className="settings-group">
@@ -2321,6 +2414,65 @@ function EngineSection(props: SectionProps): React.JSX.Element {
                 })
               }
               placeholder="You are a helpful assistant."
+            />
+          </label>
+        </div>
+      </div>
+      <div className="settings-group">
+        <div className="section-label">Generation memory</div>
+        <p className="model-help">
+          Image and video models load their own weights. On shared-memory machines they can exceed
+          RAM alongside a resident chat model. Auto evicts the chat model only when it will not fit,
+          then reloads it when generation finishes.
+        </p>
+        <div className="settings-grid">
+          <label>
+            <span>When generating media</span>
+            <select
+              value={draft.generation_memory_policy}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  generation_memory_policy: event.target
+                    .value as RuntimeSettings['generation_memory_policy']
+                })
+              }
+            >
+              <option value="auto">Auto — evict chat model only if needed</option>
+              <option value="coresident">Keep both models loaded</option>
+              <option value="exclusive">Always evict chat model</option>
+            </select>
+          </label>
+          <label>
+            <span>RAM headroom (MiB)</span>
+            <input
+              type="number"
+              min={0}
+              step={256}
+              value={draft.generation_memory_headroom_mb}
+              disabled={draft.generation_memory_policy !== 'auto'}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  generation_memory_headroom_mb: Number(event.target.value)
+                })
+              }
+            />
+          </label>
+        </div>
+        <div className="toggle-list">
+          <label>
+            <div>
+              <strong>Reload chat model after generation</strong>
+              <span>Bring the evicted chat model back once media generation completes.</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={draft.reload_llm_after_generation}
+              disabled={draft.generation_memory_policy === 'coresident'}
+              onChange={(event) =>
+                setDraft({ ...draft, reload_llm_after_generation: event.target.checked })
+              }
             />
           </label>
         </div>

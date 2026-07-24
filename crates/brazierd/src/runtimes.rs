@@ -351,6 +351,167 @@ pub fn list(
     entries
 }
 
+/// Upstream update status for a single source-built runtime.
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceUpdate {
+    pub id: String,
+    pub engine: String,
+    pub label: String,
+    pub repository: String,
+    pub revision: String,
+    /// Short commit that was built, when it was recorded.
+    pub current_commit: Option<String>,
+    /// Short commit the upstream ref currently points at.
+    pub upstream_commit: Option<String>,
+    pub update_available: bool,
+    /// Revision is a pinned commit — there is no moving ref to track.
+    pub pinned: bool,
+    pub error: Option<String>,
+}
+
+fn short_commit(sha: &str) -> String {
+    sha.chars().take(12).collect()
+}
+
+fn looks_like_commit_sha(revision: &str) -> bool {
+    let len = revision.len();
+    (7..=40).contains(&len) && revision.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Resolve the commit an upstream ref currently points at via `git ls-remote`.
+/// Returns `Ok(None)` when the ref is absent on the remote.
+fn ls_remote_commit(repository: &str, revision: &str) -> anyhow::Result<Option<String>> {
+    let output = std::process::Command::new("git")
+        .arg("ls-remote")
+        .arg(repository)
+        .arg(revision)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .context("run git ls-remote")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = stderr.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("git ls-remote failed");
+        }
+        anyhow::bail!("git ls-remote failed: {trimmed}");
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let head_ref = format!("refs/heads/{revision}");
+    let tag_ref = format!("refs/tags/{revision}");
+    let mut first: Option<String> = None;
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let sha = parts.next().unwrap_or("");
+        let refname = parts.next().unwrap_or("");
+        if sha.is_empty() {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(sha.to_owned());
+        }
+        if refname == head_ref || refname == tag_ref {
+            return Ok(Some(sha.to_owned()));
+        }
+    }
+    Ok(first)
+}
+
+fn source_id_prefix(engine: &str) -> &'static str {
+    match engine {
+        "mlx-lm" => "mlx-lm-source-",
+        "mlx-vlm" => "mlx-vlm-source-",
+        "streaming-asr" => "streaming-asr-source-",
+        "personaplex" => "personaplex-source-",
+        "stable-diffusion.cpp" => "sdcpp-source-",
+        "whisper.cpp" => "whisper-source-",
+        _ => "source-",
+    }
+}
+
+fn source_engine_label(engine: &str) -> &str {
+    match engine {
+        "mlx-lm" => "MLX-LM",
+        "mlx-vlm" => "MLX-VLM",
+        "streaming-asr" => "Streaming ASR",
+        "personaplex" => "PersonaPlex",
+        other => other,
+    }
+}
+
+/// Check every source-built runtime against its upstream ref. Performs blocking
+/// network I/O (`git ls-remote`); callers should run it off the async runtime.
+pub fn check_source_updates(data_dir: &Path) -> Vec<SourceUpdate> {
+    let engines = [
+        ENGINE,
+        "mlx-lm",
+        "mlx-vlm",
+        "streaming-asr",
+        "personaplex",
+        crate::sdcpp::ENGINE,
+        crate::whisper::ENGINE,
+    ];
+    // Dedupe remote queries so multiple builds of the same ref hit the network once.
+    let mut remote_cache: std::collections::HashMap<
+        (String, String),
+        Result<Option<String>, String>,
+    > = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for engine in engines {
+        for (build_id, record) in builds::list_builds(data_dir, engine) {
+            let id = format!("{}{build_id}", source_id_prefix(engine));
+            let label = format!("{} · {}", source_engine_label(engine), record.revision);
+            let current_commit = record.commit.as_deref().map(short_commit);
+            if looks_like_commit_sha(&record.revision) {
+                out.push(SourceUpdate {
+                    id,
+                    engine: engine.to_owned(),
+                    label,
+                    repository: record.repository.clone(),
+                    revision: record.revision.clone(),
+                    current_commit: current_commit.clone(),
+                    upstream_commit: current_commit,
+                    update_available: false,
+                    pinned: true,
+                    error: None,
+                });
+                continue;
+            }
+            let resolved = remote_cache
+                .entry((record.repository.clone(), record.revision.clone()))
+                .or_insert_with(|| {
+                    ls_remote_commit(&record.repository, &record.revision)
+                        .map_err(|error| error.to_string())
+                })
+                .clone();
+            let (upstream_commit, update_available, error) = match resolved {
+                Ok(Some(upstream)) => {
+                    let available = record
+                        .commit
+                        .as_deref()
+                        .is_some_and(|built| built != upstream);
+                    (Some(short_commit(&upstream)), available, None)
+                }
+                Ok(None) => (None, false, Some("Upstream ref not found".to_owned())),
+                Err(message) => (None, false, Some(message)),
+            };
+            out.push(SourceUpdate {
+                id,
+                engine: engine.to_owned(),
+                label,
+                repository: record.repository.clone(),
+                revision: record.revision.clone(),
+                current_commit,
+                upstream_commit,
+                update_available,
+                pinned: false,
+                error,
+            });
+        }
+    }
+    out
+}
+
 /// Resolve a runtime id from `list` back to its entry.
 pub fn find(
     data_dir: &Path,
@@ -561,6 +722,7 @@ mod tests {
                 target: "cpu".into(),
                 created_at: "1".into(),
                 binary: build_binary.display().to_string(),
+                commit: None,
             })
             .unwrap(),
         )
@@ -605,6 +767,49 @@ mod tests {
     }
 
     #[test]
+    fn detects_pinned_commit_revisions() {
+        assert!(looks_like_commit_sha("a1b2c3d"));
+        assert!(looks_like_commit_sha(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!looks_like_commit_sha("main"));
+        assert!(!looks_like_commit_sha("v1.2.3"));
+    }
+
+    #[test]
+    fn check_updates_reports_pinned_builds_without_network() {
+        let dir = tempdir().unwrap();
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let build_root = builds::builds_root(dir.path(), ENGINE).join("pinned-1");
+        let build_binary = build_root.join("install").join("bin").join("llama-server");
+        touch(&build_binary);
+        std::fs::write(
+            build_root.join("build.json"),
+            serde_json::to_vec(&builds::BuildRecord {
+                engine: ENGINE.into(),
+                repository: "https://github.com/ggml-org/llama.cpp".into(),
+                revision: sha.into(),
+                target: "cpu".into(),
+                created_at: "1".into(),
+                binary: build_binary.display().to_string(),
+                commit: Some(sha.into()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let updates = check_source_updates(dir.path());
+        let entry = updates
+            .iter()
+            .find(|update| update.id == "source-pinned-1")
+            .expect("pinned build reported");
+        assert!(entry.pinned);
+        assert!(!entry.update_available);
+        assert!(entry.error.is_none());
+        assert_eq!(entry.current_commit.as_deref(), Some("0123456789ab"));
+    }
+
+    #[test]
     fn find_for_fork_matches_source_repository() {
         let dir = tempdir().unwrap();
         let build_root = builds::builds_root(dir.path(), ENGINE).join("fork-1");
@@ -619,6 +824,7 @@ mod tests {
                 target: "cpu".into(),
                 created_at: "1".into(),
                 binary: build_binary.display().to_string(),
+                commit: None,
             })
             .unwrap(),
         )
