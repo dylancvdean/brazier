@@ -231,6 +231,100 @@ code {
   color: #d4846a;
 }
 
+.download-progress-tray {
+  position: fixed;
+  z-index: 40;
+  left: 16px;
+  bottom: 16px;
+  width: min(320px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 13px;
+  border: 1px solid #3a4232;
+  border-radius: 12px;
+  background: rgba(18, 20, 16, 0.96);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+
+.download-progress-tray-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #c6e88a;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.download-progress-tray-head strong {
+  font-size: 10px;
+  font-weight: 700;
+  color: #c6e88a;
+}
+
+.download-progress-tray-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.download-progress-tray-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.download-progress-tray-name {
+  overflow: hidden;
+  color: #e7ecdf;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-progress-tray-pct {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.download-progress-tray-detail {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-progress-tray-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.download-progress-tray-row .download-progress-tray-detail {
+  flex: 1;
+  min-width: 0;
+}
+
+.download-progress-tray .progress-track.compact {
+  margin-top: 0;
+  height: 5px;
+}
+
 .download-jobs-panel {
   margin: 14px 0;
   padding: 10px 12px;
@@ -1192,6 +1286,18 @@ code {
   cursor: pointer;
 }
 
+a.inline-link {
+  display: inline;
+}
+
+.label-with-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
 .library-path-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1561,6 +1667,11 @@ code {
   border: 1px solid var(--line);
   border-radius: 11px;
   background: #171916;
+}
+
+.discover-engine-form {
+  margin-top: 12px;
+  padding: 12px 14px;
 }
 
 .build-form label > span {
@@ -2571,7 +2682,8 @@ code {
 }
 
 .model-card-main > button,
-.quant-row > button {
+.quant-row > button,
+.quant-actions > button:not(.chip-button) {
   align-self: center;
   display: inline-flex;
   align-items: center;
@@ -2588,9 +2700,23 @@ code {
 }
 
 .model-card-main > button:disabled,
-.quant-row > button:disabled {
+.quant-row > button:disabled,
+.quant-actions > button:not(.chip-button):disabled {
   color: #787e72;
   cursor: default;
+  opacity: 0.55;
+}
+
+.quant-actions > button:not(.chip-button):hover:not(:disabled) {
+  border-color: #4a5438;
+  color: #e7f5c4;
+  background: #262a22;
+}
+
+.model-card-main > button:hover:not(:disabled) {
+  border-color: #4a5438;
+  color: #e7f5c4;
+  background: #262a22;
 }
 
 .quant-list {

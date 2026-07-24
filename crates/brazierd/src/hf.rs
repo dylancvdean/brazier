@@ -414,6 +414,41 @@ fn is_mlx_snapshot_file(path: &str) -> bool {
         || lower.ends_with("tokenizer.model")
 }
 
+/// Weights, configs, tokenizers, and voice bundles for PersonaPlex / Moshi snapshots.
+///
+/// Unlike MLX snapshots, these repos ship large `.safetensors` weights, SentencePiece
+/// models, and compressed voice packs (`.tgz`) — not a pure JSON+safetensors layout.
+fn is_personaplex_snapshot_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    if name.starts_with('.') || name == "license" {
+        return false;
+    }
+    if lower.contains("/figures/")
+        || lower.starts_with("figures/")
+        || lower.ends_with(".md")
+        || lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".gif")
+        || lower.ends_with(".svg")
+        || lower.ends_with(".ds_store")
+    {
+        return false;
+    }
+    lower.ends_with(".safetensors")
+        || lower.ends_with(".pt")
+        || lower.ends_with(".pth")
+        || lower.ends_with(".bin")
+        || lower.ends_with(".json")
+        || lower.ends_with(".model")
+        || lower.ends_with(".tiktoken")
+        || lower.ends_with(".tgz")
+        || lower.ends_with(".tar.gz")
+        || lower.ends_with(".wav")
+        || lower.ends_with(".npz")
+}
+
 /// List files needed for a local MLX snapshot download.
 pub async fn list_mlx_snapshot_files(
     client: &reqwest::Client,
@@ -425,6 +460,20 @@ pub async fn list_mlx_snapshot_files(
     Ok(files
         .into_iter()
         .filter(|file| is_mlx_snapshot_file(&file.path))
+        .collect())
+}
+
+/// List files needed for a PersonaPlex / Moshi snapshot download.
+pub async fn list_personaplex_snapshot_files(
+    client: &reqwest::Client,
+    data_dir: &std::path::Path,
+    repo_id: &str,
+    revision: &str,
+) -> anyhow::Result<Vec<RepoFile>> {
+    let files = list_repo_files(client, data_dir, repo_id, revision).await?;
+    Ok(files
+        .into_iter()
+        .filter(|file| is_personaplex_snapshot_file(&file.path))
         .collect())
 }
 
@@ -519,8 +568,25 @@ mod tests {
         assert!(looks_like_single_quant("someone/Model-IQ4_XS-GGUF"));
         assert!(looks_like_single_quant("author/Model-f16-GGUF"));
         // Family repos that hold many quants are kept.
-        assert!(!looks_like_single_quant("bartowski/Qwen2.5-7B-Instruct-GGUF"));
-        assert!(!looks_like_single_quant("unsloth/Llama-3.3-70B-Instruct-GGUF"));
+        assert!(!looks_like_single_quant(
+            "bartowski/Qwen2.5-7B-Instruct-GGUF"
+        ));
+        assert!(!looks_like_single_quant(
+            "unsloth/Llama-3.3-70B-Instruct-GGUF"
+        ));
+    }
+
+    #[test]
+    fn personaplex_snapshot_keeps_weights_voices_and_tokenizers() {
+        assert!(is_personaplex_snapshot_file("model.safetensors"));
+        assert!(is_personaplex_snapshot_file("config.json"));
+        assert!(is_personaplex_snapshot_file("tokenizer_spm_32k_3.model"));
+        assert!(is_personaplex_snapshot_file("voices.tgz"));
+        assert!(is_personaplex_snapshot_file("dist.tgz"));
+        assert!(!is_personaplex_snapshot_file("README.md"));
+        assert!(!is_personaplex_snapshot_file("figures/results.png"));
+        // MLX filter must not be used for PersonaPlex: it drops .tgz voice packs.
+        assert!(!is_mlx_snapshot_file("voices.tgz"));
     }
 
     #[test]

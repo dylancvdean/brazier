@@ -228,6 +228,118 @@ function progressLabel(event: ProgressEvent | null): string {
   return event.phase
 }
 
+/** Whole-number percent for progress UI, or null when still unknown. */
+function progressPercent(event: ProgressEvent | null): number | null {
+  if (!event) return null
+  if (event.percent != null && Number.isFinite(event.percent)) {
+    return Math.round(Math.min(100, Math.max(0, event.percent)))
+  }
+  if (
+    event.bytes != null &&
+    event.total != null &&
+    event.total > 0 &&
+    Number.isFinite(event.bytes)
+  ) {
+    return Math.round(Math.min(100, Math.max(0, (event.bytes / event.total) * 100)))
+  }
+  return null
+}
+
+function downloadKeyTitle(key: string): string {
+  const [repo, path] = key.split('::')
+  if (!path || path === 'snapshot') {
+    return repo ?? key
+  }
+  return path.split('/').at(-1) ?? path
+}
+
+function DownloadProgressTray({
+  live,
+  jobs,
+  onCancelJob
+}: {
+  live: { key: string; event: ProgressEvent | null } | null
+  jobs: DownloadJob[]
+  onCancelJob: (jobId: string) => void
+}): React.JSX.Element | null {
+  const activeJobs = jobs.filter(
+    (job) => job.status === 'pending' || job.status === 'downloading'
+  )
+  if (!live && activeJobs.length === 0) return null
+
+  const livePct = live ? progressPercent(live.event) : null
+  const liveBar = livePct ?? (live ? 8 : 0)
+
+  return (
+    <div className="download-progress-tray" role="status" aria-live="polite">
+      <div className="download-progress-tray-head">
+        <Download size={13} />
+        <strong>Downloads</strong>
+      </div>
+      {live && (
+        <div className="download-progress-tray-item">
+          <div className="download-progress-tray-title">
+            <span className="download-progress-tray-name" title={live.key}>
+              {downloadKeyTitle(live.key)}
+            </span>
+            <span className="download-progress-tray-pct">
+              {livePct != null ? `${livePct}%` : '…'}
+            </span>
+          </div>
+          <div className="progress-track compact">
+            <div
+              className="progress-fill"
+              style={{ width: `${Math.min(100, Math.max(4, liveBar))}%` }}
+            />
+          </div>
+          <span className="download-progress-tray-detail">{progressLabel(live.event)}</span>
+        </div>
+      )}
+      {activeJobs.slice(0, 4).map((job) => {
+        const basename = job.filename.split('/').at(-1) ?? job.filename
+        const pct =
+          job.bytes_downloaded != null && job.total_bytes
+            ? Math.round(
+                Math.min(100, (job.bytes_downloaded / job.total_bytes) * 100)
+              )
+            : null
+        return (
+          <div className="download-progress-tray-item" key={job.id}>
+            <div className="download-progress-tray-title">
+              <span className="download-progress-tray-name" title={job.repo_id}>
+                {basename}
+              </span>
+              <span className="download-progress-tray-pct">
+                {pct != null ? `${pct}%` : job.status === 'pending' ? 'queued' : '…'}
+              </span>
+            </div>
+            {pct != null && (
+              <div className="progress-track compact">
+                <div className="progress-fill" style={{ width: `${pct}%` }} />
+              </div>
+            )}
+            <div className="download-progress-tray-row">
+              <span className="download-progress-tray-detail">
+                {job.repo_id}
+                {job.bytes_downloaded != null && job.total_bytes
+                  ? ` · ${formatBytes(job.bytes_downloaded)} / ${formatBytes(job.total_bytes)}`
+                  : ` · ${job.status}`}
+              </span>
+              <button
+                type="button"
+                className="chip-button subtle"
+                onClick={() => onCancelJob(job.id)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 type BuildStep = { current: number; total: number; label: string }
 
 type JobProgressState = {
@@ -811,9 +923,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         .catch(() => setDownloadJobs([]))
     }
     refresh()
-    const timer = window.setInterval(refresh, 4000)
+    // Faster poll while a foreground download is running so the tray stays fresh.
+    const timer = window.setInterval(refresh, downloadProgress != null ? 1200 : 3000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [downloadProgress != null])
 
   async function saveHubToken(event: FormEvent): Promise<void> {
     event.preventDefault()
@@ -1095,7 +1208,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         </p>
         <p className="manage-subtext">{DISCOVER_ENGINE_HELP[discoverEngine]}</p>
       </header>
-      <div className="build-form-row">
+      <div className="build-form discover-engine-form">
         <label>
           <span>Model type</span>
           <select
@@ -1127,7 +1240,17 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       </div>
       <form className="build-form" onSubmit={(event) => void saveHubToken(event)}>
         <label>
-          <span>Hugging Face token (for gated models)</span>
+          <span className="label-with-link">
+            Hugging Face token (for gated models)
+            <a
+              className="inline-link"
+              href="https://huggingface.co/settings/tokens"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Create a token
+            </a>
+          </span>
           <input
             type="password"
             autoComplete="off"
@@ -1180,6 +1303,11 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           {searching ? <LoaderCircle className="spin" size={15} /> : 'Search'}
         </button>
       </form>
+      <DownloadProgressTray
+        live={downloadProgress}
+        jobs={downloadJobs}
+        onCancelJob={(jobId) => void cancelJob(jobId)}
+      />
       {enginePhase && (
         <div className="engine-phase-note">
           <LoaderCircle className="spin" size={14} />
@@ -1205,6 +1333,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                     {job.bytes_downloaded != null && job.total_bytes
                       ? ` · ${formatBytes(job.bytes_downloaded)} / ${formatBytes(job.total_bytes)}`
                       : ''}
+                    {pct != null ? ` · ${Math.round(pct)}%` : ''}
                   </span>
                   {pct != null && active && (
                     <div className="progress-track compact">
@@ -1324,7 +1453,28 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                           </p>
                         )}
                         {trustByRepo[model.id]?.gated && hfTokenSource === 'none' && (
-                          <p>A Hugging Face token is required for this gated model.</p>
+                          <p>
+                            A Hugging Face token is required for this gated model. Accept the
+                            license on the{' '}
+                            <a
+                              className="inline-link"
+                              href={`https://huggingface.co/${model.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              model page
+                            </a>
+                            , then{' '}
+                            <a
+                              className="inline-link"
+                              href="https://huggingface.co/settings/tokens"
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              create a token
+                            </a>{' '}
+                            and save it above.
+                          </p>
                         )}
                         <label className="toggle-row compact">
                           <span>I understand and want to download from this repository.</span>
@@ -1353,18 +1503,32 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                         </span>
                       </div>
                       <div className="quant-actions">
-                        <button
-                          type="button"
-                          disabled={downloadProgress?.key === `${model.id}::snapshot`}
-                          onClick={() => void downloadSnapshot(model.id)}
-                        >
-                          {downloadProgress?.key === `${model.id}::snapshot` ? (
-                            <LoaderCircle className="spin" size={14} />
-                          ) : (
-                            <Download size={14} />
-                          )}
-                          Download
-                        </button>
+                        {(() => {
+                          const snapshotKey = `${model.id}::snapshot`
+                          const snapshotActive = downloadProgress?.key === snapshotKey
+                          const snapshotPct = snapshotActive
+                            ? progressPercent(downloadProgress.event)
+                            : null
+                          return (
+                            <button
+                              type="button"
+                              disabled={snapshotActive}
+                              onClick={() => void downloadSnapshot(model.id)}
+                            >
+                              {snapshotActive ? (
+                                <>
+                                  <LoaderCircle className="spin" size={14} />
+                                  {snapshotPct != null ? `${snapshotPct}%` : '…'}
+                                </>
+                              ) : (
+                                <>
+                                  <Download size={14} />
+                                  Download
+                                </>
+                              )}
+                            </button>
+                          )
+                        })()}
                       </div>
                     </div>
                   ) : files.length === 0 ? (
@@ -1373,6 +1537,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                     files.map((file) => {
                     const key = `${model.id}::${file.path}`
                     const active = downloadProgress?.key === key
+                    const activePct = active ? progressPercent(downloadProgress.event) : null
                     const basename = file.path.split('/').at(-1) ?? file.path
                     const isProjector = basename.toLowerCase().includes('mmproj')
                     const isPreferred =
@@ -1396,7 +1561,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                                 <div
                                   className="progress-fill"
                                   style={{
-                                    width: `${Math.min(100, downloadProgress.event?.percent ?? 8)}%`
+                                    width: `${Math.min(100, activePct ?? 8)}%`
                                   }}
                                 />
                               </div>
@@ -1411,7 +1576,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                             onClick={() => void downloadQuant(model.id, file.path)}
                           >
                             {active ? (
-                              <LoaderCircle className="spin" size={15} />
+                              <>
+                                <LoaderCircle className="spin" size={15} />
+                                {activePct != null ? `${activePct}%` : '…'}
+                              </>
                             ) : isProjector ? (
                               'Add capability'
                             ) : (

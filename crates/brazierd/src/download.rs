@@ -123,37 +123,41 @@ pub async fn download_gguf_with_progress(
     };
     let engine_label = if whisper { "whisper.cpp" } else { "llama.cpp" };
     if destination.is_file() {
-        progress(ProgressEvent::phase(
-            "skip",
-            "Model already present on disk",
-        ));
         let bytes = tokio::fs::metadata(&destination).await?.len();
-        progress(ProgressEvent::download(bytes, Some(bytes)));
-        let sha256 = hash_file(&destination).await?;
-        let model_id = if whisper {
-            crate::whisper::model_id_for_path(
-                &crate::whisper::whisper_root(data_dir),
-                &destination,
-            )?
+        if looks_like_lfs_pointer(&destination).await {
+            let _ = tokio::fs::remove_file(&destination).await;
         } else {
-            model_id_for_path(&crate::models_store::gguf_root(data_dir), &destination)?
-        };
-        let result = DownloadResult {
-            model_id,
-            path: destination.display().to_string(),
-            bytes,
-            sha256,
-            resumed: false,
-            engine: Some(engine_label.to_owned()),
-            notice: None,
-        };
-        progress(ProgressEvent::done(serde_json::to_value(&result)?));
-        if let Some((db, job_id)) = &job {
-            let _ = db
-                .complete_download_job(job_id, &result.sha256, result.bytes)
-                .await;
+            progress(ProgressEvent::phase(
+                "skip",
+                "Model already present on disk",
+            ));
+            progress(ProgressEvent::download(bytes, Some(bytes)));
+            let sha256 = hash_file(&destination).await?;
+            let model_id = if whisper {
+                crate::whisper::model_id_for_path(
+                    &crate::whisper::whisper_root(data_dir),
+                    &destination,
+                )?
+            } else {
+                model_id_for_path(&crate::models_store::gguf_root(data_dir), &destination)?
+            };
+            let result = DownloadResult {
+                model_id,
+                path: destination.display().to_string(),
+                bytes,
+                sha256,
+                resumed: false,
+                engine: Some(engine_label.to_owned()),
+                notice: None,
+            };
+            progress(ProgressEvent::done(serde_json::to_value(&result)?));
+            if let Some((db, job_id)) = &job {
+                let _ = db
+                    .complete_download_job(job_id, &result.sha256, result.bytes)
+                    .await;
+            }
+            return Ok(result);
         }
-        return Ok(result);
     }
 
     if let Some(parent) = destination.parent() {
@@ -166,6 +170,14 @@ pub async fn download_gguf_with_progress(
         .context("create downloads directory")?;
 
     let partial = partial_path(data_dir, &request.repo_id, &request.filename);
+    let existing = if partial.is_file() {
+        tokio::fs::metadata(&partial).await?.len()
+    } else {
+        0
+    };
+    if existing > 0 && looks_like_lfs_pointer(&partial).await {
+        let _ = tokio::fs::remove_file(&partial).await;
+    }
     let existing = if partial.is_file() {
         tokio::fs::metadata(&partial).await?.len()
     } else {
@@ -212,9 +224,13 @@ pub async fn download_gguf_with_progress(
         if status.as_u16() == 401 || status.as_u16() == 403 {
             if hf_auth::load_token(data_dir).is_none() {
                 anyhow::bail!(
-                    "Hugging Face rejected the download ({status}). This model may be gated — add a Hugging Face token in Manage → Download models."
+                    "Hugging Face rejected the download ({status}). This model may be gated — add a Hugging Face token in Manage → Download models, accept the model license on the Hub, and retry."
                 );
             }
+            anyhow::bail!(
+                "Hugging Face rejected the download ({status}). Confirm your token can access {} and that you accepted the model license on the Hub.",
+                request.repo_id
+            );
         }
         anyhow::bail!("Hugging Face download failed ({status}): {body}");
     }
@@ -264,6 +280,15 @@ pub async fn download_gguf_with_progress(
     progress(ProgressEvent::download(written, total.or(Some(written))));
     file.flush().await?;
     drop(file);
+
+    if looks_like_lfs_pointer(&partial).await {
+        let _ = tokio::fs::remove_file(&partial).await;
+        anyhow::bail!(
+            "downloaded an LFS pointer for {} instead of the real file. Authenticate with a Hugging Face token that has access to {}.",
+            request.filename,
+            request.repo_id
+        );
+    }
 
     progress(ProgressEvent::phase("hash", "Verifying SHA-256"));
     tokio::fs::rename(&partial, &destination)
@@ -340,7 +365,108 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
-async fn download_file_to(
+/// True when a file looks like a Git LFS pointer (tiny text) rather than real weights.
+async fn looks_like_lfs_pointer(path: &Path) -> bool {
+    use tokio::io::AsyncReadExt;
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return false;
+    };
+    let mut buf = vec![0_u8; 80];
+    let Ok(read) = file.read(&mut buf).await else {
+        return false;
+    };
+    std::str::from_utf8(&buf[..read])
+        .map(|text| text.starts_with("version https://git-lfs.github.com/spec/v1"))
+        .unwrap_or(false)
+}
+
+/// Whether an on-disk file matches the Hub's expected size, when available.
+fn size_matches_expected(actual: u64, expected: Option<u64>) -> bool {
+    let Some(expected) = expected.filter(|value| *value > 0) else {
+        return actual > 0;
+    };
+    // The Hub tree API reports the exact byte count. Do not accept a partially
+    // downloaded file as complete just because it is close in size.
+    actual == expected
+}
+
+/// Optional multi-file progress context so UI shows overall snapshot progress,
+/// not 100% of the current small file only.
+#[derive(Clone, Copy)]
+struct SnapshotProgressCtx<'a> {
+    completed_before: u64,
+    overall_total: Option<u64>,
+    file_index: usize,
+    file_count: usize,
+    file_path: &'a str,
+}
+
+fn emit_file_download_progress(
+    progress: &mut ProgressCallback,
+    snapshot: Option<SnapshotProgressCtx<'_>>,
+    file_bytes: u64,
+    file_total: Option<u64>,
+    job: Option<(&Database, &str)>,
+) {
+    if let Some(ctx) = snapshot {
+        let overall_bytes = ctx.completed_before.saturating_add(file_bytes);
+        let mut event = ProgressEvent::download(overall_bytes, ctx.overall_total.or(file_total));
+        let file_pct = file_total
+            .filter(|total| *total > 0)
+            .map(|total| ((file_bytes as f64 / total as f64) * 100.0).round() as u64)
+            .unwrap_or(0);
+        event.message = Some(format!(
+            "File {}/{} · {} · {}{}",
+            ctx.file_index + 1,
+            ctx.file_count,
+            ctx.file_path,
+            format_bytes_short(file_bytes),
+            file_total
+                .map(|total| format!(" / {} (file {file_pct}%)", format_bytes_short(total)))
+                .unwrap_or_default()
+        ));
+        progress(event);
+        if let Some((db, job_id)) = job {
+            // Fire-and-forget progress for queue jobs (best-effort).
+            let db = db.clone();
+            let job_id = job_id.to_owned();
+            tokio::spawn(async move {
+                let _ = db
+                    .update_download_job_progress(&job_id, overall_bytes, ctx.overall_total)
+                    .await;
+            });
+        }
+    } else {
+        progress(ProgressEvent::download(file_bytes, file_total));
+        if let Some((db, job_id)) = job {
+            let db = db.clone();
+            let job_id = job_id.to_owned();
+            tokio::spawn(async move {
+                let _ = db
+                    .update_download_job_progress(&job_id, file_bytes, file_total)
+                    .await;
+            });
+        }
+    }
+}
+
+fn format_bytes_short(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let value = bytes as f64;
+    if value >= GB {
+        format!("{:.2} GB", value / GB)
+    } else if value >= MB {
+        format!("{:.1} MB", value / MB)
+    } else if value >= KB {
+        format!("{:.0} KB", value / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+async fn download_file_to_with_opts(
     client: &reqwest::Client,
     data_dir: &Path,
     repo_id: &str,
@@ -350,9 +476,26 @@ async fn download_file_to(
     progress: &mut ProgressCallback,
     job: Option<(&Database, &str)>,
     cancel: Option<&Arc<AtomicBool>>,
+    expected_size: Option<u64>,
+    snapshot: Option<SnapshotProgressCtx<'_>>,
 ) -> anyhow::Result<u64> {
     if destination.is_file() {
-        return Ok(tokio::fs::metadata(destination).await?.len());
+        let len = tokio::fs::metadata(destination).await?.len();
+        let pointer = looks_like_lfs_pointer(destination).await;
+        if !pointer && size_matches_expected(len, expected_size) {
+            if let Some(ctx) = snapshot {
+                emit_file_download_progress(
+                    progress,
+                    Some(ctx),
+                    len,
+                    expected_size.or(Some(len)),
+                    job,
+                );
+            }
+            return Ok(len);
+        }
+        // Stale LFS pointer or truncated copy — re-download.
+        let _ = tokio::fs::remove_file(destination).await;
     }
     if let Some(parent) = destination.parent() {
         tokio::fs::create_dir_all(parent)
@@ -364,6 +507,36 @@ async fn download_file_to(
         .context("create downloads directory")?;
 
     let partial = partial_path(data_dir, repo_id, filename);
+    let existing = if partial.is_file() {
+        tokio::fs::metadata(&partial).await?.len()
+    } else {
+        0
+    };
+    // Partial that is already "complete" for expected size may still be an LFS pointer.
+    if existing > 0 && looks_like_lfs_pointer(&partial).await {
+        let _ = tokio::fs::remove_file(&partial).await;
+    }
+    let existing = if partial.is_file() {
+        tokio::fs::metadata(&partial).await?.len()
+    } else {
+        0
+    };
+    if let Some(expected) = expected_size.filter(|size| *size > 0) {
+        if existing == expected && !looks_like_lfs_pointer(&partial).await {
+            // A previous attempt may have finished writing this file but been
+            // interrupted before the final rename. Promote it instead of
+            // asking the Hub for an invalid `Range: bytes=<len>-` request.
+            tokio::fs::rename(&partial, destination)
+                .await
+                .context("promote completed partial download")?;
+            emit_file_download_progress(progress, snapshot, existing, Some(expected), job);
+            return Ok(existing);
+        }
+        if existing > expected {
+            // A partial from a different revision cannot be safely resumed.
+            let _ = tokio::fs::remove_file(&partial).await;
+        }
+    }
     let existing = if partial.is_file() {
         tokio::fs::metadata(&partial).await?.len()
     } else {
@@ -406,14 +579,17 @@ async fn download_file_to(
         if status.as_u16() == 401 || status.as_u16() == 403 {
             if hf_auth::load_token(data_dir).is_none() {
                 anyhow::bail!(
-                    "Hugging Face rejected the download ({status}). This model may be gated — add a Hugging Face token in Manage → Download models."
+                    "Hugging Face rejected the download ({status}). This model may be gated — add a Hugging Face token in Manage → Download models, accept the model license on the Hub, and retry."
                 );
             }
+            anyhow::bail!(
+                "Hugging Face rejected the download ({status}). Confirm your token can access {repo_id} and that you accepted the model license on the Hub."
+            );
         }
         anyhow::bail!("Hugging Face download failed ({status}): {body}");
     }
 
-    let total = content_length_total(&response, existing, status.as_u16() == 206);
+    let total = content_length_total(&response, existing, status.as_u16() == 206).or(expected_size);
     let append = status.as_u16() == 206 && existing > 0;
     let mut file = OpenOptions::new()
         .create(true)
@@ -430,7 +606,7 @@ async fn download_file_to(
     let mut stream = response.bytes_stream();
     let mut written = existing;
     let mut last_emit = 0_u64;
-    progress(ProgressEvent::download(written, total));
+    emit_file_download_progress(progress, snapshot, written, total, job);
     while let Some(chunk) = stream.next().await {
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             drop(file);
@@ -443,18 +619,29 @@ async fn download_file_to(
             .context("write download chunk")?;
         written += chunk.len() as u64;
         if written.saturating_sub(last_emit) >= 256 * 1024 || total == Some(written) {
-            progress(ProgressEvent::download(written, total));
-            if let Some((db, job_id)) = job {
-                let _ = db
-                    .update_download_job_progress(job_id, written, total)
-                    .await;
-            }
+            emit_file_download_progress(progress, snapshot, written, total, job);
             last_emit = written;
         }
     }
-    progress(ProgressEvent::download(written, total.or(Some(written))));
+    emit_file_download_progress(progress, snapshot, written, total.or(Some(written)), job);
     file.flush().await?;
     drop(file);
+
+    if looks_like_lfs_pointer(&partial).await {
+        let _ = tokio::fs::remove_file(&partial).await;
+        anyhow::bail!(
+            "downloaded an LFS pointer for {filename} instead of the real file. \
+             Authenticate with a Hugging Face token that has access to {repo_id}."
+        );
+    }
+    if !size_matches_expected(written, expected_size.or(total)) {
+        let _ = tokio::fs::remove_file(&partial).await;
+        anyhow::bail!(
+            "download of {filename} finished at {} bytes but ~{} were expected — retry after checking Hub access",
+            written,
+            expected_size.or(total).unwrap_or(0)
+        );
+    }
 
     tokio::fs::rename(&partial, destination)
         .await
@@ -502,6 +689,9 @@ pub async fn download_mlx_snapshot_with_progress(
     if let Some((db, job_id)) = &job {
         let _ = db.start_download_job(job_id).await;
     }
+    let overall_total = files.iter().try_fold(0_u64, |total, file| {
+        file.size.and_then(|size| total.checked_add(size))
+    });
     let mut total_bytes = 0_u64;
     for (index, file) in files.iter().enumerate() {
         if cancel
@@ -515,7 +705,7 @@ pub async fn download_mlx_snapshot_with_progress(
             format!("Fetching {} ({}/{})", file.path, index + 1, files.len()),
         ));
         let destination = mlx_download_destination(data_dir, &request.repo_id, &file.path)?;
-        let bytes = download_file_to(
+        let bytes = download_file_to_with_opts(
             client,
             data_dir,
             &request.repo_id,
@@ -525,6 +715,14 @@ pub async fn download_mlx_snapshot_with_progress(
             &mut progress,
             job.as_ref().map(|(db, id)| (db, id.as_str())),
             cancel.as_ref(),
+            file.size,
+            Some(SnapshotProgressCtx {
+                completed_before: total_bytes,
+                overall_total,
+                file_index: index,
+                file_count: files.len(),
+                file_path: &file.path,
+            }),
         )
         .await?;
         total_bytes += bytes;
@@ -545,7 +743,7 @@ pub async fn download_mlx_snapshot_with_progress(
         progress(ProgressEvent::phase("warning", message.clone()));
     }
     let model_id = mlx_model_id(detected, &request.repo_id)?;
-    let sha256 = hash_directory(&root).await?;
+    let sha256 = snapshot_manifest_sha256(&files);
     let result = DownloadResult {
         model_id: model_id.clone(),
         path: root.display().to_string(),
@@ -607,6 +805,9 @@ pub async fn download_streaming_asr_snapshot_with_progress(
     if let Some((db, job_id)) = &job {
         let _ = db.start_download_job(job_id).await;
     }
+    let overall_total = files.iter().try_fold(0_u64, |total, file| {
+        file.size.and_then(|size| total.checked_add(size))
+    });
     let mut total_bytes = 0_u64;
     for (index, file) in files.iter().enumerate() {
         if cancel
@@ -621,7 +822,7 @@ pub async fn download_streaming_asr_snapshot_with_progress(
         ));
         let destination =
             streaming_asr::download_destination(data_dir, &request.repo_id, &file.path)?;
-        let bytes = download_file_to(
+        let bytes = download_file_to_with_opts(
             client,
             data_dir,
             &request.repo_id,
@@ -631,6 +832,14 @@ pub async fn download_streaming_asr_snapshot_with_progress(
             &mut progress,
             job.as_ref().map(|(db, id)| (db, id.as_str())),
             cancel.as_ref(),
+            file.size,
+            Some(SnapshotProgressCtx {
+                completed_before: total_bytes,
+                overall_total,
+                file_index: index,
+                file_count: files.len(),
+                file_path: &file.path,
+            }),
         )
         .await?;
         total_bytes += bytes;
@@ -641,7 +850,7 @@ pub async fn download_streaming_asr_snapshot_with_progress(
         "downloaded snapshot does not look like a streaming ASR model"
     );
     let model_id = streaming_asr::model_id_for_repo(&request.repo_id)?;
-    let sha256 = hash_directory(&root).await?;
+    let sha256 = snapshot_manifest_sha256(&files);
     let result = DownloadResult {
         model_id: model_id.clone(),
         path: root.display().to_string(),
@@ -684,9 +893,13 @@ pub async fn download_personaplex_snapshot_with_progress(
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')),
         "invalid revision"
     );
-    let files =
-        crate::hf::list_mlx_snapshot_files(client, data_dir, &request.repo_id, &request.revision)
-            .await?;
+    let files = crate::hf::list_personaplex_snapshot_files(
+        client,
+        data_dir,
+        &request.repo_id,
+        &request.revision,
+    )
+    .await?;
     anyhow::ensure!(
         !files.is_empty(),
         "no PersonaPlex snapshot files were found for {}",
@@ -703,6 +916,9 @@ pub async fn download_personaplex_snapshot_with_progress(
     if let Some((db, job_id)) = &job {
         let _ = db.start_download_job(job_id).await;
     }
+    let overall_total = files.iter().try_fold(0_u64, |total, file| {
+        file.size.and_then(|size| total.checked_add(size))
+    });
     let mut total_bytes = 0_u64;
     for (index, file) in files.iter().enumerate() {
         if cancel
@@ -717,7 +933,7 @@ pub async fn download_personaplex_snapshot_with_progress(
         ));
         let destination =
             crate::voice::download_destination(data_dir, &request.repo_id, &file.path)?;
-        let bytes = download_file_to(
+        let bytes = download_file_to_with_opts(
             client,
             data_dir,
             &request.repo_id,
@@ -727,13 +943,25 @@ pub async fn download_personaplex_snapshot_with_progress(
             &mut progress,
             job.as_ref().map(|(db, id)| (db, id.as_str())),
             cancel.as_ref(),
+            file.size,
+            Some(SnapshotProgressCtx {
+                completed_before: total_bytes,
+                overall_total,
+                file_index: index,
+                file_count: files.len(),
+                file_path: &file.path,
+            }),
         )
         .await?;
         total_bytes += bytes;
     }
     let root = crate::voice::download_root(data_dir, &request.repo_id)?;
     let model_id = crate::voice::model_id_for_repo(&request.repo_id)?;
-    let sha256 = hash_directory(&root).await?;
+    progress(ProgressEvent::phase(
+        "verify",
+        "Finalizing verified PersonaPlex snapshot",
+    ));
+    let sha256 = snapshot_manifest_sha256(&files);
     let result = DownloadResult {
         model_id: model_id.clone(),
         path: root.display().to_string(),
@@ -752,32 +980,27 @@ pub async fn download_personaplex_snapshot_with_progress(
     Ok(result)
 }
 
-async fn hash_directory(dir: &Path) -> anyhow::Result<String> {
-    let mut entries = Vec::new();
-    collect_files(dir, dir, &mut entries)?;
-    entries.sort();
-    let mut digest = Sha256::new();
-    for path in entries {
-        let relative = path.strip_prefix(dir).unwrap_or(&path);
-        digest.update(relative.to_string_lossy().as_bytes());
-        digest.update([0]);
-        let bytes = tokio::fs::read(&path).await?;
-        digest.update(bytes);
-    }
-    Ok(hex::encode(digest.finalize()))
-}
+/// Stable identity for a verified snapshot without reading every model byte a
+/// second time. Each file was checked against its Hub-reported size during
+/// download, and the manifest binds the resulting record to that exact list.
+fn snapshot_manifest_sha256(files: &[crate::hf::RepoFile]) -> String {
+    let mut ordered: Vec<_> = files.iter().collect();
+    ordered.sort_unstable_by(|left, right| left.path.cmp(&right.path));
 
-fn collect_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files(root, &path, files)?;
-        } else {
-            files.push(path);
+    let mut digest = Sha256::new();
+    digest.update(b"brazier-snapshot-manifest-v1\0");
+    for file in ordered {
+        digest.update(file.path.as_bytes());
+        digest.update([0]);
+        match file.size {
+            Some(size) => {
+                digest.update([1]);
+                digest.update(size.to_le_bytes());
+            }
+            None => digest.update([0]),
         }
     }
-    Ok(())
+    hex::encode(digest.finalize())
 }
 
 #[cfg(test)]
@@ -803,6 +1026,25 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
                 .contains("acme__demo")
+        );
+    }
+
+    #[test]
+    fn snapshot_manifest_is_order_independent() {
+        let files = vec![
+            crate::hf::RepoFile {
+                path: "weights/model.safetensors".into(),
+                size: Some(42),
+            },
+            crate::hf::RepoFile {
+                path: "config.json".into(),
+                size: Some(7),
+            },
+        ];
+        let reversed = vec![files[1].clone(), files[0].clone()];
+        assert_eq!(
+            snapshot_manifest_sha256(&files),
+            snapshot_manifest_sha256(&reversed)
         );
     }
 
