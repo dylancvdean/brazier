@@ -1,0 +1,28 @@
+{
+  "id": "whisperkit",
+  "display_name": "WhisperKit (Argmax)",
+  "upstream_origins": [
+    "https://github.com/argmaxinc/argmax-oss-swift.git",
+    "https://github.com/argmaxinc/argmax-oss-swift",
+    "https://github.com/argmaxinc/WhisperKit.git",
+    "https://github.com/argmaxinc/WhisperKit"
+  ],
+  "supported_platforms": ["macos-arm64"],
+  "steps": [
+    {
+      "label": "Build whisperkit-cli (Swift)",
+      "program": "swift",
+      "args": [
+        "build",
+        "-c",
+        "release",
+        "--package-path",
+        "{source}",
+        "--product",
+        "whisperkit-cli",
+        "--build-path",
+        "{build}"
+      ]
+    }
+  ]
+}

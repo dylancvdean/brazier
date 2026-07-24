@@ -8,13 +8,16 @@ const MLX_LM: &str = include_str!("../../../engine-recipes/mlx-lm.json");
 const MLX_VLM: &str = include_str!("../../../engine-recipes/mlx-vlm.json");
 const VLLM: &str = include_str!("../../../engine-recipes/vllm.json");
 const WHISPER_CPP: &str = include_str!("../../../engine-recipes/whisper.cpp.json");
+const WHISPERKIT: &str = include_str!("../../../engine-recipes/whisperkit.json");
 const STREAMING_ASR: &str = include_str!("../../../engine-recipes/streaming-asr.json");
 const SDCPP: &str = include_str!("../../../engine-recipes/stable-diffusion.cpp.json");
 const PERSONAPLEX: &str = include_str!("../../../engine-recipes/personaplex.json");
+const PERSONAPLEX_MLX: &str = include_str!("../../../engine-recipes/personaplex-mlx.json");
 const MLX_LM_LOCK: &str = include_str!("../../../engine-recipes/mlx-lm.lock");
 const MLX_VLM_LOCK: &str = include_str!("../../../engine-recipes/mlx-vlm.lock");
 const STREAMING_ASR_LOCK: &str = include_str!("../../../engine-recipes/streaming-asr.lock");
 const PERSONAPLEX_LOCK: &str = include_str!("../../../engine-recipes/personaplex.lock");
+const PERSONAPLEX_MLX_LOCK: &str = include_str!("../../../engine-recipes/personaplex-mlx.lock");
 const STREAMING_ASR_PYPROJECT: &str = include_str!("../python/streaming_asr_pkg/pyproject.toml");
 const STREAMING_ASR_INIT: &str =
     include_str!("../python/streaming_asr_pkg/brazier_streaming_asr/__init__.py");
@@ -24,8 +27,13 @@ const STREAMING_ASR_MAIN: &str =
 pub fn is_python_engine(engine: &str) -> bool {
     matches!(
         engine,
-        "mlx-lm" | "mlx-vlm" | "vllm" | "streaming-asr" | "personaplex"
+        "mlx-lm" | "mlx-vlm" | "vllm" | "streaming-asr" | "personaplex" | "personaplex-mlx"
     )
+}
+
+/// Swift Package Manager engines (Apple Silicon CLI tools).
+pub fn is_swift_engine(engine: &str) -> bool {
+    matches!(engine, "whisperkit")
 }
 
 /// Directory containing shipped lock files for Python engine builds.
@@ -43,6 +51,8 @@ pub fn ensure_recipe_files(data_dir: &Path) -> anyhow::Result<PathBuf> {
         .context("write streaming-asr.lock")?;
     std::fs::write(dir.join("personaplex.lock"), PERSONAPLEX_LOCK)
         .context("write personaplex.lock")?;
+    std::fs::write(dir.join("personaplex-mlx.lock"), PERSONAPLEX_MLX_LOCK)
+        .context("write personaplex-mlx.lock")?;
 
     let pkg = dir.join("streaming_asr_pkg");
     let module = pkg.join("brazier_streaming_asr");
@@ -111,9 +121,11 @@ pub fn recipe(engine: &str) -> anyhow::Result<BuildRecipe> {
         "mlx-vlm" => MLX_VLM,
         "vllm" => VLLM,
         "whisper.cpp" => WHISPER_CPP,
+        "whisperkit" => WHISPERKIT,
         "streaming-asr" => STREAMING_ASR,
         "stable-diffusion.cpp" => SDCPP,
         "personaplex" => PERSONAPLEX,
+        "personaplex-mlx" => PERSONAPLEX_MLX,
         _ => anyhow::bail!("unsupported engine recipe: {engine}"),
     };
     Ok(serde_json::from_str(source)?)

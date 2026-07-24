@@ -13,7 +13,8 @@ use tokio::process::Command;
 use crate::{
     blob_store,
     types::{ModelCapabilities, OpenAiMessage},
-    whisper::{self, TranscribeRequest},
+    whisper::{self, TranscribeContext, TranscribeRequest},
+    whisperkit,
 };
 
 const MAX_VIDEO_FRAMES: usize = 8;
@@ -32,8 +33,14 @@ pub fn detect_pipeline_features(
 ) -> PipelineFeatures {
     let binary = whisper::resolve_binary(data_dir, whisper_binary);
     let model = whisper::resolve_model_path(data_dir, whisper_model);
+    let asr = match binary.as_deref() {
+        // WhisperKit downloads CoreML models on demand — no local ggml required.
+        Some(path) if whisperkit::is_whisperkit_binary(path) => true,
+        Some(_) => model.is_some(),
+        None => false,
+    };
     PipelineFeatures {
-        asr: binary.is_some() && model.is_some(),
+        asr,
         video_preprocess: ffmpeg_available(),
     }
 }
@@ -54,7 +61,7 @@ pub fn ffmpeg_missing_message() -> &'static str {
 }
 
 pub fn asr_missing_message() -> &'static str {
-    "Audio transcription requires an active whisper.cpp runtime and a downloaded Whisper model. Build whisper.cpp under Runtimes and download a Whisper GGUF/ggml model from Discover."
+    "Audio transcription requires an ASR runtime. On Apple Silicon build WhisperKit (Argmax) under Runtimes (or `brew install whisperkit-cli`); on other platforms build whisper.cpp and download a Whisper GGUF/ggml model from Discover."
 }
 
 #[derive(Clone)]
@@ -64,6 +71,8 @@ pub struct MediaContext<'a> {
     pub features: PipelineFeatures,
     pub whisper_binary: Option<PathBuf>,
     pub whisper_model: Option<PathBuf>,
+    /// Preferred model id / WhisperKit variant (`base`, `whisperkit:tiny`, …).
+    pub whisper_model_pref: Option<&'a str>,
 }
 
 pub type ProgressFn = Box<dyn Fn(String, String) + Send + Sync>;
@@ -377,22 +386,41 @@ async fn transcribe_blob(
         .whisper_binary
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("{}", asr_missing_message()))?;
+    let input = blob_to_temp_file(ctx.data_dir, sha256, extension_for_mime(mime)).await?;
+    // WhisperKit accepts mp3/m4a/flac/wav directly; only force WAV for whisper.cpp.
+    let audio = if whisperkit::is_whisperkit_binary(binary) {
+        input.clone()
+    } else {
+        ensure_wav(&input).await?
+    };
+    let dummy_model = PathBuf::from(".");
     let model = ctx
         .whisper_model
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("{}", asr_missing_message()))?;
-    let input = blob_to_temp_file(ctx.data_dir, sha256, extension_for_mime(mime)).await?;
-    let wav = ensure_wav(&input).await?;
-    let text = whisper::transcribe(TranscribeRequest {
-        binary,
-        model,
-        audio: &wav,
-    })
+        .unwrap_or(dummy_model.as_path());
+    if !whisperkit::is_whisperkit_binary(binary) {
+        anyhow::ensure!(
+            ctx.whisper_model.as_ref().is_some_and(|path| path.is_file()),
+            "{}",
+            asr_missing_message()
+        );
+    }
+    let text = whisper::transcribe_with_context(
+        TranscribeRequest {
+            binary,
+            model,
+            audio: &audio,
+        },
+        Some(TranscribeContext {
+            data_dir: ctx.data_dir,
+            model_pref: ctx.whisper_model_pref,
+        }),
+    )
     .await
     .with_context(|| format!("transcribe {name}"))?;
     let _ = tokio::fs::remove_file(&input).await;
-    if wav != input {
-        let _ = tokio::fs::remove_file(&wav).await;
+    if audio != input {
+        let _ = tokio::fs::remove_file(&audio).await;
     }
     Ok(text)
 }
@@ -452,7 +480,14 @@ async fn prepare_video(
         )
     }));
 
-    if ctx.features.asr && ctx.whisper_binary.is_some() && ctx.whisper_model.is_some() {
+    let can_asr = ctx.features.asr
+        && ctx.whisper_binary.is_some()
+        && (ctx.whisper_model.is_some()
+            || ctx
+                .whisper_binary
+                .as_deref()
+                .is_some_and(whisperkit::is_whisperkit_binary));
+    if can_asr {
         emit("transcribe", &format!("Transcribing audio from {name}…"));
         match extract_and_transcribe_audio(ctx, &input, name).await {
             Ok(transcript) if !transcript.trim().is_empty() => {
@@ -477,7 +512,7 @@ async fn prepare_video(
     } else {
         parts.push(json!({
             "type": "text",
-            "text": "[Audio transcription skipped — whisper.cpp runtime/model not available.]"
+            "text": "[Audio transcription skipped — no ASR runtime/model available.]"
         }));
     }
 
@@ -546,15 +581,29 @@ async fn extract_and_transcribe_audio(
         .whisper_binary
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("{}", asr_missing_message()))?;
+    let dummy_model = PathBuf::from(".");
     let model = ctx
         .whisper_model
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("{}", asr_missing_message()))?;
-    let text = whisper::transcribe(TranscribeRequest {
-        binary,
-        model,
-        audio: &audio,
-    })
+        .unwrap_or(dummy_model.as_path());
+    if !whisperkit::is_whisperkit_binary(binary) {
+        anyhow::ensure!(
+            ctx.whisper_model.as_ref().is_some_and(|path| path.is_file()),
+            "{}",
+            asr_missing_message()
+        );
+    }
+    let text = whisper::transcribe_with_context(
+        TranscribeRequest {
+            binary,
+            model,
+            audio: &audio,
+        },
+        Some(TranscribeContext {
+            data_dir: ctx.data_dir,
+            model_pref: ctx.whisper_model_pref,
+        }),
+    )
     .await
     .with_context(|| format!("transcribe audio from {name}"))?;
     let _ = tokio::fs::remove_file(&audio).await;
@@ -634,6 +683,7 @@ mod tests {
             },
             whisper_binary: None,
             whisper_model: None,
+            whisper_model_pref: None,
         };
         let mut messages = vec![OpenAiMessage {
             role: "user".into(),
@@ -681,6 +731,7 @@ mod tests {
             },
             whisper_binary: None,
             whisper_model: None,
+            whisper_model_pref: None,
         };
         let mut messages = vec![OpenAiMessage {
             role: "user".into(),

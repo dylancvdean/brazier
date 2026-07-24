@@ -39,7 +39,7 @@ use crate::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
     },
-    voice, whisper,
+    voice, whisper, whisperkit,
 };
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -132,6 +132,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/huggingface/models/{repo_owner}/{repo_name}/trust",
             get(model_trust),
+        )
+        .route(
+            "/api/v1/huggingface/models/{repo_owner}/{repo_name}/description",
+            get(model_description),
         )
         .route(
             "/api/v1/huggingface/models/{repo_owner}/{repo_name}/fork-hints",
@@ -343,8 +347,8 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
                 "batch_asr": {
                     "id": "batch_asr",
                     "available": features_pipeline.asr,
-                    "engine": "whisper.cpp",
-                    "summary": "File/blob transcription via whisper.cpp before chat. Works with any text model."
+                    "engine": "whisper.cpp|whisperkit",
+                    "summary": "File/blob transcription via whisper.cpp or WhisperKit (Argmax) before chat. Works with any text model."
                 },
                 "native_model_audio": {
                     "id": "native_model_audio",
@@ -624,6 +628,17 @@ async fn model_trust(
     Ok(Json(json!(trust)))
 }
 
+async fn model_description(
+    State(state): State<AppState>,
+    Path((repo_owner, repo_name)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let repo_id = format!("{repo_owner}/{repo_name}");
+    let description = hf::model_description(&state.http, &state.data_dir, &repo_id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "description": description })))
+}
+
 async fn model_fork_hints(
     State(state): State<AppState>,
     Path((repo_owner, repo_name)): Path<(String, String)>,
@@ -712,7 +727,7 @@ fn apply_active_flags(
         let selected = match entry.engine.as_str() {
             "mlx-lm" => &active.mlx_lm,
             "mlx-vlm" => &active.mlx_vlm,
-            "whisper.cpp" => &active.whisper,
+            "whisper.cpp" | "whisperkit" => &active.whisper,
             "streaming-asr" => &active.streaming_asr,
             _ => &active.llama,
         };
@@ -927,7 +942,7 @@ async fn activate_runtime(
             )
             .await
             .map_err(ApiError::bad_request)?,
-        "whisper.cpp" => state
+        "whisper.cpp" | "whisperkit" => state
             .runtime
             .activate_whisper(std::path::PathBuf::from(&entry.path))
             .await
@@ -1651,6 +1666,7 @@ async fn create_voice_session(
         .or(settings.default_voice_persona.clone())
         .unwrap_or_else(|| "You are a helpful assistant.".into());
     let voice_prompt = request.voice_prompt_path.map(PathBuf::from);
+    let hf_token = crate::hf_auth::load_token(&state.data_dir);
     let voice_state = state.runtime.voice_state().await;
     let session = voice_state
         .sessions
@@ -1659,6 +1675,7 @@ async fn create_voice_session(
             model_path.as_deref(),
             persona.clone(),
             voice_prompt.clone(),
+            hf_token,
         )
         .await
         .map_err(ApiError::internal)?;
@@ -2208,14 +2225,14 @@ async fn audio_transcriptions(
 
     let binary = whisper::resolve_binary(&state.data_dir, settings.whisper_binary.as_deref())
         .ok_or_else(|| ApiError::bad_request(media::asr_missing_message().to_owned()))?;
-    let model_path = whisper::resolve_model_path(
-        &state.data_dir,
-        request
-            .model
-            .as_deref()
-            .or(settings.whisper_model.as_deref()),
-    )
-    .ok_or_else(|| ApiError::bad_request(media::asr_missing_message().to_owned()))?;
+    let model_pref = request
+        .model
+        .as_deref()
+        .or(settings.whisper_model.as_deref());
+    let model_path = whisper::resolve_model_path(&state.data_dir, model_pref);
+    if !whisperkit::is_whisperkit_binary(&binary) && model_path.is_none() {
+        return Err(ApiError::bad_request(media::asr_missing_message().to_owned()));
+    }
 
     let (sha256, mime) = resolve_transcription_blob(&state, &request).await?;
 
@@ -2251,7 +2268,8 @@ async fn audio_transcriptions(
             video_preprocess: media::ffmpeg_available(),
         },
         whisper_binary: Some(binary),
-        whisper_model: Some(model_path),
+        whisper_model: model_path,
+        whisper_model_pref: model_pref,
     };
     media::prepare_messages(&ctx, &mut messages, None)
         .await

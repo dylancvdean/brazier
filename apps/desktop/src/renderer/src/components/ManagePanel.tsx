@@ -36,6 +36,7 @@ import {
   ensureLlamaEngine,
   ensureSdcppEngine,
   ensureWhisperEngine,
+  fetchModelDescription,
   fetchManagedSdcppStatus,
   fetchManagedWhisperStatus,
   fetchManagedLlamaStatus,
@@ -96,6 +97,8 @@ type BuildEngine =
   | 'streaming-asr'
   | 'stable-diffusion.cpp'
   | 'personaplex'
+  | 'personaplex-mlx'
+  | 'whisperkit'
 
 const DISCOVER_ENGINE_HELP: Record<DiscoverEngine, string> = {
   'llama.cpp': 'GGUF weights for llama.cpp on CPU, CUDA, Metal, or Vulkan.',
@@ -117,6 +120,13 @@ const DISCOVER_ENGINE_LABELS: Record<DiscoverEngine, string> = {
   'streaming-asr': 'ASR · streaming',
   'stable-diffusion.cpp': 'Gen · sd.cpp',
   personaplex: 'Voice · PersonaPlex'
+}
+
+/** Labels for build offers (includes engines that are not download categories). */
+const BUILD_ENGINE_LABELS: Record<BuildEngine, string> = {
+  ...DISCOVER_ENGINE_LABELS,
+  'personaplex-mlx': 'Voice · PersonaPlex MLX',
+  whisperkit: 'ASR · WhisperKit'
 }
 
 const BUILD_ENGINE_DEFAULTS: Record<
@@ -149,6 +159,14 @@ const BUILD_ENGINE_DEFAULTS: Record<
   },
   personaplex: {
     repository: 'https://github.com/NVIDIA/personaplex',
+    revision: 'main'
+  },
+  'personaplex-mlx': {
+    repository: 'https://github.com/mu-hashmi/personaplex-mlx',
+    revision: 'main'
+  },
+  whisperkit: {
+    repository: 'https://github.com/argmaxinc/argmax-oss-swift',
     revision: 'main'
   }
 }
@@ -326,41 +344,48 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
   return (
     <div className="drawer-backdrop" onMouseDown={props.onClose}>
       <aside className="manage-panel" onMouseDown={(event) => event.stopPropagation()}>
-        <nav className="manage-nav">
-          <div className="manage-nav-title">Manage</div>
-          {SECTIONS.map((entry) => (
-            <button
-              key={entry.id}
-              className={props.section === entry.id ? 'active' : ''}
-              onClick={() => {
-                setError(null)
-                props.onSectionChange(entry.id)
-              }}
-            >
-              {entry.icon}
-              {entry.label}
-            </button>
-          ))}
-          <div className="manage-nav-spacer" />
-          <button className="manage-close" onClick={props.onClose}>
-            <X size={15} />
-            Close
+        <header className="manage-header">
+          <span className="manage-header-title">Manage</span>
+          <button
+            className="manage-close"
+            onClick={props.onClose}
+            title="Close"
+            aria-label="Close"
+          >
+            <X size={16} />
           </button>
-        </nav>
-        <div className="manage-content">
-          {error && (
-            <div className="error-banner">
-              <span>{error}</span>
-              <button onClick={() => setError(null)}>
-                <X size={14} />
+        </header>
+        <div className="manage-body">
+          <nav className="manage-nav">
+            {SECTIONS.map((entry) => (
+              <button
+                key={entry.id}
+                className={props.section === entry.id ? 'active' : ''}
+                onClick={() => {
+                  setError(null)
+                  props.onSectionChange(entry.id)
+                }}
+              >
+                {entry.icon}
+                {entry.label}
               </button>
-            </div>
-          )}
-          {props.section === 'library' && <LibrarySection {...props} onError={setError} />}
-          {props.section === 'discover' && <DiscoverSection {...props} onError={setError} />}
-          {props.section === 'runtimes' && <RuntimesSection {...props} onError={setError} />}
-          {props.section === 'mcp' && <McpSection {...props} onError={setError} />}
-          {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
+            ))}
+          </nav>
+          <div className="manage-content">
+            {error && (
+              <div className="error-banner">
+                <span>{error}</span>
+                <button onClick={() => setError(null)}>
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+            {props.section === 'library' && <LibrarySection {...props} onError={setError} />}
+            {props.section === 'discover' && <DiscoverSection {...props} onError={setError} />}
+            {props.section === 'runtimes' && <RuntimesSection {...props} onError={setError} />}
+            {props.section === 'mcp' && <McpSection {...props} onError={setError} />}
+            {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
+          </div>
         </div>
       </aside>
     </div>
@@ -727,11 +752,14 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
 }
 
 function DiscoverSection(props: SectionProps): React.JSX.Element {
-  const [query, setQuery] = useState('Qwen')
+  const [query, setQuery] = useState('')
   const [discoverEngine, setDiscoverEngine] = useState<DiscoverEngine>(() =>
     defaultDiscoverEngine(props.hardware)
   )
   const [results, setResults] = useState<HubModel[]>([])
+  const [hasSearched, setHasSearched] = useState(false)
+  const [suggested, setSuggested] = useState<HubModel[]>([])
+  const [suggestLoading, setSuggestLoading] = useState(false)
   const [searching, setSearching] = useState(false)
   const [expandedRepo, setExpandedRepo] = useState<string | null>(null)
   const [repoFiles, setRepoFiles] = useState<Record<string, HubFile[]>>({})
@@ -748,6 +776,27 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [hfTokenDraft, setHfTokenDraft] = useState('')
   const [savingHfToken, setSavingHfToken] = useState(false)
   const [downloadJobs, setDownloadJobs] = useState<DownloadJob[]>([])
+  const [openDescription, setOpenDescription] = useState<string | null>(null)
+  const [descriptions, setDescriptions] = useState<Record<string, string>>({})
+  const [descriptionLoading, setDescriptionLoading] = useState<string | null>(null)
+
+  async function toggleDescription(repoId: string): Promise<void> {
+    if (openDescription === repoId) {
+      setOpenDescription(null)
+      return
+    }
+    setOpenDescription(repoId)
+    if (descriptions[repoId] !== undefined) return
+    setDescriptionLoading(repoId)
+    try {
+      const text = await fetchModelDescription(repoId)
+      setDescriptions((current) => ({ ...current, [repoId]: text }))
+    } catch (cause) {
+      setDescriptions((current) => ({ ...current, [repoId]: errorText(cause) }))
+    } finally {
+      setDescriptionLoading((current) => (current === repoId ? null : current))
+    }
+  }
 
   useEffect(() => {
     void huggingFaceTokenStatus()
@@ -800,9 +849,34 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     setDiscoverEngine(defaultDiscoverEngine(props.hardware))
   }, [props.hardware?.os, props.hardware?.architecture])
 
+  // Load fresh suggestions for the selected engine and reset any prior search,
+  // so opening (or switching category) shows curated picks, not stale results.
+  useEffect(() => {
+    let cancelled = false
+    setResults([])
+    setHasSearched(false)
+    setExpandedRepo(null)
+    setSuggestLoading(true)
+    void searchHub('', discoverEngine)
+      .then((models) => {
+        if (!cancelled) setSuggested(models.slice(0, 9))
+      })
+      .catch(() => {
+        if (!cancelled) setSuggested([])
+      })
+      .finally(() => {
+        if (!cancelled) setSuggestLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [discoverEngine])
+
   async function findModels(event?: FormEvent): Promise<void> {
     event?.preventDefault()
+    if (!query.trim()) return
     setSearching(true)
+    setHasSearched(true)
     props.onError(null)
     setExpandedRepo(null)
     try {
@@ -1149,8 +1223,22 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           })}
         </div>
       )}
+      {!hasSearched && (
+        <div className="section-label suggested-label">
+          {suggestLoading
+            ? 'Loading suggestions…'
+            : suggested.length > 0
+              ? 'Suggested · popular & recent'
+              : 'Type a model name or author to search'}
+        </div>
+      )}
+      {hasSearched && !searching && results.length === 0 && (
+        <p className="empty-models-inline">
+          No models matched “{query.trim()}”. Try a different name or author.
+        </p>
+      )}
       <div className="model-results">
-        {results.map((model) => {
+        {(hasSearched ? results : suggested).map((model) => {
           const expanded = expandedRepo === model.id
           const files = (repoFiles[model.id] ?? []).filter((file) => {
             const lower = file.path.toLowerCase()
@@ -1166,9 +1254,21 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           return (
             <article className="model-card expandable" key={model.id}>
               <div className="model-card-main">
-                <div>
-                  <strong>{model.id.split('/').at(-1)}</strong>
-                  <span>{model.author}</span>
+                <div className="model-card-heading">
+                  <button
+                    type="button"
+                    className="model-name-button"
+                    title="Show model description"
+                    onClick={() => void toggleDescription(model.id)}
+                  >
+                    <span className="model-name-text">{model.id.split('/').at(-1)}</span>
+                    {openDescription === model.id ? (
+                      <ChevronDown size={13} />
+                    ) : (
+                      <ChevronRight size={13} />
+                    )}
+                  </button>
+                  <span className="model-card-author">{model.author}</span>
                   <div className="model-badges">
                     {model.preferred_quantizer && <span className="unsloth">Unsloth preferred</span>}
                     {model.gated && (
@@ -1200,6 +1300,13 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                   )}
                 </button>
               </div>
+              {openDescription === model.id && (
+                <p className="model-description">
+                  {descriptionLoading === model.id
+                    ? 'Loading description…'
+                    : (descriptions[model.id] ?? '')}
+                </p>
+              )}
               {expanded && (
                 <div className="quant-list">
                   {trustByRepo[model.id]?.requires_acknowledgement && (
@@ -1371,15 +1478,13 @@ function managedRuntimeInstalled(
   runtimes: RuntimeEntry[],
   target: RuntimeTarget
 ): boolean {
-  if (target === 'cpu') {
-    return runtimes.some(
-      (runtime) =>
-        runtime.kind === 'managed' &&
-        (runtime.target === 'cpu' || runtime.id === 'managed')
-    )
-  }
+  // Scoped to llama.cpp: managed whisper/sd.cpp installs also use target `cpu`
+  // and must not mark the llama CPU runtime as installed.
   return runtimes.some(
-    (runtime) => runtime.kind === 'managed' && runtime.target === target
+    (runtime) =>
+      runtime.kind === 'managed' &&
+      runtime.engine === 'llama.cpp' &&
+      (runtime.target === target || (target === 'cpu' && runtime.id === 'managed'))
   )
 }
 
@@ -1390,8 +1495,72 @@ function managedTargetStatus(
   return statuses?.find((entry) => entry.target === target) ?? null
 }
 
-function pythonRuntimeInstalled(runtimes: RuntimeEntry[], engine: BuildEngine): boolean {
-  return runtimes.some((runtime) => runtime.engine === engine)
+/** Whether a *source build* exists for an engine — managed prebuilts (which
+ * share the same engine string, e.g. stable-diffusion.cpp) must not count. */
+function sourceRuntimeInstalled(runtimes: RuntimeEntry[], engine: BuildEngine): boolean {
+  return runtimes.some((runtime) => runtime.kind === 'source' && runtime.engine === engine)
+}
+
+/** Whether a managed prebuilt is installed for an engine. */
+function managedEngineInstalled(runtimes: RuntimeEntry[], engine: string): boolean {
+  return runtimes.some((runtime) => runtime.kind === 'managed' && runtime.engine === engine)
+}
+
+type RuntimeTab = 'language' | 'speech' | 'media'
+
+/** Engines grouped by modality, mirroring the main UI's Chat/Voice/Generate split. */
+const RUNTIME_TAB_ENGINES: Record<RuntimeTab, string[]> = {
+  language: ['llama.cpp', 'mlx-lm', 'mlx-vlm'],
+  speech: ['whisper.cpp', 'whisperkit', 'streaming-asr', 'personaplex', 'personaplex-mlx'],
+  media: ['stable-diffusion.cpp']
+}
+
+const RUNTIME_TABS: ReadonlyArray<readonly [RuntimeTab, string]> = [
+  ['language', 'Language'],
+  ['speech', 'Speech'],
+  ['media', 'Media']
+]
+
+/** Recipe `supported_platforms`, mirrored so the UI only offers engines that can
+ * actually build on this host (e.g. PersonaPlex is Linux x64 only). */
+const BUILD_ENGINE_PLATFORMS: Partial<Record<BuildEngine, string[]>> = {
+  'mlx-lm': ['macos-arm64'],
+  'mlx-vlm': ['macos-arm64'],
+  'streaming-asr': ['macos-arm64', 'macos-x64', 'linux-x64', 'linux-arm64'],
+  'stable-diffusion.cpp': [
+    'linux-x64',
+    'linux-arm64',
+    'macos-x64',
+    'macos-arm64',
+    'windows-x64',
+    'windows-arm64'
+  ],
+  personaplex: ['linux-x64'],
+  'personaplex-mlx': ['macos-arm64'],
+  whisperkit: ['macos-arm64']
+}
+
+/** Platform tag matching the daemon's `builds::current_platform()`. */
+function platformTag(hardware: HardwareInfo | null): string | null {
+  if (!hardware) return null
+  const arch =
+    hardware.architecture === 'aarch64'
+      ? 'arm64'
+      : hardware.architecture === 'x86_64'
+        ? 'x64'
+        : null
+  if (!arch) return null
+  if (hardware.os === 'macos' || hardware.os === 'linux' || hardware.os === 'windows') {
+    return `${hardware.os}-${arch}`
+  }
+  return null
+}
+
+function engineBuildable(engine: BuildEngine, hardware: HardwareInfo | null): boolean {
+  const platforms = BUILD_ENGINE_PLATFORMS[engine]
+  if (!platforms) return true
+  const tag = platformTag(hardware)
+  return tag ? platforms.includes(tag) : false
 }
 
 function RuntimesSection(props: SectionProps): React.JSX.Element {
@@ -1433,15 +1602,16 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     [props.hardware?.targets]
   )
   const buildEngineOptions = useMemo((): BuildEngine[] => {
-    const engines: BuildEngine[] = [
+    const candidates: BuildEngine[] = [
+      'mlx-lm',
+      'mlx-vlm',
       'streaming-asr',
       'stable-diffusion.cpp',
-      'personaplex'
+      'personaplex',
+      'personaplex-mlx',
+      'whisperkit'
     ]
-    if (props.hardware?.os === 'macos' && props.hardware.architecture === 'aarch64') {
-      engines.unshift('mlx-lm', 'mlx-vlm')
-    }
-    return engines
+    return candidates.filter((engine) => engineBuildable(engine, props.hardware))
   }, [props.hardware?.os, props.hardware?.architecture])
   const [buildJobs, setBuildJobs] = useState(initialBuildJobs)
   const [building, setBuilding] = useState(false)
@@ -1457,6 +1627,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const [updates, setUpdates] = useState<Record<string, SourceRuntimeUpdate>>({})
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [updatesChecked, setUpdatesChecked] = useState(false)
+  const [runtimeTab, setRuntimeTab] = useState<RuntimeTab>('language')
 
   async function checkUpdates(): Promise<void> {
     setCheckingUpdates(true)
@@ -1682,7 +1853,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     buildEngine === 'mlx-lm' ||
     buildEngine === 'mlx-vlm' ||
     buildEngine === 'streaming-asr' ||
-    buildEngine === 'personaplex'
+    buildEngine === 'personaplex' ||
+    buildEngine === 'personaplex-mlx'
+  const isSwiftBuild = buildEngine === 'whisperkit'
   const isWhisperBuild = buildEngine === 'whisper.cpp'
   const isStreamingAsrBuild = buildEngine === 'streaming-asr'
 
@@ -1759,6 +1932,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const targets = props.hardware?.targets ?? []
   const runtimeList = runtimes ?? []
   const customRuntimes = runtimeList.filter((runtime) => runtime.kind !== 'managed')
+  const tabEngines = RUNTIME_TAB_ENGINES[runtimeTab]
+  const tabBuildOptions = buildEngineOptions.filter((engine) => tabEngines.includes(engine))
+  const tabCustomRuntimes = customRuntimes.filter((runtime) => tabEngines.includes(runtime.engine))
 
   return (
     <section>
@@ -1811,19 +1987,29 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         </div>
       </div>
 
+      <div className="mode-switch runtime-tabs" role="tablist" aria-label="Runtime type">
+        {RUNTIME_TABS.map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            className={runtimeTab === id ? 'active' : ''}
+            aria-selected={runtimeTab === id}
+            onClick={() => setRuntimeTab(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       <div className="settings-group">
         <div className="section-label">Available for your hardware</div>
-        {managedTargets.length === 0 && buildEngineOptions.length === 0 && (
-          <div className="manage-placeholder">
-            <Cpu size={16} />
-            Detecting supported runtimes…
-          </div>
-        )}
         {installProgress && (
           <JobProgressPanel progress={installProgress} active={installingTarget != null} />
         )}
         <div className="runtime-offer-list">
-          {managedTargets.map((target) => {
+          {runtimeTab === 'language' &&
+            managedTargets.map((target) => {
             const installed = managedRuntimeInstalled(runtimeList, target.id)
             const status = managedTargetStatus(target.id, managedStatuses)
             const updateAvailable = status?.update_available ?? false
@@ -1889,44 +2075,88 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
               </article>
             )
           })}
-          <article className="runtime-offer">
-            <div className="runtime-offer-info">
-              <strong>whisper.cpp · managed</strong>
-              <span>
-                Official CLI prebuilts on Linux/Windows. macOS releases are XCFramework-only — build
-                from source there.
-              </span>
-            </div>
-            <button
-              className="chip-button"
-              title="Download managed whisper-cli"
-              onClick={() => void installManaged('cpu', false, 'whisper.cpp')}
-            >
-              <Download size={13} />
-              Download
-            </button>
-          </article>
-          <article className="runtime-offer">
-            <div className="runtime-offer-info">
-              <strong>stable-diffusion.cpp · managed</strong>
-              <span>Prebuilt sd-cli for image and video generation (SD/Flux/Wan/LTX).</span>
-            </div>
-            <button
-              className="chip-button"
-              title="Download managed sd-cli"
-              onClick={() => void installManaged('cpu', false, 'stable-diffusion.cpp')}
-            >
-              <Download size={13} />
-              Download
-            </button>
-          </article>
-          {buildEngineOptions.map((engine) => {
-            const installed = pythonRuntimeInstalled(runtimeList, engine)
+          {runtimeTab === 'speech' &&
+            (() => {
+              const installed = managedEngineInstalled(runtimeList, 'whisper.cpp')
+              const installing = installingTarget === 'cpu'
+              return (
+                <article className="runtime-offer">
+                  <div className="runtime-offer-info">
+                    <strong>
+                      whisper.cpp · managed
+                      {installed && <span className="installed-badge">Installed</span>}
+                    </strong>
+                    <span>
+                      Official CLI prebuilts on Linux/Windows. macOS releases are XCFramework-only —
+                      build from source there.
+                    </span>
+                  </div>
+                  <button
+                    className="chip-button"
+                    disabled={installed || installing}
+                    title={installed ? 'Managed whisper-cli installed' : 'Download managed whisper-cli'}
+                    onClick={() => void installManaged('cpu', false, 'whisper.cpp')}
+                  >
+                    {installing ? (
+                      <LoaderCircle className="spin" size={13} />
+                    ) : installed ? (
+                      <>
+                        <Check size={13} />
+                        Installed
+                      </>
+                    ) : (
+                      <>
+                        <Download size={13} />
+                        Download
+                      </>
+                    )}
+                  </button>
+                </article>
+              )
+            })()}
+          {runtimeTab === 'media' &&
+            (() => {
+              const installed = managedEngineInstalled(runtimeList, 'stable-diffusion.cpp')
+              const installing = installingTarget === 'cpu'
+              return (
+                <article className="runtime-offer">
+                  <div className="runtime-offer-info">
+                    <strong>
+                      stable-diffusion.cpp · managed
+                      {installed && <span className="installed-badge">Installed</span>}
+                    </strong>
+                    <span>Prebuilt sd-cli for image and video generation (SD/Flux/Wan/LTX).</span>
+                  </div>
+                  <button
+                    className="chip-button"
+                    disabled={installed || installing}
+                    title={installed ? 'Managed sd-cli installed' : 'Download managed sd-cli'}
+                    onClick={() => void installManaged('cpu', false, 'stable-diffusion.cpp')}
+                  >
+                    {installing ? (
+                      <LoaderCircle className="spin" size={13} />
+                    ) : installed ? (
+                      <>
+                        <Check size={13} />
+                        Installed
+                      </>
+                    ) : (
+                      <>
+                        <Download size={13} />
+                        Download
+                      </>
+                    )}
+                  </button>
+                </article>
+              )
+            })()}
+          {tabBuildOptions.map((engine) => {
+            const installed = sourceRuntimeInstalled(runtimeList, engine)
             return (
               <article className="runtime-offer" key={engine}>
                 <div className="runtime-offer-info">
                   <strong>
-                    {DISCOVER_ENGINE_LABELS[engine]}
+                    {BUILD_ENGINE_LABELS[engine]}
                     {engine === 'mlx-lm' && isAppleSilicon && (
                       <span className="active-badge">Recommended</span>
                     )}
@@ -1937,14 +2167,18 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                       ? 'Build an isolated Python environment with Transformers for Nemotron streaming ASR. Requires uv.'
                       : engine === 'personaplex'
                         ? 'Build PersonaPlex / Moshi (Linux CUDA) for realtime Voice mode. Requires uv.'
-                        : engine === 'stable-diffusion.cpp'
-                          ? 'Build sd-cli from source or a trusted fork.'
-                          : 'Build a local Python environment with uv. Required for MLX models on Apple Silicon.'}
+                        : engine === 'personaplex-mlx'
+                          ? 'Build PersonaPlex-MLX for realtime Voice mode on Apple Silicon. Requires uv and HF access to nvidia/personaplex-7b-v1.'
+                          : engine === 'whisperkit'
+                            ? 'Build WhisperKit (Argmax) for on-device CoreML ASR on Apple Silicon. Requires Xcode/Swift. Models download on first use.'
+                            : engine === 'stable-diffusion.cpp'
+                              ? 'Build sd-cli from source or a trusted fork.'
+                              : 'Build a local Python environment with uv. Required for MLX models on Apple Silicon.'}
                   </span>
                 </div>
                 <button
                   className="chip-button"
-                  title={`Build ${DISCOVER_ENGINE_LABELS[engine]} from source`}
+                  title={`Build ${BUILD_ENGINE_LABELS[engine]} from source`}
                   onClick={() => openBuildForEngine(engine)}
                 >
                   <Hammer size={13} />
@@ -1954,7 +2188,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             )
           })}
         </div>
-        {managedTargets.some((target) => !target.available) && (
+        {runtimeTab === 'language' && managedTargets.some((target) => !target.available) && (
           <p className="model-help">
             Grayed-out options need hardware or drivers that were not detected on this machine. You
             can still build llama.cpp for them from source below.
@@ -1965,7 +2199,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       <div className="settings-group">
         <div className="settings-group-head">
           <div className="section-label">Custom runtimes</div>
-          {customRuntimes.length > 0 && (
+          {tabCustomRuntimes.length > 0 && (
             <button
               className="chip-button subtle"
               disabled={checkingUpdates}
@@ -1987,14 +2221,14 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             Scanning for custom runtimes…
           </div>
         )}
-        {runtimes != null && customRuntimes.length === 0 && (
+        {runtimes != null && tabCustomRuntimes.length === 0 && (
           <div className="manage-placeholder compact">
             <Cpu size={16} />
             Source builds and forks appear here after you build them.
           </div>
         )}
         <div className="runtime-list">
-          {customRuntimes.map((runtime) => {
+          {tabCustomRuntimes.map((runtime) => {
             const update = updates[runtime.id]
             const canRebuild =
               update != null &&
@@ -2092,7 +2326,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             )
           })}
         </div>
-        {updatesChecked && customRuntimes.length > 0 && (
+        {updatesChecked && tabCustomRuntimes.length > 0 && (
           <p className="model-help">
             Update checks compare each source build against the current upstream ref via git.
             Builds made before commit tracking show the latest upstream commit and offer a rebuild.
@@ -2113,7 +2347,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             buildEngine === 'llama.cpp' ||
             buildEngine === 'streaming-asr' ||
             buildEngine === 'stable-diffusion.cpp' ||
-            buildEngine === 'personaplex' ? (
+            buildEngine === 'personaplex' ||
+            buildEngine === 'personaplex-mlx' ||
+            buildEngine === 'whisperkit' ? (
               <label>
                 <span>Engine</span>
                 <select
@@ -2126,16 +2362,21 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                     [
                       'llama.cpp',
                       'whisper.cpp',
+                      'whisperkit',
+                      'mlx-lm',
+                      'mlx-vlm',
                       'streaming-asr',
                       'stable-diffusion.cpp',
                       'personaplex',
-                      ...(isAppleSilicon ? (['mlx-lm', 'mlx-vlm'] as const) : [])
+                      'personaplex-mlx'
                     ] as BuildEngine[]
-                  ).map((engine) => (
-                    <option key={engine} value={engine}>
-                      {DISCOVER_ENGINE_LABELS[engine]}
-                    </option>
-                  ))}
+                  )
+                    .filter((engine) => engineBuildable(engine, props.hardware))
+                    .map((engine) => (
+                      <option key={engine} value={engine}>
+                        {BUILD_ENGINE_LABELS[engine]}
+                      </option>
+                    ))}
                 </select>
               </label>
             ) : null}
@@ -2156,7 +2397,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                   <input value={revision} onChange={(event) => setRevision(event.target.value)} />
                 </label>
               )}
-              {!isPythonBuild && (
+              {!isPythonBuild && !isSwiftBuild && (
                 <label>
                   <span>Target</span>
                   <select
@@ -2175,17 +2416,19 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             <p className="model-help">
               {isStreamingAsrBuild
                 ? 'Installs a bundled Transformers worker plus pinned deps with uv (no Git checkout). Then download a Nemotron ASR Streaming snapshot from Discover.'
-                : isPythonBuild
-                  ? 'MLX builds create an isolated Python environment with uv. Install uv (`brew install uv`) before starting the build.'
-                  : isWhisperBuild
-                    ? 'whisper.cpp builds produce the whisper-cli binary used to transcribe audio and video soundtracks before chat.'
-                    : props.hardware?.os === 'macos'
-                      ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
-                      : props.hardware?.os === 'windows'
-                        ? 'Windows builds need Git, CMake, and Visual Studio 2022 Build Tools with the C++ workload.'
-                        : 'Linux builds need git, cmake, and a distro C++ toolchain. GPU targets also need the matching SDK or driver stack.'}
+                : isSwiftBuild
+                  ? 'WhisperKit builds require Xcode or the Swift toolchain. CoreML models download on first transcription (or install via `brew install whisperkit-cli`).'
+                  : isPythonBuild
+                    ? 'MLX builds create an isolated Python environment with uv. Install uv (`brew install uv`) before starting the build.'
+                    : isWhisperBuild
+                      ? 'whisper.cpp builds produce the whisper-cli binary used to transcribe audio and video soundtracks before chat.'
+                      : props.hardware?.os === 'macos'
+                        ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
+                        : props.hardware?.os === 'windows'
+                          ? 'Windows builds need Git, CMake, and Visual Studio 2022 Build Tools with the C++ workload.'
+                          : 'Linux builds need git, cmake, and a distro C++ toolchain. GPU targets also need the matching SDK or driver stack.'}
             </p>
-            {!isPythonBuild && (
+            {!isPythonBuild && !isSwiftBuild && (
               <label className="slider-row">
                 <span>
                   Parallel jobs (-j) <em>{buildJobs}</em>

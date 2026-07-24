@@ -410,6 +410,12 @@ code {
   -webkit-app-region: no-drag;
 }
 
+/* The panel covers the right edge to the top; its header stays a drag strip so
+   the window can still be moved while Manage is open. */
+.platform-darwin .manage-header {
+  -webkit-app-region: drag;
+}
+
 .icon-button,
 .attach-button,
 .send-button,
@@ -1046,12 +1052,56 @@ code {
 
 .manage-panel {
   display: flex;
+  flex-direction: column;
   width: min(880px, 96vw);
   height: 100%;
   overflow: hidden;
   border-left: 1px solid #34382f;
   background: #141613;
   box-shadow: -24px 0 70px rgba(0, 0, 0, 0.34);
+}
+
+.manage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 54px;
+  flex: 0 0 54px;
+  padding: 0 12px 0 22px;
+  border-bottom: 1px solid var(--line);
+  background: #111310;
+}
+
+.manage-header-title {
+  color: #747a6f;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.manage-close {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.manage-close:hover {
+  color: #fff;
+  background: #1d201b;
+}
+
+.manage-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .manage-nav {
@@ -1063,15 +1113,6 @@ code {
   padding: 16px 10px;
   border-right: 1px solid var(--line);
   background: #111310;
-}
-
-.manage-nav-title {
-  padding: 0 10px 14px;
-  color: #747a6f;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
 }
 
 .manage-nav button {
@@ -1096,10 +1137,6 @@ code {
 .manage-nav button.active {
   color: #e6eadf;
   background: #242820;
-}
-
-.manage-nav-spacer {
-  flex: 1;
 }
 
 .manage-content {
@@ -1965,7 +2002,7 @@ code {
 .tool-menu-popover {
   position: absolute;
   bottom: calc(100% + 10px);
-  left: 0;
+  right: 0;
   z-index: 30;
   display: flex;
   flex-direction: column;
@@ -2428,6 +2465,10 @@ code {
   gap: 8px;
 }
 
+.suggested-label {
+  padding-top: 8px;
+}
+
 .model-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2471,6 +2512,62 @@ code {
 
 .model-card-main .model-badges {
   margin-top: 6px;
+}
+
+.model-card-heading {
+  min-width: 0;
+}
+
+.model-name-button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  color: #e7ecdf;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  background: none;
+  cursor: pointer;
+}
+
+.model-name-button svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.model-name-button:hover {
+  color: #fff;
+}
+
+.model-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-card-author {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-description {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: #c3c8bc;
+  font-size: 11px;
+  line-height: 1.55;
+  background: #12140f;
+  white-space: pre-wrap;
 }
 
 .model-card-main > button,
@@ -2763,6 +2860,10 @@ code {
 .mode-switch button.active {
   color: #e7ecdf;
   background: #2a3028;
+}
+
+.runtime-tabs {
+  align-self: flex-start;
 }
 
 .mode-panel {

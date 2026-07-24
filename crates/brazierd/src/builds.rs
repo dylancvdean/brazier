@@ -289,6 +289,7 @@ fn primary_binary_name(engine: &str) -> &'static str {
                 "whisper-cli"
             }
         }
+        "whisperkit" => crate::whisperkit::BINARY_NAME,
         "stable-diffusion.cpp" => {
             if cfg!(windows) {
                 "sd-cli.exe"
@@ -306,12 +307,48 @@ fn primary_binary_name(engine: &str) -> &'static str {
     }
 }
 
+/// Copy a Swift PM product from `{build}/release/<name>` into `install/bin`.
+fn install_swift_product(
+    build_dir: &Path,
+    install_bin: &Path,
+    product: &str,
+) -> anyhow::Result<PathBuf> {
+    let candidates = [
+        build_dir.join("release").join(product),
+        build_dir.join("arm64-apple-macosx").join("release").join(product),
+        build_dir.join("bin").join(product),
+    ];
+    let built = candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .with_context(|| {
+            format!(
+                "build completed but {product} was not produced under {}",
+                build_dir.display()
+            )
+        })?;
+    std::fs::create_dir_all(install_bin).context("create install directory")?;
+    let destination = install_bin.join(product);
+    std::fs::copy(&built, &destination).with_context(|| format!("install {product}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&destination)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&destination, permissions)?;
+    }
+    Ok(destination)
+}
+
 /// Copy the built binary and any shared libraries into `install/bin`.
 fn install_artifacts(
     build_dir: &Path,
     install_bin: &Path,
     engine: &str,
 ) -> anyhow::Result<PathBuf> {
+    if build_recipe::is_swift_engine(engine) {
+        return install_swift_product(build_dir, install_bin, primary_binary_name(engine));
+    }
     let server_name = primary_binary_name(engine);
     let built_bin = build_dir.join("bin");
     let server = built_bin.join(server_name);
@@ -362,10 +399,10 @@ fn install_python_env(venv: &Path, engine: &str) -> anyhow::Result<PathBuf> {
         );
         return Ok(python);
     }
-    if engine == crate::voice::ENGINE {
+    if engine == crate::voice::ENGINE || engine == crate::voice::ENGINE_MLX {
         anyhow::ensure!(
             crate::voice::python_appears_runnable(&python),
-            "Python environment at {} failed an import check for PersonaPlex/Moshi",
+            "Python environment at {} failed an import check for PersonaPlex (Moshi or MLX)",
             python.display()
         );
         return Ok(python);
@@ -403,6 +440,11 @@ pub fn diagnose_failure(
         hints.push(
             "The build was stopped before it finished. You can start a new build when ready."
                 .into(),
+        );
+    }
+    if message_lower.contains("is not supported on") {
+        hints.push(
+            "This engine has no build recipe for your operating system and CPU architecture, so it cannot be built on this machine.".into(),
         );
     }
     if message_lower.contains("`git` is required") {
@@ -550,6 +592,7 @@ pub async fn run_build_with_progress(
         Err(error) => return Err(fail(error.to_string(), None, "")),
     };
     let python_engine = build_recipe::is_python_engine(&plan.engine);
+    let swift_engine = build_recipe::is_swift_engine(&plan.engine);
     if python_engine {
         if !command_available("uv") {
             return Err(fail(
@@ -559,14 +602,34 @@ pub async fn run_build_with_progress(
                 "",
             ));
         }
-    } else if plan.engine != "llama.cpp" && plan.engine != "whisper.cpp" {
+    } else if swift_engine {
+        // WhisperKit / Argmax: SwiftPM product only (macOS arm64).
+        if !command_available("swift") {
+            return Err(fail(
+                "`swift` is required to build WhisperKit; install Xcode or the Swift toolchain and try again"
+                    .into(),
+                None,
+                "",
+            ));
+        }
+        if !command_available("git") {
+            return Err(fail(
+                "`git` is required to build from source; install it and try again".into(),
+                None,
+                "",
+            ));
+        }
+    } else if plan.engine != "llama.cpp"
+        && plan.engine != "whisper.cpp"
+        && plan.engine != "stable-diffusion.cpp"
+    {
         return Err(fail(
             format!("source builds for `{}` are not executable yet", plan.engine),
             None,
             "",
         ));
     }
-    if !python_engine {
+    if !python_engine && !swift_engine {
         for program in ["git", "cmake"] {
             if !command_available(program) {
                 return Err(fail(
@@ -682,6 +745,8 @@ pub async fn run_build_with_progress(
             "install",
             if python_engine {
                 "Verifying the Python virtual environment"
+            } else if swift_engine {
+                "Installing the Swift CLI into an isolated prefix"
             } else {
                 "Installing the built server into an isolated prefix"
             },
@@ -692,6 +757,13 @@ pub async fn run_build_with_progress(
         } else {
             install_artifacts(&build, &install_bin, &plan.engine)?
         };
+        if swift_engine {
+            anyhow::ensure!(
+                crate::whisperkit::binary_appears_runnable(&binary),
+                "Swift CLI at {} failed a smoke test",
+                binary.display()
+            );
+        }
         // Record the exact commit that was built so update checks can compare it
         // against the upstream ref later, before the checkout is discarded.
         if source.join(".git").exists()

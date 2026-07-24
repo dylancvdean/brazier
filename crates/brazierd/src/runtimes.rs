@@ -12,7 +12,13 @@ use crate::{builds, llama};
 
 pub const ENGINE: &str = "llama.cpp";
 const MANAGED_FLAVORS: &[&str] = &["cuda", "rocm", "vulkan"];
-const PYTHON_ENGINES: &[&str] = &["mlx-lm", "mlx-vlm", "streaming-asr", "personaplex"];
+const PYTHON_ENGINES: &[&str] = &[
+    "mlx-lm",
+    "mlx-vlm",
+    "streaming-asr",
+    "personaplex",
+    "personaplex-mlx",
+];
 const SDCPP_MANAGED_FLAVORS: &[&str] = &["cuda", "rocm", "vulkan"];
 
 fn llama_target_label(target: &str) -> &str {
@@ -152,13 +158,14 @@ pub fn list(
                 "mlx-vlm" => "MLX-VLM",
                 "streaming-asr" => "Streaming ASR",
                 "personaplex" => "PersonaPlex",
+                "personaplex-mlx" => "PersonaPlex MLX",
                 other => other,
             };
             let selected = match *engine {
                 "mlx-lm" => &active.mlx_lm,
                 "mlx-vlm" => &active.mlx_vlm,
                 "streaming-asr" => &active.streaming_asr,
-                "personaplex" => &active.voice,
+                "personaplex" | "personaplex-mlx" => &active.voice,
                 _ => &None,
             };
             entries.push(RuntimeEntry {
@@ -279,6 +286,23 @@ pub fn list(
         });
     }
 
+    // WhisperKit (Argmax) source builds — Apple Silicon CoreML ASR.
+    for (build_id, record) in builds::list_builds(data_dir, crate::whisperkit::ENGINE) {
+        let path = PathBuf::from(&record.binary);
+        entries.push(RuntimeEntry {
+            id: format!("whisperkit-source-{build_id}"),
+            engine: crate::whisperkit::ENGINE.to_owned(),
+            kind: "source".to_owned(),
+            label: format!("WhisperKit · {}", record.revision),
+            target: Some(record.target.clone()),
+            version: Some(record.revision.clone()),
+            repository: Some(record.repository.clone()),
+            path: record.binary.clone(),
+            active: is_active(&path, &active.whisper),
+            deletable: true,
+        });
+    }
+
     // System binaries on PATH or well-known prefixes (optional — can be slow).
     if !include_system {
         return entries;
@@ -319,6 +343,7 @@ pub fn list(
     for candidate in crate::whisper::discovery_candidates(data_dir, path_env)
         .into_iter()
         .filter(|path| path.is_file())
+        .filter(|path| !crate::whisperkit::is_whisperkit_binary(path))
     {
         let canonical = candidate
             .canonicalize()
@@ -337,6 +362,35 @@ pub fn list(
             engine: crate::whisper::ENGINE.to_owned(),
             kind: "system".to_owned(),
             label: "whisper.cpp · System".to_owned(),
+            target: None,
+            version: None,
+            repository: None,
+            path: candidate.display().to_string(),
+            active: is_active(&candidate, &active.whisper),
+            deletable: false,
+        });
+    }
+    for candidate in crate::whisperkit::discovery_candidates(data_dir, path_env)
+        .into_iter()
+        .filter(|path| path.is_file())
+    {
+        let canonical = candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone());
+        if canonical.starts_with(&data_prefix) {
+            continue;
+        }
+        if entries
+            .iter()
+            .any(|entry| same_file(Path::new(&entry.path), &candidate))
+        {
+            continue;
+        }
+        entries.push(RuntimeEntry {
+            id: format!("whisperkit-system-{}", canonical.display()),
+            engine: crate::whisperkit::ENGINE.to_owned(),
+            kind: "system".to_owned(),
+            label: "WhisperKit · System".to_owned(),
             target: None,
             version: None,
             repository: None,
@@ -420,8 +474,10 @@ fn source_id_prefix(engine: &str) -> &'static str {
         "mlx-vlm" => "mlx-vlm-source-",
         "streaming-asr" => "streaming-asr-source-",
         "personaplex" => "personaplex-source-",
+        "personaplex-mlx" => "personaplex-mlx-source-",
         "stable-diffusion.cpp" => "sdcpp-source-",
         "whisper.cpp" => "whisper-source-",
+        "whisperkit" => "whisperkit-source-",
         _ => "source-",
     }
 }
@@ -432,6 +488,8 @@ fn source_engine_label(engine: &str) -> &str {
         "mlx-vlm" => "MLX-VLM",
         "streaming-asr" => "Streaming ASR",
         "personaplex" => "PersonaPlex",
+        "personaplex-mlx" => "PersonaPlex MLX",
+        "whisperkit" => "WhisperKit",
         other => other,
     }
 }
@@ -445,8 +503,10 @@ pub fn check_source_updates(data_dir: &Path) -> Vec<SourceUpdate> {
         "mlx-vlm",
         "streaming-asr",
         "personaplex",
+        "personaplex-mlx",
         crate::sdcpp::ENGINE,
         crate::whisper::ENGINE,
+        crate::whisperkit::ENGINE,
     ];
     // Dedupe remote queries so multiple builds of the same ref hit the network once.
     let mut remote_cache: std::collections::HashMap<
@@ -686,6 +746,24 @@ pub fn delete(data_dir: &Path, id: &str) -> anyhow::Result<PathBuf> {
             .join("install")
             .join("bin")
             .join(crate::whisper::binary_name());
+        std::fs::remove_dir_all(&root).context("remove source build")?;
+        return Ok(binary);
+    }
+    if let Some(build_id) = id.strip_prefix("whisperkit-source-") {
+        anyhow::ensure!(
+            !build_id.is_empty()
+                && !build_id.contains('/')
+                && !build_id.contains('\\')
+                && build_id != "."
+                && build_id != "..",
+            "invalid build id"
+        );
+        let root = builds::builds_root(data_dir, crate::whisperkit::ENGINE).join(build_id);
+        anyhow::ensure!(root.is_dir(), "source build `{build_id}` does not exist");
+        let binary = root
+            .join("install")
+            .join("bin")
+            .join(crate::whisperkit::BINARY_NAME);
         std::fs::remove_dir_all(&root).context("remove source build")?;
         return Ok(binary);
     }

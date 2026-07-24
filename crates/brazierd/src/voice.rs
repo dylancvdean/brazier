@@ -41,6 +41,17 @@ use crate::{
 };
 
 pub const ENGINE: &str = "personaplex";
+/// Apple Silicon MLX port (`mu-hashmi/personaplex-mlx`); same Moshi wire protocol.
+pub const ENGINE_MLX: &str = "personaplex-mlx";
+
+/// Which Python package backs a given voice interpreter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceBackend {
+    /// NVIDIA PersonaPlex / Kyutai `moshi.server` (Linux CUDA).
+    Moshi,
+    /// `personaplex_mlx.local_web` (macOS Apple Silicon).
+    Mlx,
+}
 
 /// Moshi WebSocket wire protocol frame type tags (first byte of every frame).
 pub mod protocol {
@@ -225,10 +236,10 @@ pub fn resolve_model_path(data_dir: &Path, preferred: Option<&str>) -> Option<Pa
 // Python resolution (mirrors `streaming_asr::resolve_python`).
 // ---------------------------------------------------------------------------
 
-/// Resolve the Python interpreter to use for `moshi.server`.
+/// Resolve the Python interpreter to use for realtime voice.
 ///
-/// Prefers an explicit override, then falls back to the most recent
-/// completed source build recorded for the `personaplex` engine.
+/// Prefers an explicit override, then the most recent completed source build
+/// for either `personaplex` (Moshi) or `personaplex-mlx`.
 pub fn resolve_python(data_dir: &Path, override_path: Option<&str>) -> Option<PathBuf> {
     if let Some(path) = override_path
         .map(PathBuf::from)
@@ -236,22 +247,23 @@ pub fn resolve_python(data_dir: &Path, override_path: Option<&str>) -> Option<Pa
     {
         return Some(path);
     }
-    for (_, record) in builds::list_builds(data_dir, ENGINE) {
-        let path = PathBuf::from(&record.binary);
-        if path.is_file() {
-            return Some(path);
+    for engine in [ENGINE, ENGINE_MLX] {
+        for (_, record) in builds::list_builds(data_dir, engine) {
+            let path = PathBuf::from(&record.binary);
+            if path.is_file() {
+                return Some(path);
+            }
         }
     }
     None
 }
 
-/// Verify that a Python interpreter can import the `moshi` package.
-pub fn python_appears_runnable(python: &Path) -> bool {
+fn python_has_module(python: &Path, module: &str) -> bool {
     if !python.is_file() {
         return false;
     }
     std::process::Command::new(python)
-        .args(["-c", "import moshi"])
+        .args(["-c", &format!("import {module}")])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -259,11 +271,28 @@ pub fn python_appears_runnable(python: &Path) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Detect whether a Python env provides Moshi or PersonaPlex-MLX.
+pub fn detect_backend(python: &Path) -> Option<VoiceBackend> {
+    // Prefer MLX when both are somehow present (Apple Silicon builds).
+    if python_has_module(python, "personaplex_mlx") {
+        Some(VoiceBackend::Mlx)
+    } else if python_has_module(python, "moshi") {
+        Some(VoiceBackend::Moshi)
+    } else {
+        None
+    }
+}
+
+/// Verify that a Python interpreter can import a supported voice package.
+pub fn python_appears_runnable(python: &Path) -> bool {
+    detect_backend(python).is_some()
+}
+
 /// Whether realtime speech-to-speech looks usable with the given (already
 /// resolved) Python interpreter and, optionally, a local model snapshot.
 ///
-/// A model is not strictly required: `moshi.server` can serve its built-in
-/// default checkpoint via `--hf-repo` when no local snapshot is selected.
+/// A model is not strictly required: both Moshi and PersonaPlex-MLX can fetch
+/// a default checkpoint via Hugging Face when no local snapshot is selected.
 pub fn realtime_voice_available(python: Option<&Path>, model: Option<&Path>) -> bool {
     let Some(python) = python else {
         return false;
@@ -283,36 +312,58 @@ pub fn proxy_ws_url(port: u16) -> String {
     format!("ws://127.0.0.1:{port}/api/chat")
 }
 
-/// A running `moshi.server` process bound to loopback.
+/// Options for launching a realtime voice server process.
+#[derive(Debug, Clone, Default)]
+pub struct VoiceLaunchOptions {
+    /// Persona / system-style text prompt (MLX `--text-prompt`; ignored by Moshi CLI).
+    pub persona_text: Option<String>,
+    /// Optional reference voice clip path (MLX `--voice-prompt`).
+    pub voice_prompt: Option<PathBuf>,
+    /// Built-in voice id when no clip is provided (MLX `--voice`, default NATF2).
+    pub voice_id: Option<String>,
+    /// Hugging Face token for gated model downloads on first run.
+    pub hf_token: Option<String>,
+}
+
+/// A running Moshi or PersonaPlex-MLX process bound to loopback.
 ///
-/// Moshi serves both its demo web UI and the realtime chat WebSocket
-/// (`/api/chat`) from the same HTTP port, so `base_url` doubles as the
-/// health-check target and the prefix for the WS proxy URL.
+/// Both backends serve the realtime chat WebSocket (`/api/chat`) on the same
+/// HTTP port, so `base_url` doubles as the health-check target and the prefix
+/// for the WS proxy URL.
 pub struct VoiceServer {
     child: Child,
     pub base_url: String,
     pub python: PathBuf,
     pub model_path: Option<PathBuf>,
+    pub backend: VoiceBackend,
 }
 
 impl VoiceServer {
-    /// Spawn `python -m moshi.server` on an ephemeral loopback port and wait
-    /// for it to start accepting connections.
+    /// Spawn the appropriate voice server on an ephemeral loopback port and
+    /// wait for it to start accepting connections.
     ///
-    /// When `model_path` is provided (a local PersonaPlex/Moshi snapshot
-    /// directory), it is passed via `--hf-repo` so `moshi.server` loads it
-    /// instead of downloading its built-in default checkpoint.
-    pub async fn start(python: &Path, model_path: Option<&Path>) -> anyhow::Result<Self> {
+    /// Moshi: `python -m moshi.server --host --port [--hf-repo]`.
+    /// MLX: `python -m personaplex_mlx.local_web --host --port --no-browser
+    ///       --text-prompt --voice|-voice-prompt [-q 4] [--hf-repo]`.
+    ///
+    /// When `model_path` is provided (a local snapshot directory), it is
+    /// passed via `--hf-repo` so the server loads it instead of downloading.
+    pub async fn start(
+        python: &Path,
+        model_path: Option<&Path>,
+        options: VoiceLaunchOptions,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             python.is_file(),
             "PersonaPlex Python interpreter missing: {}",
             python.display()
         );
-        anyhow::ensure!(
-            python_appears_runnable(python),
-            "{} does not provide `moshi`",
-            python.display()
-        );
+        let backend = detect_backend(python).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} does not provide `moshi` or `personaplex_mlx`",
+                python.display()
+            )
+        })?;
         if let Some(path) = model_path {
             anyhow::ensure!(
                 path.is_dir(),
@@ -329,26 +380,78 @@ impl VoiceServer {
 
         let mut command = Command::new(python);
         command
-            .arg("-m")
-            .arg("moshi.server")
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(port.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        if let Some(path) = model_path {
-            command.arg("--hf-repo").arg(path);
+        if let Some(token) = options.hf_token.as_deref() {
+            command.env("HF_TOKEN", token);
+            command.env("HUGGING_FACE_HUB_TOKEN", token);
         }
 
+        match backend {
+            VoiceBackend::Moshi => {
+                command
+                    .arg("-m")
+                    .arg("moshi.server")
+                    .arg("--host")
+                    .arg("127.0.0.1")
+                    .arg("--port")
+                    .arg(port.to_string());
+                if let Some(path) = model_path {
+                    command.arg("--hf-repo").arg(path);
+                }
+            }
+            VoiceBackend::Mlx => {
+                let persona = options
+                    .persona_text
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("You are a helpful assistant.");
+                command
+                    .arg("-m")
+                    .arg("personaplex_mlx.local_web")
+                    .arg("--host")
+                    .arg("127.0.0.1")
+                    .arg("--port")
+                    .arg(port.to_string())
+                    .arg("--no-browser")
+                    .arg("--text-prompt")
+                    .arg(persona)
+                    // 4-bit is the practical default for on-device Apple Silicon.
+                    .arg("-q")
+                    .arg("4");
+                if let Some(path) = options.voice_prompt.as_ref() {
+                    command.arg("--voice-prompt").arg(path);
+                } else {
+                    let voice = options
+                        .voice_id
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or("NATF2");
+                    command.arg("--voice").arg(voice);
+                }
+                if let Some(path) = model_path {
+                    command.arg("--hf-repo").arg(path);
+                }
+            }
+        }
+
+        let module = match backend {
+            VoiceBackend::Moshi => "moshi.server",
+            VoiceBackend::Mlx => "personaplex_mlx.local_web",
+        };
         let mut child = command
             .spawn()
-            .with_context(|| format!("spawn {} -m moshi.server", python.display()))?;
+            .with_context(|| format!("spawn {} -m {module}", python.display()))?;
 
         let base_url = format!("http://127.0.0.1:{port}");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+        // MLX first-run model download can exceed Moshi's typical warm-up.
+        let timeout_secs = match backend {
+            VoiceBackend::Moshi => 180,
+            VoiceBackend::Mlx => 600,
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
         wait_until_listening(&mut child, port, &base_url, deadline).await?;
 
         Ok(Self {
@@ -356,6 +459,7 @@ impl VoiceServer {
             base_url,
             python: python.to_path_buf(),
             model_path: model_path.map(Path::to_path_buf),
+            backend,
         })
     }
 
@@ -476,13 +580,24 @@ impl SessionManager {
         model_path: Option<&Path>,
         persona_text: String,
         voice_prompt: Option<PathBuf>,
+        hf_token: Option<String>,
     ) -> anyhow::Result<VoiceSession> {
         let mut guard = self.session.lock().await;
         anyhow::ensure!(
             guard.is_none(),
             "a realtime voice session is already active; end it before starting another"
         );
-        let server = VoiceServer::start(python, model_path).await?;
+        let server = VoiceServer::start(
+            python,
+            model_path,
+            VoiceLaunchOptions {
+                persona_text: Some(persona_text.clone()),
+                voice_prompt: voice_prompt.clone(),
+                voice_id: None,
+                hf_token,
+            },
+        )
+        .await?;
         let session = VoiceSession {
             id: Uuid::new_v4().to_string(),
             persona_text,

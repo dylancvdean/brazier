@@ -32,6 +32,7 @@ pub mod tools;
 pub mod types;
 pub mod voice;
 pub mod whisper;
+pub mod whisperkit;
 
 use std::{path::PathBuf, sync::Arc};
 

@@ -162,9 +162,11 @@ export function VoiceMode(props: Props) {
 
       {!props.realtimeAvailable ? (
         <p className="mode-empty">
-          Realtime voice needs a PersonaPlex runtime (Linux CUDA) and a downloaded
-          `personaplex:` model. Build the engine from Manage → Runtimes, then set a default
-          voice model in Manage → Engine. Apple Silicon Moshi/MLX is a follow-on.
+          Realtime voice needs a PersonaPlex runtime and usually a downloaded
+          `personaplex:` model. On Apple Silicon build PersonaPlex MLX from Manage →
+          Runtimes (accept the nvidia/personaplex-7b-v1 license and set an HF token); on
+          Linux CUDA build PersonaPlex / Moshi. Then set a default voice model in Manage →
+          Engine if you want a local snapshot.
         </p>
       ) : null}
 

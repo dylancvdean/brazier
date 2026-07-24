@@ -476,7 +476,7 @@ impl Runtime {
         Ok(path)
     }
 
-    /// Pin a whisper-cli binary and persist the choice.
+    /// Pin a whisper-cli / whisperkit-cli binary and persist the choice.
     pub async fn activate_whisper(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(
             path.is_file(),
@@ -485,9 +485,15 @@ impl Runtime {
         );
         let runnable = {
             let candidate = path.clone();
-            tokio::task::spawn_blocking(move || whisper::binary_appears_runnable(&candidate))
-                .await
-                .unwrap_or(false)
+            tokio::task::spawn_blocking(move || {
+                if crate::whisperkit::is_whisperkit_binary(&candidate) {
+                    crate::whisperkit::binary_appears_runnable(&candidate)
+                } else {
+                    whisper::binary_appears_runnable(&candidate)
+                }
+            })
+            .await
+            .unwrap_or(false)
         };
         anyhow::ensure!(
             runnable,
@@ -543,7 +549,7 @@ impl Runtime {
         };
         anyhow::ensure!(
             runnable,
-            "{} failed an import check for PersonaPlex/Moshi",
+            "{} failed an import check for PersonaPlex (Moshi or MLX)",
             path.display()
         );
         let mut settings = self.settings.lock().await;
@@ -796,7 +802,7 @@ impl Runtime {
                 self.activate_python(MlxKind::Vlm, PathBuf::from(&entry.path))
                     .await?;
             }
-            "whisper.cpp" => {
+            "whisper.cpp" | "whisperkit" => {
                 self.activate_whisper(PathBuf::from(&entry.path)).await?;
             }
             "streaming-asr" => {
@@ -806,7 +812,7 @@ impl Runtime {
             "stable-diffusion.cpp" => {
                 self.activate_sdcpp(PathBuf::from(&entry.path)).await?;
             }
-            "personaplex" => {
+            "personaplex" | "personaplex-mlx" => {
                 self.activate_voice(PathBuf::from(&entry.path)).await?;
             }
             _ => {
@@ -1226,6 +1232,7 @@ impl Runtime {
             features,
             whisper_binary,
             whisper_model,
+            whisper_model_pref: settings.whisper_model.as_deref(),
         };
         let progress = if load_tx.is_some() {
             let tx = load_tx.clone();
@@ -1291,6 +1298,7 @@ impl Runtime {
             features,
             whisper_binary,
             whisper_model,
+            whisper_model_pref: settings.whisper_model.as_deref(),
         };
         let progress = if load_tx.is_some() {
             let tx = load_tx.clone();

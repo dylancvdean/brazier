@@ -143,14 +143,29 @@ pub async fn search(
     query: SearchQuery,
 ) -> anyhow::Result<Vec<HubModel>> {
     let limit = query.limit.unwrap_or(30).clamp(1, 100);
+    let trimmed_q = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let mut request = hf_auth::apply_auth(
         client
             .get("https://huggingface.co/api/models")
             .query(&[("limit", limit.to_string()), ("full", "true".to_owned())]),
         data_dir,
     );
-    if let Some(q) = &query.q {
+    if let Some(q) = trimmed_q {
         request = request.query(&[("search", q)]);
+    } else {
+        // No query: surface trending models — HF's trendingScore blends
+        // popularity and recency — pre-narrowed by a representative tag so the
+        // engine filter below has compatible candidates to keep.
+        request = request.query(&[("sort", "trendingScore"), ("direction", "-1")]);
+        if let Some(engine) = &query.engine
+            && let Some(tag) = engine_filter_tag(engine)
+        {
+            request = request.query(&[("filter", tag)]);
+        }
     }
     let values: Vec<Value> = request
         .send()
@@ -209,8 +224,51 @@ pub async fn search(
             })
         })
         .collect::<Vec<_>>();
-    models.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+    if trimmed_q.is_some() {
+        // Explicit query: rank by our relevance/popularity score and return
+        // everything the user might be looking for, quant repos included.
+        models.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+    } else {
+        // Suggestions: keep Hugging Face's trendingScore order, but drop
+        // near-zero-download noise and, for GGUF, single-quant repos so we
+        // recommend model families the user can pick a quant from.
+        let gguf = query.engine.as_deref() == Some("llama.cpp");
+        models.retain(|model| {
+            model.downloads >= MIN_SUGGESTED_DOWNLOADS
+                && !(gguf && looks_like_single_quant(&model.id))
+        });
+    }
     Ok(models)
+}
+
+/// Minimum downloads before a model is trusted enough to suggest unprompted.
+const MIN_SUGGESTED_DOWNLOADS: u64 = 100;
+
+/// A single representative Hub tag used to pre-narrow trending results per engine.
+fn engine_filter_tag(engine: &str) -> Option<&'static str> {
+    match engine {
+        "llama.cpp" => Some("gguf"),
+        "mlx-lm" | "mlx-vlm" => Some("mlx"),
+        "whisper.cpp" | "streaming-asr" => Some("automatic-speech-recognition"),
+        "stable-diffusion.cpp" => Some("text-to-image"),
+        "personaplex" => Some("text-to-speech"),
+        _ => None,
+    }
+}
+
+/// Whether a repo id names one specific quantization (e.g. `…-Q4_K_M-GGUF`)
+/// rather than a family repo that holds many quant files to choose from.
+fn looks_like_single_quant(repo_id: &str) -> bool {
+    let name = repo_id
+        .rsplit('/')
+        .next()
+        .unwrap_or(repo_id)
+        .to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "q2_k", "q3_k", "q4_0", "q4_1", "q4_k", "q5_0", "q5_1", "q5_k", "q6_k", "q8_0", "iq1_",
+        "iq2_", "iq3_", "iq4_", "-f16", "_f16", "-bf16", "_bf16", "-f32", "_f32",
+    ];
+    MARKERS.iter().any(|marker| name.contains(marker))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,6 +308,70 @@ pub async fn list_repo_files(
             Some(RepoFile { path, size })
         })
         .collect())
+}
+
+/// Fetch a short plain-text description for a model from its README.
+pub async fn model_description(
+    client: &reqwest::Client,
+    data_dir: &std::path::Path,
+    repo_id: &str,
+) -> anyhow::Result<String> {
+    crate::models_store::validate_repo_id(repo_id)?;
+    let url = format!("https://huggingface.co/{repo_id}/raw/main/README.md");
+    let response = hf_auth::apply_auth(client.get(url), data_dir)
+        .send()
+        .await
+        .context("contact Hugging Face")?;
+    if !response.status().is_success() {
+        return Ok("This model has no README description on Hugging Face.".to_owned());
+    }
+    let body = response.text().await.context("read README")?;
+    Ok(readme_summary(&body))
+}
+
+/// Reduce a model README to a short plain-text summary: drop YAML frontmatter,
+/// headings, badges, tables, and code fences, then take the first paragraph.
+fn readme_summary(readme: &str) -> String {
+    let body = readme
+        .strip_prefix("---")
+        .and_then(|rest| rest.split_once("\n---").map(|(_, after)| after))
+        .unwrap_or(readme);
+    let mut out = String::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !out.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if trimmed.starts_with('#')
+            || trimmed.starts_with('!')
+            || trimmed.starts_with('<')
+            || trimmed.starts_with("[![")
+            || trimmed.starts_with('|')
+            || trimmed.starts_with("---")
+            || trimmed.starts_with("```")
+        {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(trimmed);
+        if out.chars().count() >= 600 {
+            break;
+        }
+    }
+    let summary = out.trim();
+    if summary.is_empty() {
+        return "This model's README has no short description.".to_owned();
+    }
+    let mut result: String = summary.chars().take(600).collect();
+    if summary.chars().count() > 600 {
+        result.push('…');
+    }
+    result
 }
 
 /// List GGUF filenames for a repository and suggest a default quant.
@@ -381,6 +503,25 @@ pub async fn model_trust(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readme_summary_strips_frontmatter_and_headings() {
+        let readme = "---\nlicense: apache-2.0\ntags:\n- text-generation\n---\n\n# My Model\n\n![badge](x.png)\n\nThis model is a fine-tune for helpful chat. It handles tools well.\n\nMore details below.";
+        let summary = readme_summary(readme);
+        assert!(summary.starts_with("This model is a fine-tune"));
+        assert!(!summary.contains('#'));
+        assert!(!summary.contains("license"));
+    }
+
+    #[test]
+    fn single_quant_repos_are_detected() {
+        assert!(looks_like_single_quant("bartowski/Qwen2.5-7B-Q4_K_M-GGUF"));
+        assert!(looks_like_single_quant("someone/Model-IQ4_XS-GGUF"));
+        assert!(looks_like_single_quant("author/Model-f16-GGUF"));
+        // Family repos that hold many quants are kept.
+        assert!(!looks_like_single_quant("bartowski/Qwen2.5-7B-Instruct-GGUF"));
+        assert!(!looks_like_single_quant("unsloth/Llama-3.3-70B-Instruct-GGUF"));
+    }
 
     #[test]
     fn engine_compatibility_is_a_hard_filter() {

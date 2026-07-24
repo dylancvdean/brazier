@@ -465,7 +465,7 @@ pub fn whisper_root(data_dir: &Path) -> PathBuf {
     data_dir.join("models").join("whisper")
 }
 
-/// Resolve an activated or discovered whisper-cli binary.
+/// Resolve an activated or discovered ASR binary (whisper-cli or WhisperKit).
 pub fn resolve_binary(data_dir: &Path, override_path: Option<&str>) -> Option<PathBuf> {
     if let Some(path) = override_path
         .map(PathBuf::from)
@@ -490,6 +490,10 @@ pub fn resolve_binary(data_dir: &Path, override_path: Option<&str>) -> Option<Pa
         if path.is_file() {
             return Some(path);
         }
+    }
+    // Apple Silicon: WhisperKit source builds or brew-installed CLI.
+    if let Some(path) = crate::whisperkit::resolve_binary(data_dir, None) {
+        return Some(path);
     }
     which_binary(binary_name())
 }
@@ -684,11 +688,43 @@ pub struct TranscribeRequest<'a> {
     pub audio: &'a Path,
 }
 
-/// Run whisper-cli on a WAV (or ffmpeg-converted) audio file and return transcript text.
+/// Optional context for backends that download models themselves (WhisperKit).
+pub struct TranscribeContext<'a> {
+    pub data_dir: &'a Path,
+    /// Preferred model id / path / WhisperKit variant name.
+    pub model_pref: Option<&'a str>,
+}
+
+/// Run whisper-cli (or WhisperKit when the binary is `whisperkit-cli`) on audio.
 pub async fn transcribe(request: TranscribeRequest<'_>) -> anyhow::Result<String> {
-    anyhow::ensure!(request.binary.is_file(), "whisper-cli binary missing");
-    anyhow::ensure!(request.model.is_file(), "whisper model missing");
+    transcribe_with_context(request, None).await
+}
+
+/// Like [`transcribe`], with optional data-dir context for WhisperKit model cache.
+pub async fn transcribe_with_context(
+    request: TranscribeRequest<'_>,
+    context: Option<TranscribeContext<'_>>,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(request.binary.is_file(), "ASR binary missing");
     anyhow::ensure!(request.audio.is_file(), "audio file missing");
+
+    if crate::whisperkit::is_whisperkit_binary(request.binary) {
+        let data_dir = context
+            .as_ref()
+            .map(|ctx| ctx.data_dir)
+            .ok_or_else(|| anyhow::anyhow!("WhisperKit transcription requires data_dir context"))?;
+        let model_pref = context.as_ref().and_then(|ctx| ctx.model_pref);
+        return crate::whisperkit::transcribe(crate::whisperkit::TranscribeRequest {
+            binary: request.binary,
+            data_dir,
+            model: model_pref,
+            audio: request.audio,
+            language: None,
+        })
+        .await;
+    }
+
+    anyhow::ensure!(request.model.is_file(), "whisper model missing");
 
     let output_base = request.audio.with_extension("");
     let output_txt = PathBuf::from(format!("{}.txt", output_base.display()));

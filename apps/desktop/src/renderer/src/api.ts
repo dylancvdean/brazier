@@ -277,6 +277,14 @@ export async function fetchModelTrust(repoId: string): Promise<ModelTrust> {
   return request(`/api/v1/huggingface/models/${owner}/${name}/trust`)
 }
 
+export async function fetchModelDescription(repoId: string): Promise<string> {
+  const [owner, name] = repoId.split('/')
+  const response = await request<{ description: string }>(
+    `/api/v1/huggingface/models/${owner}/${name}/description`
+  )
+  return response.description
+}
+
 export type DownloadJob = {
   id: string
   repo_id: string

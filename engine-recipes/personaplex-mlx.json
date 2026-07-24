@@ -1,0 +1,33 @@
+{
+  "id": "personaplex-mlx",
+  "display_name": "PersonaPlex (MLX)",
+  "upstream_origins": [
+    "https://github.com/mu-hashmi/personaplex-mlx.git",
+    "https://github.com/mu-hashmi/personaplex-mlx"
+  ],
+  "supported_platforms": ["macos-arm64"],
+  "steps": [
+    {
+      "label": "Create isolated environment",
+      "program": "uv",
+      "args": ["venv", "--python", "3.12", "{venv}"]
+    },
+    {
+      "label": "Install pinned dependencies",
+      "program": "uv",
+      "args": [
+        "pip",
+        "install",
+        "--python",
+        "{python}",
+        "--requirements",
+        "{recipe}/personaplex-mlx.lock"
+      ]
+    },
+    {
+      "label": "Install PersonaPlex-MLX from source",
+      "program": "uv",
+      "args": ["pip", "install", "--python", "{python}", "--no-deps", "{source}"]
+    }
+  ]
+}
