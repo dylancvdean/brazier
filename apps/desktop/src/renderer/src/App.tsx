@@ -27,6 +27,7 @@ import {
   createConversation,
   createMessage,
   engineStatus,
+  fetchCapabilities,
   fetchModelBindings,
   health,
   exportConversation,
@@ -42,6 +43,7 @@ import {
   type ConversationExport,
   type HardwareInfo,
   type LocalModel,
+  type PipelineFeatures,
   type RunSnapshot,
   type RuntimeEntry,
   type RuntimeForkHint,
@@ -56,6 +58,7 @@ import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
 import { ModelMenu } from './components/ModelMenu'
 import {
+  isChatModel,
   modelDisplayName,
   runtimeNoticeForModel,
   visionCapabilityTitle
@@ -266,15 +269,20 @@ export function App(): React.JSX.Element {
   }, [selectedModel, localModels, modelsLoading])
   const canChat = Boolean(selectedModel) && modelPrepareState === 'ready'
   const selectedCapabilities = localModels.find((model) => model.id === selectedModel)?.capabilities
+  const chatModels = useMemo(() => localModels.filter((model) => isChatModel(model)), [localModels])
+  const [pipelineFeatures, setPipelineFeatures] = useState<PipelineFeatures>({
+    asr: false,
+    video_preprocess: false
+  })
   const runtimeWarning = useMemo(
     () => runtimeNoticeForModel(selectedModel, localModels, prefetchedRuntimes, modelBindings),
     [selectedModel, localModels, prefetchedRuntimes, modelBindings]
   )
-  const canAttach = Boolean(
-    selectedCapabilities?.input_modalities.some((modality) =>
-      ['image', 'audio', 'video'].includes(modality)
-    )
-  )
+  const canAttachImage = Boolean(selectedCapabilities?.input_modalities.includes('image'))
+  const canAttachAudio = pipelineFeatures.asr
+  const canAttachVideo =
+    pipelineFeatures.video_preprocess && canAttachImage
+  const canAttach = canAttachImage || canAttachAudio || canAttachVideo
   const canUseTools = selectedCapabilities?.tools !== false
 
   async function refreshLocalModels(): Promise<void> {
@@ -288,6 +296,10 @@ export function App(): React.JSX.Element {
   }
 
   const selectModel = useCallback((modelId: string): void => {
+    if (modelId.startsWith('whisper:')) {
+      setError('Whisper models are used for audio transcription, not chat. Pick a chat model instead.')
+      return
+    }
     prepareAbortRef.current?.abort()
     setSelectedModel(modelId)
     setForkHints([])
@@ -312,6 +324,15 @@ export function App(): React.JSX.Element {
         setModelLoadStatus(null)
         void prefetchRuntimes()
         void fetchModelBindings().then(setModelBindings).catch(() => {})
+        void fetchCapabilities()
+          .then((payload) => {
+            setPipelineFeatures({
+              asr: Boolean(payload.features.asr),
+              video_preprocess: Boolean(payload.features.video_preprocess),
+              whisper_cpp_engine: Boolean(payload.features.whisper_cpp_engine)
+            })
+          })
+          .catch(() => {})
       })
       .catch((cause: unknown) => {
         if ((cause as Error).name === 'AbortError') return
@@ -430,6 +451,15 @@ export function App(): React.JSX.Element {
     void refreshRuntime().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
+    void fetchCapabilities()
+      .then((payload) => {
+        setPipelineFeatures({
+          asr: Boolean(payload.features.asr),
+          video_preprocess: Boolean(payload.features.video_preprocess),
+          whisper_cpp_engine: Boolean(payload.features.whisper_cpp_engine)
+        })
+      })
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -534,12 +564,21 @@ export function App(): React.JSX.Element {
   async function selectFiles(event: ChangeEvent<HTMLInputElement>): Promise<void> {
     try {
       const files = Array.from(event.target.files ?? [])
-      const accepted = files.filter(
-        (file) =>
-          file.type.startsWith('image/') ||
-          file.type.startsWith('audio/') ||
-          file.type.startsWith('video/')
-      )
+      const accepted = files.filter((file) => {
+        if (file.type.startsWith('image/')) return canAttachImage
+        if (file.type.startsWith('audio/')) return canAttachAudio
+        if (file.type.startsWith('video/')) return canAttachVideo
+        return false
+      })
+      if (accepted.length === 0 && files.length > 0) {
+        const reasons: string[] = []
+        if (!canAttachImage) reasons.push('vision model for images')
+        if (!canAttachAudio) reasons.push('whisper.cpp + Whisper model for audio')
+        if (!canAttachVideo) reasons.push('ffmpeg + vision model for video')
+        setError(`Cannot attach that media yet. Need: ${reasons.join('; ')}.`)
+        event.target.value = ''
+        return
+      }
       const loaded = await Promise.all(accepted.map(fileToAttachment))
       setAttachments((current) => [...current, ...loaded])
       event.target.value = ''
@@ -808,15 +847,30 @@ export function App(): React.JSX.Element {
               <Brain size={14} /> Reasoning
             </span>
             <span
-              className={selectedCapabilities?.input_modalities.includes('image') ? '' : 'unavailable'}
-              title={visionCapabilityTitle(selectedModel, localModels, canAttach)}
+              className={canAttachImage ? '' : 'unavailable'}
+              title={visionCapabilityTitle(selectedModel, localModels, canAttachImage)}
             >
               <Image size={14} /> Vision
             </span>
             <span
-              className={selectedCapabilities?.input_modalities.includes('audio') ? '' : 'unavailable'}
+              className={canAttachAudio ? '' : 'unavailable'}
+              title={
+                canAttachAudio
+                  ? 'Audio attachments are transcribed with whisper.cpp before chat'
+                  : 'Build whisper.cpp and download a Whisper model to enable audio'
+              }
             >
               <AudioLines size={14} /> Audio
+            </span>
+            <span
+              className={canAttachVideo ? '' : 'unavailable'}
+              title={
+                canAttachVideo
+                  ? 'Video is sampled with ffmpeg and transcribed when ASR is available'
+                  : 'Need ffmpeg plus a vision model (and whisper.cpp for soundtrack)'
+              }
+            >
+              <Video size={14} /> Video
             </span>
             <span className={selectedCapabilities?.tools ? '' : 'unavailable'}>
               <Wrench size={14} /> Tools
@@ -1058,7 +1112,13 @@ export function App(): React.JSX.Element {
               <input
                 ref={fileInput}
                 type="file"
-                accept="image/*,audio/*,video/*"
+                accept={[
+                  canAttachImage ? 'image/*' : null,
+                  canAttachAudio ? 'audio/*' : null,
+                  canAttachVideo ? 'video/*' : null
+                ]
+                  .filter(Boolean)
+                  .join(',') || 'image/*'}
                 multiple
                 hidden
                 onChange={(event) => void selectFiles(event)}
@@ -1082,7 +1142,15 @@ export function App(): React.JSX.Element {
                 className="attach-button"
                 type="button"
                 title={
-                  canAttach ? 'Attach media' : 'Attach media (the model may require an mmproj GGUF)'
+                  canAttach
+                    ? [
+                        canAttachImage ? 'images' : null,
+                        canAttachAudio ? 'audio' : null,
+                        canAttachVideo ? 'video' : null
+                      ]
+                        .filter(Boolean)
+                        .join(', ')
+                    : 'Attach media once vision and/or ASR pipelines are available'
                 }
                 onClick={() => fileInput.current?.click()}
               >
@@ -1124,7 +1192,7 @@ export function App(): React.JSX.Element {
 
       {modelMenuOpen && (
         <ModelMenu
-          models={localModels}
+          models={chatModels}
           selectedModel={selectedModel}
           loading={modelsLoading}
           onSelect={selectModel}

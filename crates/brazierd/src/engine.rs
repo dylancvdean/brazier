@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use crate::{
     fork_hints::{self, ModelLoadError},
     llama::{self, LlamaServer},
+    media::{self, MediaContext},
     mlx::{self, MlxKind, MlxServer},
     model_bindings,
     models_store,
@@ -16,7 +17,8 @@ use crate::{
     runtimes,
     tool_registry::{self, ToolContext},
     tools,
-    types::{ChatCompletionRequest, ModelDescriptor, OpenAiMessage},
+    types::{ChatCompletionRequest, ModelCapabilities, ModelDescriptor, OpenAiMessage},
+    whisper,
 };
 
 #[derive(Debug, Clone)]
@@ -75,6 +77,10 @@ struct MlxState {
     server: Option<MlxServer>,
 }
 
+struct WhisperState {
+    binary: Option<PathBuf>,
+}
+
 enum ActiveBackend {
     Llama(String),
     Mlx(String),
@@ -86,6 +92,7 @@ pub struct Runtime {
     http: reqwest::Client,
     llama: Mutex<LlamaState>,
     mlx: Mutex<MlxState>,
+    whisper: Mutex<WhisperState>,
     settings: Mutex<RuntimeSettings>,
     models_cache: Mutex<Option<Vec<ModelDescriptor>>>,
 }
@@ -121,6 +128,10 @@ impl Runtime {
                 .skip(1)
                 .find(|path| path.is_file())
             });
+        let whisper_binary = whisper::resolve_binary(
+            &data_dir,
+            settings.whisper_binary.as_deref(),
+        );
         Arc::new(Self {
             data_dir,
             http,
@@ -132,6 +143,9 @@ impl Runtime {
                 lm_python: settings.mlx_lm_python.as_ref().map(PathBuf::from),
                 vlm_python: settings.mlx_vlm_python.as_ref().map(PathBuf::from),
                 server: None,
+            }),
+            whisper: Mutex::new(WhisperState {
+                binary: whisper_binary,
             }),
             settings: Mutex::new(settings),
             models_cache: Mutex::new(None),
@@ -257,10 +271,12 @@ impl Runtime {
     pub async fn active_runtimes(&self) -> runtimes::ActiveRuntimes {
         let llama = self.llama.lock().await.binary.clone();
         let mlx = self.mlx.lock().await;
+        let whisper = self.whisper.lock().await.binary.clone();
         runtimes::ActiveRuntimes {
             llama,
             mlx_lm: mlx.lm_python.clone(),
             mlx_vlm: mlx.vlm_python.clone(),
+            whisper,
         }
     }
 
@@ -295,6 +311,10 @@ impl Runtime {
             }
             mlx.lm_python = settings.mlx_lm_python.as_ref().map(PathBuf::from);
             mlx.vlm_python = settings.mlx_vlm_python.as_ref().map(PathBuf::from);
+            let mut whisper = self.whisper.lock().await;
+            whisper.binary = settings.whisper_binary.as_ref().map(PathBuf::from).or_else(|| {
+                whisper::resolve_binary(&self.data_dir, None)
+            });
         }
         *current = settings.clone();
         drop(current);
@@ -371,9 +391,41 @@ impl Runtime {
         Ok(path)
     }
 
+    /// Pin a whisper-cli binary and persist the choice.
+    pub async fn activate_whisper(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            path.is_file(),
+            "whisper binary not found: {}",
+            path.display()
+        );
+        let runnable = {
+            let candidate = path.clone();
+            tokio::task::spawn_blocking(move || whisper::binary_appears_runnable(&candidate))
+                .await
+                .unwrap_or(false)
+        };
+        anyhow::ensure!(
+            runnable,
+            "{} failed a smoke test (missing shared libraries or incompatible build)",
+            path.display()
+        );
+        let mut settings = self.settings.lock().await;
+        settings.whisper_binary = Some(path.display().to_string());
+        runtime_settings::save(&self.data_dir, &settings).await?;
+        drop(settings);
+        self.whisper.lock().await.binary = Some(path.clone());
+        Ok(path)
+    }
+
     /// Forget a runtime that was removed from disk.
     pub async fn release_runtime(&self, path: &std::path::Path) -> anyhow::Result<()> {
         self.release_binary(path).await?;
+        {
+            let mut whisper = self.whisper.lock().await;
+            if whisper.binary.as_deref() == Some(path) {
+                whisper.binary = None;
+            }
+        }
         let mut mlx = self.mlx.lock().await;
         let served_from_deleted = mlx
             .server
@@ -397,6 +449,10 @@ impl Runtime {
         }
         if settings.mlx_vlm_python.as_deref() == Some(&path.display().to_string()) {
             settings.mlx_vlm_python = None;
+            changed = true;
+        }
+        if settings.whisper_binary.as_deref() == Some(&path.display().to_string()) {
+            settings.whisper_binary = None;
             changed = true;
         }
         if changed {
@@ -475,6 +531,9 @@ impl Runtime {
             "mlx-vlm" => {
                 self.activate_python(MlxKind::Vlm, PathBuf::from(&entry.path))
                     .await?;
+            }
+            "whisper.cpp" => {
+                self.activate_whisper(PathBuf::from(&entry.path)).await?;
             }
             _ => {
                 self.activate_binary(PathBuf::from(&entry.path)).await?;
@@ -786,9 +845,58 @@ impl Runtime {
                 }
             }
         }
-        emit(&load_tx, "ready", "Model ready — generating…").await;
+        emit(&load_tx, "ready", "Model ready — preparing media…").await;
         let settings = self.settings.lock().await.clone();
         let mut request = request.clone();
+        let model_caps = self
+            .cached_models()
+            .await
+            .ok()
+            .and_then(|models| {
+                models
+                    .into_iter()
+                    .find(|model| model.id == model_id)
+                    .map(|model| model.capabilities)
+            })
+            .unwrap_or_else(|| ModelCapabilities {
+                input_modalities: vec!["text".into()],
+                output_modalities: vec!["text".into()],
+                streaming: true,
+                tools: true,
+                reasoning: false,
+                max_context_length: None,
+                reasoning_modes: Vec::new(),
+                harmony: false,
+            });
+        let whisper_binary = self.whisper.lock().await.binary.clone().or_else(|| {
+            whisper::resolve_binary(&self.data_dir, settings.whisper_binary.as_deref())
+        });
+        let whisper_model =
+            whisper::resolve_model_path(&self.data_dir, settings.whisper_model.as_deref());
+        let features = media::detect_pipeline_features(
+            &self.data_dir,
+            settings.whisper_binary.as_deref(),
+            settings.whisper_model.as_deref(),
+        );
+        let media_ctx = MediaContext {
+            data_dir: &self.data_dir,
+            model_caps: &model_caps,
+            features,
+            whisper_binary,
+            whisper_model,
+        };
+        let progress = if load_tx.is_some() {
+            let tx = load_tx.clone();
+            Some(Box::new(move |phase: String, message: String| {
+                if let Some(tx) = &tx {
+                    let _ = tx.try_send(Ok(StreamEvent::Load { phase, message }));
+                }
+            }) as media::ProgressFn)
+        } else {
+            None
+        };
+        media::prepare_messages(&media_ctx, &mut request.messages, progress).await?;
+        emit(&load_tx, "ready", "Model ready — generating…").await;
         let harmony = crate::harmony::is_harmony_model(&model_id);
         if let Some(merged) =
             tool_registry::merge_definitions(&self.data_dir, &request, harmony)

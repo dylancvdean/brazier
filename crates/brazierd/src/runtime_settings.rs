@@ -55,6 +55,12 @@ pub struct RuntimeSettings {
     /// Absolute path of an activated mlx-vlm Python interpreter.
     #[serde(default)]
     pub mlx_vlm_python: Option<String>,
+    /// Absolute path of an activated whisper-cli binary.
+    #[serde(default)]
+    pub whisper_binary: Option<String>,
+    /// Preferred whisper model id (`whisper:…`) or absolute path.
+    #[serde(default)]
+    pub whisper_model: Option<String>,
     /// Parallel compile jobs for source builds (`cmake --build … --parallel`).
     #[serde(default = "default_build_jobs")]
     pub build_jobs: u16,
@@ -89,6 +95,8 @@ impl Default for RuntimeSettings {
             binary_override: None,
             mlx_lm_python: None,
             mlx_vlm_python: None,
+            whisper_binary: None,
+            whisper_model: None,
             build_jobs: default_build_jobs(),
             extra_model_library_paths: Vec::new(),
         }

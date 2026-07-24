@@ -392,7 +392,8 @@ fn dir_has_projector(dir: &Path) -> bool {
 fn gguf_capabilities(has_projector: bool, model_key: &str) -> ModelCapabilities {
     let mut input_modalities = vec!["text".into()];
     if has_projector {
-        input_modalities.extend(["image".into(), "audio".into(), "video".into()]);
+        // mmproj enables vision only; audio/video use the whisper.cpp + ffmpeg pipeline.
+        input_modalities.push("image".into());
     }
     let (reasoning, reasoning_modes) = infer_reasoning_profile(model_key, None);
     ModelCapabilities {
@@ -696,6 +697,14 @@ pub fn list_local_models(
         .collect::<HashSet<_>>();
     for model in list_mlx_models(data_dir)? {
         if let Ok(path) = path_for_model_id(data_dir, &model.id, extra_library_paths) {
+            if let Ok(canonical) = std::fs::canonicalize(path) {
+                seen_paths.insert(canonical);
+            }
+        }
+        models.push(model);
+    }
+    for model in crate::whisper::list_models(data_dir)? {
+        if let Ok(path) = crate::whisper::path_for_model_id(data_dir, &model.id) {
             if let Ok(canonical) = std::fs::canonicalize(path) {
                 seen_paths.insert(canonical);
             }

@@ -1,0 +1,23 @@
+{
+  "id": "whisper.cpp",
+  "display_name": "whisper.cpp",
+  "upstream_origins": [
+    "https://github.com/ggml-org/whisper.cpp.git",
+    "https://github.com/ggml-org/whisper.cpp",
+    "https://github.com/ggerganov/whisper.cpp.git",
+    "https://github.com/ggerganov/whisper.cpp"
+  ],
+  "supported_platforms": ["linux-x64", "linux-arm64", "macos-x64", "macos-arm64", "windows-x64", "windows-arm64"],
+  "steps": [
+    {
+      "label": "Configure",
+      "program": "cmake",
+      "args": ["-S", "{source}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF", "-DWHISPER_BUILD_TESTS=OFF", "-DWHISPER_BUILD_EXAMPLES=ON", "{target_flags}"]
+    },
+    {
+      "label": "Build CLI",
+      "program": "cmake",
+      "args": ["--build", "{build}", "--config", "Release", "--target", "whisper-cli", "--parallel", "{parallel}"]
+    }
+  ]
+}

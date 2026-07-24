@@ -35,6 +35,17 @@ pub struct DownloadRequest {
     pub filename: String,
     #[serde(default = "default_revision")]
     pub revision: String,
+    /// `llama.cpp` (default) or `whisper.cpp`.
+    #[serde(default = "default_download_engine")]
+    pub engine: String,
+}
+
+fn default_revision() -> String {
+    "main".to_owned()
+}
+
+fn default_download_engine() -> String {
+    "llama.cpp".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,10 +54,6 @@ pub struct MlxDownloadRequest {
     pub engine: String,
     #[serde(default = "default_revision")]
     pub revision: String,
-}
-
-fn default_revision() -> String {
-    "main".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,7 +114,17 @@ pub async fn download_gguf_with_progress(
         "invalid revision"
     );
 
-    let destination = download_destination(data_dir, &request.repo_id, &request.filename)?;
+    let whisper = request.engine == "whisper.cpp";
+    let destination = if whisper {
+        crate::whisper::download_destination(data_dir, &request.repo_id, &request.filename)?
+    } else {
+        download_destination(data_dir, &request.repo_id, &request.filename)?
+    };
+    let engine_label = if whisper {
+        "whisper.cpp"
+    } else {
+        "llama.cpp"
+    };
     if destination.is_file() {
         progress(ProgressEvent::phase(
             "skip",
@@ -116,14 +133,18 @@ pub async fn download_gguf_with_progress(
         let bytes = tokio::fs::metadata(&destination).await?.len();
         progress(ProgressEvent::download(bytes, Some(bytes)));
         let sha256 = hash_file(&destination).await?;
-        let model_id = model_id_for_path(&crate::models_store::gguf_root(data_dir), &destination)?;
+        let model_id = if whisper {
+            crate::whisper::model_id_for_path(&crate::whisper::whisper_root(data_dir), &destination)?
+        } else {
+            model_id_for_path(&crate::models_store::gguf_root(data_dir), &destination)?
+        };
         let result = DownloadResult {
             model_id,
             path: destination.display().to_string(),
             bytes,
             sha256,
             resumed: false,
-            engine: Some("llama.cpp".to_owned()),
+            engine: Some(engine_label.to_owned()),
             notice: None,
         };
         progress(ProgressEvent::done(serde_json::to_value(&result)?));
@@ -249,14 +270,18 @@ pub async fn download_gguf_with_progress(
         .await
         .context("promote partial download")?;
     let sha256 = hash_file(&destination).await?;
-    let model_id = model_id_for_path(&crate::models_store::gguf_root(data_dir), &destination)?;
+    let model_id = if whisper {
+        crate::whisper::model_id_for_path(&crate::whisper::whisper_root(data_dir), &destination)?
+    } else {
+        model_id_for_path(&crate::models_store::gguf_root(data_dir), &destination)?
+    };
     let result = DownloadResult {
         model_id,
         path: destination.display().to_string(),
         bytes: written,
         sha256,
         resumed,
-        engine: Some("llama.cpp".to_owned()),
+        engine: Some(engine_label.to_owned()),
         notice: None,
     };
     progress(ProgressEvent::done(serde_json::to_value(&result)?));
@@ -600,6 +625,7 @@ mod tests {
                 repo_id: "acme/demo".into(),
                 filename: "model.gguf".into(),
                 revision: "main".into(),
+                engine: "llama.cpp".into(),
             },
         )
         .await

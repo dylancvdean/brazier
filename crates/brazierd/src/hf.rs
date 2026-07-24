@@ -70,6 +70,20 @@ fn compatible(tags: &[String], engine: &str) -> bool {
         }),
         "mlx-lm" => mlx_lm_tags(tags) && !mlx_vlm_tags(tags),
         "mlx-vlm" => mlx_lm_tags(tags) && mlx_vlm_tags(tags),
+        "whisper.cpp" => {
+            tags_contain_any(
+                tags,
+                &[
+                    "whisper",
+                    "automatic-speech-recognition",
+                    "speech-to-text",
+                    "asr",
+                ],
+            ) || tags.iter().any(|tag| {
+                let tag = tag.to_ascii_lowercase();
+                tag.contains("whisper") || tag.contains("whisper.cpp")
+            })
+        }
         "vllm" => tags.iter().any(|tag| {
             matches!(
                 tag.as_str(),

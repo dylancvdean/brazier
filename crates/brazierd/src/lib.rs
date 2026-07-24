@@ -14,6 +14,7 @@ pub mod hf;
 pub mod hf_auth;
 pub mod js_sandbox;
 pub mod llama;
+pub mod media;
 pub mod message_format;
 pub mod mlx;
 pub mod mcp;
@@ -27,6 +28,7 @@ pub mod tool_registry;
 pub mod toolchain_hints;
 pub mod tools;
 pub mod types;
+pub mod whisper;
 
 use std::{path::PathBuf, sync::Arc};
 

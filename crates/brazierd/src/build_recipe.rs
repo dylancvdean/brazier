@@ -7,6 +7,7 @@ const LLAMA_CPP: &str = include_str!("../../../engine-recipes/llama.cpp.json");
 const MLX_LM: &str = include_str!("../../../engine-recipes/mlx-lm.json");
 const MLX_VLM: &str = include_str!("../../../engine-recipes/mlx-vlm.json");
 const VLLM: &str = include_str!("../../../engine-recipes/vllm.json");
+const WHISPER_CPP: &str = include_str!("../../../engine-recipes/whisper.cpp.json");
 const MLX_LM_LOCK: &str = include_str!("../../../engine-recipes/mlx-lm.lock");
 const MLX_VLM_LOCK: &str = include_str!("../../../engine-recipes/mlx-vlm.lock");
 
@@ -78,6 +79,7 @@ pub fn recipe(engine: &str) -> anyhow::Result<BuildRecipe> {
         "mlx-lm" => MLX_LM,
         "mlx-vlm" => MLX_VLM,
         "vllm" => VLLM,
+        "whisper.cpp" => WHISPER_CPP,
         _ => anyhow::bail!("unsupported engine recipe: {engine}"),
     };
     Ok(serde_json::from_str(source)?)

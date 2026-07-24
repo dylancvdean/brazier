@@ -34,6 +34,7 @@ pub struct ActiveRuntimes {
     pub llama: Option<PathBuf>,
     pub mlx_lm: Option<PathBuf>,
     pub mlx_vlm: Option<PathBuf>,
+    pub whisper: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -169,6 +170,22 @@ pub fn list(
         }
     }
 
+    for (build_id, record) in builds::list_builds(data_dir, crate::whisper::ENGINE) {
+        let path = PathBuf::from(&record.binary);
+        entries.push(RuntimeEntry {
+            id: format!("whisper-source-{build_id}"),
+            engine: crate::whisper::ENGINE.to_owned(),
+            kind: "source".to_owned(),
+            label: format!("whisper.cpp · Source · {}", record.revision),
+            target: Some(record.target.clone()),
+            version: Some(record.revision.clone()),
+            repository: Some(record.repository.clone()),
+            path: record.binary.clone(),
+            active: is_active(&path, &active.whisper),
+            deletable: true,
+        });
+    }
+
     // System binaries on PATH or well-known prefixes (optional — can be slow).
     if !include_system {
         return entries;
@@ -203,6 +220,35 @@ pub fn list(
             repository: None,
             path: candidate.display().to_string(),
             active: is_active(&candidate, &active.llama),
+            deletable: false,
+        });
+    }
+    for candidate in crate::whisper::discovery_candidates(data_dir, path_env)
+        .into_iter()
+        .filter(|path| path.is_file())
+    {
+        let canonical = candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone());
+        if canonical.starts_with(&data_prefix) {
+            continue;
+        }
+        if entries
+            .iter()
+            .any(|entry| same_file(Path::new(&entry.path), &candidate))
+        {
+            continue;
+        }
+        entries.push(RuntimeEntry {
+            id: format!("whisper-system-{}", canonical.display()),
+            engine: crate::whisper::ENGINE.to_owned(),
+            kind: "system".to_owned(),
+            label: "whisper.cpp · System".to_owned(),
+            target: None,
+            version: None,
+            repository: None,
+            path: candidate.display().to_string(),
+            active: is_active(&candidate, &active.whisper),
             deletable: false,
         });
     }
@@ -311,6 +357,24 @@ pub fn delete(data_dir: &Path, id: &str) -> anyhow::Result<PathBuf> {
             std::fs::remove_dir_all(&root).context("remove source build")?;
             return Ok(python);
         }
+    }
+    if let Some(build_id) = id.strip_prefix("whisper-source-") {
+        anyhow::ensure!(
+            !build_id.is_empty()
+                && !build_id.contains('/')
+                && !build_id.contains('\\')
+                && build_id != "."
+                && build_id != "..",
+            "invalid build id"
+        );
+        let root = builds::builds_root(data_dir, crate::whisper::ENGINE).join(build_id);
+        anyhow::ensure!(root.is_dir(), "source build `{build_id}` does not exist");
+        let binary = root
+            .join("install")
+            .join("bin")
+            .join(crate::whisper::binary_name());
+        std::fs::remove_dir_all(&root).context("remove source build")?;
+        return Ok(binary);
     }
     anyhow::bail!("runtime `{id}` cannot be deleted");
 }

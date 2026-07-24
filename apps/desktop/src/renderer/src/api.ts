@@ -67,8 +67,30 @@ export type RuntimeSettings = {
   enable_reasoning: boolean
   reasoning_budget_tokens?: number | null
   binary_override: string | null
+  mlx_lm_python?: string | null
+  mlx_vlm_python?: string | null
+  whisper_binary?: string | null
+  whisper_model?: string | null
   build_jobs: number
   extra_model_library_paths: string[]
+}
+
+export type PipelineFeatures = {
+  asr: boolean
+  video_preprocess: boolean
+  whisper_cpp_engine?: boolean
+}
+
+export type CapabilitiesResponse = {
+  schema_version: number
+  features: Record<string, boolean> & {
+    asr?: boolean
+    video_preprocess?: boolean
+  }
+}
+
+export async function fetchCapabilities(): Promise<CapabilitiesResponse> {
+  return request('/api/v1/capabilities')
 }
 
 export type HardwareInfo = {
@@ -590,13 +612,14 @@ export async function downloadModel(
   repoId: string,
   filename: string,
   onProgress: (event: ProgressEvent) => void,
-  revision = 'main'
+  revision = 'main',
+  engine: 'llama.cpp' | 'whisper.cpp' = 'llama.cpp'
 ): Promise<DownloadResult> {
   const final = await readProgressSse(
     '/api/v1/models/download?stream=true',
     {
       method: 'POST',
-      body: JSON.stringify({ repo_id: repoId, filename, revision })
+      body: JSON.stringify({ repo_id: repoId, filename, revision, engine })
     },
     onProgress
   )

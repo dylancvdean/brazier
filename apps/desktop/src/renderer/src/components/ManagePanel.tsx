@@ -70,19 +70,21 @@ import {
 } from '../model-utils'
 import type { HubModel } from '../types'
 
-type DiscoverEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm'
-type BuildEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm'
+type DiscoverEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm' | 'whisper.cpp'
+type BuildEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm' | 'whisper.cpp'
 
 const DISCOVER_ENGINE_HELP: Record<DiscoverEngine, string> = {
   'llama.cpp': 'GGUF weights for llama.cpp on CPU, CUDA, Metal, or Vulkan.',
   'mlx-lm': 'Text-only MLX models for Apple Silicon (chat, tools, reasoning).',
-  'mlx-vlm': 'Vision MLX models for Apple Silicon (image + text input).'
+  'mlx-vlm': 'Vision MLX models for Apple Silicon (image + text input).',
+  'whisper.cpp': 'Whisper speech-to-text weights (ggml/gguf) for local audio transcription.'
 }
 
 const DISCOVER_ENGINE_LABELS: Record<DiscoverEngine, string> = {
   'llama.cpp': 'GGUF · llama.cpp',
   'mlx-lm': 'MLX · text',
-  'mlx-vlm': 'MLX · vision'
+  'mlx-vlm': 'MLX · vision',
+  'whisper.cpp': 'ASR · whisper.cpp'
 }
 
 const BUILD_ENGINE_DEFAULTS: Record<
@@ -100,6 +102,10 @@ const BUILD_ENGINE_DEFAULTS: Record<
   'mlx-vlm': {
     repository: 'https://github.com/Blaizzy/mlx-vlm',
     revision: 'main'
+  },
+  'whisper.cpp': {
+    repository: 'https://github.com/ggml-org/whisper.cpp',
+    revision: 'master'
   }
 }
 
@@ -603,25 +609,35 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                   <span className="library-runtime-note">{runtimeNotice}</span>
                 )}
                 <div className="library-caps">
+                  {engine === 'whisper.cpp' && <span>asr</span>}
                   {caps?.input_modalities.includes('image') && <span>vision</span>}
+                  {caps?.input_modalities.includes('audio') && engine !== 'whisper.cpp' && (
+                    <span>audio</span>
+                  )}
                   {caps?.tools && <span>tools</span>}
                   {caps?.reasoning && <span>reasoning</span>}
                 </div>
               </div>
               <div className="library-card-actions">
-                <button
-                  className={isSelected ? 'chip-button selected' : 'chip-button'}
-                  disabled={isSelected}
-                  onClick={() => props.onSelectModel(model.id)}
-                >
-                  {isSelected ? (
-                    <>
-                      <Check size={13} /> In use
-                    </>
-                  ) : (
-                    'Use'
-                  )}
-                </button>
+                {engine === 'whisper.cpp' ? (
+                  <button className="chip-button selected" disabled type="button" title="Used automatically for audio/video transcription when active">
+                    <Check size={13} /> ASR model
+                  </button>
+                ) : (
+                  <button
+                    className={isSelected ? 'chip-button selected' : 'chip-button'}
+                    disabled={isSelected}
+                    onClick={() => props.onSelectModel(model.id)}
+                  >
+                    {isSelected ? (
+                      <>
+                        <Check size={13} /> In use
+                      </>
+                    ) : (
+                      'Use'
+                    )}
+                  </button>
+                )}
                 {!isExternal &&
                   (confirming === model.id ? (
                     <button
@@ -743,7 +759,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   }
 
   async function downloadSnapshot(repoId: string): Promise<void> {
-    if (discoverEngine === 'llama.cpp') return
+    if (discoverEngine === 'llama.cpp' || discoverEngine === 'whisper.cpp') return
     const trust = trustByRepo[repoId]
     if (trust?.gated && hfTokenSource === 'none') {
       props.onError('This model is gated on Hugging Face. Save an access token above first.')
@@ -795,7 +811,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       return
     }
     setExpandedRepo(model.id)
-    if (discoverEngine !== 'llama.cpp') {
+    if (discoverEngine !== 'llama.cpp' && discoverEngine !== 'whisper.cpp') {
       if (trustByRepo[model.id]) return
       setLoadingFilesFor(model.id)
       props.onError(null)
@@ -843,8 +859,19 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     setDownloadProgress({ key, event: null })
     props.onError(null)
     try {
-      await downloadModel(repoId, path, (event) => setDownloadProgress({ key, event }))
+      const engine = discoverEngine === 'whisper.cpp' ? 'whisper.cpp' : 'llama.cpp'
+      await downloadModel(
+        repoId,
+        path,
+        (event) => setDownloadProgress({ key, event }),
+        'main',
+        engine
+      )
       await props.refreshModels()
+      if (engine === 'whisper.cpp') {
+        props.onError(null)
+        return
+      }
       // Make sure a runtime exists so the model is immediately usable.
       setEnginePhase('Checking the inference runtime…')
       try {
@@ -901,32 +928,40 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           Search Hugging Face for{' '}
           {discoverEngine === 'llama.cpp'
             ? 'GGUF weights compatible with llama.cpp'
-            : `${engineLabel(discoverEngine)} models for Apple Silicon`}
+            : discoverEngine === 'whisper.cpp'
+              ? 'Whisper speech-to-text weights for whisper.cpp'
+              : `${engineLabel(discoverEngine)} models for Apple Silicon`}
           .
         </p>
         <p className="manage-subtext">{DISCOVER_ENGINE_HELP[discoverEngine]}</p>
       </header>
-      {props.hardware?.os === 'macos' && props.hardware.architecture === 'aarch64' && (
-        <div className="build-form-row">
-          <label>
-            <span>Model type</span>
-            <select
-              value={discoverEngine}
-              onChange={(event) => {
-                setDiscoverEngine(event.target.value as DiscoverEngine)
-                setResults([])
-                setExpandedRepo(null)
-              }}
-            >
-              {(Object.keys(DISCOVER_ENGINE_LABELS) as DiscoverEngine[]).map((engine) => (
-                <option key={engine} value={engine}>
-                  {DISCOVER_ENGINE_LABELS[engine]}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      )}
+      <div className="build-form-row">
+        <label>
+          <span>Model type</span>
+          <select
+            value={discoverEngine}
+            onChange={(event) => {
+              setDiscoverEngine(event.target.value as DiscoverEngine)
+              setResults([])
+              setExpandedRepo(null)
+            }}
+          >
+            {(
+              [
+                'llama.cpp',
+                'whisper.cpp',
+                ...(props.hardware?.os === 'macos' && props.hardware.architecture === 'aarch64'
+                  ? (['mlx-lm', 'mlx-vlm'] as const)
+                  : [])
+              ] as DiscoverEngine[]
+            ).map((engine) => (
+              <option key={engine} value={engine}>
+                {DISCOVER_ENGINE_LABELS[engine]}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
       <form className="build-form" onSubmit={(event) => void saveHubToken(event)}>
         <label>
           <span>Hugging Face token (for gated models)</span>
@@ -1028,10 +1063,16 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       <div className="model-results">
         {results.map((model) => {
           const expanded = expandedRepo === model.id
-          const files = (repoFiles[model.id] ?? []).filter((file) =>
-            file.path.toLowerCase().endsWith('.gguf')
-          )
+          const files = (repoFiles[model.id] ?? []).filter((file) => {
+            const lower = file.path.toLowerCase()
+            if (discoverEngine === 'whisper.cpp') {
+              return lower.endsWith('.bin') || lower.endsWith('.gguf')
+            }
+            return lower.endsWith('.gguf')
+          })
           const preferred = preferredFiles[model.id]
+          const filePickEngine =
+            discoverEngine === 'llama.cpp' || discoverEngine === 'whisper.cpp'
           return (
             <article className="model-card expandable" key={model.id}>
               <div className="model-card-main">
@@ -1059,11 +1100,11 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                     <>
                       {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                       {expanded
-                        ? discoverEngine === 'llama.cpp'
-                          ? 'Hide quants'
+                        ? filePickEngine
+                          ? 'Hide files'
                           : 'Hide details'
-                        : discoverEngine === 'llama.cpp'
-                          ? 'Choose quant'
+                        : filePickEngine
+                          ? 'Choose file'
                           : 'Download'}
                     </>
                   )}
@@ -1104,7 +1145,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                       </div>
                     </div>
                   )}
-                  {discoverEngine !== 'llama.cpp' ? (
+                  {discoverEngine !== 'llama.cpp' && discoverEngine !== 'whisper.cpp' ? (
                     <div className="quant-row">
                       <div>
                         <strong>Full MLX snapshot</strong>
@@ -1496,6 +1537,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   }
 
   const isPythonBuild = buildEngine === 'mlx-lm' || buildEngine === 'mlx-vlm'
+  const isWhisperBuild = buildEngine === 'whisper.cpp'
 
   async function runBuild(event: FormEvent): Promise<void> {
     event.preventDefault()
@@ -1818,7 +1860,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         </button>
         {buildOpen && (
           <form className="build-form" onSubmit={(event) => void runBuild(event)}>
-            {isAppleSilicon && (
+            {isAppleSilicon || buildEngine === 'whisper.cpp' || buildEngine === 'llama.cpp' ? (
               <label>
                 <span>Engine</span>
                 <select
@@ -1827,14 +1869,20 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                     applyBuildEngine(event.target.value as BuildEngine)
                   }
                 >
-                  {(Object.keys(BUILD_ENGINE_DEFAULTS) as BuildEngine[]).map((engine) => (
+                  {(
+                    [
+                      'llama.cpp',
+                      'whisper.cpp',
+                      ...(isAppleSilicon ? (['mlx-lm', 'mlx-vlm'] as const) : [])
+                    ] as BuildEngine[]
+                  ).map((engine) => (
                     <option key={engine} value={engine}>
                       {DISCOVER_ENGINE_LABELS[engine]}
                     </option>
                   ))}
                 </select>
               </label>
-            )}
+            ) : null}
             <label>
               <span>Repository</span>
               <input
@@ -1867,11 +1915,13 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             <p className="model-help">
               {isPythonBuild
                 ? 'MLX builds create an isolated Python environment with uv. Install uv (`brew install uv`) before starting the build.'
-                : props.hardware?.os === 'macos'
-                  ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
-                  : props.hardware?.os === 'windows'
-                    ? 'Windows builds need Git, CMake, and Visual Studio 2022 Build Tools with the C++ workload.'
-                    : 'Linux builds need git, cmake, and a distro C++ toolchain. GPU targets also need the matching SDK or driver stack.'}
+                : isWhisperBuild
+                  ? 'whisper.cpp builds produce the whisper-cli binary used to transcribe audio and video soundtracks before chat.'
+                  : props.hardware?.os === 'macos'
+                    ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
+                    : props.hardware?.os === 'windows'
+                      ? 'Windows builds need Git, CMake, and Visual Studio 2022 Build Tools with the C++ workload.'
+                      : 'Linux builds need git, cmake, and a distro C++ toolchain. GPU targets also need the matching SDK or driver stack.'}
             </p>
             {!isPythonBuild && (
               <label className="slider-row">

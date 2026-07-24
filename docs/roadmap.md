@@ -32,6 +32,14 @@
 - Conversation search, JSON import/export (including embedded attachment blobs
   and run metadata), persisted model download jobs, background download queue,
   in-flight download cancellation, and Hub license / remote-code acknowledgement.
+- Media hydration: `brazier_blob` attachments expand to OpenAI `image_url` data
+  URLs for vision models; honest capability advertising (mmproj → image only).
+- whisper.cpp ASR runtime (source builds, inventory, activation) with Whisper
+  model download/discovery and `POST /v1/audio/transcriptions`.
+- Video preprocess via system ffmpeg (frame sampling into the active vision
+  model) plus optional soundtrack transcription when ASR is available.
+- Pipeline feature flags (`asr`, `video_preprocess`) on `/api/v1/capabilities`
+  so the desktop gates Audio/Video badges on real preprocess readiness.
 
 ## Alpha
 
@@ -44,6 +52,8 @@
   and drivers without silent elevation.
 - Add Linux vLLM, remote OpenAI-compatible connections, engine diagnostics, and
   hardware-specific compatibility tests.
+- Optional mlx-whisper, bundled ffmpeg, and native multimodal-audio LLMs
+  (models that consume audio tokens directly).
 
 ## Tool packs and release hardening
 

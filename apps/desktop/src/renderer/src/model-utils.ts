@@ -14,6 +14,8 @@ export function engineLabel(engine: string): string {
       return 'MLX · vision'
     case 'llama.cpp':
       return 'GGUF'
+    case 'whisper.cpp':
+      return 'ASR · whisper'
     default:
       return engine
   }
@@ -27,9 +29,16 @@ export function engineBadgeClass(engine: string): string {
       return 'engine-badge mlx-vlm'
     case 'llama.cpp':
       return 'engine-badge gguf'
+    case 'whisper.cpp':
+      return 'engine-badge whisper'
     default:
       return 'engine-badge'
   }
+}
+
+export function isChatModel(model: LocalModel | undefined): boolean {
+  const engine = modelEngine(model)
+  return engine !== 'whisper.cpp'
 }
 
 export function modelLibraryKey(modelId: string): string {

@@ -32,11 +32,11 @@ use crate::{
     engine::{Engine, StreamEvent},
     fork_hints::{self, ModelLoadError, RuntimeForkHint},
     hf::{self, SearchQuery},
-    hf_auth, model_bindings, models_store,
+    hf_auth, media, model_bindings, models_store,
     llama,
     mcp,
     progress::ProgressEvent,
-    runtimes, tool_registry,
+    runtimes, tool_registry, whisper,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
@@ -178,6 +178,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/models/prepare", post(prepare_model))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/audio/transcriptions", post(audio_transcriptions))
         .route("/v1/responses", post(responses))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
@@ -236,6 +237,12 @@ async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
 
 async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let models = state.runtime.models().await.map_err(ApiError::internal)?;
+    let settings = state.runtime.settings().await;
+    let features_pipeline = media::detect_pipeline_features(
+        &state.data_dir,
+        settings.whisper_binary.as_deref(),
+        settings.whisper_model.as_deref(),
+    );
     Ok(Json(json!({
         "schema_version": 1,
         "models": models,
@@ -244,14 +251,18 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             "hugging_face_search": true,
             "model_download": true,
             "llama_cpp_engine": true,
+            "whisper_cpp_engine": true,
             "openai_chat_completions": true,
             "openai_responses": true,
+            "openai_audio_transcriptions": true,
             "conversation_search": true,
             "conversation_import_export": true,
             "model_download_jobs": true,
             "model_download_queue": true,
             "model_download_cancel": true,
             "model_trust_acknowledgement": true,
+            "asr": features_pipeline.asr,
+            "video_preprocess": features_pipeline.video_preprocess,
         }
     })))
 }
@@ -568,6 +579,7 @@ async fn list_runtimes(
         "active_binary": active.llama.map(|path| path.display().to_string()),
         "active_mlx_lm_python": active.mlx_lm.map(|path| path.display().to_string()),
         "active_mlx_vlm_python": active.mlx_vlm.map(|path| path.display().to_string()),
+        "active_whisper_binary": active.whisper.map(|path| path.display().to_string()),
     }))
 }
 
@@ -579,6 +591,7 @@ fn apply_active_flags(
         let selected = match entry.engine.as_str() {
             "mlx-lm" => &active.mlx_lm,
             "mlx-vlm" => &active.mlx_vlm,
+            "whisper.cpp" => &active.whisper,
             _ => &active.llama,
         };
         entry.active = selected.as_ref().is_some_and(|active_path| {
@@ -778,6 +791,11 @@ async fn activate_runtime(
                 crate::mlx::MlxKind::Vlm,
                 std::path::PathBuf::from(&entry.path),
             )
+            .await
+            .map_err(ApiError::bad_request)?,
+        "whisper.cpp" => state
+            .runtime
+            .activate_whisper(std::path::PathBuf::from(&entry.path))
             .await
             .map_err(ApiError::bad_request)?,
         _ => state
@@ -1259,6 +1277,7 @@ async fn download_model(
                 repo_id,
                 filename,
                 revision,
+                engine: "llama.cpp".into(),
             },
             Box::new(move |event| {
                 push_progress(&progress_tx, event);
@@ -1412,6 +1431,125 @@ async fn list_models(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         })
         .collect::<Vec<_>>();
     Ok(Json(json!({ "object": "list", "data": data })))
+}
+
+#[derive(Debug, Deserialize)]
+struct TranscriptionRequest {
+    #[serde(default)]
+    file_sha256: Option<String>,
+    #[serde(default)]
+    file_base64: Option<String>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+async fn audio_transcriptions(
+    State(state): State<AppState>,
+    Json(request): Json<TranscriptionRequest>,
+) -> ApiResult<Json<Value>> {
+    let settings = state.runtime.settings().await;
+    let binary = whisper::resolve_binary(&state.data_dir, settings.whisper_binary.as_deref())
+        .ok_or_else(|| ApiError::bad_request(media::asr_missing_message().to_owned()))?;
+    let model_path = whisper::resolve_model_path(
+        &state.data_dir,
+        request
+            .model
+            .as_deref()
+            .or(settings.whisper_model.as_deref()),
+    )
+    .ok_or_else(|| ApiError::bad_request(media::asr_missing_message().to_owned()))?;
+
+    let (bytes, mime) = if let Some(sha256) = request.file_sha256.as_deref() {
+        let (bytes, stored_mime) = blob_store::read_blob(&state.data_dir, sha256)
+            .await
+            .map_err(ApiError::bad_request)?;
+        (
+            bytes,
+            request
+                .mime_type
+                .unwrap_or(stored_mime),
+        )
+    } else if let Some(encoded) = request.file_base64.as_deref() {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| ApiError::bad_request(format!("invalid file_base64: {error}")))?;
+        (
+            bytes,
+            request
+                .mime_type
+                .unwrap_or_else(|| "audio/wav".to_owned()),
+        )
+    } else {
+        return Err(ApiError::bad_request(
+            "provide file_sha256 or file_base64 for transcription",
+        ));
+    };
+
+    let stored = blob_store::store_bytes(
+        &state.data_dir,
+        &bytes,
+        &mime,
+        Some("transcription-input"),
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
+
+    let mut messages = vec![crate::types::OpenAiMessage {
+        role: "user".into(),
+        content: json!([{
+            "type": "brazier_blob",
+            "brazier_blob": {
+                "sha256": stored.sha256,
+                "mime_type": mime,
+                "name": "audio"
+            }
+        }]),
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+    let caps = crate::types::ModelCapabilities {
+        input_modalities: vec!["audio".into()],
+        output_modalities: vec!["text".into()],
+        streaming: false,
+        tools: false,
+        reasoning: false,
+        max_context_length: None,
+        reasoning_modes: Vec::new(),
+        harmony: false,
+    };
+    let ctx = media::MediaContext {
+        data_dir: &state.data_dir,
+        model_caps: &caps,
+        features: media::PipelineFeatures {
+            asr: true,
+            video_preprocess: media::ffmpeg_available(),
+        },
+        whisper_binary: Some(binary),
+        whisper_model: Some(model_path),
+    };
+    media::prepare_messages(&ctx, &mut messages, None)
+        .await
+        .map_err(ApiError::bad_request)?;
+    let text = messages
+        .first()
+        .and_then(|message| match &message.content {
+            Value::Array(parts) => parts
+                .iter()
+                .find_map(|part| part.get("text").and_then(Value::as_str)),
+            Value::String(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or("")
+        .lines()
+        .skip_while(|line| line.starts_with('['))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+    Ok(Json(json!({ "text": text })))
 }
 
 async fn chat_completions(

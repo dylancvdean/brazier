@@ -276,13 +276,28 @@ async fn run_step(
     Ok(())
 }
 
-/// Copy the built server binary and any shared libraries into `install/bin`.
-fn install_artifacts(build_dir: &Path, install_bin: &Path) -> anyhow::Result<PathBuf> {
-    let server_name = if cfg!(windows) {
-        "llama-server.exe"
-    } else {
-        "llama-server"
-    };
+fn primary_binary_name(engine: &str) -> &'static str {
+    match engine {
+        "whisper.cpp" => {
+            if cfg!(windows) {
+                "whisper-cli.exe"
+            } else {
+                "whisper-cli"
+            }
+        }
+        _ => {
+            if cfg!(windows) {
+                "llama-server.exe"
+            } else {
+                "llama-server"
+            }
+        }
+    }
+}
+
+/// Copy the built binary and any shared libraries into `install/bin`.
+fn install_artifacts(build_dir: &Path, install_bin: &Path, engine: &str) -> anyhow::Result<PathBuf> {
+    let server_name = primary_binary_name(engine);
     let built_bin = build_dir.join("bin");
     let server = built_bin.join(server_name);
     anyhow::ensure!(
@@ -416,10 +431,11 @@ pub fn diagnose_failure(
         );
     }
     if message_lower.contains("llama-server was not produced")
+        || message_lower.contains("whisper-cli was not produced")
         || message_lower.contains("server binary missing")
     {
         hints.push(
-            "The server binary was not produced. Confirm the recipe still builds the `llama-server` target and that the checkout revision is compatible.".into(),
+            "The expected binary was not produced. Confirm the recipe still builds the target (`llama-server` or `whisper-cli`) and that the checkout revision is compatible.".into(),
         );
     }
     if message_lower.contains("virtual environment python was not created")
@@ -512,7 +528,7 @@ pub async fn run_build_with_progress(
                 "",
             ));
         }
-    } else if plan.engine != "llama.cpp" {
+    } else if plan.engine != "llama.cpp" && plan.engine != "whisper.cpp" {
         return Err(fail(
             format!("source builds for `{}` are not executable yet", plan.engine),
             None,
@@ -638,7 +654,7 @@ pub async fn run_build_with_progress(
         let binary = if python_engine {
             install_python_env(&venv, &plan.engine)?
         } else {
-            install_artifacts(&build, &install_bin)?
+            install_artifacts(&build, &install_bin, &plan.engine)?
         };
         let _ = tokio::fs::remove_dir_all(&source).await;
         if !python_engine {
