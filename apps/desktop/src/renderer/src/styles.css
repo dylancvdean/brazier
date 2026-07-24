@@ -3162,6 +3162,157 @@ a.inline-link {
   gap: 8px;
 }
 
+/* Curated stable-diffusion.cpp bundles in Manage → Download models. */
+.bundle-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.bundle-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-raised);
+}
+
+.bundle-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bundle-head strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.bundle-meta,
+.bundle-size {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.bundle-summary {
+  margin: 0;
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.bundle-components {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: #12150f;
+  list-style: none;
+}
+
+.bundle-components li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.bundle-role {
+  min-width: 190px;
+  color: var(--soft);
+}
+
+.bundle-components code {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.bundle-size {
+  margin-left: auto;
+}
+
+.bundle-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.bundle-assemble {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 18px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.bundle-card.proposal {
+  border-color: #46503c;
+}
+
+.bundle-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  color: #e8d3a0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.proposal-components {
+  display: grid;
+  gap: 6px;
+}
+
+.proposal-row {
+  display: grid;
+  grid-template-columns: 200px 1fr 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposal-row .bundle-role {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+}
+
+.proposal-row code {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+}
+
+.proposal-row input {
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--soft);
+  background: #12150f;
+  font-size: 11px;
+}
+
+.proposal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.installed-badge.gated {
+  border-color: #6b5a2f;
+  color: #e8d3a0;
+  background: #2c2718;
+}
+
 .voice-status {
   display: flex;
   align-items: center;

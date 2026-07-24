@@ -837,7 +837,7 @@ export type GenerateBlobResult = {
   engine: string
 }
 
-export function generateImage(body: {
+export type GenerateBody = {
   prompt: string
   model_id?: string
   negative_prompt?: string
@@ -845,28 +845,119 @@ export function generateImage(body: {
   height?: number
   steps?: number
   seed?: number
+  /** Classifier-free guidance. Distilled models such as Flux want 1.0. */
+  cfg_scale?: number
+  /** Distilled guidance, used by Flux-family models instead of CFG. */
+  guidance?: number
   video_frames?: number
-}): Promise<GenerateBlobResult> {
+  fps?: number
+}
+
+export function generateImage(body: GenerateBody): Promise<GenerateBlobResult> {
   return request('/api/v1/generate/image', {
     method: 'POST',
     body: JSON.stringify(body)
   })
 }
 
-export function generateVideo(body: {
-  prompt: string
-  model_id?: string
-  negative_prompt?: string
-  width?: number
-  height?: number
-  steps?: number
-  seed?: number
-  video_frames?: number
-}): Promise<GenerateBlobResult> {
+export function generateVideo(body: GenerateBody): Promise<GenerateBlobResult> {
   return request('/api/v1/generate/video', {
     method: 'POST',
     body: JSON.stringify(body)
   })
+}
+
+/** Generation settings that suit a curated model, used to prefill the panel. */
+export type SdcppDefaults = {
+  width?: number
+  height?: number
+  steps?: number
+  cfg_scale?: number
+  guidance?: number
+  video_frames?: number
+  fps?: number
+}
+
+export type SdcppBundleComponent = {
+  repo_id: string
+  path: string
+  /** sd-cli flag without the dashes; null for a self-contained checkpoint. */
+  flag?: string | null
+  role: string
+  gated: boolean
+  approx_bytes?: number | null
+}
+
+export type SdcppBundle = {
+  id: string
+  label: string
+  modality: 'image' | 'video'
+  key: string
+  summary: string
+  license?: string | null
+  model_id: string
+  installed: boolean
+  gated: boolean
+  approx_bytes?: number | null
+  /** `builtin` ships with the app; `custom` lives in the data directory. */
+  origin: 'builtin' | 'custom'
+  defaults: SdcppDefaults
+  components: SdcppBundleComponent[]
+}
+
+/** A bundle proposed for an arbitrary checkpoint, before it is installed. */
+export type SdcppProposal = {
+  bundle: SdcppBundle
+  architecture: string | null
+  architecture_label: string | null
+  variant: string | null
+  /** How the architecture was identified: GGUF metadata, tensor names, … */
+  detected_by: string
+  self_contained: boolean
+  warnings: string[]
+}
+
+/** Inspect a checkpoint's header on the Hub and propose a bundle for it. */
+export function assembleSdcppBundle(body: {
+  repo_id: string
+  path: string
+  modality?: 'image' | 'video'
+}): Promise<SdcppProposal> {
+  return request('/api/v1/models/sdcpp/assemble', {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+}
+
+export function saveSdcppBundle(bundle: SdcppBundle): Promise<SdcppBundle> {
+  return request('/api/v1/models/sdcpp/bundles', {
+    method: 'PUT',
+    body: JSON.stringify(bundle)
+  })
+}
+
+export function deleteSdcppBundle(id: string): Promise<{ deleted: string }> {
+  return request(`/api/v1/models/sdcpp/bundles/${encodeURIComponent(id)}`, {
+    method: 'DELETE'
+  })
+}
+
+/** Curated sd.cpp bundles: a model plus the VAE and text encoders it needs. */
+export async function listSdcppBundles(): Promise<SdcppBundle[]> {
+  return (await request<{ data: SdcppBundle[] }>('/api/v1/models/sdcpp/catalog')).data
+}
+
+/** Install a saved bundle by id, or a one-off bundle passed inline. */
+export async function installSdcppBundle(
+  target: { id: string } | { bundle: SdcppBundle },
+  onProgress: (event: ProgressEvent) => void
+): Promise<{ model_id: string; path: string; bytes: number }> {
+  const final = await readProgressSse(
+    '/api/v1/models/sdcpp/install?stream=true',
+    { method: 'POST', body: JSON.stringify(target) },
+    onProgress
+  )
+  return final.result as { model_id: string; path: string; bytes: number }
 }
 
 export type VoiceSessionInfo = {

@@ -4,9 +4,11 @@ import {
   fetchBlobObjectUrl,
   generateImage,
   generateVideo,
+  listSdcppBundles,
   type GenerateBlobResult,
   type LocalModel,
-  type RuntimeSettings
+  type RuntimeSettings,
+  type SdcppDefaults
 } from '../api'
 
 type Modality = 'image' | 'video'
@@ -35,9 +37,13 @@ export function GenerateMode(props: Props) {
   const [steps, setSteps] = useState(20)
   const [frames, setFrames] = useState(16)
   const [seed, setSeed] = useState('')
+  const [cfgScale, setCfgScale] = useState(7)
+  const [guidance, setGuidance] = useState('')
+  const [fps, setFps] = useState(24)
   const [busy, setBusy] = useState(false)
   const [results, setResults] = useState<GenerateBlobResult[]>([])
   const [urls, setUrls] = useState<Record<string, string>>({})
+  const [defaultsByModel, setDefaultsByModel] = useState<Record<string, SdcppDefaults>>({})
 
   useEffect(() => {
     let cancelled = false
@@ -61,8 +67,34 @@ export function GenerateMode(props: Props) {
     }
   }, [results])
 
+  // Curated models carry the settings they expect — most importantly CFG,
+  // which has to be 1.0 for distilled models like Flux schnell.
+  useEffect(() => {
+    void listSdcppBundles()
+      .then((bundles) =>
+        setDefaultsByModel(
+          Object.fromEntries(bundles.map((bundle) => [bundle.model_id, bundle.defaults]))
+        )
+      )
+      .catch(() => {
+        // Non-fatal: the panel just keeps whatever settings are on screen.
+      })
+  }, [])
+
   const available = props.models
   const selected = props.modelId
+
+  useEffect(() => {
+    const defaults = defaultsByModel[selected]
+    if (!defaults) return
+    if (defaults.width) setWidth(defaults.width)
+    if (defaults.height) setHeight(defaults.height)
+    if (defaults.steps) setSteps(defaults.steps)
+    if (defaults.cfg_scale != null) setCfgScale(defaults.cfg_scale)
+    setGuidance(defaults.guidance != null ? String(defaults.guidance) : '')
+    if (defaults.video_frames) setFrames(defaults.video_frames)
+    if (defaults.fps) setFps(defaults.fps)
+  }, [selected, defaultsByModel])
 
   async function onSubmit(event: FormEvent): Promise<void> {
     event.preventDefault()
@@ -78,7 +110,10 @@ export function GenerateMode(props: Props) {
         height,
         steps,
         seed: seed.trim() ? Number(seed) : undefined,
-        video_frames: frames
+        cfg_scale: cfgScale,
+        guidance: guidance.trim() ? Number(guidance) : undefined,
+        video_frames: frames,
+        fps
       }
       const result =
         modality === 'image' ? await generateImage(body) : await generateVideo(body)
@@ -178,17 +213,48 @@ export function GenerateMode(props: Props) {
                 onChange={(event) => setSteps(Number(event.target.value))}
               />
             </label>
+            <label title="Classifier-free guidance. Distilled models (Flux schnell, 4-step Wan) need 1.0; SDXL likes 5–8.">
+              CFG scale
+              <input
+                type="number"
+                min={0}
+                max={30}
+                step={0.5}
+                value={cfgScale}
+                onChange={(event) => setCfgScale(Number(event.target.value))}
+              />
+            </label>
+            <label title="Distilled guidance, used by Flux-family models instead of CFG. Leave blank for other architectures.">
+              Guidance
+              <input
+                value={guidance}
+                onChange={(event) => setGuidance(event.target.value)}
+                placeholder="Model default"
+              />
+            </label>
             {modality === 'video' ? (
-              <label>
-                Frames
-                <input
-                  type="number"
-                  min={1}
-                  max={120}
-                  value={frames}
-                  onChange={(event) => setFrames(Number(event.target.value))}
-                />
-              </label>
+              <>
+                <label>
+                  Frames
+                  <input
+                    type="number"
+                    min={1}
+                    max={241}
+                    value={frames}
+                    onChange={(event) => setFrames(Number(event.target.value))}
+                  />
+                </label>
+                <label title="Playback rate written into the clip.">
+                  FPS
+                  <input
+                    type="number"
+                    min={1}
+                    max={60}
+                    value={fps}
+                    onChange={(event) => setFps(Number(event.target.value))}
+                  />
+                </label>
+              </>
             ) : null}
             <label>
               Seed

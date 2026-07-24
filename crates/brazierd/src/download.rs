@@ -1,6 +1,7 @@
 //! Hugging Face artifact download with resume, integrity hashing, and progress.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -867,6 +868,155 @@ pub async fn download_streaming_asr_snapshot_with_progress(
             .await;
     }
     Ok(result)
+}
+
+/// Install a curated stable-diffusion.cpp bundle: every component file plus
+/// the manifest that binds them to sd-cli flags.
+///
+/// Components come from several repositories — a Flux install pulls its VAE
+/// and both text encoders from two other repos — so files are fetched
+/// individually rather than as one snapshot, and the manifest is written last
+/// so a cancelled install leaves nothing the model list would pick up.
+pub async fn install_sdcpp_bundle_with_progress(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    bundle: &crate::sdcpp_catalog::Bundle,
+    mut progress: ProgressCallback,
+    job: Option<(Database, String)>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> anyhow::Result<DownloadResult> {
+    let dir = bundle.install_dir(data_dir)?;
+    progress(ProgressEvent::phase(
+        "start",
+        format!(
+            "Installing {} — {} files including text encoders",
+            bundle.label,
+            bundle.components.len()
+        ),
+    ));
+    if let Some((db, job_id)) = &job {
+        let _ = db.start_download_job(job_id).await;
+    }
+
+    // Resolve real sizes from the Hub: the catalog's figures are estimates for
+    // the install summary, and downloads are verified against the true length.
+    let mut sizes: HashMap<(String, String), Option<u64>> = HashMap::new();
+    for component in &bundle.components {
+        validate_repo_id(&component.repo_id)?;
+        if sizes.contains_key(&(component.repo_id.clone(), component.path.clone())) {
+            continue;
+        }
+        let paths: Vec<String> = bundle
+            .components
+            .iter()
+            .filter(|other| other.repo_id == component.repo_id)
+            .map(|other| other.path.clone())
+            .collect();
+        let infos = crate::hf::paths_info(client, data_dir, &component.repo_id, "main", &paths)
+            .await
+            .with_context(|| format!("look up files in {}", component.repo_id))?;
+        for path in &paths {
+            let size = infos
+                .iter()
+                .find(|info| &info.path == path)
+                .with_context(|| format!("{path} is missing from {}", component.repo_id))?
+                .size;
+            sizes.insert((component.repo_id.clone(), path.clone()), size);
+        }
+    }
+
+    let overall_total = bundle
+        .components
+        .iter()
+        .try_fold(0_u64, |total, component| {
+            sizes
+                .get(&(component.repo_id.clone(), component.path.clone()))
+                .copied()
+                .flatten()
+                .and_then(|size| total.checked_add(size))
+        });
+    let mut total_bytes = 0_u64;
+    let count = bundle.components.len();
+    for (index, component) in bundle.components.iter().enumerate() {
+        if cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            anyhow::bail!("install cancelled");
+        }
+        progress(ProgressEvent::phase(
+            "download",
+            format!("{} ({}/{})", component.role, index + 1, count),
+        ));
+        let destination = crate::sdcpp::component_destination(
+            data_dir,
+            bundle.modality,
+            &bundle.key,
+            component.file_name(),
+        )?;
+        let bytes = download_file_to_with_opts(
+            client,
+            data_dir,
+            &component.repo_id,
+            "main",
+            &component.path,
+            &destination,
+            &mut progress,
+            job.as_ref().map(|(db, id)| (db, id.as_str())),
+            cancel.as_ref(),
+            sizes
+                .get(&(component.repo_id.clone(), component.path.clone()))
+                .copied()
+                .flatten(),
+            Some(SnapshotProgressCtx {
+                completed_before: total_bytes,
+                overall_total,
+                file_index: index,
+                file_count: count,
+                file_path: &component.path,
+            }),
+        )
+        .await?;
+        total_bytes += bytes;
+    }
+
+    progress(ProgressEvent::phase(
+        "verify",
+        "Writing the sd-cli manifest",
+    ));
+    crate::sdcpp::write_manifest(&dir, &bundle.manifest()).await?;
+
+    let result = DownloadResult {
+        model_id: bundle.model_id(),
+        path: dir.display().to_string(),
+        bytes: total_bytes,
+        sha256: bundle_manifest_sha256(bundle),
+        resumed: false,
+        engine: Some("stable-diffusion.cpp".to_owned()),
+        notice: None,
+    };
+    progress(ProgressEvent::done(serde_json::to_value(&result)?));
+    if let Some((db, job_id)) = &job {
+        let _ = db
+            .complete_download_job(job_id, &result.sha256, result.bytes)
+            .await;
+    }
+    Ok(result)
+}
+
+/// Stable identity for an installed bundle, derived from the exact component
+/// list it was built from rather than from the downloaded bytes.
+fn bundle_manifest_sha256(bundle: &crate::sdcpp_catalog::Bundle) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"brazier-sdcpp-bundle-v1\0");
+    digest.update(bundle.id.as_bytes());
+    for component in &bundle.components {
+        digest.update(b"\0");
+        digest.update(component.repo_id.as_bytes());
+        digest.update(b"\0");
+        digest.update(component.path.as_bytes());
+    }
+    hex::encode(digest.finalize())
 }
 
 /// Download a Hugging Face snapshot for PersonaPlex / Moshi.

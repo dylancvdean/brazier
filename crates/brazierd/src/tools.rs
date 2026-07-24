@@ -336,6 +336,10 @@ async fn generate_image_tool(data_dir: &std::path::Path, args: &Value) -> anyhow
             .get("cfg_scale")
             .and_then(Value::as_f64)
             .map(|v| v as f32),
+        guidance: args
+            .get("guidance")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32),
         init_image: None,
     };
     let result =
@@ -389,12 +393,17 @@ async fn generate_video_tool(data_dir: &std::path::Path, args: &Value) -> anyhow
             .get("cfg_scale")
             .and_then(Value::as_f64)
             .map(|v| v as f32),
+        guidance: args
+            .get("guidance")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32),
         init_image: None,
         video_frames: args
             .get("video_frames")
             .and_then(Value::as_u64)
             .map(|v| v as u32)
             .unwrap_or(16),
+        fps: args.get("fps").and_then(Value::as_u64).map(|v| v as u32),
     };
     let result =
         crate::sdcpp::generate_video(data_dir, settings.sdcpp_binary.as_deref(), &request).await?;

@@ -35,7 +35,26 @@ const GITHUB_API: &str = "https://api.github.com/repos/leejet/stable-diffusion.c
 const USER_AGENT: &str = "brazier-sdcpp-manager";
 
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(600);
-const VIDEO_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Floor for a video job, covering model load plus a short clip.
+const VIDEO_TIMEOUT_BASE: Duration = Duration::from_secs(1800);
+/// Added per frame-step, so long clips are not cut off mid-render.
+const VIDEO_TIMEOUT_PER_FRAME_STEP: Duration = Duration::from_millis(1500);
+/// Ceiling, so a wedged sd-cli is still eventually reclaimed.
+const VIDEO_TIMEOUT_MAX: Duration = Duration::from_secs(6 * 3600);
+
+/// Budget for one video job.
+///
+/// Render time scales with frames × steps, and a Wan clip at a useful length
+/// runs well past the half hour a fixed cap allowed, so the deadline grows
+/// with the work requested rather than failing a job that was progressing.
+fn video_timeout(steps: u32, frames: u32) -> Duration {
+    let work = u64::from(steps.max(1)) * u64::from(frames.max(1));
+    VIDEO_TIMEOUT_BASE
+        .saturating_add(
+            VIDEO_TIMEOUT_PER_FRAME_STEP.saturating_mul(work.min(u32::MAX as u64) as u32),
+        )
+        .min(VIDEO_TIMEOUT_MAX)
+}
 
 // ---------------------------------------------------------------------------
 // Managed install
@@ -658,6 +677,44 @@ pub fn model_id(modality: Modality, key: &str) -> String {
     format!("{}:{key}", modality.prefix())
 }
 
+/// Directory a model with this key installs into, after validating the key.
+pub fn model_dir_for_key(
+    data_dir: &Path,
+    modality: Modality,
+    key: &str,
+) -> anyhow::Result<PathBuf> {
+    validate_key(key)?;
+    Ok(modality.root(data_dir).join(key))
+}
+
+/// Destination for one component file inside a model directory.
+pub fn component_destination(
+    data_dir: &Path,
+    modality: Modality,
+    key: &str,
+    file_name: &str,
+) -> anyhow::Result<PathBuf> {
+    validate_component_filename(file_name)?;
+    Ok(model_dir_for_key(data_dir, modality, key)?.join(file_name))
+}
+
+/// Write the sidecar manifest that binds downloaded files to sd-cli flags.
+pub async fn write_manifest(dir: &Path, manifest: &SdcppManifest) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("create {}", dir.display()))?;
+    let payload = serde_json::to_vec_pretty(manifest).context("serialize sdcpp manifest")?;
+    let path = manifest_file_path(dir);
+    tokio::fs::write(&path, payload)
+        .await
+        .with_context(|| format!("write {}", path.display()))
+}
+
+/// Alias of [`model_id`] that reads naturally from the catalog.
+pub fn model_id_for_key(modality: Modality, key: &str) -> String {
+    model_id(modality, key)
+}
+
 /// Split a stable-diffusion.cpp model id into its modality and key.
 pub fn parse_model_id(model_id: &str) -> anyhow::Result<(Modality, &str)> {
     if let Some(key) = model_id.strip_prefix("sdcpp-image:") {
@@ -871,6 +928,9 @@ pub struct GenerateImageRequest {
     pub seed: Option<i64>,
     #[serde(default)]
     pub cfg_scale: Option<f32>,
+    /// Distilled guidance scale, used by Flux-family models instead of CFG.
+    #[serde(default)]
+    pub guidance: Option<f32>,
     /// Optional path to a local image to condition an img2img generation.
     #[serde(default)]
     pub init_image: Option<PathBuf>,
@@ -892,11 +952,17 @@ pub struct GenerateVideoRequest {
     pub seed: Option<i64>,
     #[serde(default)]
     pub cfg_scale: Option<f32>,
+    /// Distilled guidance scale, used by Flux-family models instead of CFG.
+    #[serde(default)]
+    pub guidance: Option<f32>,
     /// Optional path to a local image to condition an img2vid generation.
     #[serde(default)]
     pub init_image: Option<PathBuf>,
     #[serde(default = "default_video_frames")]
     pub video_frames: u32,
+    /// Playback rate written into the clip; sd-cli defaults to 24.
+    #[serde(default)]
+    pub fps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1023,6 +1089,9 @@ pub async fn generate_image(
     if let Some(cfg_scale) = request.cfg_scale {
         command.arg("--cfg-scale").arg(cfg_scale.to_string());
     }
+    if let Some(guidance) = request.guidance {
+        command.arg("--guidance").arg(guidance.to_string());
+    }
     if let Some(init_image) = &request.init_image {
         command.arg("-i").arg(init_image);
     }
@@ -1108,6 +1177,12 @@ pub async fn generate_video(
     if let Some(cfg_scale) = request.cfg_scale {
         command.arg("--cfg-scale").arg(cfg_scale.to_string());
     }
+    if let Some(guidance) = request.guidance {
+        command.arg("--guidance").arg(guidance.to_string());
+    }
+    if let Some(fps) = request.fps {
+        command.arg("--fps").arg(fps.to_string());
+    }
     if let Some(init_image) = &request.init_image {
         command.arg("-i").arg(init_image);
     }
@@ -1116,7 +1191,7 @@ pub async fn generate_video(
         prepend_library_path(&mut command, dir);
     }
 
-    run_sd_cli(command, VIDEO_TIMEOUT).await?;
+    run_sd_cli(command, video_timeout(request.steps, request.video_frames)).await?;
     anyhow::ensure!(
         output_path.is_file(),
         "sd-cli did not produce an output video at {}",
@@ -1143,6 +1218,66 @@ pub async fn generate_video(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn video_timeout_grows_with_the_work_requested() {
+        // A long clip must not be killed while it is still rendering.
+        let short = video_timeout(20, 16);
+        let long = video_timeout(30, 81);
+        assert!(short >= VIDEO_TIMEOUT_BASE);
+        assert!(long > short, "{long:?} should exceed {short:?}");
+        assert!(long <= VIDEO_TIMEOUT_MAX);
+        // Absurd requests still hit a ceiling rather than hanging forever.
+        assert_eq!(video_timeout(150, 241), VIDEO_TIMEOUT_MAX);
+        // Zero-ish inputs must not underflow into an instant timeout.
+        assert!(video_timeout(0, 0) >= VIDEO_TIMEOUT_BASE);
+    }
+
+    #[test]
+    fn manifests_round_trip_through_the_install_helpers() {
+        let dir = tempdir().unwrap();
+        let target =
+            model_dir_for_key(dir.path(), Modality::Image, "acme/flux").expect("valid key");
+        let manifest = SdcppManifest {
+            modality: Modality::Image,
+            args: BTreeMap::from([
+                ("diffusion-model".to_owned(), "model.gguf".to_owned()),
+                ("t5xxl".to_owned(), "t5xxl_fp16.safetensors".to_owned()),
+            ]),
+            single_file: None,
+        };
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(write_manifest(&target, &manifest))
+            .unwrap();
+        let loaded = load_manifest(&target).unwrap();
+        assert_eq!(loaded.modality, Modality::Image);
+        assert_eq!(
+            loaded.args.get("t5xxl").map(String::as_str),
+            Some("t5xxl_fp16.safetensors")
+        );
+    }
+
+    #[test]
+    fn component_destinations_reject_traversal() {
+        let dir = tempdir().unwrap();
+        assert!(
+            component_destination(
+                dir.path(),
+                Modality::Video,
+                "acme/wan",
+                "../escape.safetensors"
+            )
+            .is_err()
+        );
+        assert!(
+            component_destination(dir.path(), Modality::Video, "../..", "vae.safetensors").is_err()
+        );
+        assert!(
+            component_destination(dir.path(), Modality::Video, "acme/wan", "vae.safetensors")
+                .is_ok()
+        );
+    }
 
     #[test]
     fn selects_macos_arm64_asset() {

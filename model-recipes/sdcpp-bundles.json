@@ -1,0 +1,156 @@
+{
+  "bundles": [
+    {
+      "id": "sdxl-base-1.0",
+      "label": "SDXL 1.0 base",
+      "modality": "image",
+      "key": "stabilityai/sdxl-base-1.0",
+      "summary": "The dependable baseline: one self-contained checkpoint, no separate text encoders, and the largest LoRA and finetune ecosystem.",
+      "license": "openrail++",
+      "defaults": { "width": 1024, "height": 1024, "steps": 30, "cfg_scale": 7.0 },
+      "components": [
+        {
+          "repo_id": "stabilityai/stable-diffusion-xl-base-1.0",
+          "path": "sd_xl_base_1.0.safetensors",
+          "role": "Checkpoint (UNet + VAE + text encoders)",
+          "approx_bytes": 6938040706
+        }
+      ]
+    },
+    {
+      "id": "realvisxl-v5",
+      "label": "RealVisXL V5.0",
+      "modality": "image",
+      "key": "SG161222/realvisxl-v5",
+      "summary": "Photoreal SDXL finetune. Same single-file simplicity as SDXL base, noticeably better faces and lighting.",
+      "license": "openrail++",
+      "defaults": { "width": 1024, "height": 1024, "steps": 30, "cfg_scale": 5.0 },
+      "components": [
+        {
+          "repo_id": "SG161222/RealVisXL_V5.0",
+          "path": "RealVisXL_V5.0_fp16.safetensors",
+          "role": "Checkpoint (UNet + VAE + text encoders)",
+          "approx_bytes": 6938040706
+        }
+      ]
+    },
+    {
+      "id": "flux1-schnell-q8",
+      "label": "FLUX.1 schnell (Q8_0)",
+      "modality": "image",
+      "key": "black-forest-labs/flux1-schnell-q8",
+      "summary": "Best quality per second: Apache-2.0, four steps, and CFG pinned at 1.0. Pulls its two text encoders and VAE alongside the diffusion weights.",
+      "license": "apache-2.0",
+      "defaults": { "width": 1024, "height": 1024, "steps": 4, "cfg_scale": 1.0 },
+      "components": [
+        {
+          "repo_id": "city96/FLUX.1-schnell-gguf",
+          "path": "flux1-schnell-Q8_0.gguf",
+          "flag": "diffusion-model",
+          "role": "Diffusion model",
+          "approx_bytes": 12600000000
+        },
+        {
+          "repo_id": "black-forest-labs/FLUX.1-schnell",
+          "path": "ae.safetensors",
+          "flag": "vae",
+          "role": "VAE",
+          "gated": true,
+          "approx_bytes": 335304388
+        },
+        {
+          "repo_id": "comfyanonymous/flux_text_encoders",
+          "path": "clip_l.safetensors",
+          "flag": "clip_l",
+          "role": "Text encoder (CLIP-L)",
+          "approx_bytes": 246144152
+        },
+        {
+          "repo_id": "comfyanonymous/flux_text_encoders",
+          "path": "t5xxl_fp16.safetensors",
+          "flag": "t5xxl",
+          "role": "Text encoder (T5-XXL)",
+          "approx_bytes": 9787841024
+        }
+      ]
+    },
+    {
+      "id": "wan2.2-ti2v-5b",
+      "label": "Wan 2.2 TI2V 5B",
+      "modality": "video",
+      "key": "wan-ai/wan2.2-ti2v-5b",
+      "summary": "One model for text-to-video and image-to-video at up to 720p. The best video starting point on Apple Silicon.",
+      "license": "apache-2.0",
+      "defaults": {
+        "width": 704,
+        "height": 480,
+        "steps": 20,
+        "cfg_scale": 5.0,
+        "video_frames": 49,
+        "fps": 24
+      },
+      "components": [
+        {
+          "repo_id": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+          "path": "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
+          "flag": "diffusion-model",
+          "role": "Diffusion model",
+          "approx_bytes": 10200000000
+        },
+        {
+          "repo_id": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+          "path": "split_files/vae/wan2.2_vae.safetensors",
+          "flag": "vae",
+          "role": "VAE",
+          "approx_bytes": 1400000000
+        },
+        {
+          "repo_id": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+          "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+          "flag": "t5xxl",
+          "role": "Text encoder (umT5-XXL)",
+          "approx_bytes": 6700000000
+        }
+      ]
+    },
+    {
+      "id": "wan2.1-t2v-1.3b",
+      "label": "Wan 2.1 T2V 1.3B",
+      "modality": "video",
+      "key": "wan-ai/wan2.1-t2v-1.3b",
+      "summary": "The small, fast video model. 480p clips in a fraction of the time — good for finding a prompt before committing to the 5B.",
+      "license": "apache-2.0",
+      "defaults": {
+        "width": 832,
+        "height": 480,
+        "steps": 20,
+        "cfg_scale": 6.0,
+        "video_frames": 49,
+        "fps": 16
+      },
+      "components": [
+        {
+          "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+          "path": "split_files/diffusion_models/wan2.1_t2v_1.3B_bf16.safetensors",
+          "flag": "diffusion-model",
+          "role": "Diffusion model",
+          "approx_bytes": 2900000000
+        },
+        {
+          "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+          "path": "split_files/vae/wan_2.1_vae.safetensors",
+          "flag": "vae",
+          "role": "VAE",
+          "approx_bytes": 254000000
+        },
+        {
+          "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+          "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+          "flag": "t5xxl",
+          "role": "Text encoder (umT5-XXL)",
+          "approx_bytes": 6700000000
+        }
+      ]
+    }
+  ]
+}

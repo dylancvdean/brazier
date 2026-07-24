@@ -310,6 +310,52 @@ pub async fn list_repo_files(
         .collect())
 }
 
+/// Exact sizes for specific files in a repository.
+///
+/// The tree API only lists one directory level, so nested component paths
+/// (`split_files/vae/…`) need the paths-info endpoint. Resolving real sizes
+/// up front also confirms every path exists before any bytes are fetched.
+pub async fn paths_info(
+    client: &reqwest::Client,
+    data_dir: &std::path::Path,
+    repo_id: &str,
+    revision: &str,
+    paths: &[String],
+) -> anyhow::Result<Vec<RepoFile>> {
+    crate::models_store::validate_repo_id(repo_id)?;
+    anyhow::ensure!(!revision.is_empty(), "revision is required");
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!("https://huggingface.co/api/models/{repo_id}/paths-info/{revision}");
+    let values: Vec<Value> = hf_auth::apply_auth(client.post(url), data_dir)
+        .json(&serde_json::json!({ "paths": paths }))
+        .send()
+        .await
+        .context("contact Hugging Face paths-info API")?
+        .error_for_status()
+        .context("Hugging Face paths-info request failed")?
+        .json()
+        .await
+        .context("decode Hugging Face paths-info response")?;
+    Ok(values
+        .into_iter()
+        .filter_map(|value| {
+            let path = value.get("path")?.as_str()?.to_owned();
+            if value.get("type").and_then(Value::as_str).unwrap_or("file") != "file" {
+                return None;
+            }
+            // LFS-backed files report the real size under `lfs`.
+            let size = value
+                .get("lfs")
+                .and_then(|lfs| lfs.get("size"))
+                .and_then(Value::as_u64)
+                .or_else(|| value.get("size").and_then(Value::as_u64));
+            Some(RepoFile { path, size })
+        })
+        .collect())
+}
+
 /// Fetch a short plain-text description for a model from its README.
 pub async fn model_description(
     client: &reqwest::Client,

@@ -26,6 +26,8 @@ pub mod progress;
 pub mod runtime_settings;
 pub mod runtimes;
 pub mod sdcpp;
+pub mod sdcpp_arch;
+pub mod sdcpp_catalog;
 pub mod streaming_asr;
 pub mod tool_registry;
 pub mod toolchain_hints;

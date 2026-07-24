@@ -34,7 +34,7 @@ use crate::{
     hf::{self, SearchQuery},
     hf_auth, llama, mcp, media, model_bindings, models_store,
     progress::ProgressEvent,
-    runtimes, sdcpp, streaming_asr, tool_registry, toolchain_hints,
+    runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry, toolchain_hints,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
@@ -167,6 +167,17 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/engines/stable-diffusion.cpp/managed-status",
             get(managed_sdcpp_status),
         )
+        .route("/api/v1/models/sdcpp/catalog", get(sdcpp_catalog))
+        .route("/api/v1/models/sdcpp/assemble", post(assemble_sdcpp_bundle))
+        .route(
+            "/api/v1/models/sdcpp/bundles",
+            axum::routing::put(save_sdcpp_bundle),
+        )
+        .route(
+            "/api/v1/models/sdcpp/bundles/{id}",
+            axum::routing::delete(delete_sdcpp_bundle),
+        )
+        .route("/api/v1/models/sdcpp/install", post(install_sdcpp_bundle))
         .route("/api/v1/generate/image", post(generate_image))
         .route("/api/v1/generate/video", post(generate_video))
         .route(
@@ -1469,6 +1480,8 @@ struct GenerateImageApiRequest {
     #[serde(default)]
     cfg_scale: Option<f32>,
     #[serde(default)]
+    guidance: Option<f32>,
+    #[serde(default)]
     init_image_blob: Option<String>,
 }
 
@@ -1489,6 +1502,10 @@ struct GenerateVideoApiRequest {
     seed: Option<i64>,
     #[serde(default)]
     cfg_scale: Option<f32>,
+    #[serde(default)]
+    guidance: Option<f32>,
+    #[serde(default)]
+    fps: Option<u32>,
     #[serde(default)]
     init_image_blob: Option<String>,
     #[serde(default)]
@@ -1532,6 +1549,7 @@ async fn generate_image(
         steps: request.steps.unwrap_or(20),
         seed: request.seed,
         cfg_scale: request.cfg_scale,
+        guidance: request.guidance,
         init_image,
     };
     let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
@@ -1586,8 +1604,10 @@ async fn generate_video(
         steps: request.steps.unwrap_or(20),
         seed: request.seed,
         cfg_scale: request.cfg_scale,
+        guidance: request.guidance,
         init_image,
         video_frames: request.video_frames.unwrap_or(16),
+        fps: request.fps,
     };
     let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
     let generated =
@@ -2233,7 +2253,9 @@ async fn audio_transcriptions(
         .or(settings.whisper_model.as_deref());
     let model_path = whisper::resolve_model_path(&state.data_dir, model_pref);
     if !whisperkit::is_whisperkit_binary(&binary) && model_path.is_none() {
-        return Err(ApiError::bad_request(media::asr_missing_message().to_owned()));
+        return Err(ApiError::bad_request(
+            media::asr_missing_message().to_owned(),
+        ));
     }
 
     let (sha256, mime) = resolve_transcription_blob(&state, &request).await?;
@@ -2403,6 +2425,185 @@ async fn download_personaplex_model(
                 push_progress(
                     &tx,
                     ProgressEvent::done(serde_json::to_value(&download_result).unwrap_or_default()),
+                );
+            }
+            Err(error) => {
+                push_progress(&tx, ProgressEvent::error(error.to_string()));
+            }
+        }
+    });
+    progress_sse(rx)
+}
+
+/// Every stable-diffusion.cpp bundle on offer, with what is already installed.
+async fn sdcpp_catalog(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let data: Vec<Value> = sdcpp_catalog::catalog(&state.data_dir)
+        .into_iter()
+        .map(|entry| bundle_json(&entry.bundle, entry.origin, &state.data_dir))
+        .collect();
+    Ok(Json(json!({ "data": data })))
+}
+
+fn bundle_json(
+    bundle: &sdcpp_catalog::Bundle,
+    origin: sdcpp_catalog::Origin,
+    data_dir: &std::path::Path,
+) -> Value {
+    json!({
+        "id": bundle.id,
+        "label": bundle.label,
+        "modality": bundle.modality,
+        "key": bundle.key,
+        "summary": bundle.summary,
+        "license": bundle.license,
+        "model_id": bundle.model_id(),
+        "installed": bundle.installed(data_dir),
+        "gated": bundle.gated(),
+        "approx_bytes": bundle.approx_bytes(),
+        "origin": origin,
+        "defaults": bundle.defaults,
+        "components": bundle.components.iter().map(|component| json!({
+            "repo_id": component.repo_id,
+            "path": component.path,
+            "flag": component.flag,
+            "role": component.role,
+            "gated": component.gated,
+            "approx_bytes": component.approx_bytes,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct AssembleSdcppRequest {
+    repo_id: String,
+    path: String,
+    #[serde(default)]
+    modality: Option<sdcpp::Modality>,
+}
+
+/// Inspect a checkpoint on the Hub and propose a bundle for it.
+///
+/// Only the file's header is fetched, so this stays fast even for a 20 GB
+/// model, and the proposal is returned for review rather than installed.
+async fn assemble_sdcpp_bundle(
+    State(state): State<AppState>,
+    Json(request): Json<AssembleSdcppRequest>,
+) -> ApiResult<Json<Value>> {
+    let probe = sdcpp_arch::probe_hub_file(
+        &state.http,
+        &state.data_dir,
+        &request.repo_id,
+        &request.path,
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
+    let proposal = sdcpp_arch::assemble(&request.repo_id, &request.path, &probe, request.modality);
+    Ok(Json(json!({
+        "bundle": bundle_json(&proposal.bundle, sdcpp_catalog::Origin::Custom, &state.data_dir),
+        "architecture": proposal.architecture,
+        "architecture_label": proposal.architecture_label,
+        "variant": proposal.variant,
+        "detected_by": proposal.detected_by,
+        "self_contained": proposal.self_contained,
+        "warnings": proposal.warnings,
+    })))
+}
+
+/// Save a locally defined bundle, whether assembled or hand-written.
+async fn save_sdcpp_bundle(
+    State(state): State<AppState>,
+    Json(bundle): Json<sdcpp_catalog::Bundle>,
+) -> ApiResult<Json<Value>> {
+    let saved =
+        sdcpp_catalog::save_custom(&state.data_dir, bundle).map_err(ApiError::bad_request)?;
+    Ok(Json(bundle_json(
+        &saved,
+        sdcpp_catalog::Origin::Custom,
+        &state.data_dir,
+    )))
+}
+
+async fn delete_sdcpp_bundle(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    sdcpp_catalog::delete_custom(&state.data_dir, &id).map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "deleted": id })))
+}
+
+#[derive(Debug, Deserialize)]
+struct InstallSdcppBundleRequest {
+    #[serde(default)]
+    id: Option<String>,
+    /// A bundle to install directly, without saving it to the catalog first.
+    #[serde(default)]
+    bundle: Option<sdcpp_catalog::Bundle>,
+}
+
+async fn install_sdcpp_bundle(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<InstallSdcppBundleRequest>,
+) -> Response {
+    let bundle = match (request.bundle, request.id) {
+        (Some(bundle), _) => match sdcpp_catalog::validate(&bundle) {
+            Ok(()) => bundle,
+            Err(error) => return ApiError::bad_request(error).into_response(),
+        },
+        (None, Some(id)) => match sdcpp_catalog::find(&state.data_dir, &id) {
+            Some(bundle) => bundle,
+            None => {
+                return ApiError::bad_request(format!("unknown model bundle `{id}`"))
+                    .into_response();
+            }
+        },
+        (None, None) => {
+            return ApiError::bad_request("id or bundle is required").into_response();
+        }
+    };
+
+    if !query.stream {
+        let result = download::install_sdcpp_bundle_with_progress(
+            &state.http,
+            &state.data_dir,
+            &bundle,
+            Box::new(|_| {}),
+            None,
+            None,
+        )
+        .await;
+        return match result {
+            Ok(result) => {
+                state.invalidate_models_cache().await;
+                (StatusCode::OK, Json(json!(result))).into_response()
+            }
+            Err(error) => ApiError::bad_request(error).into_response(),
+        };
+    }
+
+    let (tx, rx) = progress_channel();
+    let http = state.http.clone();
+    let data_dir = state.data_dir.clone();
+    let cache_state = state.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let result = download::install_sdcpp_bundle_with_progress(
+            &http,
+            &data_dir,
+            &bundle,
+            Box::new(move |event| {
+                push_progress(&progress_tx, event);
+            }),
+            None,
+            None,
+        )
+        .await;
+        match result {
+            Ok(install) => {
+                cache_state.invalidate_models_cache().await;
+                push_progress(
+                    &tx,
+                    ProgressEvent::done(serde_json::to_value(&install).unwrap_or_default()),
                 );
             }
             Err(error) => {

@@ -41,7 +41,12 @@ import {
   fetchManagedWhisperStatus,
   fetchManagedLlamaStatus,
   fetchModelTrust,
+  assembleSdcppBundle,
+  deleteSdcppBundle,
   formatBytes,
+  installSdcppBundle,
+  listSdcppBundles,
+  saveSdcppBundle,
   clearHuggingFaceToken,
   huggingFaceTokenStatus,
   listDownloadJobs,
@@ -68,7 +73,9 @@ import {
   setHuggingFaceToken,
   queueModelDownload,
   refreshMcpServer,
-  updateMcpServer
+  updateMcpServer,
+  type SdcppBundle,
+  type SdcppProposal
 } from '../api'
 import {
   engineBadgeClass,
@@ -865,6 +872,13 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
 
 function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [query, setQuery] = useState('')
+  const [bundles, setBundles] = useState<SdcppBundle[]>([])
+  const [bundlesLoading, setBundlesLoading] = useState(false)
+  const [installingBundle, setInstallingBundle] = useState<string | null>(null)
+  const [assembleRepo, setAssembleRepo] = useState('')
+  const [assemblePath, setAssemblePath] = useState('')
+  const [assembling, setAssembling] = useState(false)
+  const [proposal, setProposal] = useState<SdcppProposal | null>(null)
   const [discoverEngine, setDiscoverEngine] = useState<DiscoverEngine>(() =>
     defaultDiscoverEngine(props.hardware)
   )
@@ -998,6 +1012,113 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       props.onError(errorText(cause))
     } finally {
       setSearching(false)
+    }
+  }
+
+  // sd.cpp models are installed as curated bundles rather than single files:
+  // Flux and Wan need their VAE and text encoders fetched alongside the
+  // diffusion weights, and a manifest written so sd-cli can find them.
+  const isSdcpp = discoverEngine === 'stable-diffusion.cpp'
+
+  useEffect(() => {
+    if (!isSdcpp || bundles.length > 0) return
+    setBundlesLoading(true)
+    void listSdcppBundles()
+      .then(setBundles)
+      .catch((cause: unknown) => props.onError(errorText(cause)))
+      .finally(() => setBundlesLoading(false))
+  }, [isSdcpp])
+
+  async function refreshBundles(): Promise<void> {
+    try {
+      setBundles(await listSdcppBundles())
+    } catch {
+      // Non-fatal: the list keeps showing what it last loaded.
+    }
+  }
+
+  async function installBundle(bundle: SdcppBundle): Promise<void> {
+    if (bundle.gated && hfTokenSource === 'none') {
+      props.onError(
+        `${bundle.label} includes a file from a gated repository. Accept its terms on Hugging Face and save an access token above first.`
+      )
+      return
+    }
+    const key = `bundle::${bundle.id}`
+    setDownloadProgress({ key, event: null })
+    setInstallingBundle(bundle.id)
+    props.onError(null)
+    try {
+      const result = await installSdcppBundle({ id: bundle.id }, (event) =>
+        setDownloadProgress({ key, event })
+      )
+      await props.refreshModels()
+      await refreshBundles()
+      if (result?.model_id) props.onSelectModel(result.model_id)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setInstallingBundle(null)
+      setDownloadProgress(null)
+    }
+  }
+
+  async function assembleBundle(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    if (!assembleRepo.trim() || !assemblePath.trim()) return
+    setAssembling(true)
+    setProposal(null)
+    props.onError(null)
+    try {
+      setProposal(
+        await assembleSdcppBundle({
+          repo_id: assembleRepo.trim(),
+          path: assemblePath.trim()
+        })
+      )
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setAssembling(false)
+    }
+  }
+
+  /** Edit one component of the proposal before it is saved or installed. */
+  function updateProposalComponent(
+    index: number,
+    patch: { repo_id?: string; path?: string }
+  ): void {
+    setProposal((current) => {
+      if (!current) return current
+      const components = current.bundle.components.map((component, position) =>
+        position === index ? { ...component, ...patch } : component
+      )
+      return { ...current, bundle: { ...current.bundle, components } }
+    })
+  }
+
+  async function saveProposal(install: boolean): Promise<void> {
+    if (!proposal) return
+    props.onError(null)
+    try {
+      const saved = await saveSdcppBundle(proposal.bundle)
+      await refreshBundles()
+      setProposal(null)
+      setAssembleRepo('')
+      setAssemblePath('')
+      if (install) await installBundle(saved)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function removeBundle(bundle: SdcppBundle): Promise<void> {
+    props.onError(null)
+    try {
+      await deleteSdcppBundle(bundle.id)
+      await refreshBundles()
+    } catch (cause) {
+      props.onError(errorText(cause))
     }
   }
 
@@ -1289,20 +1410,22 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           )}
         </div>
       </form>
-      <form className="model-search" onSubmit={(event) => void findModels(event)}>
-        <label>
-          <Search size={16} />
-          <input
-            aria-label="Search Hugging Face"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Model name or author"
-          />
-        </label>
-        <button type="submit" disabled={searching || !query.trim()}>
-          {searching ? <LoaderCircle className="spin" size={15} /> : 'Search'}
-        </button>
-      </form>
+      {!isSdcpp && (
+        <form className="model-search" onSubmit={(event) => void findModels(event)}>
+          <label>
+            <Search size={16} />
+            <input
+              aria-label="Search Hugging Face"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Model name or author"
+            />
+          </label>
+          <button type="submit" disabled={searching || !query.trim()}>
+            {searching ? <LoaderCircle className="spin" size={15} /> : 'Search'}
+          </button>
+        </form>
+      )}
       <DownloadProgressTray
         live={downloadProgress}
         jobs={downloadJobs}
@@ -1352,7 +1475,169 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           })}
         </div>
       )}
-      {!hasSearched && (
+      {isSdcpp && (
+        <div className="bundle-assemble">
+          <div className="section-label">Add any model from Hugging Face</div>
+          <p className="manage-subtext">
+            Brazier reads the checkpoint's header to work out its architecture, then fills in the
+            VAE and text encoders sd-cli will need. Review the file list before installing.
+          </p>
+          <form className="build-form" onSubmit={(event) => void assembleBundle(event)}>
+            <label>
+              <span>Repository</span>
+              <input
+                value={assembleRepo}
+                onChange={(event) => setAssembleRepo(event.target.value)}
+                placeholder="city96/FLUX.1-dev-gguf"
+              />
+            </label>
+            <label>
+              <span>File path in the repo</span>
+              <input
+                value={assemblePath}
+                onChange={(event) => setAssemblePath(event.target.value)}
+                placeholder="flux1-dev-Q4_K_S.gguf"
+              />
+            </label>
+            <button
+              className="chip-button"
+              type="submit"
+              disabled={assembling || !assembleRepo.trim() || !assemblePath.trim()}
+            >
+              {assembling ? <LoaderCircle className="spin" size={13} /> : <Search size={13} />}
+              Identify model
+            </button>
+          </form>
+
+          {proposal && (
+            <article className="bundle-card proposal">
+              <div className="bundle-head">
+                <strong>{proposal.bundle.label}</strong>
+                <span className="bundle-meta">
+                  {proposal.architecture_label ?? 'Unrecognized architecture'}
+                  {proposal.variant ? ` · ${proposal.variant}` : ''}
+                  {` · detected by ${proposal.detected_by}`}
+                </span>
+              </div>
+              {proposal.warnings.map((warning) => (
+                <p className="bundle-warning" key={warning}>
+                  <ShieldAlert size={13} /> {warning}
+                </p>
+              ))}
+              <div className="proposal-components">
+                {proposal.bundle.components.map((component, index) => (
+                  <div className="proposal-row" key={`${component.role}-${index}`}>
+                    <span className="bundle-role">
+                      {component.role}
+                      {component.flag ? <code>--{component.flag}</code> : <code>-m</code>}
+                    </span>
+                    <input
+                      aria-label={`${component.role} repository`}
+                      value={component.repo_id}
+                      onChange={(event) =>
+                        updateProposalComponent(index, { repo_id: event.target.value })
+                      }
+                    />
+                    <input
+                      aria-label={`${component.role} file`}
+                      value={component.path}
+                      onChange={(event) =>
+                        updateProposalComponent(index, { path: event.target.value })
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="proposal-actions">
+                <button className="chip-button" onClick={() => void saveProposal(true)}>
+                  <Download size={13} /> Save and install
+                </button>
+                <button className="chip-button subtle" onClick={() => void saveProposal(false)}>
+                  Save for later
+                </button>
+                <button className="chip-button subtle" onClick={() => setProposal(null)}>
+                  Discard
+                </button>
+              </div>
+            </article>
+          )}
+        </div>
+      )}
+      {isSdcpp && (
+        <div className="bundle-list">
+          <div className="section-label">Curated models · installs every required file</div>
+          {bundlesLoading && bundles.length === 0 && (
+            <p className="empty-models-inline">
+              <LoaderCircle className="spin" size={14} /> Loading the model catalog…
+            </p>
+          )}
+          {bundles.map((bundle) => {
+            const installing = installingBundle === bundle.id
+            return (
+              <article className="bundle-card" key={bundle.id}>
+                <div className="bundle-head">
+                  <strong>
+                    {bundle.label}
+                    {bundle.installed && <span className="installed-badge">Installed</span>}
+                    {bundle.gated && !bundle.installed && (
+                      <span className="installed-badge gated">Token required</span>
+                    )}
+                  </strong>
+                  <span className="bundle-meta">
+                    {bundle.modality === 'video' ? 'Video' : 'Image'}
+                    {bundle.origin === 'custom' ? ' · Yours' : ''}
+                    {bundle.license ? ` · ${bundle.license}` : ''}
+                    {bundle.approx_bytes ? ` · ~${formatBytes(bundle.approx_bytes)}` : ''}
+                  </span>
+                </div>
+                <p className="bundle-summary">{bundle.summary}</p>
+                <ul className="bundle-components">
+                  {bundle.components.map((component) => (
+                    <li key={`${component.repo_id}/${component.path}`}>
+                      <span className="bundle-role">{component.role}</span>
+                      <code>{component.repo_id}</code>
+                      {component.approx_bytes ? (
+                        <span className="bundle-size">{formatBytes(component.approx_bytes)}</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+                <div className="bundle-actions">
+                <button
+                  className="chip-button"
+                  disabled={installing || bundle.installed || installingBundle != null}
+                  onClick={() => void installBundle(bundle)}
+                >
+                  {installing ? (
+                    <>
+                      <LoaderCircle className="spin" size={13} /> Installing…
+                    </>
+                  ) : bundle.installed ? (
+                    <>
+                      <Check size={13} /> Installed
+                    </>
+                  ) : (
+                    <>
+                      <Download size={13} /> Install all {bundle.components.length} files
+                    </>
+                  )}
+                </button>
+                {bundle.origin === 'custom' && (
+                  <button
+                    className="chip-button subtle"
+                    title="Remove this bundle from the list. Downloaded files stay on disk."
+                    onClick={() => void removeBundle(bundle)}
+                  >
+                    <Trash2 size={13} /> Forget
+                  </button>
+                )}
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      )}
+      {!isSdcpp && !hasSearched && (
         <div className="section-label suggested-label">
           {suggestLoading
             ? 'Loading suggestions…'
@@ -1361,13 +1646,13 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
               : 'Type a model name or author to search'}
         </div>
       )}
-      {hasSearched && !searching && results.length === 0 && (
+      {!isSdcpp && hasSearched && !searching && results.length === 0 && (
         <p className="empty-models-inline">
           No models matched “{query.trim()}”. Try a different name or author.
         </p>
       )}
       <div className="model-results">
-        {(hasSearched ? results : suggested).map((model) => {
+        {(isSdcpp ? [] : hasSearched ? results : suggested).map((model) => {
           const expanded = expandedRepo === model.id
           const files = (repoFiles[model.id] ?? []).filter((file) => {
             const lower = file.path.toLowerCase()
