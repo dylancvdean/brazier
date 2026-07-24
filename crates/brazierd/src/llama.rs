@@ -1210,7 +1210,12 @@ mod tests {
                 role: "user".into(),
                 content: json!([
                     {"type": "text", "text": "Describe"},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,xx"}}
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,xx"}},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": "AAAA", "format": "wav"},
+                        "brazier_sha256": "deadbeef"
+                    }
                 ]),
                 tool_calls: None,
                 tool_call_id: None,
@@ -1232,6 +1237,11 @@ mod tests {
         assert!(!body["stream"].as_bool().unwrap());
         assert_eq!(body["messages"][0]["content"][0]["text"], "Describe");
         assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
+        assert_eq!(body["messages"][0]["content"][2]["type"], "input_audio");
+        assert_eq!(
+            body["messages"][0]["content"][2]["input_audio"]["format"],
+            "wav"
+        );
         let streamed = translate_chat_request(&request, &settings, "local", true);
         assert!(streamed["stream"].as_bool().unwrap());
     }

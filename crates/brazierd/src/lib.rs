@@ -27,6 +27,7 @@ pub mod runtimes;
 pub mod tool_registry;
 pub mod toolchain_hints;
 pub mod tools;
+pub mod streaming_asr;
 pub mod types;
 pub mod whisper;
 

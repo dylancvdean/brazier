@@ -12,7 +12,7 @@ use crate::{builds, llama};
 
 pub const ENGINE: &str = "llama.cpp";
 const MANAGED_FLAVORS: &[&str] = &["cuda", "rocm", "vulkan"];
-const PYTHON_ENGINES: &[&str] = &["mlx-lm", "mlx-vlm"];
+const PYTHON_ENGINES: &[&str] = &["mlx-lm", "mlx-vlm", "streaming-asr"];
 
 fn llama_target_label(target: &str) -> &str {
     match target {
@@ -35,6 +35,7 @@ pub struct ActiveRuntimes {
     pub mlx_lm: Option<PathBuf>,
     pub mlx_vlm: Option<PathBuf>,
     pub whisper: Option<PathBuf>,
+    pub streaming_asr: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,10 +144,17 @@ pub fn list(
     for engine in PYTHON_ENGINES {
         for (build_id, record) in builds::list_builds(data_dir, engine) {
             let path = PathBuf::from(&record.binary);
-            let display = if *engine == "mlx-lm" {
-                "MLX-LM"
-            } else {
-                "MLX-VLM"
+            let display = match *engine {
+                "mlx-lm" => "MLX-LM",
+                "mlx-vlm" => "MLX-VLM",
+                "streaming-asr" => "Streaming ASR",
+                other => other,
+            };
+            let selected = match *engine {
+                "mlx-lm" => &active.mlx_lm,
+                "mlx-vlm" => &active.mlx_vlm,
+                "streaming-asr" => &active.streaming_asr,
+                _ => &None,
             };
             entries.push(RuntimeEntry {
                 id: format!("{engine}-source-{build_id}"),
@@ -157,14 +165,7 @@ pub fn list(
                 version: Some(record.revision.clone()),
                 repository: Some(record.repository.clone()),
                 path: record.binary.clone(),
-                active: is_active(
-                    &path,
-                    if *engine == "mlx-lm" {
-                        &active.mlx_lm
-                    } else {
-                        &active.mlx_vlm
-                    },
-                ),
+                active: is_active(&path, selected),
                 deletable: true,
             });
         }

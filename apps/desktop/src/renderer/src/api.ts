@@ -658,6 +658,24 @@ export async function downloadMlxModel(
   return result
 }
 
+export async function downloadStreamingAsrModel(
+  repoId: string,
+  onProgress: (event: ProgressEvent) => void,
+  revision = 'main'
+): Promise<DownloadResult> {
+  const final = await readProgressSse(
+    '/api/v1/models/download/streaming-asr?stream=true',
+    {
+      method: 'POST',
+      body: JSON.stringify({ repo_id: repoId, engine: 'streaming-asr', revision })
+    },
+    onProgress
+  )
+  const result = final.result as DownloadResult | undefined
+  if (!result?.model_id) throw new Error('Download completed without a model id.')
+  return result
+}
+
 export type ManagedLlamaTargetStatus = {
   target: string
   installed: boolean

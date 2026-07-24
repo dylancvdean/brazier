@@ -36,7 +36,7 @@ use crate::{
     llama,
     mcp,
     progress::ProgressEvent,
-    runtimes, tool_registry, whisper,
+    runtimes, streaming_asr, tool_registry, whisper,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
@@ -166,6 +166,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/runtimes/build/cancel", post(cancel_build))
         .route("/api/v1/models/download", post(download_model))
         .route("/api/v1/models/download/mlx", post(download_mlx_model))
+        .route(
+            "/api/v1/models/download/streaming-asr",
+            post(download_streaming_asr_model),
+        )
         .route("/api/v1/models/download/queue", post(queue_model_download))
         .route("/api/v1/models/download/cancel", post(cancel_model_download))
         .route("/api/v1/models/downloads", get(list_download_jobs))
@@ -250,6 +254,11 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             .as_deref()
             .is_some_and(|mode| mode == "native")
     });
+    let streaming_asr_available = streaming_asr::detect_available(
+        &state.data_dir,
+        settings.streaming_asr_python.as_deref(),
+        settings.streaming_asr_model.as_deref(),
+    );
     Ok(Json(json!({
         "schema_version": 1,
         "models": models,
@@ -259,6 +268,7 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             "model_download": true,
             "llama_cpp_engine": true,
             "whisper_cpp_engine": true,
+            "streaming_asr_engine": true,
             "openai_chat_completions": true,
             "openai_responses": true,
             "openai_audio_transcriptions": true,
@@ -281,13 +291,13 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
                 "native_model_audio": {
                     "id": "native_model_audio",
                     "available": any_native_audio,
-                    "summary": "Chat model consumes audio tokens directly (OpenAI input_audio). Detected on specific audio-LLM checkpoints; not Whisper ASR weights."
+                    "summary": "Chat model consumes audio tokens directly (OpenAI input_audio). Detected on specific audio-LLM checkpoints; not Whisper ASR weights. Falls back to batch ASR when the chat engine rejects input_audio."
                 },
                 "streaming_asr": {
                     "id": "streaming_asr",
-                    "available": false,
-                    "planned": true,
-                    "summary": "Low-latency chunked transcription (for example NVIDIA Nemotron ASR Streaming). Not shipped yet."
+                    "available": streaming_asr_available,
+                    "engine": "streaming-asr",
+                    "summary": "Low-latency chunked transcription via NVIDIA Nemotron ASR Streaming (Transformers). POST /v1/audio/transcriptions with stream=true."
                 },
                 "realtime_voice": {
                     "id": "realtime_voice",
@@ -613,6 +623,9 @@ async fn list_runtimes(
         "active_mlx_lm_python": active.mlx_lm.map(|path| path.display().to_string()),
         "active_mlx_vlm_python": active.mlx_vlm.map(|path| path.display().to_string()),
         "active_whisper_binary": active.whisper.map(|path| path.display().to_string()),
+        "active_streaming_asr_python": active
+            .streaming_asr
+            .map(|path| path.display().to_string()),
     }))
 }
 
@@ -625,6 +638,7 @@ fn apply_active_flags(
             "mlx-lm" => &active.mlx_lm,
             "mlx-vlm" => &active.mlx_vlm,
             "whisper.cpp" => &active.whisper,
+            "streaming-asr" => &active.streaming_asr,
             _ => &active.llama,
         };
         entry.active = selected.as_ref().is_some_and(|active_path| {
@@ -829,6 +843,11 @@ async fn activate_runtime(
         "whisper.cpp" => state
             .runtime
             .activate_whisper(std::path::PathBuf::from(&entry.path))
+            .await
+            .map_err(ApiError::bad_request)?,
+        "streaming-asr" => state
+            .runtime
+            .activate_streaming_asr(std::path::PathBuf::from(&entry.path))
             .await
             .map_err(ApiError::bad_request)?,
         _ => state
@@ -1476,13 +1495,163 @@ struct TranscriptionRequest {
     mime_type: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    stream: bool,
+    /// Prefer `streaming-asr` or `whisper.cpp`. Default: streaming when stream=true.
+    #[serde(default)]
+    engine: Option<String>,
+}
+
+async fn resolve_transcription_blob(
+    state: &AppState,
+    request: &TranscriptionRequest,
+) -> ApiResult<(String, String)> {
+    let (bytes, mime) = if let Some(sha256) = request.file_sha256.as_deref() {
+        let (bytes, stored_mime) = blob_store::read_blob(&state.data_dir, sha256)
+            .await
+            .map_err(ApiError::bad_request)?;
+        (bytes, request.mime_type.clone().unwrap_or(stored_mime))
+    } else if let Some(encoded) = request.file_base64.as_deref() {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| ApiError::bad_request(format!("invalid file_base64: {error}")))?;
+        (
+            bytes,
+            request
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "audio/wav".to_owned()),
+        )
+    } else {
+        return Err(ApiError::bad_request(
+            "provide file_sha256 or file_base64 for transcription",
+        ));
+    };
+    let stored = blob_store::store_bytes(
+        &state.data_dir,
+        &bytes,
+        &mime,
+        Some("transcription-input"),
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
+    Ok((stored.sha256, mime))
 }
 
 async fn audio_transcriptions(
     State(state): State<AppState>,
     Json(request): Json<TranscriptionRequest>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Response> {
     let settings = state.runtime.settings().await;
+    let prefer_streaming = request.stream
+        || request
+            .engine
+            .as_deref()
+            .is_some_and(|engine| engine == streaming_asr::ENGINE);
+    if prefer_streaming {
+        let python = streaming_asr::resolve_python(
+            &state.data_dir,
+            settings.streaming_asr_python.as_deref(),
+        )
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "Streaming ASR requires a built streaming-asr Python environment. Install it under Runtimes.".to_owned(),
+            )
+        })?;
+        let model_path = streaming_asr::resolve_model_path(
+            &state.data_dir,
+            request
+                .model
+                .as_deref()
+                .or(settings.streaming_asr_model.as_deref()),
+        )
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "Streaming ASR requires a downloaded Nemotron ASR Streaming snapshot from Discover.".to_owned(),
+            )
+        })?;
+        let (sha256, mime) = resolve_transcription_blob(&state, &request).await?;
+        let wav = media::materialize_wav_from_blob(&state.data_dir, &sha256, &mime)
+            .await
+            .map_err(ApiError::bad_request)?;
+        let mut events = streaming_asr::transcribe_stream(streaming_asr::StreamTranscribeRequest {
+            python: &python,
+            model: &model_path,
+            audio: &wav,
+            lookahead: None,
+        })
+        .await
+        .map_err(ApiError::bad_request)?;
+        if !request.stream {
+            let mut text = String::new();
+            while let Some(item) = events.recv().await {
+                match item.map_err(ApiError::bad_request)? {
+                    streaming_asr::WorkerEvent::Delta { text: delta } => text.push_str(&delta),
+                    streaming_asr::WorkerEvent::Done { text: final_text } => {
+                        text = final_text;
+                    }
+                    streaming_asr::WorkerEvent::Error { message } => {
+                        return Err(ApiError::bad_request(message));
+                    }
+                    streaming_asr::WorkerEvent::Status { .. } => {}
+                }
+            }
+            let _ = tokio::fs::remove_file(&wav).await;
+            return Ok(Json(json!({ "text": text.trim(), "engine": streaming_asr::ENGINE }))
+                .into_response());
+        }
+        let stream_events = stream! {
+            while let Some(item) = events.recv().await {
+                match item {
+                    Ok(streaming_asr::WorkerEvent::Status { phase, message, latency_ms }) => {
+                        yield Ok::<Event, Infallible>(Event::default()
+                            .event("transcription.status")
+                            .data(json!({
+                                "type": "transcription.status",
+                                "phase": phase,
+                                "message": message,
+                                "latency_ms": latency_ms,
+                            }).to_string()));
+                    }
+                    Ok(streaming_asr::WorkerEvent::Delta { text }) => {
+                        yield Ok::<Event, Infallible>(Event::default()
+                            .event("transcription.delta")
+                            .data(json!({
+                                "type": "transcription.delta",
+                                "text": text,
+                            }).to_string()));
+                    }
+                    Ok(streaming_asr::WorkerEvent::Done { text }) => {
+                        yield Ok::<Event, Infallible>(Event::default()
+                            .event("transcription.done")
+                            .data(json!({
+                                "type": "transcription.done",
+                                "text": text,
+                                "engine": streaming_asr::ENGINE,
+                            }).to_string()));
+                    }
+                    Ok(streaming_asr::WorkerEvent::Error { message }) => {
+                        yield Ok::<Event, Infallible>(Event::default()
+                            .event("error")
+                            .data(json!({ "error": { "message": message } }).to_string()));
+                        break;
+                    }
+                    Err(error) => {
+                        yield Ok::<Event, Infallible>(Event::default()
+                            .event("error")
+                            .data(json!({ "error": { "message": error.to_string() } }).to_string()));
+                        break;
+                    }
+                }
+            }
+            let _ = tokio::fs::remove_file(&wav).await;
+        };
+        return Ok(Sse::new(stream_events)
+            .keep_alive(KeepAlive::default())
+            .into_response());
+    }
+
     let binary = whisper::resolve_binary(&state.data_dir, settings.whisper_binary.as_deref())
         .ok_or_else(|| ApiError::bad_request(media::asr_missing_message().to_owned()))?;
     let model_path = whisper::resolve_model_path(
@@ -1494,48 +1663,14 @@ async fn audio_transcriptions(
     )
     .ok_or_else(|| ApiError::bad_request(media::asr_missing_message().to_owned()))?;
 
-    let (bytes, mime) = if let Some(sha256) = request.file_sha256.as_deref() {
-        let (bytes, stored_mime) = blob_store::read_blob(&state.data_dir, sha256)
-            .await
-            .map_err(ApiError::bad_request)?;
-        (
-            bytes,
-            request
-                .mime_type
-                .unwrap_or(stored_mime),
-        )
-    } else if let Some(encoded) = request.file_base64.as_deref() {
-        use base64::Engine as _;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .map_err(|error| ApiError::bad_request(format!("invalid file_base64: {error}")))?;
-        (
-            bytes,
-            request
-                .mime_type
-                .unwrap_or_else(|| "audio/wav".to_owned()),
-        )
-    } else {
-        return Err(ApiError::bad_request(
-            "provide file_sha256 or file_base64 for transcription",
-        ));
-    };
-
-    let stored = blob_store::store_bytes(
-        &state.data_dir,
-        &bytes,
-        &mime,
-        Some("transcription-input"),
-    )
-    .await
-    .map_err(ApiError::bad_request)?;
+    let (sha256, mime) = resolve_transcription_blob(&state, &request).await?;
 
     let mut messages = vec![crate::types::OpenAiMessage {
         role: "user".into(),
         content: json!([{
             "type": "brazier_blob",
             "brazier_blob": {
-                "sha256": stored.sha256,
+                "sha256": sha256,
                 "mime_type": mime,
                 "name": "audio"
             }
@@ -1583,7 +1718,66 @@ async fn audio_transcriptions(
         .join("\n")
         .trim()
         .to_owned();
-    Ok(Json(json!({ "text": text })))
+    Ok(Json(json!({ "text": text, "engine": "whisper.cpp" })).into_response())
+}
+
+async fn download_streaming_asr_model(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<download::MlxDownloadRequest>,
+) -> Response {
+    let mut request = request;
+    request.engine = streaming_asr::ENGINE.to_owned();
+    if !query.stream {
+        let result = download::download_streaming_asr_snapshot_with_progress(
+            &state.http,
+            &state.data_dir,
+            request,
+            Box::new(|_| {}),
+            None,
+            None,
+        )
+        .await;
+        return match result {
+            Ok(result) => {
+                state.invalidate_models_cache().await;
+                (StatusCode::OK, Json(json!(result))).into_response()
+            }
+            Err(error) => ApiError::bad_request(error).into_response(),
+        };
+    }
+
+    let (tx, rx) = progress_channel();
+    let http = state.http.clone();
+    let data_dir = state.data_dir.clone();
+    let cache_state = state.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let result = download::download_streaming_asr_snapshot_with_progress(
+            &http,
+            &data_dir,
+            request,
+            Box::new(move |event| {
+                push_progress(&progress_tx, event);
+            }),
+            None,
+            None,
+        )
+        .await;
+        match result {
+            Ok(download_result) => {
+                cache_state.invalidate_models_cache().await;
+                push_progress(
+                    &tx,
+                    ProgressEvent::done(serde_json::to_value(&download_result).unwrap_or_default()),
+                );
+            }
+            Err(error) => {
+                push_progress(&tx, ProgressEvent::error(error.to_string()));
+            }
+        }
+    });
+    progress_sse(rx)
 }
 
 async fn chat_completions(

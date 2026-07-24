@@ -1,0 +1,46 @@
+{
+  "id": "streaming-asr",
+  "display_name": "Streaming ASR",
+  "upstream_origins": [
+    "https://github.com/huggingface/transformers.git",
+    "https://github.com/huggingface/transformers"
+  ],
+  "supported_platforms": [
+    "macos-arm64",
+    "macos-x64",
+    "linux-x64",
+    "linux-arm64"
+  ],
+  "skip_checkout": true,
+  "steps": [
+    {
+      "label": "Create isolated environment",
+      "program": "uv",
+      "args": ["venv", "--python", "3.12", "{venv}"]
+    },
+    {
+      "label": "Install pinned dependencies",
+      "program": "uv",
+      "args": [
+        "pip",
+        "install",
+        "--python",
+        "{python}",
+        "--requirements",
+        "{recipe}/streaming-asr.lock"
+      ]
+    },
+    {
+      "label": "Install Brazier streaming ASR worker",
+      "program": "uv",
+      "args": [
+        "pip",
+        "install",
+        "--python",
+        "{python}",
+        "--no-deps",
+        "{recipe}/streaming_asr_pkg"
+      ]
+    }
+  ]
+}

@@ -16,6 +16,8 @@ export function engineLabel(engine: string): string {
       return 'GGUF'
     case 'whisper.cpp':
       return 'ASR · whisper'
+    case 'streaming-asr':
+      return 'ASR · streaming'
     default:
       return engine
   }
@@ -31,6 +33,8 @@ export function engineBadgeClass(engine: string): string {
       return 'engine-badge gguf'
     case 'whisper.cpp':
       return 'engine-badge whisper'
+    case 'streaming-asr':
+      return 'engine-badge whisper'
     default:
       return 'engine-badge'
   }
@@ -38,7 +42,7 @@ export function engineBadgeClass(engine: string): string {
 
 export function isChatModel(model: LocalModel | undefined): boolean {
   const engine = modelEngine(model)
-  return engine !== 'whisper.cpp'
+  return engine !== 'whisper.cpp' && engine !== 'streaming-asr'
 }
 
 export function modelLibraryKey(modelId: string): string {

@@ -84,6 +84,22 @@ fn compatible(tags: &[String], engine: &str) -> bool {
                 tag.contains("whisper") || tag.contains("whisper.cpp")
             })
         }
+        "streaming-asr" => {
+            tags_contain_any(
+                tags,
+                &[
+                    "automatic-speech-recognition",
+                    "speech-to-text",
+                    "asr",
+                    "nemotron",
+                ],
+            ) || tags.iter().any(|tag| {
+                let tag = tag.to_ascii_lowercase();
+                tag.contains("nemotron")
+                    || tag.contains("streaming")
+                    || tag.contains("asr")
+            })
+        }
         "vllm" => tags.iter().any(|tag| {
             matches!(
                 tag.as_str(),

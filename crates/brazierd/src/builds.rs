@@ -339,6 +339,14 @@ fn install_python_env(venv: &Path, engine: &str) -> anyhow::Result<PathBuf> {
         "build completed but the virtual environment Python was not created at {}",
         python.display()
     );
+    if engine == crate::streaming_asr::ENGINE {
+        anyhow::ensure!(
+            crate::streaming_asr::python_appears_runnable(&python),
+            "Python environment at {} failed an import check for streaming ASR",
+            python.display()
+        );
+        return Ok(python);
+    }
     let kind = crate::mlx::MlxKind::from_engine_id(engine)
         .ok_or_else(|| anyhow::anyhow!("unsupported Python engine `{engine}`"))?;
     anyhow::ensure!(
@@ -522,7 +530,7 @@ pub async fn run_build_with_progress(
     if python_engine {
         if !command_available("uv") {
             return Err(fail(
-                "`uv` is required to build MLX Python environments; install it and try again"
+                "`uv` is required to build Python engine environments; install it and try again"
                     .into(),
                 None,
                 "",
@@ -560,7 +568,7 @@ pub async fn run_build_with_progress(
         {
             return Err(fail(message, Some("Preflight"), ""));
         }
-    } else if !command_available("git") {
+    } else if !plan.skip_checkout && !command_available("git") {
         return Err(fail(
             "`git` is required to build from source; install it and try again".into(),
             None,

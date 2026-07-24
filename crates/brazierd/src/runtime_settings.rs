@@ -61,6 +61,12 @@ pub struct RuntimeSettings {
     /// Preferred whisper model id (`whisper:…`) or absolute path.
     #[serde(default)]
     pub whisper_model: Option<String>,
+    /// Absolute path of an activated streaming ASR Python interpreter.
+    #[serde(default)]
+    pub streaming_asr_python: Option<String>,
+    /// Preferred streaming ASR model id (`streaming-asr:…`) or absolute path.
+    #[serde(default)]
+    pub streaming_asr_model: Option<String>,
     /// Parallel compile jobs for source builds (`cmake --build … --parallel`).
     #[serde(default = "default_build_jobs")]
     pub build_jobs: u16,
@@ -97,6 +103,8 @@ impl Default for RuntimeSettings {
             mlx_vlm_python: None,
             whisper_binary: None,
             whisper_model: None,
+            streaming_asr_python: None,
+            streaming_asr_model: None,
             build_jobs: default_build_jobs(),
             extra_model_library_paths: Vec::new(),
         }

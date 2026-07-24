@@ -39,10 +39,14 @@
 - Video preprocess via system ffmpeg (frame sampling into the active vision
   model) plus optional soundtrack transcription when batch ASR is available.
 - Distinct audio interface taxonomy in architecture and
-  `/api/v1/capabilities` (`batch_asr`, `native_model_audio`, planned
-  `streaming_asr`, planned `realtime_voice`).
+  `/api/v1/capabilities` (`batch_asr`, `native_model_audio`, `streaming_asr`,
+  planned `realtime_voice`).
 - Conservative `audio_input: native` detection for known audio-LLM checkpoints
-  (separate from Whisper ASR weights).
+  (separate from Whisper ASR weights), with automatic fallback to batch ASR when
+  the chat engine rejects `input_audio`.
+- **Streaming ASR** via managed Python env + NVIDIA Nemotron ASR Streaming
+  snapshots; `POST /v1/audio/transcriptions` with `stream=true` emits partial
+  transcript SSE events.
 
 ## Alpha
 
@@ -56,11 +60,6 @@
 - Add Linux vLLM, remote OpenAI-compatible connections, engine diagnostics, and
   hardware-specific compatibility tests.
 - Optional mlx-whisper and bundled ffmpeg for stronger offline media prep.
-- Harden **native model audio** end-to-end for detected audio-LLMs (engine wire
-  support beyond detection; clear fallback to batch ASR when the adapter cannot
-  accept `input_audio`).
-- **Streaming ASR** — low-latency chunked transcription engines (for example
-  NVIDIA Nemotron ASR Streaming).
 - **Realtime voice / PersonaPlex** — full-duplex speech-to-speech with persona
   control (NVIDIA PersonaPlex / Nemotron VoiceChat class). Separate product
   surface from file-attach chat; requires dedicated streaming I/O, not only

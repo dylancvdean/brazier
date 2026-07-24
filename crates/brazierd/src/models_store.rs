@@ -61,6 +61,9 @@ pub fn path_for_model_id(
     if let Some(key) = model_id.strip_prefix("mlx:") {
         return path_for_mlx_id(data_dir, key);
     }
+    if model_id.starts_with("streaming-asr:") {
+        return crate::streaming_asr::path_for_model_id(data_dir, model_id);
+    }
     anyhow::bail!("unknown local model id: {model_id}");
 }
 
@@ -776,6 +779,14 @@ pub fn list_local_models(
         }
         models.push(model);
     }
+    for model in crate::streaming_asr::list_models(data_dir)? {
+        if let Ok(path) = crate::streaming_asr::path_for_model_id(data_dir, &model.id) {
+            if let Ok(canonical) = std::fs::canonicalize(path) {
+                seen_paths.insert(canonical);
+            }
+        }
+        models.push(model);
+    }
     for (index, root) in extra_library_paths.iter().enumerate() {
         if !root.is_dir() {
             continue;
@@ -940,6 +951,14 @@ pub fn delete_model(
         std::fs::remove_dir_all(&path)
             .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
         prune_empty_parents(path.parent(), &mlx_root(data_dir));
+        return Ok(path);
+    }
+    if model_id.starts_with("streaming-asr:") {
+        let path = crate::streaming_asr::path_for_model_id(data_dir, model_id)?;
+        anyhow::ensure!(path.is_dir(), "model directory not found for {model_id}");
+        std::fs::remove_dir_all(&path)
+            .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
+        prune_empty_parents(path.parent(), &crate::streaming_asr::models_root(data_dir));
         return Ok(path);
     }
     anyhow::bail!("unknown local model id: {model_id}");

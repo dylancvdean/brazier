@@ -1,6 +1,6 @@
 //! Engine adapters: llama.cpp runtime over on-disk GGUF models.
 
-use std::{path::Path, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -17,6 +17,7 @@ use crate::{
     runtimes,
     tool_registry::{self, ToolContext},
     tools,
+    streaming_asr,
     types::{ChatCompletionRequest, ModelCapabilities, ModelDescriptor, OpenAiMessage},
     whisper,
 };
@@ -81,6 +82,10 @@ struct WhisperState {
     binary: Option<PathBuf>,
 }
 
+struct StreamingAsrState {
+    python: Option<PathBuf>,
+}
+
 enum ActiveBackend {
     Llama(String),
     Mlx(String),
@@ -93,6 +98,7 @@ pub struct Runtime {
     llama: Mutex<LlamaState>,
     mlx: Mutex<MlxState>,
     whisper: Mutex<WhisperState>,
+    streaming_asr: Mutex<StreamingAsrState>,
     settings: Mutex<RuntimeSettings>,
     models_cache: Mutex<Option<Vec<ModelDescriptor>>>,
 }
@@ -132,6 +138,10 @@ impl Runtime {
             &data_dir,
             settings.whisper_binary.as_deref(),
         );
+        let streaming_asr_python = streaming_asr::resolve_python(
+            &data_dir,
+            settings.streaming_asr_python.as_deref(),
+        );
         Arc::new(Self {
             data_dir,
             http,
@@ -146,6 +156,9 @@ impl Runtime {
             }),
             whisper: Mutex::new(WhisperState {
                 binary: whisper_binary,
+            }),
+            streaming_asr: Mutex::new(StreamingAsrState {
+                python: streaming_asr_python,
             }),
             settings: Mutex::new(settings),
             models_cache: Mutex::new(None),
@@ -272,11 +285,13 @@ impl Runtime {
         let llama = self.llama.lock().await.binary.clone();
         let mlx = self.mlx.lock().await;
         let whisper = self.whisper.lock().await.binary.clone();
+        let streaming_asr = self.streaming_asr.lock().await.python.clone();
         runtimes::ActiveRuntimes {
             llama,
             mlx_lm: mlx.lm_python.clone(),
             mlx_vlm: mlx.vlm_python.clone(),
             whisper,
+            streaming_asr,
         }
     }
 
@@ -315,6 +330,12 @@ impl Runtime {
             whisper.binary = settings.whisper_binary.as_ref().map(PathBuf::from).or_else(|| {
                 whisper::resolve_binary(&self.data_dir, None)
             });
+            let mut streaming_asr = self.streaming_asr.lock().await;
+            streaming_asr.python = settings
+                .streaming_asr_python
+                .as_ref()
+                .map(PathBuf::from)
+                .or_else(|| streaming_asr::resolve_python(&self.data_dir, None));
         }
         *current = settings.clone();
         drop(current);
@@ -417,6 +438,32 @@ impl Runtime {
         Ok(path)
     }
 
+    /// Pin a streaming ASR Python interpreter and persist the choice.
+    pub async fn activate_streaming_asr(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            path.is_file(),
+            "streaming ASR Python not found: {}",
+            path.display()
+        );
+        let runnable = {
+            let candidate = path.clone();
+            tokio::task::spawn_blocking(move || streaming_asr::python_appears_runnable(&candidate))
+                .await
+                .unwrap_or(false)
+        };
+        anyhow::ensure!(
+            runnable,
+            "{} failed an import check for streaming ASR",
+            path.display()
+        );
+        let mut settings = self.settings.lock().await;
+        settings.streaming_asr_python = Some(path.display().to_string());
+        runtime_settings::save(&self.data_dir, &settings).await?;
+        drop(settings);
+        self.streaming_asr.lock().await.python = Some(path.clone());
+        Ok(path)
+    }
+
     /// Forget a runtime that was removed from disk.
     pub async fn release_runtime(&self, path: &std::path::Path) -> anyhow::Result<()> {
         self.release_binary(path).await?;
@@ -424,6 +471,12 @@ impl Runtime {
             let mut whisper = self.whisper.lock().await;
             if whisper.binary.as_deref() == Some(path) {
                 whisper.binary = None;
+            }
+        }
+        {
+            let mut streaming_asr = self.streaming_asr.lock().await;
+            if streaming_asr.python.as_deref() == Some(path) {
+                streaming_asr.python = None;
             }
         }
         let mut mlx = self.mlx.lock().await;
@@ -453,6 +506,10 @@ impl Runtime {
         }
         if settings.whisper_binary.as_deref() == Some(&path.display().to_string()) {
             settings.whisper_binary = None;
+            changed = true;
+        }
+        if settings.streaming_asr_python.as_deref() == Some(&path.display().to_string()) {
+            settings.streaming_asr_python = None;
             changed = true;
         }
         if changed {
@@ -534,6 +591,10 @@ impl Runtime {
             }
             "whisper.cpp" => {
                 self.activate_whisper(PathBuf::from(&entry.path)).await?;
+            }
+            "streaming-asr" => {
+                self.activate_streaming_asr(PathBuf::from(&entry.path))
+                    .await?;
             }
             _ => {
                 self.activate_binary(PathBuf::from(&entry.path)).await?;
@@ -907,6 +968,71 @@ impl Runtime {
         Ok((backend, settings, request))
     }
 
+    /// When the chat engine rejects native `input_audio`, rewrite to Whisper
+    /// transcripts and return true so the caller can retry once.
+    async fn fallback_native_audio_with_asr(
+        &self,
+        request: &mut ChatCompletionRequest,
+        load_tx: LoadNotifier,
+    ) -> anyhow::Result<bool> {
+        let settings = self.settings.lock().await.clone();
+        let model_caps = self
+            .cached_models()
+            .await
+            .ok()
+            .and_then(|models| {
+                models
+                    .into_iter()
+                    .find(|model| model.id == request.model)
+                    .map(|model| model.capabilities)
+            })
+            .unwrap_or_else(|| ModelCapabilities {
+                input_modalities: vec!["text".into()],
+                output_modalities: vec!["text".into()],
+                streaming: true,
+                tools: true,
+                reasoning: false,
+                max_context_length: None,
+                reasoning_modes: Vec::new(),
+                harmony: false,
+                audio_input: None,
+            });
+        let whisper_binary = self.whisper.lock().await.binary.clone().or_else(|| {
+            whisper::resolve_binary(&self.data_dir, settings.whisper_binary.as_deref())
+        });
+        let whisper_model =
+            whisper::resolve_model_path(&self.data_dir, settings.whisper_model.as_deref());
+        let features = media::detect_pipeline_features(
+            &self.data_dir,
+            settings.whisper_binary.as_deref(),
+            settings.whisper_model.as_deref(),
+        );
+        let media_ctx = MediaContext {
+            data_dir: &self.data_dir,
+            model_caps: &model_caps,
+            features,
+            whisper_binary,
+            whisper_model,
+        };
+        let progress = if load_tx.is_some() {
+            let tx = load_tx.clone();
+            Some(Box::new(move |phase: String, message: String| {
+                if let Some(tx) = &tx {
+                    let _ = tx.try_send(Ok(StreamEvent::Load { phase, message }));
+                }
+            }) as media::ProgressFn)
+        } else {
+            None
+        };
+        let converted = media::fallback_native_audio_to_asr(
+            &media_ctx,
+            &mut request.messages,
+            progress.as_ref(),
+        )
+        .await?;
+        Ok(converted > 0)
+    }
+
     async fn backend_base_url(&self, backend: &ActiveBackend) -> anyhow::Result<String> {
         match backend {
             ActiveBackend::Llama(_) => {
@@ -975,11 +1101,8 @@ impl Runtime {
                 &request,
                 crate::harmony::is_harmony_model(&request.model),
             );
-            let http = runtime.http.clone();
-            let data_dir = runtime.data_dir.clone();
             if let Err(error) = stream_tool_rounds(
-                &http,
-                &data_dir,
+                &runtime,
                 &base_url,
                 request,
                 settings,
@@ -1066,6 +1189,7 @@ impl Engine for Runtime {
             data_dir: &self.data_dir,
             http: &self.http,
         };
+        let mut audio_fallback_attempted = false;
         for round in 0..MAX_TOOL_ROUNDS {
             let last_round = round + 1 == MAX_TOOL_ROUNDS;
             let mut body = llama::translate_chat_request(&request, &settings, "local", false);
@@ -1075,6 +1199,19 @@ impl Engine for Runtime {
             let response = match llama::chat_once(&self.http, &base_url, &body).await {
                 Ok(response) => response,
                 Err(error) => {
+                    if !audio_fallback_attempted
+                        && media::messages_contain_input_audio(&request.messages)
+                        && media::looks_like_audio_rejection(&error.to_string())
+                    {
+                        audio_fallback_attempted = true;
+                        if self
+                            .fallback_native_audio_with_asr(&mut request, None)
+                            .await
+                            .unwrap_or(false)
+                        {
+                            continue;
+                        }
+                    }
                     self.reap_dead_server().await;
                     return Err(error);
                 }
@@ -1201,22 +1338,43 @@ async fn append_tool_round(
 
 /// Streaming generation loop with server-side tool execution.
 async fn stream_tool_rounds(
-    http: &reqwest::Client,
-    data_dir: &Path,
+    runtime: &Runtime,
     base_url: &str,
     mut request: ChatCompletionRequest,
     settings: RuntimeSettings,
     tools_active: bool,
     tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
 ) -> anyhow::Result<()> {
-    let ctx = ToolContext { data_dir, http };
+    let ctx = ToolContext {
+        data_dir: &runtime.data_dir,
+        http: &runtime.http,
+    };
+    let mut audio_fallback_attempted = false;
     for round in 0..MAX_TOOL_ROUNDS {
         let last_round = round + 1 == MAX_TOOL_ROUNDS;
         let mut body = llama::translate_chat_request(&request, &settings, "local", true);
         if last_round && let Some(object) = body.as_object_mut() {
             object.remove("tools");
         }
-        let mut chunks = llama::open_chat_stream(http, base_url, &body).await?;
+        let mut chunks = match llama::open_chat_stream(&runtime.http, base_url, &body).await {
+            Ok(chunks) => chunks,
+            Err(error) => {
+                if !audio_fallback_attempted
+                    && media::messages_contain_input_audio(&request.messages)
+                    && media::looks_like_audio_rejection(&error.to_string())
+                {
+                    audio_fallback_attempted = true;
+                    if runtime
+                        .fallback_native_audio_with_asr(&mut request, Some(tx.clone()))
+                        .await
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                }
+                return Err(error);
+            }
+        };
         let mut accumulator = llama::ToolCallAccumulator::default();
         let mut round_text = String::new();
         while let Some(item) = chunks.recv().await {

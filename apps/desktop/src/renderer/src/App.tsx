@@ -286,10 +286,12 @@ export function App(): React.JSX.Element {
   const canAttach = canAttachImage || canAttachAudio || canAttachVideo
   const canUseTools = selectedCapabilities?.tools !== false
   const audioBadgeTitle = selectedNativeAudio
-    ? 'Native audio: this chat model can consume audio directly (not Whisper ASR)'
+    ? 'Native audio: this chat model can consume audio directly; falls back to batch ASR if the engine rejects input_audio'
     : pipelineFeatures.asr
       ? 'Batch ASR: attachments are transcribed with whisper.cpp, then sent as text'
-      : 'No audio path yet — build whisper.cpp + download a Whisper model, or select a native-audio chat model. Realtime PersonaPlex voice is not available yet.'
+      : pipelineFeatures.streaming_asr
+        ? 'Streaming ASR is available via /v1/audio/transcriptions?stream=true; chat attachments still use batch ASR or native audio'
+        : 'No audio path yet — build whisper.cpp + download a Whisper model, install streaming ASR, or select a native-audio chat model.'
 
   async function refreshLocalModels(): Promise<void> {
     const models = await listModels()
@@ -302,8 +304,8 @@ export function App(): React.JSX.Element {
   }
 
   const selectModel = useCallback((modelId: string): void => {
-    if (modelId.startsWith('whisper:')) {
-      setError('Whisper models are used for audio transcription, not chat. Pick a chat model instead.')
+    if (modelId.startsWith('whisper:') || modelId.startsWith('streaming-asr:')) {
+      setError('ASR models are used for transcription, not chat. Pick a chat model instead.')
       return
     }
     prepareAbortRef.current?.abort()

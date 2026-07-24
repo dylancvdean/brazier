@@ -8,11 +8,19 @@ const MLX_LM: &str = include_str!("../../../engine-recipes/mlx-lm.json");
 const MLX_VLM: &str = include_str!("../../../engine-recipes/mlx-vlm.json");
 const VLLM: &str = include_str!("../../../engine-recipes/vllm.json");
 const WHISPER_CPP: &str = include_str!("../../../engine-recipes/whisper.cpp.json");
+const STREAMING_ASR: &str = include_str!("../../../engine-recipes/streaming-asr.json");
 const MLX_LM_LOCK: &str = include_str!("../../../engine-recipes/mlx-lm.lock");
 const MLX_VLM_LOCK: &str = include_str!("../../../engine-recipes/mlx-vlm.lock");
+const STREAMING_ASR_LOCK: &str = include_str!("../../../engine-recipes/streaming-asr.lock");
+const STREAMING_ASR_PYPROJECT: &str =
+    include_str!("../python/streaming_asr_pkg/pyproject.toml");
+const STREAMING_ASR_INIT: &str =
+    include_str!("../python/streaming_asr_pkg/brazier_streaming_asr/__init__.py");
+const STREAMING_ASR_MAIN: &str =
+    include_str!("../python/streaming_asr_pkg/brazier_streaming_asr/__main__.py");
 
 pub fn is_python_engine(engine: &str) -> bool {
-    matches!(engine, "mlx-lm" | "mlx-vlm" | "vllm")
+    matches!(engine, "mlx-lm" | "mlx-vlm" | "vllm" | "streaming-asr")
 }
 
 /// Directory containing shipped lock files for Python engine builds.
@@ -20,12 +28,24 @@ pub fn recipe_root(data_dir: &Path) -> PathBuf {
     data_dir.join("engine-recipes")
 }
 
-/// Write bundled recipe lock files into the application data directory.
+/// Write bundled recipe lock files and Python packages into the data directory.
 pub fn ensure_recipe_files(data_dir: &Path) -> anyhow::Result<PathBuf> {
     let dir = recipe_root(data_dir);
     std::fs::create_dir_all(&dir).context("create engine-recipes directory")?;
     std::fs::write(dir.join("mlx-lm.lock"), MLX_LM_LOCK).context("write mlx-lm.lock")?;
     std::fs::write(dir.join("mlx-vlm.lock"), MLX_VLM_LOCK).context("write mlx-vlm.lock")?;
+    std::fs::write(dir.join("streaming-asr.lock"), STREAMING_ASR_LOCK)
+        .context("write streaming-asr.lock")?;
+
+    let pkg = dir.join("streaming_asr_pkg");
+    let module = pkg.join("brazier_streaming_asr");
+    std::fs::create_dir_all(&module).context("create streaming_asr_pkg")?;
+    std::fs::write(pkg.join("pyproject.toml"), STREAMING_ASR_PYPROJECT)
+        .context("write streaming_asr pyproject")?;
+    std::fs::write(module.join("__init__.py"), STREAMING_ASR_INIT)
+        .context("write streaming_asr __init__")?;
+    std::fs::write(module.join("__main__.py"), STREAMING_ASR_MAIN)
+        .context("write streaming_asr __main__")?;
     Ok(dir)
 }
 
@@ -35,6 +55,8 @@ pub struct BuildRecipe {
     pub display_name: String,
     pub upstream_origins: Vec<String>,
     pub supported_platforms: Vec<String>,
+    #[serde(default)]
+    pub skip_checkout: bool,
     pub steps: Vec<RecipeStep>,
 }
 
@@ -64,6 +86,8 @@ pub struct BuildPlan {
     pub warning: Option<String>,
     pub checkout: Vec<PlannedCommand>,
     pub build: Vec<PlannedCommand>,
+    #[serde(skip)]
+    pub skip_checkout: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +104,7 @@ pub fn recipe(engine: &str) -> anyhow::Result<BuildRecipe> {
         "mlx-vlm" => MLX_VLM,
         "vllm" => VLLM,
         "whisper.cpp" => WHISPER_CPP,
+        "streaming-asr" => STREAMING_ASR,
         _ => anyhow::bail!("unsupported engine recipe: {engine}"),
     };
     Ok(serde_json::from_str(source)?)
@@ -131,35 +156,40 @@ pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
             request.repository
         )
     });
-    let checkout = vec![
-        PlannedCommand {
-            label: "Clone source without running hooks".to_owned(),
-            program: "git".to_owned(),
-            args: vec![
-                "-c".into(),
-                "core.hooksPath=".into(),
-                "clone".into(),
-                "--no-checkout".into(),
-                "--filter=blob:none".into(),
-                request.repository.clone(),
-                "{source}".into(),
-            ],
-        },
-        PlannedCommand {
-            label: "Checkout selected revision".to_owned(),
-            program: "git".to_owned(),
-            args: vec![
-                "-c".into(),
-                "core.hooksPath=".into(),
-                "-C".into(),
-                "{source}".into(),
-                "checkout".into(),
-                "--detach".into(),
-                request.revision.clone(),
-                "--".into(),
-            ],
-        },
-    ];
+    let checkout = if recipe.skip_checkout {
+        Vec::new()
+    } else {
+        vec![
+            PlannedCommand {
+                label: "Clone source without running hooks".to_owned(),
+                program: "git".to_owned(),
+                args: vec![
+                    "-c".into(),
+                    "core.hooksPath=".into(),
+                    "clone".into(),
+                    "--no-checkout".into(),
+                    "--filter=blob:none".into(),
+                    request.repository.clone(),
+                    "{source}".into(),
+                ],
+            },
+            PlannedCommand {
+                label: "Checkout selected revision".to_owned(),
+                program: "git".to_owned(),
+                args: vec![
+                    "-c".into(),
+                    "core.hooksPath=".into(),
+                    "-C".into(),
+                    "{source}".into(),
+                    "checkout".into(),
+                    "--detach".into(),
+                    request.revision.clone(),
+                    "--".into(),
+                ],
+            },
+        ]
+    };
+    let skip_checkout = recipe.skip_checkout;
     let build = recipe
         .steps
         .into_iter()
@@ -179,6 +209,7 @@ pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
         warning,
         checkout,
         build,
+        skip_checkout,
     })
 }
 
@@ -222,5 +253,30 @@ mod tests {
             platform: "linux-x64".into(),
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn streaming_asr_skips_git_checkout() {
+        let plan = plan(BuildPlanRequest {
+            engine: "streaming-asr".into(),
+            repository: "https://github.com/huggingface/transformers.git".into(),
+            revision: "bundled".into(),
+            platform: "macos-arm64".into(),
+        })
+        .unwrap();
+        assert!(plan.skip_checkout);
+        assert!(plan.checkout.is_empty());
+        assert!(plan.trusted_origin);
+        assert!(plan.build.iter().any(|step| step.label.contains("streaming ASR")));
+    }
+
+    #[test]
+    fn ensure_recipe_files_writes_streaming_asr_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = ensure_recipe_files(dir.path()).unwrap();
+        assert!(root.join("streaming-asr.lock").is_file());
+        assert!(root
+            .join("streaming_asr_pkg/brazier_streaming_asr/__main__.py")
+            .is_file());
     }
 }

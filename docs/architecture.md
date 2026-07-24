@@ -63,11 +63,15 @@ collapse them into a single Audio badge meaning.
 2. **Native model audio** — The selected chat model accepts audio tokens or
    OpenAI-style `input_audio` parts (`capabilities.audio_input = "native"`).
    Brazier hydrates blobs to `input_audio` instead of running Whisper. Detection
-   is conservative (name/config heuristics for known audio-LLMs). Engine
-   adapters must still accept the wire format.
+   is conservative (name/config heuristics for known audio-LLMs). If the chat
+   engine rejects `input_audio`, Brazier falls back once to batch ASR using the
+   original blob metadata.
 
-3. **Streaming ASR** — Low-latency chunked transcription while audio arrives
-   (for example NVIDIA Nemotron ASR Streaming). Not implemented; see roadmap.
+3. **Streaming ASR** — Low-latency chunked transcription via the managed
+   `streaming-asr` Python engine (NVIDIA Nemotron ASR Streaming / Transformers).
+   Exposed as `audio_interfaces.streaming_asr` and
+   `POST /v1/audio/transcriptions` with `stream=true` (SSE partials). Distinct
+   from chat attachment hydration.
 
 4. **Realtime voice / PersonaPlex-class** — Full-duplex speech-to-speech with
    persona control (NVIDIA PersonaPlex / Nemotron VoiceChat). Not implemented;

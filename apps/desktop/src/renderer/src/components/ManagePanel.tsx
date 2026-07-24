@@ -28,6 +28,7 @@ import {
   deleteRuntime,
   downloadModel,
   downloadMlxModel,
+  downloadStreamingAsrModel,
   ensureLlamaEngine,
   fetchManagedLlamaStatus,
   fetchModelTrust,
@@ -70,21 +71,24 @@ import {
 } from '../model-utils'
 import type { HubModel } from '../types'
 
-type DiscoverEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm' | 'whisper.cpp'
-type BuildEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm' | 'whisper.cpp'
+type DiscoverEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm' | 'whisper.cpp' | 'streaming-asr'
+type BuildEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm' | 'whisper.cpp' | 'streaming-asr'
 
 const DISCOVER_ENGINE_HELP: Record<DiscoverEngine, string> = {
   'llama.cpp': 'GGUF weights for llama.cpp on CPU, CUDA, Metal, or Vulkan.',
   'mlx-lm': 'Text-only MLX models for Apple Silicon (chat, tools, reasoning).',
   'mlx-vlm': 'Vision MLX models for Apple Silicon (image + text input).',
-  'whisper.cpp': 'Whisper speech-to-text weights (ggml/gguf) for local audio transcription.'
+  'whisper.cpp': 'Whisper speech-to-text weights (ggml/gguf) for local audio transcription.',
+  'streaming-asr':
+    'Nemotron ASR Streaming snapshots for low-latency chunked transcription (Transformers).'
 }
 
 const DISCOVER_ENGINE_LABELS: Record<DiscoverEngine, string> = {
   'llama.cpp': 'GGUF · llama.cpp',
   'mlx-lm': 'MLX · text',
   'mlx-vlm': 'MLX · vision',
-  'whisper.cpp': 'ASR · whisper.cpp'
+  'whisper.cpp': 'ASR · whisper.cpp',
+  'streaming-asr': 'ASR · streaming'
 }
 
 const BUILD_ENGINE_DEFAULTS: Record<
@@ -106,6 +110,10 @@ const BUILD_ENGINE_DEFAULTS: Record<
   'whisper.cpp': {
     repository: 'https://github.com/ggml-org/whisper.cpp',
     revision: 'master'
+  },
+  'streaming-asr': {
+    repository: 'https://github.com/huggingface/transformers',
+    revision: 'bundled'
   }
 }
 
@@ -610,18 +618,29 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                 )}
                 <div className="library-caps">
                   {engine === 'whisper.cpp' && <span>batch ASR</span>}
+                  {engine === 'streaming-asr' && <span>streaming ASR</span>}
                   {caps?.audio_input === 'native' && <span>native audio</span>}
                   {caps?.input_modalities.includes('image') && <span>vision</span>}
                   {caps?.input_modalities.includes('audio') &&
                     engine !== 'whisper.cpp' &&
+                    engine !== 'streaming-asr' &&
                     caps?.audio_input !== 'native' && <span>audio</span>}
                   {caps?.tools && <span>tools</span>}
                   {caps?.reasoning && <span>reasoning</span>}
                 </div>
               </div>
               <div className="library-card-actions">
-                {engine === 'whisper.cpp' ? (
-                  <button className="chip-button selected" disabled type="button" title="Used automatically for audio/video transcription when active">
+                {engine === 'whisper.cpp' || engine === 'streaming-asr' ? (
+                  <button
+                    className="chip-button selected"
+                    disabled
+                    type="button"
+                    title={
+                      engine === 'streaming-asr'
+                        ? 'Used for streaming transcription via /v1/audio/transcriptions'
+                        : 'Used automatically for audio/video transcription when active'
+                    }
+                  >
                     <Check size={13} /> ASR model
                   </button>
                 ) : (
@@ -774,23 +793,34 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     setDownloadProgress({ key, event: null })
     props.onError(null)
     try {
-      const result = await downloadMlxModel(repoId, discoverEngine, (event) =>
-        setDownloadProgress({ key, event })
-      )
+      const result =
+        discoverEngine === 'streaming-asr'
+          ? await downloadStreamingAsrModel(repoId, (event) =>
+              setDownloadProgress({ key, event })
+            )
+          : await downloadMlxModel(
+              repoId,
+              discoverEngine === 'mlx-vlm' ? 'mlx-vlm' : 'mlx-lm',
+              (event) => setDownloadProgress({ key, event })
+            )
       await props.refreshModels()
-      if (result.model_id) {
+      if (result.model_id && discoverEngine !== 'streaming-asr') {
         props.onSelectModel(result.model_id)
       }
       const engine = result.engine ?? discoverEngine
-      setEnginePhase('Checking the MLX runtime…')
+      setEnginePhase(
+        discoverEngine === 'streaming-asr'
+          ? 'Checking the streaming ASR runtime…'
+          : 'Checking the MLX runtime…'
+      )
       try {
         const runtimeResponse = await listRuntimes()
-        const hasMlx = runtimeResponse.data.some(
+        const hasRuntime = runtimeResponse.data.some(
           (entry) => entry.engine === engine && entry.active
         )
         if (result.notice) {
           props.onError(result.notice)
-        } else if (!hasMlx) {
+        } else if (!hasRuntime) {
           props.onError(
             `Model downloaded for ${engineLabel(engine)}, but that runtime is not active yet. ` +
               'Build and activate it in the Runtimes section.'
@@ -812,7 +842,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       return
     }
     setExpandedRepo(model.id)
-    if (discoverEngine !== 'llama.cpp' && discoverEngine !== 'whisper.cpp') {
+    if (
+      discoverEngine !== 'llama.cpp' &&
+      discoverEngine !== 'whisper.cpp'
+    ) {
       if (trustByRepo[model.id]) return
       setLoadingFilesFor(model.id)
       props.onError(null)
@@ -931,7 +964,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
             ? 'GGUF weights compatible with llama.cpp'
             : discoverEngine === 'whisper.cpp'
               ? 'Whisper speech-to-text weights for whisper.cpp'
-              : `${engineLabel(discoverEngine)} models for Apple Silicon`}
+              : discoverEngine === 'streaming-asr'
+                ? 'Nemotron ASR Streaming snapshots for low-latency transcription'
+                : `${engineLabel(discoverEngine)} models for Apple Silicon`}
           .
         </p>
         <p className="manage-subtext">{DISCOVER_ENGINE_HELP[discoverEngine]}</p>
@@ -951,6 +986,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
               [
                 'llama.cpp',
                 'whisper.cpp',
+                'streaming-asr',
                 ...(props.hardware?.os === 'macos' && props.hardware.architecture === 'aarch64'
                   ? (['mlx-lm', 'mlx-vlm'] as const)
                   : [])
@@ -1074,6 +1110,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           const preferred = preferredFiles[model.id]
           const filePickEngine =
             discoverEngine === 'llama.cpp' || discoverEngine === 'whisper.cpp'
+          // streaming-asr / mlx use snapshot download, not per-file picker
           return (
             <article className="model-card expandable" key={model.id}>
               <div className="model-card-main">
@@ -1344,10 +1381,11 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     [props.hardware?.targets]
   )
   const buildEngineOptions = useMemo((): BuildEngine[] => {
+    const engines: BuildEngine[] = ['streaming-asr']
     if (props.hardware?.os === 'macos' && props.hardware.architecture === 'aarch64') {
-      return ['mlx-lm', 'mlx-vlm']
+      engines.unshift('mlx-lm', 'mlx-vlm')
     }
-    return []
+    return engines
   }, [props.hardware?.os, props.hardware?.architecture])
   const [buildJobs, setBuildJobs] = useState(initialBuildJobs)
   const [building, setBuilding] = useState(false)
@@ -1537,8 +1575,10 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     return next
   }
 
-  const isPythonBuild = buildEngine === 'mlx-lm' || buildEngine === 'mlx-vlm'
+  const isPythonBuild =
+    buildEngine === 'mlx-lm' || buildEngine === 'mlx-vlm' || buildEngine === 'streaming-asr'
   const isWhisperBuild = buildEngine === 'whisper.cpp'
+  const isStreamingAsrBuild = buildEngine === 'streaming-asr'
 
   async function runBuild(event: FormEvent): Promise<void> {
     event.preventDefault()
@@ -1756,8 +1796,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                     {installed && <span className="installed-badge">Built</span>}
                   </strong>
                   <span>
-                    Build a local Python environment with uv. Required for MLX models on Apple
-                    Silicon.
+                    {engine === 'streaming-asr'
+                      ? 'Build an isolated Python environment with Transformers for Nemotron streaming ASR. Requires uv.'
+                      : 'Build a local Python environment with uv. Required for MLX models on Apple Silicon.'}
                   </span>
                 </div>
                 <button
@@ -1861,7 +1902,10 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         </button>
         {buildOpen && (
           <form className="build-form" onSubmit={(event) => void runBuild(event)}>
-            {isAppleSilicon || buildEngine === 'whisper.cpp' || buildEngine === 'llama.cpp' ? (
+            {isAppleSilicon ||
+            buildEngine === 'whisper.cpp' ||
+            buildEngine === 'llama.cpp' ||
+            buildEngine === 'streaming-asr' ? (
               <label>
                 <span>Engine</span>
                 <select
@@ -1874,6 +1918,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                     [
                       'llama.cpp',
                       'whisper.cpp',
+                      'streaming-asr',
                       ...(isAppleSilicon ? (['mlx-lm', 'mlx-vlm'] as const) : [])
                     ] as BuildEngine[]
                   ).map((engine) => (
@@ -1884,19 +1929,23 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 </select>
               </label>
             ) : null}
-            <label>
-              <span>Repository</span>
-              <input
-                value={repository}
-                onChange={(event) => setRepository(event.target.value)}
-                placeholder={BUILD_ENGINE_DEFAULTS[buildEngine].repository}
-              />
-            </label>
-            <div className="build-form-row">
+            {!isStreamingAsrBuild && (
               <label>
-                <span>Branch, tag, or commit</span>
-                <input value={revision} onChange={(event) => setRevision(event.target.value)} />
+                <span>Repository</span>
+                <input
+                  value={repository}
+                  onChange={(event) => setRepository(event.target.value)}
+                  placeholder={BUILD_ENGINE_DEFAULTS[buildEngine].repository}
+                />
               </label>
+            )}
+            <div className="build-form-row">
+              {!isStreamingAsrBuild && (
+                <label>
+                  <span>Branch, tag, or commit</span>
+                  <input value={revision} onChange={(event) => setRevision(event.target.value)} />
+                </label>
+              )}
               {!isPythonBuild && (
                 <label>
                   <span>Target</span>
@@ -1914,15 +1963,17 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
               )}
             </div>
             <p className="model-help">
-              {isPythonBuild
-                ? 'MLX builds create an isolated Python environment with uv. Install uv (`brew install uv`) before starting the build.'
-                : isWhisperBuild
-                  ? 'whisper.cpp builds produce the whisper-cli binary used to transcribe audio and video soundtracks before chat.'
-                  : props.hardware?.os === 'macos'
-                    ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
-                    : props.hardware?.os === 'windows'
-                      ? 'Windows builds need Git, CMake, and Visual Studio 2022 Build Tools with the C++ workload.'
-                      : 'Linux builds need git, cmake, and a distro C++ toolchain. GPU targets also need the matching SDK or driver stack.'}
+              {isStreamingAsrBuild
+                ? 'Installs a bundled Transformers worker plus pinned deps with uv (no Git checkout). Then download a Nemotron ASR Streaming snapshot from Discover.'
+                : isPythonBuild
+                  ? 'MLX builds create an isolated Python environment with uv. Install uv (`brew install uv`) before starting the build.'
+                  : isWhisperBuild
+                    ? 'whisper.cpp builds produce the whisper-cli binary used to transcribe audio and video soundtracks before chat.'
+                    : props.hardware?.os === 'macos'
+                      ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
+                      : props.hardware?.os === 'windows'
+                        ? 'Windows builds need Git, CMake, and Visual Studio 2022 Build Tools with the C++ workload.'
+                        : 'Linux builds need git, cmake, and a distro C++ toolchain. GPU targets also need the matching SDK or driver stack.'}
             </p>
             {!isPythonBuild && (
               <label className="slider-row">

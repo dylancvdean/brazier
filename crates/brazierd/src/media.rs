@@ -120,7 +120,9 @@ pub async fn prepare_messages(
                     .is_some_and(|mode| mode == "native");
                 if native {
                     emit("hydrate", &format!("Preparing native audio for {name}…"));
-                    next_parts.push(native_audio_part_from_blob(ctx.data_dir, sha256, mime).await?);
+                    next_parts.push(
+                        native_audio_part_from_blob(ctx.data_dir, sha256, mime, name).await?,
+                    );
                 } else if ctx.features.asr {
                     emit("transcribe", &format!("Transcribing {name} via batch ASR…"));
                     let transcript = transcribe_blob(ctx, sha256, mime, name).await?;
@@ -179,10 +181,12 @@ async fn image_part_from_blob(
 }
 
 /// OpenAI-style `input_audio` part for models with `audio_input: native`.
+/// Keeps `brazier_sha256` so chat can fall back to batch ASR without re-uploading.
 async fn native_audio_part_from_blob(
     data_dir: &Path,
     sha256: &str,
     mime: &str,
+    name: &str,
 ) -> anyhow::Result<Value> {
     let input = blob_to_temp_file(data_dir, sha256, extension_for_mime(mime)).await?;
     let wav = ensure_wav(&input).await?;
@@ -199,8 +203,98 @@ async fn native_audio_part_from_blob(
         "input_audio": {
             "data": encoded,
             "format": "wav"
-        }
+        },
+        "brazier_sha256": sha256,
+        "brazier_name": name,
+        "brazier_mime_type": mime
     }))
+}
+
+pub fn messages_contain_input_audio(messages: &[OpenAiMessage]) -> bool {
+    messages.iter().any(|message| match &message.content {
+        Value::Array(parts) => parts.iter().any(|part| {
+            part.get("type").and_then(Value::as_str) == Some("input_audio")
+        }),
+        _ => false,
+    })
+}
+
+pub fn looks_like_audio_rejection(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("input_audio")
+        || lower.contains("audio content")
+        || lower.contains("unsupported content")
+        || lower.contains("unknown content type")
+        || lower.contains("modality")
+        || lower.contains("multimodal")
+        || (lower.contains("audio")
+            && (lower.contains("not support")
+                || lower.contains("unsupported")
+                || lower.contains("invalid")
+                || lower.contains("400")))
+}
+
+/// Replace native `input_audio` parts with Whisper transcripts when the chat
+/// engine rejected audio. Requires batch ASR to be available.
+pub async fn fallback_native_audio_to_asr(
+    ctx: &MediaContext<'_>,
+    messages: &mut [OpenAiMessage],
+    progress: Option<&ProgressFn>,
+) -> anyhow::Result<usize> {
+    anyhow::ensure!(ctx.features.asr, "{}", asr_missing_message());
+    let emit = |phase: &str, message: &str| {
+        if let Some(progress) = progress {
+            progress(phase.to_owned(), message.to_owned());
+        }
+    };
+    let mut converted = 0_usize;
+    for message in messages.iter_mut() {
+        let Value::Array(parts) = &message.content else {
+            continue;
+        };
+        let mut next_parts = Vec::with_capacity(parts.len());
+        for part in parts {
+            if part.get("type").and_then(Value::as_str) != Some("input_audio") {
+                next_parts.push(part.clone());
+                continue;
+            }
+            let sha256 = part
+                .get("brazier_sha256")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "native audio part is missing brazier_sha256; cannot fall back to ASR"
+                    )
+                })?;
+            let name = part
+                .get("brazier_name")
+                .and_then(Value::as_str)
+                .unwrap_or("audio");
+            let mime = part
+                .get("brazier_mime_type")
+                .and_then(Value::as_str)
+                .unwrap_or("audio/wav");
+            emit("transcribe", &format!("Engine rejected native audio; transcribing {name}…"));
+            let transcript = transcribe_blob(ctx, sha256, mime, name).await?;
+            next_parts.push(json!({
+                "type": "text",
+                "text": format!("[Transcript of {name} — native audio unsupported by engine]\n{transcript}")
+            }));
+            converted += 1;
+        }
+        message.content = Value::Array(next_parts);
+    }
+    Ok(converted)
+}
+
+/// Materialize a blob as a 16 kHz WAV temp file for ASR workers.
+pub async fn materialize_wav_from_blob(
+    data_dir: &Path,
+    sha256: &str,
+    mime: &str,
+) -> anyhow::Result<PathBuf> {
+    let input = blob_to_temp_file(data_dir, sha256, extension_for_mime(mime)).await?;
+    ensure_wav(&input).await
 }
 
 async fn blob_to_temp_file(
@@ -486,6 +580,24 @@ async fn probe_duration_seconds(path: &Path) -> anyhow::Result<f64> {
 mod tests {
     use super::*;
     use crate::types::ModelCapabilities;
+
+    #[test]
+    fn detects_audio_rejection_and_input_audio_parts() {
+        assert!(looks_like_audio_rejection("unsupported content type input_audio"));
+        assert!(looks_like_audio_rejection("Model does not support audio modality"));
+        assert!(!looks_like_audio_rejection("context length exceeded"));
+        let messages = vec![OpenAiMessage {
+            role: "user".into(),
+            content: json!([{
+                "type": "input_audio",
+                "input_audio": {"data": "AA", "format": "wav"},
+                "brazier_sha256": "abc"
+            }]),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        assert!(messages_contain_input_audio(&messages));
+    }
 
     #[tokio::test]
     async fn hydrates_image_blobs_to_data_urls() {
