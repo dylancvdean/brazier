@@ -28,8 +28,13 @@ import {
   deleteRuntime,
   downloadModel,
   downloadMlxModel,
+  downloadPersonaplexModel,
   downloadStreamingAsrModel,
   ensureLlamaEngine,
+  ensureSdcppEngine,
+  ensureWhisperEngine,
+  fetchManagedSdcppStatus,
+  fetchManagedWhisperStatus,
   fetchManagedLlamaStatus,
   fetchModelTrust,
   formatBytes,
@@ -67,12 +72,27 @@ import {
   modelEngine,
   modelLibraryKey,
   runtimeNoticeForModel,
+  modelDisplayName,
   runtimesForModel
 } from '../model-utils'
 import type { HubModel } from '../types'
 
-type DiscoverEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm' | 'whisper.cpp' | 'streaming-asr'
-type BuildEngine = 'llama.cpp' | 'mlx-lm' | 'mlx-vlm' | 'whisper.cpp' | 'streaming-asr'
+type DiscoverEngine =
+  | 'llama.cpp'
+  | 'mlx-lm'
+  | 'mlx-vlm'
+  | 'whisper.cpp'
+  | 'streaming-asr'
+  | 'stable-diffusion.cpp'
+  | 'personaplex'
+type BuildEngine =
+  | 'llama.cpp'
+  | 'mlx-lm'
+  | 'mlx-vlm'
+  | 'whisper.cpp'
+  | 'streaming-asr'
+  | 'stable-diffusion.cpp'
+  | 'personaplex'
 
 const DISCOVER_ENGINE_HELP: Record<DiscoverEngine, string> = {
   'llama.cpp': 'GGUF weights for llama.cpp on CPU, CUDA, Metal, or Vulkan.',
@@ -80,7 +100,10 @@ const DISCOVER_ENGINE_HELP: Record<DiscoverEngine, string> = {
   'mlx-vlm': 'Vision MLX models for Apple Silicon (image + text input).',
   'whisper.cpp': 'Whisper speech-to-text weights (ggml/gguf) for local audio transcription.',
   'streaming-asr':
-    'Nemotron ASR Streaming snapshots for low-latency chunked transcription (Transformers).'
+    'Nemotron ASR Streaming snapshots for low-latency chunked transcription (Transformers).',
+  'stable-diffusion.cpp':
+    'Image (SD/Flux/Qwen) and video (Wan/LTX) checkpoints for sd-cli generation.',
+  personaplex: 'PersonaPlex / Moshi speech-to-speech snapshots for realtime Voice mode.'
 }
 
 const DISCOVER_ENGINE_LABELS: Record<DiscoverEngine, string> = {
@@ -88,7 +111,9 @@ const DISCOVER_ENGINE_LABELS: Record<DiscoverEngine, string> = {
   'mlx-lm': 'MLX · text',
   'mlx-vlm': 'MLX · vision',
   'whisper.cpp': 'ASR · whisper.cpp',
-  'streaming-asr': 'ASR · streaming'
+  'streaming-asr': 'ASR · streaming',
+  'stable-diffusion.cpp': 'Gen · sd.cpp',
+  personaplex: 'Voice · PersonaPlex'
 }
 
 const BUILD_ENGINE_DEFAULTS: Record<
@@ -114,6 +139,14 @@ const BUILD_ENGINE_DEFAULTS: Record<
   'streaming-asr': {
     repository: 'https://github.com/huggingface/transformers',
     revision: 'bundled'
+  },
+  'stable-diffusion.cpp': {
+    repository: 'https://github.com/leejet/stable-diffusion.cpp',
+    revision: 'master'
+  },
+  personaplex: {
+    repository: 'https://github.com/NVIDIA/personaplex',
+    revision: 'main'
   }
 }
 
@@ -779,7 +812,13 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   }
 
   async function downloadSnapshot(repoId: string): Promise<void> {
-    if (discoverEngine === 'llama.cpp' || discoverEngine === 'whisper.cpp') return
+    if (
+      discoverEngine === 'llama.cpp' ||
+      discoverEngine === 'whisper.cpp' ||
+      discoverEngine === 'stable-diffusion.cpp'
+    ) {
+      return
+    }
     const trust = trustByRepo[repoId]
     if (trust?.gated && hfTokenSource === 'none') {
       props.onError('This model is gated on Hugging Face. Save an access token above first.')
@@ -798,11 +837,15 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           ? await downloadStreamingAsrModel(repoId, (event) =>
               setDownloadProgress({ key, event })
             )
-          : await downloadMlxModel(
-              repoId,
-              discoverEngine === 'mlx-vlm' ? 'mlx-vlm' : 'mlx-lm',
-              (event) => setDownloadProgress({ key, event })
-            )
+          : discoverEngine === 'personaplex'
+            ? await downloadPersonaplexModel(repoId, (event) =>
+                setDownloadProgress({ key, event })
+              )
+            : await downloadMlxModel(
+                repoId,
+                discoverEngine === 'mlx-vlm' ? 'mlx-vlm' : 'mlx-lm',
+                (event) => setDownloadProgress({ key, event })
+              )
       await props.refreshModels()
       if (result.model_id && discoverEngine !== 'streaming-asr') {
         props.onSelectModel(result.model_id)
@@ -966,7 +1009,11 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
               ? 'Whisper speech-to-text weights for whisper.cpp'
               : discoverEngine === 'streaming-asr'
                 ? 'Nemotron ASR Streaming snapshots for low-latency transcription'
-                : `${engineLabel(discoverEngine)} models for Apple Silicon`}
+                : discoverEngine === 'stable-diffusion.cpp'
+                  ? 'image and video generation checkpoints for stable-diffusion.cpp'
+                  : discoverEngine === 'personaplex'
+                    ? 'PersonaPlex / Moshi speech-to-speech snapshots'
+                    : `${engineLabel(discoverEngine)} models for Apple Silicon`}
           .
         </p>
         <p className="manage-subtext">{DISCOVER_ENGINE_HELP[discoverEngine]}</p>
@@ -987,6 +1034,8 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                 'llama.cpp',
                 'whisper.cpp',
                 'streaming-asr',
+                'stable-diffusion.cpp',
+                'personaplex',
                 ...(props.hardware?.os === 'macos' && props.hardware.architecture === 'aarch64'
                   ? (['mlx-lm', 'mlx-vlm'] as const)
                   : [])
@@ -1381,7 +1430,11 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     [props.hardware?.targets]
   )
   const buildEngineOptions = useMemo((): BuildEngine[] => {
-    const engines: BuildEngine[] = ['streaming-asr']
+    const engines: BuildEngine[] = [
+      'streaming-asr',
+      'stable-diffusion.cpp',
+      'personaplex'
+    ]
     if (props.hardware?.os === 'macos' && props.hardware.architecture === 'aarch64') {
       engines.unshift('mlx-lm', 'mlx-vlm')
     }
@@ -1415,8 +1468,15 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
 
   async function refreshManagedStatuses(): Promise<void> {
     try {
-      const response = await fetchManagedLlamaStatus()
-      setManagedStatuses(response.targets)
+      const [llama, whisper, sdcpp] = await Promise.all([
+        fetchManagedLlamaStatus(),
+        fetchManagedWhisperStatus().catch(() => null),
+        fetchManagedSdcppStatus().catch(() => null)
+      ])
+      setManagedStatuses(llama.targets)
+      // Surface whisper/sd.cpp availability in the install helper copy via statuses.
+      void whisper
+      void sdcpp
     } catch {
       setManagedStatuses(null)
     }
@@ -1522,15 +1582,30 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     }
   }
 
-  async function installManaged(target: RuntimeTarget, force = false): Promise<void> {
-    const label = llamaRuntimeLabel(target)
+  async function installManaged(
+    target: RuntimeTarget,
+    force = false,
+    engine: 'llama.cpp' | 'whisper.cpp' | 'stable-diffusion.cpp' = 'llama.cpp'
+  ): Promise<void> {
+    const label =
+      engine === 'whisper.cpp'
+        ? `whisper.cpp · ${target}`
+        : engine === 'stable-diffusion.cpp'
+          ? `stable-diffusion.cpp · ${target}`
+          : llamaRuntimeLabel(target)
     setInstallingTarget(target)
     setInstallProgress(
       emptyJobProgress(force ? `Updating ${label}` : `Installing ${label}`)
     )
     props.onError(null)
     try {
-      await ensureLlamaEngine(
+      const ensure =
+        engine === 'whisper.cpp'
+          ? ensureWhisperEngine
+          : engine === 'stable-diffusion.cpp'
+            ? ensureSdcppEngine
+            : ensureLlamaEngine
+      await ensure(
         (event) => {
           setInstallProgress((current) =>
             applyJobProgress(
@@ -1576,7 +1651,10 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   }
 
   const isPythonBuild =
-    buildEngine === 'mlx-lm' || buildEngine === 'mlx-vlm' || buildEngine === 'streaming-asr'
+    buildEngine === 'mlx-lm' ||
+    buildEngine === 'mlx-vlm' ||
+    buildEngine === 'streaming-asr' ||
+    buildEngine === 'personaplex'
   const isWhisperBuild = buildEngine === 'whisper.cpp'
   const isStreamingAsrBuild = buildEngine === 'streaming-asr'
 
@@ -1783,6 +1861,37 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
               </article>
             )
           })}
+          <article className="runtime-offer">
+            <div className="runtime-offer-info">
+              <strong>whisper.cpp · managed</strong>
+              <span>
+                Official CLI prebuilts on Linux/Windows. macOS releases are XCFramework-only — build
+                from source there.
+              </span>
+            </div>
+            <button
+              className="chip-button"
+              title="Download managed whisper-cli"
+              onClick={() => void installManaged('cpu', false, 'whisper.cpp')}
+            >
+              <Download size={13} />
+              Download
+            </button>
+          </article>
+          <article className="runtime-offer">
+            <div className="runtime-offer-info">
+              <strong>stable-diffusion.cpp · managed</strong>
+              <span>Prebuilt sd-cli for image and video generation (SD/Flux/Wan/LTX).</span>
+            </div>
+            <button
+              className="chip-button"
+              title="Download managed sd-cli"
+              onClick={() => void installManaged('cpu', false, 'stable-diffusion.cpp')}
+            >
+              <Download size={13} />
+              Download
+            </button>
+          </article>
           {buildEngineOptions.map((engine) => {
             const installed = pythonRuntimeInstalled(runtimeList, engine)
             return (
@@ -1798,7 +1907,11 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                   <span>
                     {engine === 'streaming-asr'
                       ? 'Build an isolated Python environment with Transformers for Nemotron streaming ASR. Requires uv.'
-                      : 'Build a local Python environment with uv. Required for MLX models on Apple Silicon.'}
+                      : engine === 'personaplex'
+                        ? 'Build PersonaPlex / Moshi (Linux CUDA) for realtime Voice mode. Requires uv.'
+                        : engine === 'stable-diffusion.cpp'
+                          ? 'Build sd-cli from source or a trusted fork.'
+                          : 'Build a local Python environment with uv. Required for MLX models on Apple Silicon.'}
                   </span>
                 </div>
                 <button
@@ -1905,7 +2018,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             {isAppleSilicon ||
             buildEngine === 'whisper.cpp' ||
             buildEngine === 'llama.cpp' ||
-            buildEngine === 'streaming-asr' ? (
+            buildEngine === 'streaming-asr' ||
+            buildEngine === 'stable-diffusion.cpp' ||
+            buildEngine === 'personaplex' ? (
               <label>
                 <span>Engine</span>
                 <select
@@ -1919,6 +2034,8 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                       'llama.cpp',
                       'whisper.cpp',
                       'streaming-asr',
+                      'stable-diffusion.cpp',
+                      'personaplex',
                       ...(isAppleSilicon ? (['mlx-lm', 'mlx-vlm'] as const) : [])
                     ] as BuildEngine[]
                   ).map((engine) => (
@@ -2122,6 +2239,91 @@ function EngineSection(props: SectionProps): React.JSX.Element {
             ))}
           </div>
         )}
+      </div>
+      <div className="settings-group">
+        <div className="section-label">Generation & voice defaults</div>
+        <p className="model-help">
+          These models are used by chat tools (`generate_image` / `generate_video`) and as defaults
+          in Generate / Voice modes.
+        </p>
+        <div className="settings-grid">
+          <label>
+            <span>Default image model</span>
+            <select
+              value={draft.default_image_gen_model ?? ''}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  default_image_gen_model: event.target.value || null
+                })
+              }
+            >
+              <option value="">None</option>
+              {props.models
+                .filter((model) => model.id.startsWith('sdcpp-image:'))
+                .map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {modelDisplayName(model.id, model).title}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            <span>Default video model</span>
+            <select
+              value={draft.default_video_gen_model ?? ''}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  default_video_gen_model: event.target.value || null
+                })
+              }
+            >
+              <option value="">None</option>
+              {props.models
+                .filter((model) => model.id.startsWith('sdcpp-video:'))
+                .map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {modelDisplayName(model.id, model).title}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            <span>Default voice model</span>
+            <select
+              value={draft.default_voice_model ?? ''}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  default_voice_model: event.target.value || null
+                })
+              }
+            >
+              <option value="">None</option>
+              {props.models
+                .filter((model) => model.id.startsWith('personaplex:'))
+                .map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {modelDisplayName(model.id, model).title}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label className="span-2">
+            <span>Default voice persona</span>
+            <input
+              value={draft.default_voice_persona ?? ''}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  default_voice_persona: event.target.value || null
+                })
+              }
+              placeholder="You are a helpful assistant."
+            />
+          </label>
+        </div>
       </div>
       <div className="settings-grid">
         <label>

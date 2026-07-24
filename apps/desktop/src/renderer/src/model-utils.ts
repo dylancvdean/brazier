@@ -18,6 +18,10 @@ export function engineLabel(engine: string): string {
       return 'ASR · whisper'
     case 'streaming-asr':
       return 'ASR · streaming'
+    case 'stable-diffusion.cpp':
+      return 'Gen · sd.cpp'
+    case 'personaplex':
+      return 'Voice · PersonaPlex'
     default:
       return engine
   }
@@ -35,6 +39,10 @@ export function engineBadgeClass(engine: string): string {
       return 'engine-badge whisper'
     case 'streaming-asr':
       return 'engine-badge whisper'
+    case 'stable-diffusion.cpp':
+      return 'engine-badge gguf'
+    case 'personaplex':
+      return 'engine-badge mlx-lm'
     default:
       return 'engine-badge'
   }
@@ -42,7 +50,27 @@ export function engineBadgeClass(engine: string): string {
 
 export function isChatModel(model: LocalModel | undefined): boolean {
   const engine = modelEngine(model)
-  return engine !== 'whisper.cpp' && engine !== 'streaming-asr'
+  return (
+    engine !== 'whisper.cpp' &&
+    engine !== 'streaming-asr' &&
+    engine !== 'stable-diffusion.cpp' &&
+    engine !== 'personaplex' &&
+    !model?.id.startsWith('sdcpp-image:') &&
+    !model?.id.startsWith('sdcpp-video:') &&
+    !model?.id.startsWith('personaplex:')
+  )
+}
+
+export function isImageGenModel(model: LocalModel | undefined): boolean {
+  return Boolean(model?.id.startsWith('sdcpp-image:'))
+}
+
+export function isVideoGenModel(model: LocalModel | undefined): boolean {
+  return Boolean(model?.id.startsWith('sdcpp-video:'))
+}
+
+export function isVoiceModel(model: LocalModel | undefined): boolean {
+  return Boolean(model?.id.startsWith('personaplex:'))
 }
 
 export function modelLibraryKey(modelId: string): string {

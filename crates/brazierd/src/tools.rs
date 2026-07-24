@@ -83,6 +83,57 @@ pub fn definitions() -> Value {
                     "required": ["code"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_image",
+                "description": "Generate an image with the configured local stable-diffusion.cpp model. Returns a brazier_blob reference the user can view. Requires an installed sd-cli runtime and a default image generation model.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "Text description of the image to generate."
+                        },
+                        "negative_prompt": {
+                            "type": "string",
+                            "description": "Optional negative prompt."
+                        },
+                        "width": { "type": "integer", "description": "Image width in pixels (default 512)." },
+                        "height": { "type": "integer", "description": "Image height in pixels (default 512)." },
+                        "steps": { "type": "integer", "description": "Diffusion steps (default 20)." },
+                        "seed": { "type": "integer", "description": "Optional RNG seed." }
+                    },
+                    "required": ["prompt"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_video",
+                "description": "Generate a short video with the configured local stable-diffusion.cpp Wan/LTX model. Returns a brazier_blob reference. Requires an installed sd-cli runtime and a default video generation model.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "Text description of the video to generate."
+                        },
+                        "negative_prompt": {
+                            "type": "string",
+                            "description": "Optional negative prompt."
+                        },
+                        "width": { "type": "integer", "description": "Frame width in pixels (default 512)." },
+                        "height": { "type": "integer", "description": "Frame height in pixels (default 512)." },
+                        "steps": { "type": "integer", "description": "Diffusion steps (default 20)." },
+                        "video_frames": { "type": "integer", "description": "Number of frames (default 16)." },
+                        "seed": { "type": "integer", "description": "Optional RNG seed." }
+                    },
+                    "required": ["prompt"]
+                }
+            }
         }
     ])
 }
@@ -126,6 +177,20 @@ pub fn catalog() -> Value {
                 ),
                 "network": false,
                 "source": "builtin"
+            },
+            {
+                "name": "generate_image",
+                "title": "Generate image",
+                "description": "Local image generation via stable-diffusion.cpp (requires runtime + default model).",
+                "network": false,
+                "source": "builtin"
+            },
+            {
+                "name": "generate_video",
+                "title": "Generate video",
+                "description": "Local video generation via stable-diffusion.cpp (requires runtime + default model).",
+                "network": false,
+                "source": "builtin"
             }
         ]
     })
@@ -134,7 +199,12 @@ pub fn catalog() -> Value {
 pub fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "get_current_time" | "calculator" | "fetch_url" | "run_javascript"
+        "get_current_time"
+            | "calculator"
+            | "fetch_url"
+            | "run_javascript"
+            | "generate_image"
+            | "generate_video"
     )
 }
 
@@ -142,6 +212,16 @@ pub fn is_builtin(name: &str) -> bool {
 /// the model can react to them; `is_error` marks them for the UI.
 pub async fn execute(
     client: &reqwest::Client,
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+) -> ToolInvocation {
+    execute_with_data_dir(client, None, call_id, name, arguments).await
+}
+
+pub async fn execute_with_data_dir(
+    client: &reqwest::Client,
+    data_dir: Option<&std::path::Path>,
     call_id: &str,
     name: &str,
     arguments: &str,
@@ -187,6 +267,18 @@ pub async fn execute(
                 "run_javascript requires a `code` string argument"
             )),
         },
+        "generate_image" => match data_dir {
+            Some(dir) => generate_image_tool(dir, &parsed).await,
+            None => Err(anyhow::anyhow!(
+                "generate_image requires daemon data directory context"
+            )),
+        },
+        "generate_video" => match data_dir {
+            Some(dir) => generate_video_tool(dir, &parsed).await,
+            None => Err(anyhow::anyhow!(
+                "generate_video requires daemon data directory context"
+            )),
+        },
         other => Err(anyhow::anyhow!("unknown built-in tool `{other}`")),
     };
     match result {
@@ -205,6 +297,145 @@ pub async fn execute(
             is_error: true,
         },
     }
+}
+
+async fn generate_image_tool(data_dir: &std::path::Path, args: &Value) -> anyhow::Result<String> {
+    let prompt = args
+        .get("prompt")
+        .and_then(Value::as_str)
+        .context("generate_image requires a `prompt` string")?;
+    let settings = crate::runtime_settings::load(data_dir);
+    let model_id = settings
+        .default_image_gen_model
+        .clone()
+        .context("no default image generation model configured (set one in Manage → Engine)")?;
+    let request = crate::sdcpp::GenerateImageRequest {
+        prompt: prompt.to_owned(),
+        model_id,
+        negative_prompt: args
+            .get("negative_prompt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        width: args
+            .get("width")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32)
+            .unwrap_or(512),
+        height: args
+            .get("height")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32)
+            .unwrap_or(512),
+        steps: args
+            .get("steps")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32)
+            .unwrap_or(20),
+        seed: args.get("seed").and_then(Value::as_i64),
+        cfg_scale: args
+            .get("cfg_scale")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32),
+        init_image: None,
+    };
+    let result = crate::sdcpp::generate_image(
+        data_dir,
+        settings.sdcpp_binary.as_deref(),
+        &request,
+    )
+    .await?;
+    let bytes = tokio::fs::read(&result.output_path)
+        .await
+        .context("read generated image")?;
+    let blob = crate::blob_store::store_bytes(
+        data_dir,
+        &bytes,
+        "image/png",
+        Some("generated.png"),
+    )
+    .await?;
+    let _ = tokio::fs::remove_file(&result.output_path).await;
+    Ok(format!(
+        "Generated image stored as brazier_blob:{} ({} bytes).",
+        blob.sha256, blob.size_bytes
+    ))
+}
+
+async fn generate_video_tool(data_dir: &std::path::Path, args: &Value) -> anyhow::Result<String> {
+    let prompt = args
+        .get("prompt")
+        .and_then(Value::as_str)
+        .context("generate_video requires a `prompt` string")?;
+    let settings = crate::runtime_settings::load(data_dir);
+    let model_id = settings
+        .default_video_gen_model
+        .clone()
+        .context("no default video generation model configured (set one in Manage → Engine)")?;
+    let request = crate::sdcpp::GenerateVideoRequest {
+        prompt: prompt.to_owned(),
+        model_id,
+        negative_prompt: args
+            .get("negative_prompt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        width: args
+            .get("width")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32)
+            .unwrap_or(512),
+        height: args
+            .get("height")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32)
+            .unwrap_or(512),
+        steps: args
+            .get("steps")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32)
+            .unwrap_or(20),
+        seed: args.get("seed").and_then(Value::as_i64),
+        cfg_scale: args
+            .get("cfg_scale")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32),
+        init_image: None,
+        video_frames: args
+            .get("video_frames")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32)
+            .unwrap_or(16),
+    };
+    let result = crate::sdcpp::generate_video(
+        data_dir,
+        settings.sdcpp_binary.as_deref(),
+        &request,
+    )
+    .await?;
+    let bytes = tokio::fs::read(&result.output_path)
+        .await
+        .context("read generated video")?;
+    let mime = if result
+        .output_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("webm"))
+    {
+        "video/webm"
+    } else {
+        "video/mp4"
+    };
+    let blob = crate::blob_store::store_bytes(
+        data_dir,
+        &bytes,
+        mime,
+        Some(result.output_path.file_name().and_then(|n| n.to_str()).unwrap_or("generated.mp4")),
+    )
+    .await?;
+    let _ = tokio::fs::remove_file(&result.output_path).await;
+    Ok(format!(
+        "Generated video stored as brazier_blob:{} ({} bytes).",
+        blob.sha256, blob.size_bytes
+    ))
 }
 
 fn current_time() -> String {

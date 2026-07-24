@@ -12,7 +12,8 @@ use crate::{builds, llama};
 
 pub const ENGINE: &str = "llama.cpp";
 const MANAGED_FLAVORS: &[&str] = &["cuda", "rocm", "vulkan"];
-const PYTHON_ENGINES: &[&str] = &["mlx-lm", "mlx-vlm", "streaming-asr"];
+const PYTHON_ENGINES: &[&str] = &["mlx-lm", "mlx-vlm", "streaming-asr", "personaplex"];
+const SDCPP_MANAGED_FLAVORS: &[&str] = &["cuda", "rocm", "vulkan"];
 
 fn llama_target_label(target: &str) -> &str {
     match target {
@@ -36,6 +37,8 @@ pub struct ActiveRuntimes {
     pub mlx_vlm: Option<PathBuf>,
     pub whisper: Option<PathBuf>,
     pub streaming_asr: Option<PathBuf>,
+    pub sdcpp: Option<PathBuf>,
+    pub voice: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,12 +151,14 @@ pub fn list(
                 "mlx-lm" => "MLX-LM",
                 "mlx-vlm" => "MLX-VLM",
                 "streaming-asr" => "Streaming ASR",
+                "personaplex" => "PersonaPlex",
                 other => other,
             };
             let selected = match *engine {
                 "mlx-lm" => &active.mlx_lm,
                 "mlx-vlm" => &active.mlx_vlm,
                 "streaming-asr" => &active.streaming_asr,
+                "personaplex" => &active.voice,
                 _ => &None,
             };
             entries.push(RuntimeEntry {
@@ -166,6 +171,96 @@ pub fn list(
                 repository: Some(record.repository.clone()),
                 path: record.binary.clone(),
                 active: is_active(&path, selected),
+                deletable: true,
+            });
+        }
+    }
+
+    // Managed stable-diffusion.cpp installs.
+    let sdcpp_engine_dir = crate::sdcpp::managed_engine_dir(data_dir);
+    let sdcpp_default = crate::sdcpp::managed_binary_path(data_dir);
+    if sdcpp_default.is_file() {
+        entries.push(RuntimeEntry {
+            id: "sdcpp-managed".to_owned(),
+            engine: crate::sdcpp::ENGINE.to_owned(),
+            kind: "managed".to_owned(),
+            label: "stable-diffusion.cpp · CPU".to_owned(),
+            target: Some("cpu".to_owned()),
+            version: read_version(&sdcpp_engine_dir),
+            repository: None,
+            path: sdcpp_default.display().to_string(),
+            active: is_active(&sdcpp_default, &active.sdcpp),
+            deletable: true,
+        });
+    }
+    for flavor in SDCPP_MANAGED_FLAVORS {
+        let flavor_dir = sdcpp_engine_dir.join(flavor);
+        let binary = flavor_dir.join("bin").join(crate::sdcpp::binary_name());
+        if binary.is_file() {
+            entries.push(RuntimeEntry {
+                id: format!("sdcpp-managed-{flavor}"),
+                engine: crate::sdcpp::ENGINE.to_owned(),
+                kind: "managed".to_owned(),
+                label: format!(
+                    "stable-diffusion.cpp · {}",
+                    llama_target_label(flavor)
+                ),
+                target: Some((*flavor).to_owned()),
+                version: read_version(&flavor_dir),
+                repository: None,
+                path: binary.display().to_string(),
+                active: is_active(&binary, &active.sdcpp),
+                deletable: true,
+            });
+        }
+    }
+    for (build_id, record) in builds::list_builds(data_dir, crate::sdcpp::ENGINE) {
+        let path = PathBuf::from(&record.binary);
+        entries.push(RuntimeEntry {
+            id: format!("sdcpp-source-{build_id}"),
+            engine: crate::sdcpp::ENGINE.to_owned(),
+            kind: "source".to_owned(),
+            label: format!("stable-diffusion.cpp · Source · {}", record.revision),
+            target: Some(record.target.clone()),
+            version: Some(record.revision.clone()),
+            repository: Some(record.repository.clone()),
+            path: record.binary.clone(),
+            active: is_active(&path, &active.sdcpp),
+            deletable: true,
+        });
+    }
+
+    // Managed whisper.cpp installs (Linux/Windows CLI prebuilts).
+    let whisper_engine_dir = crate::whisper::managed_engine_dir(data_dir);
+    let whisper_default = crate::whisper::managed_binary_path(data_dir);
+    if whisper_default.is_file() {
+        entries.push(RuntimeEntry {
+            id: "whisper-managed".to_owned(),
+            engine: crate::whisper::ENGINE.to_owned(),
+            kind: "managed".to_owned(),
+            label: "whisper.cpp · CPU".to_owned(),
+            target: Some("cpu".to_owned()),
+            version: read_version(&whisper_engine_dir),
+            repository: None,
+            path: whisper_default.display().to_string(),
+            active: is_active(&whisper_default, &active.whisper),
+            deletable: true,
+        });
+    }
+    for flavor in ["cuda"] {
+        let flavor_dir = whisper_engine_dir.join(flavor);
+        let binary = flavor_dir.join("bin").join(crate::whisper::binary_name());
+        if binary.is_file() {
+            entries.push(RuntimeEntry {
+                id: format!("whisper-managed-{flavor}"),
+                engine: crate::whisper::ENGINE.to_owned(),
+                kind: "managed".to_owned(),
+                label: format!("whisper.cpp · {}", llama_target_label(flavor)),
+                target: Some((*flavor).to_owned()),
+                version: read_version(&flavor_dir),
+                repository: None,
+                path: binary.display().to_string(),
+                active: is_active(&binary, &active.whisper),
                 deletable: true,
             });
         }
@@ -358,6 +453,62 @@ pub fn delete(data_dir: &Path, id: &str) -> anyhow::Result<PathBuf> {
             std::fs::remove_dir_all(&root).context("remove source build")?;
             return Ok(python);
         }
+    }
+    if id == "sdcpp-managed" {
+        let binary = crate::sdcpp::managed_binary_path(data_dir);
+        anyhow::ensure!(binary.is_file(), "managed sd.cpp runtime is not installed");
+        let bin_dir = binary.parent().context("managed binary has no parent")?;
+        std::fs::remove_dir_all(bin_dir).context("remove managed sd.cpp runtime")?;
+        let _ = std::fs::remove_file(crate::sdcpp::managed_engine_dir(data_dir).join("VERSION"));
+        return Ok(binary);
+    }
+    if let Some(flavor) = id.strip_prefix("sdcpp-managed-") {
+        anyhow::ensure!(
+            SDCPP_MANAGED_FLAVORS.contains(&flavor),
+            "unknown managed sd.cpp runtime `{id}`"
+        );
+        let flavor_dir = crate::sdcpp::managed_engine_dir(data_dir).join(flavor);
+        let binary = flavor_dir.join("bin").join(crate::sdcpp::binary_name());
+        anyhow::ensure!(flavor_dir.is_dir(), "managed sd.cpp runtime `{id}` is not installed");
+        std::fs::remove_dir_all(&flavor_dir).context("remove managed sd.cpp runtime")?;
+        return Ok(binary);
+    }
+    if let Some(build_id) = id.strip_prefix("sdcpp-source-") {
+        anyhow::ensure!(
+            !build_id.is_empty()
+                && !build_id.contains('/')
+                && !build_id.contains('\\')
+                && build_id != "."
+                && build_id != "..",
+            "invalid build id"
+        );
+        let root = builds::builds_root(data_dir, crate::sdcpp::ENGINE).join(build_id);
+        anyhow::ensure!(root.is_dir(), "source build `{build_id}` does not exist");
+        let binary = root
+            .join("install")
+            .join("bin")
+            .join(crate::sdcpp::binary_name());
+        std::fs::remove_dir_all(&root).context("remove source build")?;
+        return Ok(binary);
+    }
+    if id == "whisper-managed" {
+        let binary = crate::whisper::managed_binary_path(data_dir);
+        anyhow::ensure!(binary.is_file(), "managed whisper runtime is not installed");
+        let bin_dir = binary.parent().context("managed binary has no parent")?;
+        std::fs::remove_dir_all(bin_dir).context("remove managed whisper runtime")?;
+        let _ = std::fs::remove_file(crate::whisper::managed_engine_dir(data_dir).join("VERSION"));
+        return Ok(binary);
+    }
+    if let Some(flavor) = id.strip_prefix("whisper-managed-") {
+        anyhow::ensure!(flavor == "cuda", "unknown managed whisper runtime `{id}`");
+        let flavor_dir = crate::whisper::managed_engine_dir(data_dir).join(flavor);
+        let binary = flavor_dir.join("bin").join(crate::whisper::binary_name());
+        anyhow::ensure!(
+            flavor_dir.is_dir(),
+            "managed whisper runtime `{id}` is not installed"
+        );
+        std::fs::remove_dir_all(&flavor_dir).context("remove managed whisper runtime")?;
+        return Ok(binary);
     }
     if let Some(build_id) = id.strip_prefix("whisper-source-") {
         anyhow::ensure!(

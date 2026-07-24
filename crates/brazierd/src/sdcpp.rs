@@ -1,0 +1,1370 @@
+//! stable-diffusion.cpp binary discovery, managed install, model store, and
+//! spawn-per-request image/video generation jobs.
+//!
+//! Mirrors the managed-install conventions from `llama.rs` and the CLI
+//! spawn/timeout conventions from `whisper.rs`. Unlike llama-server (a
+//! long-lived HTTP server) and whisper-cli (a quick batch transcription),
+//! `sd-cli` runs one full diffusion job per invocation, so jobs are
+//! serialized behind a process-global lock to protect the GPU.
+
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::OnceLock,
+    time::Duration,
+};
+
+use anyhow::Context;
+use flate2::read::GzDecoder;
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+use tar::Archive;
+use tokio::{
+    io::AsyncWriteExt,
+    process::Command,
+    sync::Mutex as AsyncMutex,
+};
+
+use crate::{
+    models_store,
+    progress::{ProgressCallback, ProgressEvent},
+    runtime_settings::RuntimeTarget,
+    types::{ModelCapabilities, ModelDescriptor},
+};
+
+pub const ENGINE: &str = "stable-diffusion.cpp";
+
+const GITHUB_API: &str =
+    "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/latest";
+const USER_AGENT: &str = "brazier-sdcpp-manager";
+
+const IMAGE_TIMEOUT: Duration = Duration::from_secs(600);
+const VIDEO_TIMEOUT: Duration = Duration::from_secs(1800);
+
+// ---------------------------------------------------------------------------
+// Managed install
+// ---------------------------------------------------------------------------
+
+pub fn managed_engine_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("engines").join("stable-diffusion.cpp")
+}
+
+pub fn binary_name() -> &'static str {
+    if cfg!(windows) { "sd-cli.exe" } else { "sd-cli" }
+}
+
+pub fn managed_binary_path(data_dir: &Path) -> PathBuf {
+    managed_engine_dir(data_dir).join("bin").join(binary_name())
+}
+
+pub fn managed_binary_path_for_target(data_dir: &Path, target: RuntimeTarget) -> PathBuf {
+    if matches!(
+        target,
+        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal
+    ) {
+        return managed_binary_path(data_dir);
+    }
+    managed_engine_dir(data_dir)
+        .join(target.as_str())
+        .join("bin")
+        .join(binary_name())
+}
+
+/// Root directory where managed install metadata (VERSION) lives for a target.
+pub fn managed_install_root(data_dir: &Path, target: RuntimeTarget) -> PathBuf {
+    let engine_dir = managed_engine_dir(data_dir);
+    match target {
+        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal => engine_dir,
+        _ => engine_dir.join(target.as_str()),
+    }
+}
+
+pub fn managed_is_installed(data_dir: &Path, target: RuntimeTarget) -> bool {
+    managed_binary_path_for_target(data_dir, target).is_file()
+}
+
+pub fn managed_installed_version(data_dir: &Path, target: RuntimeTarget) -> Option<String> {
+    std::fs::read_to_string(managed_install_root(data_dir, target).join("VERSION"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Coarse OS/arch tag used to select a GitHub release asset. Only platforms
+/// with an upstream prebuilt CLI package are supported here; everything else
+/// falls back to a source build.
+pub fn platform_asset_tag() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("macos-arm64"),
+        ("linux", "x86_64") => Some("linux-x64"),
+        ("windows", "x86_64") => Some("windows-x64"),
+        _ => None,
+    }
+}
+
+/// Restrict an acceleration target to what this platform's managed releases
+/// actually publish, falling back to the platform's baseline flavor.
+fn constrain_target_to_platform(target: RuntimeTarget) -> RuntimeTarget {
+    match (std::env::consts::OS, target) {
+        ("macos", RuntimeTarget::Cuda | RuntimeTarget::Rocm | RuntimeTarget::Vulkan) => {
+            RuntimeTarget::Metal
+        }
+        ("linux", RuntimeTarget::Cuda | RuntimeTarget::Metal) => RuntimeTarget::Cpu,
+        ("windows", RuntimeTarget::Rocm | RuntimeTarget::Metal) => RuntimeTarget::Cpu,
+        _ => target,
+    }
+}
+
+/// Choose the best prebuilt release asset for this host/target combination.
+///
+/// - macOS arm64: asset name contains `Darwin` and `arm64`.
+/// - Linux x64 CPU: contains `Linux` + `x86_64`, without `vulkan`/`rocm`/`cuda`.
+/// - Linux x64 Vulkan: contains `vulkan`.
+/// - Linux x64 ROCm: contains `rocm`.
+/// - Windows CPU: `win-cpu-x64`, or `win` + `cpu` + `x64`.
+/// - Windows CUDA: `win-cuda`, or `cuda12` + `win`.
+/// - Windows Vulkan: `win-vulkan`, or `win` + `vulkan`.
+///
+/// `cudart` redistributable packages are always skipped.
+pub fn select_release_asset_for_target<'a>(
+    asset_names: impl IntoIterator<Item = &'a str>,
+    platform_tag: &str,
+    target: RuntimeTarget,
+) -> Option<&'a str> {
+    let mut candidates: Vec<&str> = asset_names
+        .into_iter()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("cudart") {
+                return false;
+            }
+            if !(lower.ends_with(".zip") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz"))
+            {
+                return false;
+            }
+            match platform_tag {
+                "macos-arm64" => lower.contains("darwin") && lower.contains("arm64"),
+                "linux-x64" => {
+                    let base = lower.contains("linux") && lower.contains("x86_64");
+                    if !base {
+                        return false;
+                    }
+                    match target {
+                        RuntimeTarget::Vulkan => lower.contains("vulkan"),
+                        RuntimeTarget::Rocm => lower.contains("rocm"),
+                        _ => {
+                            !lower.contains("vulkan")
+                                && !lower.contains("rocm")
+                                && !lower.contains("cuda")
+                        }
+                    }
+                }
+                "windows-x64" => match target {
+                    RuntimeTarget::Cuda => {
+                        lower.contains("win-cuda")
+                            || (lower.contains("cuda12") && lower.contains("win"))
+                    }
+                    RuntimeTarget::Vulkan => {
+                        lower.contains("win-vulkan")
+                            || (lower.contains("win") && lower.contains("vulkan"))
+                    }
+                    _ => {
+                        lower.contains("win-cpu-x64")
+                            || (lower.contains("win")
+                                && lower.contains("cpu")
+                                && lower.contains("x64"))
+                    }
+                },
+                _ => false,
+            }
+        })
+        .collect();
+    // Prefer the shortest matching name (fewest extra qualifiers).
+    candidates.sort_by_key(|name| name.len());
+    candidates.first().copied()
+}
+
+#[derive(Debug, Clone)]
+pub struct ReleaseAsset {
+    pub name: String,
+    pub browser_download_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+/// Resolve the preferred managed binary download for this platform/target.
+pub async fn resolve_managed_release(
+    client: &reqwest::Client,
+    target: RuntimeTarget,
+) -> anyhow::Result<(String, ReleaseAsset)> {
+    let platform = platform_asset_tag()
+        .context("managed stable-diffusion.cpp binaries are not available for this platform")?;
+    let release: GithubRelease = client
+        .get(GITHUB_API)
+        .header("user-agent", USER_AGENT)
+        .send()
+        .await
+        .context("contact GitHub releases")?
+        .error_for_status()
+        .context("GitHub releases request failed")?
+        .json()
+        .await
+        .context("decode GitHub release")?;
+    let names: Vec<String> = release
+        .assets
+        .iter()
+        .map(|asset| asset.name.clone())
+        .collect();
+    let selected =
+        select_release_asset_for_target(names.iter().map(String::as_str), platform, target)
+            .context("no matching stable-diffusion.cpp release asset for this platform/target")?
+            .to_owned();
+    let asset = release
+        .assets
+        .into_iter()
+        .find(|asset| asset.name == selected)
+        .context("selected asset missing from release")?;
+    Ok((
+        release.tag_name,
+        ReleaseAsset {
+            name: asset.name,
+            browser_download_url: asset.browser_download_url,
+        },
+    ))
+}
+
+fn should_keep_extracted_file(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    let is_lib =
+        lower.contains(".so") || lower.ends_with(".dll") || lower.ends_with(".dylib");
+    let is_cli = file_name == binary_name();
+    is_lib
+        || is_cli
+        || lower.starts_with("sd")
+        || lower.starts_with("ggml")
+        || lower.starts_with("stable-diffusion")
+}
+
+/// Extract release members into `bin_dir`, flattening any top-level prefix directory.
+fn extract_release_archive(archive_path: &Path, bin_dir: &Path) -> anyhow::Result<()> {
+    let file = std::fs::File::open(archive_path).context("open archive")?;
+    let name = archive_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        let decoder = GzDecoder::new(file);
+        let mut archive = Archive::new(decoder);
+        let mut found_cli = false;
+        for entry in archive.entries().context("read tar entries")? {
+            let mut entry = entry.context("tar entry")?;
+            let path = entry.path().context("tar entry path")?.into_owned();
+            if entry.header().entry_type().is_dir() {
+                continue;
+            }
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if file_name.is_empty() || !should_keep_extracted_file(file_name) {
+                continue;
+            }
+            let dest = bin_dir.join(file_name);
+            entry
+                .unpack(&dest)
+                .with_context(|| format!("unpack {file_name}"))?;
+            if file_name == binary_name() {
+                found_cli = true;
+            }
+        }
+        anyhow::ensure!(found_cli, "sd-cli binary not found in archive");
+        return Ok(());
+    }
+    if name.ends_with(".zip") {
+        let mut archive = zip::ZipArchive::new(file).context("read zip archive")?;
+        let mut found_cli = false;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).context("read zip entry")?;
+            if entry.is_dir() {
+                continue;
+            }
+            let Some(path) = entry.enclosed_name() else {
+                continue;
+            };
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if !should_keep_extracted_file(file_name) {
+                continue;
+            }
+            let mut destination =
+                std::fs::File::create(bin_dir.join(file_name)).context("create zip output")?;
+            std::io::copy(&mut entry, &mut destination).context("extract zip entry")?;
+            found_cli |= file_name == binary_name();
+        }
+        anyhow::ensure!(found_cli, "sd-cli binary not found in archive");
+        return Ok(());
+    }
+    anyhow::bail!("unsupported archive format: {name}");
+}
+
+/// Download and extract a managed sd-cli binary into the data directory.
+pub async fn install_managed_binary_with_progress(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    target: RuntimeTarget,
+    mut progress: ProgressCallback,
+) -> anyhow::Result<PathBuf> {
+    progress(ProgressEvent::phase(
+        "resolve",
+        "Looking up the latest stable-diffusion.cpp release",
+    ));
+    let (tag, asset) = resolve_managed_release(client, target).await?;
+    tracing::info!(%tag, asset = %asset.name, "downloading managed stable-diffusion.cpp binary");
+    progress(ProgressEvent::phase(
+        "download",
+        format!("Downloading {tag} ({})", asset.name),
+    ));
+
+    let response = client
+        .get(&asset.browser_download_url)
+        .header("user-agent", USER_AGENT)
+        .send()
+        .await
+        .context("download stable-diffusion.cpp release")?
+        .error_for_status()
+        .context("stable-diffusion.cpp release download failed")?;
+    let total = response.content_length();
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    let mut written = 0_u64;
+    let mut last_emit = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read stable-diffusion.cpp release body")?;
+        written += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+        if written.saturating_sub(last_emit) >= 256 * 1024 || total == Some(written) {
+            progress(ProgressEvent::download(written, total));
+            last_emit = written;
+        }
+    }
+    progress(ProgressEvent::download(written, total.or(Some(written))));
+
+    let binary = managed_binary_path_for_target(data_dir, target);
+    let bin_dir = binary
+        .parent()
+        .context("managed binary path has no parent")?
+        .to_path_buf();
+    let engine_dir = bin_dir
+        .parent()
+        .context("managed binary directory has no parent")?
+        .to_path_buf();
+    if bin_dir.exists() {
+        tokio::fs::remove_dir_all(&bin_dir)
+            .await
+            .context("clear previous managed sdcpp install")?;
+    }
+    tokio::fs::create_dir_all(&bin_dir)
+        .await
+        .context("create sdcpp engine bin directory")?;
+    let archive_path = engine_dir.join(&asset.name);
+    {
+        let mut file = tokio::fs::File::create(&archive_path)
+            .await
+            .context("write release archive")?;
+        file.write_all(&bytes).await?;
+        file.flush().await?;
+    }
+
+    progress(ProgressEvent::phase(
+        "extract",
+        "Extracting sd-cli and shared libraries",
+    ));
+    extract_release_archive(&archive_path, &bin_dir)
+        .context("extract stable-diffusion.cpp release")?;
+    anyhow::ensure!(
+        binary.is_file(),
+        "archive did not contain {}; extracted into {}",
+        binary_name(),
+        bin_dir.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in std::fs::read_dir(&bin_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let mut permissions = std::fs::metadata(&path)?.permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&path, permissions)?;
+            }
+        }
+    }
+    let _ = tokio::fs::remove_file(&archive_path).await;
+    tokio::fs::write(engine_dir.join("VERSION"), format!("{tag}\n")).await?;
+    progress(ProgressEvent::done(serde_json::json!({
+        "binary": binary.display().to_string(),
+        "tag": tag,
+        "status": "ready"
+    })));
+    Ok(binary)
+}
+
+/// Ensure an sd-cli binary is available, installing a managed build if needed.
+pub async fn ensure_binary_with_progress(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    target: RuntimeTarget,
+    force: bool,
+    mut progress: ProgressCallback,
+) -> anyhow::Result<PathBuf> {
+    let target = if target == RuntimeTarget::Auto {
+        constrain_target_to_platform(crate::hardware::detect().recommended_target)
+    } else {
+        target
+    };
+    if force {
+        return install_managed_binary_with_progress(client, data_dir, target, progress).await;
+    }
+    let managed = managed_binary_path_for_target(data_dir, target);
+    progress(ProgressEvent::phase(
+        "discover",
+        "Looking for an existing sd-cli binary",
+    ));
+    let discovered = if managed.is_file() {
+        Some(managed.clone())
+    } else {
+        resolve_binary(data_dir, None)
+    };
+    if let Some(path) = discovered {
+        if binary_appears_runnable(&path) {
+            progress(ProgressEvent::done(serde_json::json!({
+                "binary": path.display().to_string(),
+                "status": "ready",
+                "source": "discovered"
+            })));
+            return Ok(path);
+        }
+        if path != managed {
+            tracing::warn!(
+                binary = %path.display(),
+                "discovered sd-cli failed a smoke test; trying managed install"
+            );
+        }
+    }
+    install_managed_binary_with_progress(client, data_dir, target, progress).await
+}
+
+/// Candidate paths where a user- or app-installed sd-cli might live.
+pub fn discovery_candidates(data_dir: &Path, path_env: Option<&str>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for target in [
+        RuntimeTarget::Cpu,
+        RuntimeTarget::Cuda,
+        RuntimeTarget::Rocm,
+        RuntimeTarget::Vulkan,
+        RuntimeTarget::Metal,
+    ] {
+        let managed = managed_binary_path_for_target(data_dir, target);
+        if !candidates.contains(&managed) {
+            candidates.push(managed);
+        }
+    }
+    for (_, record) in crate::builds::list_builds(data_dir, ENGINE) {
+        candidates.push(PathBuf::from(record.binary));
+    }
+    if let Some(path_env) = path_env {
+        for dir in std::env::split_paths(path_env) {
+            candidates.push(dir.join(binary_name()));
+        }
+    }
+    for dir in [
+        "/usr/local/bin",
+        "/usr/bin",
+        "/opt/homebrew/bin",
+        "/opt/local/bin",
+    ] {
+        candidates.push(PathBuf::from(dir).join(binary_name()));
+    }
+    candidates
+}
+
+/// Resolve an activated, discovered, or PATH-installed sd-cli binary.
+pub fn resolve_binary(data_dir: &Path, override_path: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = override_path
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return Some(path);
+    }
+    discovery_candidates(data_dir, std::env::var_os("PATH").as_deref().and_then(|p| p.to_str()))
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+fn prepend_library_path(command: &mut Command, dir: &Path) {
+    #[cfg(unix)]
+    {
+        let key = if cfg!(target_os = "macos") {
+            "DYLD_LIBRARY_PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        let mut paths = vec![dir.to_path_buf()];
+        if let Some(existing) = std::env::var_os(key) {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env(key, joined);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut paths = vec![dir.to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env("PATH", joined);
+        }
+    }
+}
+
+/// Best-effort check that a binary can start (shared libraries resolve).
+pub fn binary_appears_runnable(binary: &Path) -> bool {
+    let mut command = std::process::Command::new(binary);
+    command
+        .arg("-h")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(dir) = binary.parent() {
+        #[cfg(unix)]
+        {
+            let key = if cfg!(target_os = "macos") {
+                "DYLD_LIBRARY_PATH"
+            } else {
+                "LD_LIBRARY_PATH"
+            };
+            let mut paths = vec![dir.to_path_buf()];
+            if let Some(existing) = std::env::var_os(key) {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            if let Ok(joined) = std::env::join_paths(paths) {
+                command.env(key, joined);
+            }
+        }
+    }
+    matches!(command.status(), Ok(status) if status.success() || status.code().is_some())
+}
+
+// ---------------------------------------------------------------------------
+// Model store
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Modality {
+    Image,
+    Video,
+}
+
+impl Modality {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Image => "sdcpp-image",
+            Self::Video => "sdcpp-video",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+        }
+    }
+
+    fn root(self, data_dir: &Path) -> PathBuf {
+        match self {
+            Self::Image => image_root(data_dir),
+            Self::Video => video_root(data_dir),
+        }
+    }
+}
+
+/// Root for image models: `<data>/models/sdcpp/image`.
+pub fn image_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("models").join("sdcpp").join("image")
+}
+
+/// Root for video models: `<data>/models/sdcpp/video`.
+pub fn video_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("models").join("sdcpp").join("video")
+}
+
+/// Sidecar manifest describing how to invoke sd-cli for one model.
+///
+/// Placed as `manifest.json` inside the model's directory, either next to a
+/// multi-component model's constituent weight files (`args`) or alongside a
+/// single checkpoint file (`single_file`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SdcppManifest {
+    pub modality: Modality,
+    /// Maps an sd-cli flag name (without leading `--`, e.g. `diffusion-model`,
+    /// `vae`, `t5xxl`, `clip_l`, `llm`, `clip_vision`) to a path relative to
+    /// the manifest's directory.
+    #[serde(default)]
+    pub args: BTreeMap<String, String>,
+    /// Relative path (from the manifest's directory) to a single
+    /// `.safetensors`/`.gguf` checkpoint, used with sd-cli's `-m` flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub single_file: Option<String>,
+}
+
+fn manifest_file_path(dir: &Path) -> PathBuf {
+    dir.join("manifest.json")
+}
+
+/// Load and parse the manifest for a model directory.
+pub fn load_manifest(dir: &Path) -> anyhow::Result<SdcppManifest> {
+    let path = manifest_file_path(dir);
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+}
+
+fn validate_key(key: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!key.is_empty(), "empty stable-diffusion.cpp model key");
+    anyhow::ensure!(
+        !key.split('/')
+            .any(|part| part.is_empty() || part == "." || part == ".."),
+        "invalid stable-diffusion.cpp model key"
+    );
+    Ok(())
+}
+
+fn validate_component_filename(filename: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !filename.is_empty() && filename.len() <= 260,
+        "invalid filename"
+    );
+    anyhow::ensure!(
+        !filename.starts_with('/') && !filename.contains('\\'),
+        "filename must be a relative path"
+    );
+    anyhow::ensure!(
+        !filename
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == ".."),
+        "filename must not contain empty or parent path segments"
+    );
+    Ok(())
+}
+
+/// Stable model id: `sdcpp-image:{key}` or `sdcpp-video:{key}`.
+pub fn model_id(modality: Modality, key: &str) -> String {
+    format!("{}:{key}", modality.prefix())
+}
+
+/// Split a stable-diffusion.cpp model id into its modality and key.
+pub fn parse_model_id(model_id: &str) -> anyhow::Result<(Modality, &str)> {
+    if let Some(key) = model_id.strip_prefix("sdcpp-image:") {
+        return Ok((Modality::Image, key));
+    }
+    if let Some(key) = model_id.strip_prefix("sdcpp-video:") {
+        return Ok((Modality::Video, key));
+    }
+    anyhow::bail!("not a stable-diffusion.cpp model id: {model_id}")
+}
+
+/// Resolve a model directory and its parsed manifest from a model id.
+fn resolve_manifest(data_dir: &Path, model_id: &str) -> anyhow::Result<(PathBuf, SdcppManifest)> {
+    let (modality, key) = parse_model_id(model_id)?;
+    validate_key(key)?;
+    let dir = modality.root(data_dir).join(key);
+    anyhow::ensure!(dir.is_dir(), "model not found: {model_id}");
+    let manifest = load_manifest(&dir)?;
+    anyhow::ensure!(
+        manifest.modality == modality,
+        "manifest modality does not match model id {model_id}"
+    );
+    Ok((dir, manifest))
+}
+
+/// Resolve a `sdcpp-image:…`/`sdcpp-video:…` model id to an on-disk path.
+///
+/// Returns the model's manifest directory for multi-component models, or the
+/// single checkpoint file when the manifest declares `single_file`.
+pub fn path_for_model_id(data_dir: &Path, model_id: &str) -> anyhow::Result<PathBuf> {
+    let (dir, manifest) = resolve_manifest(data_dir, model_id)?;
+    if let Some(single_file) = &manifest.single_file {
+        validate_component_filename(single_file)?;
+        let file = dir.join(single_file);
+        anyhow::ensure!(
+            file.is_file(),
+            "manifest single_file missing: {}",
+            file.display()
+        );
+        return Ok(file);
+    }
+    Ok(dir)
+}
+
+/// Destination path for one downloaded weight/component file.
+pub fn download_destination(
+    data_dir: &Path,
+    modality: Modality,
+    repo_id: &str,
+    filename: &str,
+) -> anyhow::Result<PathBuf> {
+    models_store::validate_repo_id(repo_id)?;
+    validate_component_filename(filename)?;
+    Ok(modality.root(data_dir).join(repo_id).join(filename))
+}
+
+fn directory_size_bytes(dir: &Path) -> u64 {
+    let mut total = 0_u64;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            total += std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        } else if path.is_dir() {
+            total += directory_size_bytes(&path);
+        }
+    }
+    total
+}
+
+fn capabilities_for(modality: Modality) -> ModelCapabilities {
+    ModelCapabilities {
+        input_modalities: vec!["text".into(), "image".into()],
+        output_modalities: vec![modality.as_str().to_owned()],
+        streaming: false,
+        tools: false,
+        reasoning: false,
+        max_context_length: None,
+        reasoning_modes: Vec::new(),
+        harmony: false,
+        audio_input: None,
+    }
+}
+
+fn collect_manifests(
+    modality: Modality,
+    root: &Path,
+    dir: &Path,
+    models: &mut Vec<ModelDescriptor>,
+) -> anyhow::Result<()> {
+    let entries = std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if manifest_file_path(&path).is_file() {
+            if let Ok(relative) = path.strip_prefix(root) {
+                let key = relative
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if key.is_empty() {
+                    continue;
+                }
+                match load_manifest(&path) {
+                    Ok(manifest) if manifest.modality == modality => {
+                        models.push(ModelDescriptor {
+                            id: model_id(modality, &key),
+                            name: key,
+                            engine: ENGINE.to_owned(),
+                            capabilities: capabilities_for(modality),
+                            size_bytes: Some(directory_size_bytes(&path)),
+                            read_only: false,
+                            library_label: None,
+                        });
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "skipping stable-diffusion.cpp manifest with mismatched modality"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, path = %path.display(), "skipping invalid stable-diffusion.cpp manifest");
+                    }
+                }
+            }
+            // A model directory's own subdirectories are manifest-relative
+            // component storage, not further models.
+            continue;
+        }
+        collect_manifests(modality, root, &path, models)?;
+    }
+    Ok(())
+}
+
+/// List on-disk stable-diffusion.cpp image and video models.
+pub fn list_models(data_dir: &Path) -> anyhow::Result<Vec<ModelDescriptor>> {
+    let mut models = Vec::new();
+    for modality in [Modality::Image, Modality::Video] {
+        let root = modality.root(data_dir);
+        if !root.is_dir() {
+            continue;
+        }
+        collect_manifests(modality, &root, &root, &mut models)?;
+    }
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(models)
+}
+
+// ---------------------------------------------------------------------------
+// Job runners
+// ---------------------------------------------------------------------------
+
+/// Single-flight lock protecting the GPU: only one sd-cli job may run at a time.
+static JOB_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+
+fn job_lock() -> &'static AsyncMutex<()> {
+    JOB_LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+/// Returned when another generation job is already running.
+#[derive(Debug)]
+pub struct BusyError;
+
+impl std::fmt::Display for BusyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "stable-diffusion.cpp is busy running another generation job"
+        )
+    }
+}
+
+impl std::error::Error for BusyError {}
+
+fn default_width() -> u32 {
+    512
+}
+
+fn default_height() -> u32 {
+    512
+}
+
+fn default_steps() -> u32 {
+    20
+}
+
+fn default_video_frames() -> u32 {
+    16
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GenerateImageRequest {
+    pub prompt: String,
+    pub model_id: String,
+    #[serde(default)]
+    pub negative_prompt: Option<String>,
+    #[serde(default = "default_width")]
+    pub width: u32,
+    #[serde(default = "default_height")]
+    pub height: u32,
+    #[serde(default = "default_steps")]
+    pub steps: u32,
+    #[serde(default)]
+    pub seed: Option<i64>,
+    #[serde(default)]
+    pub cfg_scale: Option<f32>,
+    /// Optional path to a local image to condition an img2img generation.
+    #[serde(default)]
+    pub init_image: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GenerateVideoRequest {
+    pub prompt: String,
+    pub model_id: String,
+    #[serde(default)]
+    pub negative_prompt: Option<String>,
+    #[serde(default = "default_width")]
+    pub width: u32,
+    #[serde(default = "default_height")]
+    pub height: u32,
+    #[serde(default = "default_steps")]
+    pub steps: u32,
+    #[serde(default)]
+    pub seed: Option<i64>,
+    #[serde(default)]
+    pub cfg_scale: Option<f32>,
+    /// Optional path to a local image to condition an img2vid generation.
+    #[serde(default)]
+    pub init_image: Option<PathBuf>,
+    #[serde(default = "default_video_frames")]
+    pub video_frames: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GenerateResult {
+    pub output_path: PathBuf,
+    pub metadata: serde_json::Value,
+}
+
+async fn job_output_dir(data_dir: &Path) -> anyhow::Result<PathBuf> {
+    let dir = data_dir
+        .join("tmp")
+        .join("sdcpp")
+        .join(uuid::Uuid::new_v4().simple().to_string());
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .context("create sdcpp job output directory")?;
+    Ok(dir)
+}
+
+fn apply_manifest_args(
+    command: &mut Command,
+    model_dir: &Path,
+    manifest: &SdcppManifest,
+) -> anyhow::Result<()> {
+    if let Some(single_file) = &manifest.single_file {
+        validate_component_filename(single_file)?;
+        let path = model_dir.join(single_file);
+        anyhow::ensure!(
+            path.is_file(),
+            "manifest single_file missing: {}",
+            path.display()
+        );
+        command.arg("-m").arg(path);
+    }
+    for (flag, relative) in &manifest.args {
+        validate_component_filename(relative)?;
+        let path = model_dir.join(relative);
+        anyhow::ensure!(
+            path.exists(),
+            "manifest arg `--{flag}` missing file: {}",
+            path.display()
+        );
+        command.arg(format!("--{flag}")).arg(path);
+    }
+    Ok(())
+}
+
+/// Spawn `sd-cli` with the given argv, waiting up to `timeout` for completion.
+async fn run_sd_cli(mut command: Command, timeout: Duration) -> anyhow::Result<()> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().context("spawn sd-cli")?;
+    let status = tokio::time::timeout(timeout, child.wait())
+        .await
+        .map_err(|_| anyhow::anyhow!("sd-cli timed out after {}s", timeout.as_secs()))?
+        .context("wait for sd-cli")?;
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf).await;
+            stderr = String::from_utf8_lossy(&buf).into_owned();
+        }
+        anyhow::bail!("sd-cli failed with {status}: {stderr}");
+    }
+    Ok(())
+}
+
+/// Generate a single image with sd-cli. Resolves the binary and the model's
+/// manifest, writes output under a fresh temp directory, and serializes GPU
+/// access via a process-global lock.
+pub async fn generate_image(
+    data_dir: &Path,
+    binary_override: Option<&str>,
+    request: &GenerateImageRequest,
+) -> anyhow::Result<GenerateResult> {
+    let _permit = job_lock().try_lock().map_err(|_| BusyError)?;
+
+    let binary = resolve_binary(data_dir, binary_override)
+        .filter(|path| path.is_file())
+        .ok_or_else(|| anyhow::anyhow!("no stable-diffusion.cpp (sd-cli) binary available"))?;
+    let (model_dir, manifest) = resolve_manifest(data_dir, &request.model_id)?;
+    anyhow::ensure!(
+        manifest.modality == Modality::Image,
+        "model `{}` is not an image model",
+        request.model_id
+    );
+    if let Some(init_image) = &request.init_image {
+        anyhow::ensure!(
+            init_image.is_file(),
+            "init image not found: {}",
+            init_image.display()
+        );
+    }
+
+    let job_dir = job_output_dir(data_dir).await?;
+    let output_path = job_dir.join("output.png");
+
+    let mut command = Command::new(&binary);
+    command
+        .arg("-M")
+        .arg("img_gen")
+        .arg("-p")
+        .arg(&request.prompt);
+    if let Some(negative) = &request.negative_prompt {
+        command.arg("-n").arg(negative);
+    }
+    command
+        .arg("-W")
+        .arg(request.width.to_string())
+        .arg("-H")
+        .arg(request.height.to_string())
+        .arg("--steps")
+        .arg(request.steps.to_string())
+        .arg("-o")
+        .arg(&output_path);
+    if let Some(seed) = request.seed {
+        command.arg("-s").arg(seed.to_string());
+    }
+    if let Some(cfg_scale) = request.cfg_scale {
+        command.arg("--cfg-scale").arg(cfg_scale.to_string());
+    }
+    if let Some(init_image) = &request.init_image {
+        command.arg("-i").arg(init_image);
+    }
+    apply_manifest_args(&mut command, &model_dir, &manifest)?;
+    if let Some(dir) = binary.parent() {
+        prepend_library_path(&mut command, dir);
+    }
+
+    run_sd_cli(command, IMAGE_TIMEOUT).await?;
+    anyhow::ensure!(
+        output_path.is_file(),
+        "sd-cli did not produce an output image at {}",
+        output_path.display()
+    );
+
+    Ok(GenerateResult {
+        output_path,
+        metadata: serde_json::json!({
+            "model_id": request.model_id,
+            "prompt": request.prompt,
+            "negative_prompt": request.negative_prompt,
+            "width": request.width,
+            "height": request.height,
+            "steps": request.steps,
+            "seed": request.seed,
+            "cfg_scale": request.cfg_scale,
+        }),
+    })
+}
+
+/// Generate a short video clip with sd-cli. Same lifecycle as
+/// [`generate_image`] but with a longer timeout and video-specific argv.
+pub async fn generate_video(
+    data_dir: &Path,
+    binary_override: Option<&str>,
+    request: &GenerateVideoRequest,
+) -> anyhow::Result<GenerateResult> {
+    let _permit = job_lock().try_lock().map_err(|_| BusyError)?;
+
+    let binary = resolve_binary(data_dir, binary_override)
+        .filter(|path| path.is_file())
+        .ok_or_else(|| anyhow::anyhow!("no stable-diffusion.cpp (sd-cli) binary available"))?;
+    let (model_dir, manifest) = resolve_manifest(data_dir, &request.model_id)?;
+    anyhow::ensure!(
+        manifest.modality == Modality::Video,
+        "model `{}` is not a video model",
+        request.model_id
+    );
+    if let Some(init_image) = &request.init_image {
+        anyhow::ensure!(
+            init_image.is_file(),
+            "init image not found: {}",
+            init_image.display()
+        );
+    }
+
+    let job_dir = job_output_dir(data_dir).await?;
+    let output_path = job_dir.join("output.mp4");
+
+    let mut command = Command::new(&binary);
+    command
+        .arg("-M")
+        .arg("vid_gen")
+        .arg("-p")
+        .arg(&request.prompt);
+    if let Some(negative) = &request.negative_prompt {
+        command.arg("-n").arg(negative);
+    }
+    command
+        .arg("-W")
+        .arg(request.width.to_string())
+        .arg("-H")
+        .arg(request.height.to_string())
+        .arg("--steps")
+        .arg(request.steps.to_string())
+        .arg("--video-frames")
+        .arg(request.video_frames.to_string())
+        .arg("-o")
+        .arg(&output_path);
+    if let Some(seed) = request.seed {
+        command.arg("-s").arg(seed.to_string());
+    }
+    if let Some(cfg_scale) = request.cfg_scale {
+        command.arg("--cfg-scale").arg(cfg_scale.to_string());
+    }
+    if let Some(init_image) = &request.init_image {
+        command.arg("-i").arg(init_image);
+    }
+    apply_manifest_args(&mut command, &model_dir, &manifest)?;
+    if let Some(dir) = binary.parent() {
+        prepend_library_path(&mut command, dir);
+    }
+
+    run_sd_cli(command, VIDEO_TIMEOUT).await?;
+    anyhow::ensure!(
+        output_path.is_file(),
+        "sd-cli did not produce an output video at {}",
+        output_path.display()
+    );
+
+    Ok(GenerateResult {
+        output_path,
+        metadata: serde_json::json!({
+            "model_id": request.model_id,
+            "prompt": request.prompt,
+            "negative_prompt": request.negative_prompt,
+            "width": request.width,
+            "height": request.height,
+            "steps": request.steps,
+            "seed": request.seed,
+            "cfg_scale": request.cfg_scale,
+            "video_frames": request.video_frames,
+        }),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn selects_macos_arm64_asset() {
+        let assets = [
+            "sd-master-Darwin-arm64.tar.gz",
+            "sd-master-Darwin-x86_64.tar.gz",
+            "sd-master-Linux-x86_64.tar.gz",
+        ];
+        assert_eq!(
+            select_release_asset_for_target(assets, "macos-arm64", RuntimeTarget::Cpu),
+            Some("sd-master-Darwin-arm64.tar.gz")
+        );
+        assert_eq!(
+            select_release_asset_for_target(assets, "macos-arm64", RuntimeTarget::Metal),
+            Some("sd-master-Darwin-arm64.tar.gz")
+        );
+    }
+
+    #[test]
+    fn selects_linux_cpu_vulkan_rocm_assets() {
+        let assets = [
+            "sd-master-Linux-x86_64.tar.gz",
+            "sd-master-Linux-x86_64-vulkan.tar.gz",
+            "sd-master-Linux-x86_64-rocm.tar.gz",
+            "sd-master-Linux-x86_64-cuda12.tar.gz",
+        ];
+        assert_eq!(
+            select_release_asset_for_target(assets, "linux-x64", RuntimeTarget::Cpu),
+            Some("sd-master-Linux-x86_64.tar.gz")
+        );
+        assert_eq!(
+            select_release_asset_for_target(assets, "linux-x64", RuntimeTarget::Vulkan),
+            Some("sd-master-Linux-x86_64-vulkan.tar.gz")
+        );
+        assert_eq!(
+            select_release_asset_for_target(assets, "linux-x64", RuntimeTarget::Rocm),
+            Some("sd-master-Linux-x86_64-rocm.tar.gz")
+        );
+    }
+
+    #[test]
+    fn selects_windows_cpu_cuda_vulkan_assets() {
+        let assets = [
+            "sd-master-win-cpu-x64.zip",
+            "sd-master-win-cuda12-x64.zip",
+            "sd-master-win-vulkan-x64.zip",
+        ];
+        assert_eq!(
+            select_release_asset_for_target(assets, "windows-x64", RuntimeTarget::Cpu),
+            Some("sd-master-win-cpu-x64.zip")
+        );
+        assert_eq!(
+            select_release_asset_for_target(assets, "windows-x64", RuntimeTarget::Cuda),
+            Some("sd-master-win-cuda12-x64.zip")
+        );
+        assert_eq!(
+            select_release_asset_for_target(assets, "windows-x64", RuntimeTarget::Vulkan),
+            Some("sd-master-win-vulkan-x64.zip")
+        );
+    }
+
+    #[test]
+    fn skips_cudart_redistributable_packages() {
+        let assets = [
+            "sd-master-win-cuda12-x64.zip",
+            "sd-master-win-cudart-x64.zip",
+        ];
+        assert_eq!(
+            select_release_asset_for_target(assets, "windows-x64", RuntimeTarget::Cuda),
+            Some("sd-master-win-cuda12-x64.zip")
+        );
+    }
+
+    #[test]
+    fn no_match_returns_none() {
+        let assets = ["sd-master-Linux-x86_64.tar.gz"];
+        assert_eq!(
+            select_release_asset_for_target(assets, "windows-x64", RuntimeTarget::Cpu),
+            None
+        );
+    }
+
+    #[test]
+    fn model_id_round_trips() {
+        assert_eq!(
+            model_id(Modality::Image, "acme/flux-schnell"),
+            "sdcpp-image:acme/flux-schnell"
+        );
+        assert_eq!(
+            model_id(Modality::Video, "acme/wan2.2"),
+            "sdcpp-video:acme/wan2.2"
+        );
+        let (modality, key) = parse_model_id("sdcpp-image:acme/flux-schnell").unwrap();
+        assert_eq!(modality, Modality::Image);
+        assert_eq!(key, "acme/flux-schnell");
+        let (modality, key) = parse_model_id("sdcpp-video:acme/wan2.2").unwrap();
+        assert_eq!(modality, Modality::Video);
+        assert_eq!(key, "acme/wan2.2");
+    }
+
+    #[test]
+    fn parse_model_id_rejects_other_prefixes() {
+        assert!(parse_model_id("gguf:acme/model.gguf").is_err());
+        assert!(parse_model_id("sdcpp-image").is_err());
+    }
+
+    #[test]
+    fn discovery_candidates_cover_all_targets() {
+        let data = PathBuf::from("/tmp/brazier-data");
+        let candidates = discovery_candidates(&data, Some("/usr/bin:/opt/bin"));
+        assert!(candidates.contains(&managed_binary_path(&data)));
+        assert!(
+            candidates
+                .iter()
+                .any(|path| path.ends_with(format!("cuda/bin/{}", binary_name())))
+        );
+        assert!(candidates.iter().any(|path| path.ends_with(binary_name())));
+    }
+
+    #[test]
+    fn lists_multi_component_and_single_file_models() {
+        let dir = tempdir().unwrap();
+        let image_model = image_root(dir.path()).join("acme/flux-schnell");
+        std::fs::create_dir_all(&image_model).unwrap();
+        std::fs::write(image_model.join("diffusion_model.safetensors"), b"a").unwrap();
+        std::fs::write(image_model.join("vae.safetensors"), b"b").unwrap();
+        std::fs::write(
+            manifest_file_path(&image_model),
+            serde_json::to_vec(&SdcppManifest {
+                modality: Modality::Image,
+                args: BTreeMap::from([
+                    (
+                        "diffusion-model".to_owned(),
+                        "diffusion_model.safetensors".to_owned(),
+                    ),
+                    ("vae".to_owned(), "vae.safetensors".to_owned()),
+                ]),
+                single_file: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let video_model = video_root(dir.path()).join("acme/wan2.2");
+        std::fs::create_dir_all(&video_model).unwrap();
+        std::fs::write(video_model.join("model.gguf"), b"c").unwrap();
+        std::fs::write(
+            manifest_file_path(&video_model),
+            serde_json::to_vec(&SdcppManifest {
+                modality: Modality::Video,
+                args: BTreeMap::new(),
+                single_file: Some("model.gguf".to_owned()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let models = list_models(dir.path()).unwrap();
+        assert_eq!(models.len(), 2);
+        let image = models
+            .iter()
+            .find(|model| model.id == "sdcpp-image:acme/flux-schnell")
+            .unwrap();
+        assert_eq!(image.engine, ENGINE);
+        assert_eq!(image.capabilities.output_modalities, vec!["image"]);
+        let video = models
+            .iter()
+            .find(|model| model.id == "sdcpp-video:acme/wan2.2")
+            .unwrap();
+        assert_eq!(video.capabilities.output_modalities, vec!["video"]);
+
+        assert_eq!(
+            path_for_model_id(dir.path(), &image.id).unwrap(),
+            image_model
+        );
+        assert_eq!(
+            path_for_model_id(dir.path(), &video.id).unwrap(),
+            video_model.join("model.gguf")
+        );
+    }
+
+    #[test]
+    fn download_destination_validates_repo_id_and_filename() {
+        let dir = tempdir().unwrap();
+        let path = download_destination(
+            dir.path(),
+            Modality::Image,
+            "acme/flux-schnell",
+            "vae.safetensors",
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            image_root(dir.path()).join("acme/flux-schnell/vae.safetensors")
+        );
+        assert!(
+            download_destination(dir.path(), Modality::Image, "not-a-repo-id", "vae.safetensors")
+                .is_err()
+        );
+        assert!(
+            download_destination(dir.path(), Modality::Image, "acme/flux-schnell", "../evil")
+                .is_err()
+        );
+    }
+}

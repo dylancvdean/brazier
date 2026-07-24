@@ -47,6 +47,14 @@
 - **Streaming ASR** via managed Python env + NVIDIA Nemotron ASR Streaming
   snapshots; `POST /v1/audio/transcriptions` with `stream=true` emits partial
   transcript SSE events.
+- **whisper.cpp managed prebuilts** on Linux/Windows (official CLI release
+  assets); macOS continues to use source builds (XCFramework-only releases).
+- **stable-diffusion.cpp** image/video generation (managed + source builds),
+  `POST /api/v1/generate/{image,video}`, chat tools `generate_image` /
+  `generate_video`, and a dedicated Generate workspace mode.
+- **Realtime voice (PersonaPlex / Moshi protocol)** — engine recipe, session
+  API, Voice workspace mode with persona text; Apple Silicon Moshi/MLX and
+  deeper duplex polish remain follow-ons.
 
 ## Alpha
 
@@ -60,14 +68,10 @@
 - Add Linux vLLM, remote OpenAI-compatible connections, engine diagnostics, and
   hardware-specific compatibility tests.
 - Optional mlx-whisper and bundled ffmpeg for stronger offline media prep.
-- **Realtime voice / PersonaPlex** — full-duplex speech-to-speech with persona
-  control (NVIDIA PersonaPlex / Nemotron VoiceChat class). Separate product
-  surface from file-attach chat; requires dedicated streaming I/O, not only
-  blob hydration.
-- **Image and video generation models** — discover/install generation
-  checkpoints and invoke them either as an inbuilt tool call from chat or via
-  a direct management/API action (not mixed into the chat completion path by
-  default).
+- Moshi MLX (Apple Silicon) flavor for realtime voice; interruption UX polish;
+  Nemotron VoiceChat if open self-host packaging lands.
+- Broader generation families beyond sd.cpp (e.g. Diffusers for Hunyuan/CogVideoX)
+  if needed.
 
 ## Tool packs and release hardening
 

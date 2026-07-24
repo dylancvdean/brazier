@@ -74,12 +74,27 @@ collapse them into a single Audio badge meaning.
    from chat attachment hydration.
 
 4. **Realtime voice / PersonaPlex-class** — Full-duplex speech-to-speech with
-   persona control (NVIDIA PersonaPlex / Nemotron VoiceChat). Not implemented;
-   see roadmap. This is not the same as attaching a file to a text chat.
+   persona control over the Moshi WebSocket protocol (NVIDIA PersonaPlex
+   primary flavor). Dedicated Voice workspace mode and
+   `/api/v1/voice/sessions` — not file-attach chat. Apple Silicon Moshi/MLX
+   is a planned follow-on.
 
 **Vision** attachments hydrate to `image_url` data URLs when the chat model
 advertises `image`. **Video** uses system ffmpeg to sample frames into that
 vision path, optionally with batch ASR on the soundtrack.
+
+## Generation interfaces
+
+Image and video *generation* are separate from vision *input* hydration and
+from `/v1/chat/completions` modalities:
+
+- Engine: `stable-diffusion.cpp` (`sd-cli`) with managed GitHub release
+  binaries and source/fork builds.
+- Models use `sdcpp-image:` / `sdcpp-video:` ids and optional `manifest.json`
+  for multi-component checkpoints.
+- Invoke via `POST /api/v1/generate/image|video`, bundled chat tools, or the
+  Generate workspace mode. Defaults live in runtime settings
+  (`default_image_gen_model`, `default_video_gen_model`).
 
 Unsupported modalities fail in `brazierd` before inference.
 

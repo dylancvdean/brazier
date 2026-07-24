@@ -1,0 +1,40 @@
+{
+  "id": "personaplex",
+  "display_name": "PersonaPlex",
+  "upstream_origins": [
+    "https://github.com/NVIDIA/personaplex.git",
+    "https://github.com/NVIDIA/personaplex"
+  ],
+  "supported_platforms": ["linux-x64"],
+  "steps": [
+    {
+      "label": "Create isolated environment",
+      "program": "uv",
+      "args": ["venv", "--python", "3.12", "{venv}"]
+    },
+    {
+      "label": "Install pinned dependencies",
+      "program": "uv",
+      "args": [
+        "pip",
+        "install",
+        "--python",
+        "{python}",
+        "--requirements",
+        "{recipe}/personaplex.lock"
+      ]
+    },
+    {
+      "label": "Install PersonaPlex / Moshi from source",
+      "program": "uv",
+      "args": [
+        "pip",
+        "install",
+        "--python",
+        "{python}",
+        "--no-deps",
+        "{source}/moshi"
+      ]
+    }
+  ]
+}

@@ -650,6 +650,94 @@ pub async fn download_streaming_asr_snapshot_with_progress(
     Ok(result)
 }
 
+/// Download a Hugging Face snapshot for PersonaPlex / Moshi.
+pub async fn download_personaplex_snapshot_with_progress(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    request: MlxDownloadRequest,
+    mut progress: ProgressCallback,
+    job: Option<(Database, String)>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> anyhow::Result<DownloadResult> {
+    validate_repo_id(&request.repo_id)?;
+    anyhow::ensure!(
+        request.engine == crate::voice::ENGINE,
+        "unsupported PersonaPlex engine `{}`",
+        request.engine
+    );
+    anyhow::ensure!(
+        !request.revision.is_empty()
+            && request.revision.len() <= 200
+            && request
+                .revision
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')),
+        "invalid revision"
+    );
+    let files = crate::hf::list_mlx_snapshot_files(client, data_dir, &request.repo_id, &request.revision)
+        .await?;
+    anyhow::ensure!(
+        !files.is_empty(),
+        "no PersonaPlex snapshot files were found for {}",
+        request.repo_id
+    );
+    progress(ProgressEvent::phase(
+        "start",
+        format!(
+            "Downloading {} PersonaPlex files for {}",
+            files.len(),
+            request.repo_id
+        ),
+    ));
+    if let Some((db, job_id)) = &job {
+        let _ = db.start_download_job(job_id).await;
+    }
+    let mut total_bytes = 0_u64;
+    for (index, file) in files.iter().enumerate() {
+        if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            anyhow::bail!("download cancelled");
+        }
+        progress(ProgressEvent::phase(
+            "download",
+            format!("Fetching {} ({}/{})", file.path, index + 1, files.len()),
+        ));
+        let destination =
+            crate::voice::download_destination(data_dir, &request.repo_id, &file.path)?;
+        let bytes = download_file_to(
+            client,
+            data_dir,
+            &request.repo_id,
+            &request.revision,
+            &file.path,
+            &destination,
+            &mut progress,
+            job.as_ref().map(|(db, id)| (db, id.as_str())),
+            cancel.as_ref(),
+        )
+        .await?;
+        total_bytes += bytes;
+    }
+    let root = crate::voice::download_root(data_dir, &request.repo_id)?;
+    let model_id = crate::voice::model_id_for_repo(&request.repo_id)?;
+    let sha256 = hash_directory(&root).await?;
+    let result = DownloadResult {
+        model_id: model_id.clone(),
+        path: root.display().to_string(),
+        bytes: total_bytes,
+        sha256,
+        resumed: false,
+        engine: Some(crate::voice::ENGINE.to_owned()),
+        notice: None,
+    };
+    progress(ProgressEvent::done(serde_json::to_value(&result)?));
+    if let Some((db, job_id)) = &job {
+        let _ = db
+            .complete_download_job(job_id, &result.sha256, result.bytes)
+            .await;
+    }
+    Ok(result)
+}
+
 async fn hash_directory(dir: &Path) -> anyhow::Result<String> {
     let mut entries = Vec::new();
     collect_files(dir, dir, &mut entries)?;

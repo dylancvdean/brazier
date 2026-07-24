@@ -54,9 +54,11 @@ import {
   streamCompletion,
   uploadAttachmentBlob
 } from './api'
+import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
 import { ModelMenu } from './components/ModelMenu'
+import { VoiceMode } from './components/VoiceMode'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { hasCompletedWelcome, markWelcomeCompleted } from './welcomePrefs'
 import {
@@ -255,6 +257,8 @@ export function App(): React.JSX.Element {
   const [runSnapshots, setRunSnapshots] = useState<RunSnapshot[]>([])
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
   const [showWelcome, setShowWelcome] = useState<boolean | null>(null)
+  const [appMode, setAppMode] = useState<'chat' | 'generate' | 'voice'>('chat')
+  const [realtimeVoiceAvailable, setRealtimeVoiceAvailable] = useState(false)
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
@@ -346,6 +350,7 @@ export function App(): React.JSX.Element {
               streaming_asr: Boolean(audio?.streaming_asr?.available),
               realtime_voice: Boolean(audio?.realtime_voice?.available)
             })
+            setRealtimeVoiceAvailable(Boolean(audio?.realtime_voice?.available))
           })
           .catch(() => {})
       })
@@ -493,6 +498,7 @@ export function App(): React.JSX.Element {
           streaming_asr: Boolean(audio?.streaming_asr?.available),
           realtime_voice: Boolean(audio?.realtime_voice?.available)
         })
+        setRealtimeVoiceAvailable(Boolean(audio?.realtime_voice?.available))
       })
       .catch(() => {})
   }, [])
@@ -869,10 +875,31 @@ export function App(): React.JSX.Element {
           <button className="icon-button" onClick={() => setSidebarOpen((open) => !open)}>
             <Menu size={19} />
           </button>
+          <div className="mode-switch" role="tablist" aria-label="Workspace mode">
+            {(
+              [
+                ['chat', 'Chat'],
+                ['generate', 'Generate'],
+                ['voice', 'Voice']
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                className={appMode === id ? 'active' : ''}
+                aria-selected={appMode === id}
+                onClick={() => setAppMode(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <button
             className="model-picker"
             title="Choose which installed model to chat with"
             onClick={() => setModelMenuOpen(true)}
+            disabled={appMode !== 'chat'}
           >
             <div className="model-icon">
               <Box size={16} />
@@ -961,7 +988,23 @@ export function App(): React.JSX.Element {
           </div>
         )}
 
-        <div className="chat">
+        {appMode === 'generate' ? (
+          <GenerateMode
+            models={localModels}
+            settings={runtime}
+            onError={setError}
+          />
+        ) : null}
+        {appMode === 'voice' ? (
+          <VoiceMode
+            models={localModels}
+            settings={runtime}
+            realtimeAvailable={realtimeVoiceAvailable}
+            onError={setError}
+          />
+        ) : null}
+
+        <div className="chat" hidden={appMode !== 'chat'}>
           {modelLoadStatus && (modelPrepareState === 'loading' || (busy && !streamingText)) && (
             <div className="model-load-status">
               <LoaderCircle className="spin" size={18} />

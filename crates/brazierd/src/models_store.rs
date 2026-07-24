@@ -64,6 +64,12 @@ pub fn path_for_model_id(
     if model_id.starts_with("streaming-asr:") {
         return crate::streaming_asr::path_for_model_id(data_dir, model_id);
     }
+    if model_id.starts_with("sdcpp-image:") || model_id.starts_with("sdcpp-video:") {
+        return crate::sdcpp::path_for_model_id(data_dir, model_id);
+    }
+    if model_id.starts_with("personaplex:") {
+        return crate::voice::path_for_model_id(data_dir, model_id);
+    }
     anyhow::bail!("unknown local model id: {model_id}");
 }
 
@@ -781,6 +787,22 @@ pub fn list_local_models(
     }
     for model in crate::streaming_asr::list_models(data_dir)? {
         if let Ok(path) = crate::streaming_asr::path_for_model_id(data_dir, &model.id) {
+            if let Ok(canonical) = std::fs::canonicalize(path) {
+                seen_paths.insert(canonical);
+            }
+        }
+        models.push(model);
+    }
+    for model in crate::sdcpp::list_models(data_dir)? {
+        if let Ok(path) = crate::sdcpp::path_for_model_id(data_dir, &model.id) {
+            if let Ok(canonical) = std::fs::canonicalize(path) {
+                seen_paths.insert(canonical);
+            }
+        }
+        models.push(model);
+    }
+    for model in crate::voice::list_models(data_dir)? {
+        if let Ok(path) = crate::voice::path_for_model_id(data_dir, &model.id) {
             if let Ok(canonical) = std::fs::canonicalize(path) {
                 seen_paths.insert(canonical);
             }

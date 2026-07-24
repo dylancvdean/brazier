@@ -27,8 +27,10 @@ pub mod runtimes;
 pub mod tool_registry;
 pub mod toolchain_hints;
 pub mod tools;
+pub mod sdcpp;
 pub mod streaming_asr;
 pub mod types;
+pub mod voice;
 pub mod whisper;
 
 use std::{path::PathBuf, sync::Arc};

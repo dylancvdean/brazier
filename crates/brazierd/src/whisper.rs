@@ -1,4 +1,4 @@
-//! whisper.cpp CLI discovery, activation, and one-shot transcription.
+//! whisper.cpp CLI discovery, managed install, activation, and one-shot transcription.
 
 use std::{
     path::{Path, PathBuf},
@@ -7,11 +7,22 @@ use std::{
 };
 
 use anyhow::Context;
-use tokio::process::Command;
+use flate2::read::GzDecoder;
+use futures::StreamExt;
+use serde::Deserialize;
+use tar::Archive;
+use tokio::{io::AsyncWriteExt, process::Command};
 
-use crate::models_store;
+use crate::{
+    models_store,
+    progress::{ProgressCallback, ProgressEvent},
+    runtime_settings::RuntimeTarget,
+};
 
 pub const ENGINE: &str = "whisper.cpp";
+
+const GITHUB_API: &str = "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest";
+const USER_AGENT: &str = "brazier-whisper-manager";
 
 pub fn managed_engine_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("engines").join("whisper.cpp")
@@ -25,6 +36,432 @@ pub fn binary_name() -> &'static str {
     }
 }
 
+pub fn managed_binary_path(data_dir: &Path) -> PathBuf {
+    managed_engine_dir(data_dir).join("bin").join(binary_name())
+}
+
+pub fn managed_binary_path_for_target(data_dir: &Path, target: RuntimeTarget) -> PathBuf {
+    if matches!(
+        target,
+        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal
+    ) {
+        return managed_binary_path(data_dir);
+    }
+    managed_engine_dir(data_dir)
+        .join(target.as_str())
+        .join("bin")
+        .join(binary_name())
+}
+
+pub fn managed_install_root(data_dir: &Path, target: RuntimeTarget) -> PathBuf {
+    let engine_dir = managed_engine_dir(data_dir);
+    match target {
+        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal => engine_dir,
+        _ => engine_dir.join(target.as_str()),
+    }
+}
+
+pub fn managed_is_installed(data_dir: &Path, target: RuntimeTarget) -> bool {
+    managed_binary_path_for_target(data_dir, target).is_file()
+}
+
+pub fn managed_installed_version(data_dir: &Path, target: RuntimeTarget) -> Option<String> {
+    std::fs::read_to_string(managed_install_root(data_dir, target).join("VERSION"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Official whisper.cpp releases ship CLI tarballs for Linux/Windows only.
+/// macOS assets are XCFramework packages, not whisper-cli binaries.
+pub fn managed_prebuilts_supported() -> bool {
+    platform_asset_tag().is_some()
+}
+
+/// Platform tag substring used to select a GitHub release asset.
+pub fn platform_asset_tag() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("ubuntu-x64"),
+        ("linux", "aarch64") => Some("ubuntu-arm64"),
+        ("windows", "x86_64") => Some("x64"),
+        ("windows", "aarch64") => None,
+        ("macos", _) => None,
+        _ => None,
+    }
+}
+
+/// Choose the best prebuilt release asset for this host.
+pub fn select_release_asset<'a>(
+    asset_names: impl IntoIterator<Item = &'a str>,
+    platform_tag: &str,
+) -> Option<&'a str> {
+    let mut candidates: Vec<&str> = asset_names
+        .into_iter()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            if !(lower.ends_with(".tar.gz") || lower.ends_with(".zip")) {
+                return false;
+            }
+            if lower.contains("xcframework") || lower.contains("cublas") || lower.contains("blas")
+            {
+                return false;
+            }
+            if platform_tag.starts_with("ubuntu") {
+                return lower.contains("whisper-bin") && lower.contains(platform_tag);
+            }
+            // Windows CPU: whisper-bin-x64.zip / whisper-bin-Win32.zip — prefer x64.
+            lower.contains("whisper-bin")
+                && lower.contains(platform_tag)
+                && !lower.contains("win32")
+        })
+        .collect();
+    candidates.sort_by_key(|name| name.len());
+    candidates.first().copied()
+}
+
+pub fn select_release_asset_for_target<'a>(
+    asset_names: impl IntoIterator<Item = &'a str>,
+    platform_tag: &str,
+    target: RuntimeTarget,
+) -> Option<&'a str> {
+    let names: Vec<&str> = asset_names.into_iter().collect();
+    if matches!(
+        target,
+        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal
+    ) {
+        return select_release_asset(names, platform_tag);
+    }
+    if target == RuntimeTarget::Cuda && platform_tag == "x64" {
+        let mut candidates: Vec<&str> = names
+            .into_iter()
+            .filter(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower.contains("cublas")
+                    && lower.contains("x64")
+                    && (lower.ends_with(".zip") || lower.ends_with(".tar.gz"))
+            })
+            .collect();
+        // Prefer newer CUDA 12.x packages.
+        candidates.sort_by(|a, b| {
+            let score = |name: &str| {
+                let lower = name.to_ascii_lowercase();
+                if lower.contains("12.4") {
+                    0
+                } else if lower.contains("12.") {
+                    1
+                } else {
+                    2
+                }
+            };
+            score(a).cmp(&score(b)).then_with(|| a.len().cmp(&b.len()))
+        });
+        return candidates.first().copied();
+    }
+    None
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReleaseAsset {
+    pub name: String,
+    pub browser_download_url: String,
+}
+
+pub async fn resolve_managed_release(
+    client: &reqwest::Client,
+    target: RuntimeTarget,
+) -> anyhow::Result<(String, ReleaseAsset)> {
+    let platform = platform_asset_tag()
+        .context("managed whisper.cpp CLI binaries are not available for this platform (macOS uses source builds)")?;
+    let release: GithubRelease = client
+        .get(GITHUB_API)
+        .header("user-agent", USER_AGENT)
+        .send()
+        .await
+        .context("contact GitHub releases")?
+        .error_for_status()
+        .context("GitHub releases request failed")?
+        .json()
+        .await
+        .context("decode GitHub release")?;
+    let names: Vec<String> = release
+        .assets
+        .iter()
+        .map(|asset| asset.name.clone())
+        .collect();
+    let selected =
+        select_release_asset_for_target(names.iter().map(String::as_str), platform, target)
+            .context("no matching whisper.cpp release asset for this platform/target")?
+            .to_owned();
+    let asset = release
+        .assets
+        .into_iter()
+        .find(|asset| asset.name == selected)
+        .context("selected asset missing from release")?;
+    Ok((
+        release.tag_name,
+        ReleaseAsset {
+            name: asset.name,
+            browser_download_url: asset.browser_download_url,
+        },
+    ))
+}
+
+pub async fn install_managed_binary_with_progress(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    target: RuntimeTarget,
+    mut progress: ProgressCallback,
+) -> anyhow::Result<PathBuf> {
+    progress(ProgressEvent::phase(
+        "resolve",
+        "Looking up the latest whisper.cpp release",
+    ));
+    let (tag, asset) = resolve_managed_release(client, target).await?;
+    tracing::info!(%tag, asset = %asset.name, "downloading managed whisper.cpp binary");
+    progress(ProgressEvent::phase(
+        "download",
+        format!("Downloading {tag} ({})", asset.name),
+    ));
+
+    let response = client
+        .get(&asset.browser_download_url)
+        .header("user-agent", USER_AGENT)
+        .send()
+        .await
+        .context("download whisper.cpp release")?
+        .error_for_status()
+        .context("whisper.cpp release download failed")?;
+    let total = response.content_length();
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    let mut written = 0_u64;
+    let mut last_emit = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read whisper.cpp release body")?;
+        written += chunk.len() as u64;
+        bytes.extend_from_slice(&chunk);
+        if written.saturating_sub(last_emit) >= 256 * 1024 || total == Some(written) {
+            progress(ProgressEvent::download(written, total));
+            last_emit = written;
+        }
+    }
+    progress(ProgressEvent::download(written, total.or(Some(written))));
+
+    let binary = managed_binary_path_for_target(data_dir, target);
+    let bin_dir = binary
+        .parent()
+        .context("managed binary path has no parent")?
+        .to_path_buf();
+    let engine_dir = bin_dir
+        .parent()
+        .context("managed binary directory has no parent")?
+        .to_path_buf();
+    if bin_dir.exists() {
+        tokio::fs::remove_dir_all(&bin_dir)
+            .await
+            .context("clear previous managed whisper install")?;
+    }
+    tokio::fs::create_dir_all(&bin_dir)
+        .await
+        .context("create whisper engine bin directory")?;
+    let archive_path = engine_dir.join(&asset.name);
+    {
+        let mut file = tokio::fs::File::create(&archive_path)
+            .await
+            .context("write release archive")?;
+        file.write_all(&bytes).await?;
+        file.flush().await?;
+    }
+
+    progress(ProgressEvent::phase(
+        "extract",
+        "Extracting whisper-cli and shared libraries",
+    ));
+    extract_release_archive(&archive_path, &bin_dir).context("extract whisper.cpp release")?;
+    anyhow::ensure!(
+        binary.is_file(),
+        "archive did not contain {}; extracted into {}",
+        binary_name(),
+        bin_dir.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in std::fs::read_dir(&bin_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let mut permissions = std::fs::metadata(&path)?.permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&path, permissions)?;
+            }
+        }
+    }
+    let _ = tokio::fs::remove_file(&archive_path).await;
+    tokio::fs::write(engine_dir.join("VERSION"), format!("{tag}\n")).await?;
+    progress(ProgressEvent::done(serde_json::json!({
+        "binary": binary.display().to_string(),
+        "tag": tag,
+        "status": "ready"
+    })));
+    Ok(binary)
+}
+
+fn extract_release_archive(archive_path: &Path, bin_dir: &Path) -> anyhow::Result<()> {
+    let file = std::fs::File::open(archive_path).context("open archive")?;
+    let name = archive_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let keep = |file_name: &str| -> bool {
+        let is_lib = file_name.contains(".so")
+            || file_name.ends_with(".dll")
+            || file_name.ends_with(".dylib");
+        let is_cli = file_name == "whisper-cli"
+            || file_name == "whisper-cli.exe"
+            || file_name == "main"
+            || file_name == "main.exe";
+        is_lib || is_cli || file_name.starts_with("whisper") || file_name.starts_with("ggml")
+    };
+    let rename_cli = |file_name: &str| -> String {
+        if file_name == "main" || file_name == "main.exe" {
+            binary_name().to_owned()
+        } else {
+            file_name.to_owned()
+        }
+    };
+
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        let decoder = GzDecoder::new(file);
+        let mut archive = Archive::new(decoder);
+        let mut found_cli = false;
+        for entry in archive.entries().context("read tar entries")? {
+            let mut entry = entry.context("tar entry")?;
+            let path = entry.path().context("tar entry path")?.into_owned();
+            if entry.header().entry_type().is_dir() {
+                continue;
+            }
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if file_name.is_empty() || file_name == "LICENSE" || !keep(file_name) {
+                continue;
+            }
+            let dest_name = rename_cli(file_name);
+            let dest = bin_dir.join(&dest_name);
+            entry
+                .unpack(&dest)
+                .with_context(|| format!("unpack {file_name}"))?;
+            if dest_name == binary_name() {
+                found_cli = true;
+            }
+        }
+        anyhow::ensure!(found_cli, "whisper-cli binary not found in archive");
+        return Ok(());
+    }
+    if name.ends_with(".zip") {
+        let mut archive = zip::ZipArchive::new(file).context("read zip archive")?;
+        let mut found_cli = false;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).context("read zip entry")?;
+            if entry.is_dir() {
+                continue;
+            }
+            let Some(path) = entry.enclosed_name() else {
+                continue;
+            };
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if !keep(file_name) {
+                continue;
+            }
+            let dest_name = rename_cli(file_name);
+            let mut destination =
+                std::fs::File::create(bin_dir.join(&dest_name)).context("create zip output")?;
+            std::io::copy(&mut entry, &mut destination).context("extract zip entry")?;
+            found_cli |= dest_name == binary_name();
+        }
+        anyhow::ensure!(found_cli, "whisper-cli binary not found in archive");
+        return Ok(());
+    }
+    anyhow::bail!("unsupported archive format: {name}");
+}
+
+pub async fn ensure_binary_with_progress(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    target: RuntimeTarget,
+    force: bool,
+    mut progress: ProgressCallback,
+) -> anyhow::Result<PathBuf> {
+    let target = if target == RuntimeTarget::Auto {
+        let detected = crate::hardware::detect().recommended_target;
+        // Metal/macOS has no managed CLI; fall back to discovery only.
+        if !managed_prebuilts_supported() {
+            RuntimeTarget::Cpu
+        } else if detected == RuntimeTarget::Cuda {
+            RuntimeTarget::Cuda
+        } else {
+            RuntimeTarget::Cpu
+        }
+    } else {
+        target
+    };
+    if force {
+        anyhow::ensure!(
+            managed_prebuilts_supported(),
+            "managed whisper.cpp binaries are not available on this platform; build from source instead"
+        );
+        return install_managed_binary_with_progress(client, data_dir, target, progress).await;
+    }
+    let managed = managed_binary_path_for_target(data_dir, target);
+    progress(ProgressEvent::phase(
+        "discover",
+        "Looking for an existing whisper-cli binary",
+    ));
+    let discovered = if managed.is_file() {
+        Some(managed.clone())
+    } else {
+        resolve_binary(data_dir, None)
+    };
+    if let Some(path) = discovered {
+        if binary_appears_runnable(&path) {
+            progress(ProgressEvent::done(serde_json::json!({
+                "binary": path.display().to_string(),
+                "status": "ready",
+                "source": "discovered"
+            })));
+            return Ok(path);
+        }
+        if path != managed {
+            tracing::warn!(
+                binary = %path.display(),
+                "discovered whisper-cli failed a smoke test; trying managed install"
+            );
+        }
+    }
+    anyhow::ensure!(
+        managed_prebuilts_supported(),
+        "no whisper-cli found and managed binaries are not available on this platform; build whisper.cpp from source"
+    );
+    install_managed_binary_with_progress(client, data_dir, target, progress).await
+}
+
 pub fn whisper_root(data_dir: &Path) -> PathBuf {
     data_dir.join("models").join("whisper")
 }
@@ -34,9 +471,16 @@ pub fn resolve_binary(data_dir: &Path, override_path: Option<&str>) -> Option<Pa
     if let Some(path) = override_path.map(PathBuf::from).filter(|path| path.is_file()) {
         return Some(path);
     }
-    let managed = managed_engine_dir(data_dir).join("bin").join(binary_name());
-    if managed.is_file() {
-        return Some(managed);
+    for target in [
+        RuntimeTarget::Cpu,
+        RuntimeTarget::Cuda,
+        RuntimeTarget::Rocm,
+        RuntimeTarget::Vulkan,
+    ] {
+        let managed = managed_binary_path_for_target(data_dir, target);
+        if managed.is_file() {
+            return Some(managed);
+        }
     }
     for (build_id, record) in crate::builds::list_builds(data_dir, ENGINE) {
         let _ = build_id;
@@ -61,9 +505,16 @@ fn which_binary(name: &str) -> Option<PathBuf> {
 
 pub fn discovery_candidates(data_dir: &Path, path_env: Option<&str>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    let managed = managed_engine_dir(data_dir).join("bin").join(binary_name());
-    if managed.is_file() {
-        candidates.push(managed);
+    for target in [
+        RuntimeTarget::Cpu,
+        RuntimeTarget::Cuda,
+        RuntimeTarget::Rocm,
+        RuntimeTarget::Vulkan,
+    ] {
+        let managed = managed_binary_path_for_target(data_dir, target);
+        if managed.is_file() {
+            candidates.push(managed);
+        }
     }
     for (_, record) in crate::builds::list_builds(data_dir, ENGINE) {
         let path = PathBuf::from(record.binary);
@@ -301,6 +752,38 @@ mod tests {
         assert_eq!(
             model_id_for_path(root, &file).unwrap(),
             "whisper:ggerganov/whisper.cpp/ggml-base.en.bin"
+        );
+    }
+
+    #[test]
+    fn selects_linux_cpu_asset() {
+        let assets = [
+            "whisper-bin-ubuntu-x64.tar.gz",
+            "whisper-bin-ubuntu-arm64.tar.gz",
+            "whisper-cublas-12.4.0-bin-x64.zip",
+            "whisper-v1.9.0-xcframework.zip",
+        ];
+        assert_eq!(
+            select_release_asset(assets, "ubuntu-x64"),
+            Some("whisper-bin-ubuntu-x64.tar.gz")
+        );
+        assert_eq!(
+            select_release_asset_for_target(assets, "x64", RuntimeTarget::Cuda),
+            Some("whisper-cublas-12.4.0-bin-x64.zip")
+        );
+    }
+
+    #[test]
+    fn selects_windows_cpu_asset() {
+        let assets = [
+            "whisper-bin-x64.zip",
+            "whisper-bin-Win32.zip",
+            "whisper-blas-bin-x64.zip",
+            "whisper-cublas-12.4.0-bin-x64.zip",
+        ];
+        assert_eq!(
+            select_release_asset(assets, "x64"),
+            Some("whisper-bin-x64.zip")
         );
     }
 }

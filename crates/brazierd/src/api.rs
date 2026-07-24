@@ -36,7 +36,7 @@ use crate::{
     llama,
     mcp,
     progress::ProgressEvent,
-    runtimes, streaming_asr, tool_registry, toolchain_hints, whisper,
+    runtimes, sdcpp, streaming_asr, tool_registry, toolchain_hints, voice, whisper,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
@@ -151,6 +151,29 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/engines/llama.cpp/managed-status",
             get(managed_llama_status),
         )
+        .route("/api/v1/engines/whisper.cpp/ensure", post(ensure_whisper))
+        .route(
+            "/api/v1/engines/whisper.cpp/managed-status",
+            get(managed_whisper_status),
+        )
+        .route(
+            "/api/v1/engines/stable-diffusion.cpp/ensure",
+            post(ensure_sdcpp),
+        )
+        .route(
+            "/api/v1/engines/stable-diffusion.cpp/managed-status",
+            get(managed_sdcpp_status),
+        )
+        .route("/api/v1/generate/image", post(generate_image))
+        .route("/api/v1/generate/video", post(generate_video))
+        .route(
+            "/api/v1/voice/sessions",
+            get(list_voice_session).post(create_voice_session),
+        )
+        .route(
+            "/api/v1/voice/sessions/{id}",
+            axum::routing::delete(end_voice_session),
+        )
         .route("/api/v1/tools", get(list_tools))
         .route("/api/v1/mcp/servers", get(list_mcp_servers).post(create_mcp_server))
         .route(
@@ -170,6 +193,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/models/download/streaming-asr",
             post(download_streaming_asr_model),
+        )
+        .route(
+            "/api/v1/models/download/personaplex",
+            post(download_personaplex_model),
         )
         .route("/api/v1/models/download/queue", post(queue_model_download))
         .route("/api/v1/models/download/cancel", post(cancel_model_download))
@@ -260,6 +287,24 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         settings.streaming_asr_python.as_deref(),
         settings.streaming_asr_model.as_deref(),
     );
+    let sdcpp_binary = sdcpp::resolve_binary(&state.data_dir, settings.sdcpp_binary.as_deref());
+    let image_gen_available = sdcpp_binary.is_some()
+        && settings
+            .default_image_gen_model
+            .as_deref()
+            .is_some_and(|id| sdcpp::path_for_model_id(&state.data_dir, id).is_ok());
+    let video_gen_available = sdcpp_binary.is_some()
+        && settings
+            .default_video_gen_model
+            .as_deref()
+            .is_some_and(|id| sdcpp::path_for_model_id(&state.data_dir, id).is_ok());
+    let voice_python = voice::resolve_python(&state.data_dir, settings.voice_python.as_deref());
+    let voice_model = voice::resolve_model_path(
+        &state.data_dir,
+        settings.default_voice_model.as_deref(),
+    );
+    let realtime_voice_available =
+        voice::realtime_voice_available(voice_python.as_deref(), voice_model.as_deref());
     Ok(Json(json!({
         "schema_version": 1,
         "models": models,
@@ -270,6 +315,8 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             "llama_cpp_engine": true,
             "whisper_cpp_engine": true,
             "streaming_asr_engine": true,
+            "stable_diffusion_cpp_engine": true,
+            "personaplex_engine": true,
             "openai_chat_completions": true,
             "openai_responses": true,
             "openai_audio_transcriptions": true,
@@ -302,9 +349,24 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
                 },
                 "realtime_voice": {
                     "id": "realtime_voice",
-                    "available": false,
-                    "planned": true,
-                    "summary": "Full-duplex speech-to-speech (PersonaPlex / Nemotron VoiceChat class). Not shipped yet."
+                    "available": realtime_voice_available,
+                    "planned": !realtime_voice_available,
+                    "engine": "personaplex",
+                    "summary": "Full-duplex speech-to-speech via Moshi protocol (PersonaPlex). Dedicated Voice mode; not file-attach chat."
+                }
+            },
+            "generation_interfaces": {
+                "image_gen": {
+                    "id": "image_gen",
+                    "available": image_gen_available,
+                    "engine": "stable-diffusion.cpp",
+                    "summary": "Local image generation via sd-cli (SD/Flux/Qwen-Image). Chat tool or Generate mode."
+                },
+                "video_gen": {
+                    "id": "video_gen",
+                    "available": video_gen_available,
+                    "engine": "stable-diffusion.cpp",
+                    "summary": "Local video generation via sd-cli (Wan/LTX). Chat tool or Generate mode."
                 }
             }
         }
@@ -1155,6 +1217,465 @@ async fn ensure_llama(
     progress_sse(rx)
 }
 
+async fn managed_whisper_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    use crate::runtime_settings::RuntimeTarget;
+
+    let supported = whisper::managed_prebuilts_supported();
+    let latest_tag = if supported {
+        whisper::resolve_managed_release(&state.http, RuntimeTarget::Cpu)
+            .await
+            .ok()
+            .map(|(tag, _)| tag)
+    } else {
+        None
+    };
+    let target_specs = [("cpu", RuntimeTarget::Cpu), ("cuda", RuntimeTarget::Cuda)];
+    let targets: Vec<Value> = target_specs
+        .iter()
+        .map(|(id, target)| {
+            let installed = whisper::managed_is_installed(&state.data_dir, *target);
+            let installed_version = whisper::managed_installed_version(&state.data_dir, *target);
+            let update_available = installed
+                && latest_tag
+                    .as_deref()
+                    .is_some_and(|latest| Some(latest) != installed_version.as_deref());
+            json!({
+                "target": id,
+                "installed": installed,
+                "installed_version": installed_version,
+                "latest_version": latest_tag,
+                "update_available": update_available,
+                "managed_supported": supported
+                    && (*id == "cpu" || (*id == "cuda" && cfg!(windows))),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "latest_version": latest_tag,
+        "managed_supported": supported,
+        "targets": targets,
+        "note": if supported {
+            None
+        } else {
+            Some("Official whisper.cpp releases do not ship a macOS CLI binary (XCFramework only). Build from source on macOS.")
+        },
+    })))
+}
+
+async fn ensure_whisper(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<EnsureLlamaRequest>,
+) -> Response {
+    let target = request.target;
+    let force = request.force;
+    if !query.stream {
+        return match state
+            .runtime
+            .ensure_whisper_binary_with_progress(target, force, Box::new(|_| {}))
+            .await
+        {
+            Ok(path) => {
+                state.invalidate_runtimes_cache().await;
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "binary": path.display().to_string(),
+                        "status": "ready"
+                    })),
+                )
+                    .into_response()
+            }
+            Err(error) => ApiError::internal(error).into_response(),
+        };
+    }
+    let (tx, rx) = progress_channel();
+    let runtime = state.runtime.clone();
+    let cache_state = state.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let result = runtime
+            .ensure_whisper_binary_with_progress(target, force, Box::new(move |event| {
+                push_progress(&progress_tx, event);
+            }))
+            .await;
+        if let Ok(path) = &result {
+            cache_state.invalidate_runtimes_cache().await;
+            push_progress(
+                &tx,
+                ProgressEvent::done(json!({
+                    "binary": path.display().to_string(),
+                    "status": "ready"
+                })),
+            );
+        }
+        if let Err(error) = result {
+            push_progress(&tx, ProgressEvent::error(error.to_string()));
+        }
+    });
+    progress_sse(rx)
+}
+
+async fn managed_sdcpp_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    use crate::runtime_settings::RuntimeTarget;
+
+    let latest_tag = sdcpp::resolve_managed_release(&state.http, RuntimeTarget::Cpu)
+        .await
+        .ok()
+        .map(|(tag, _)| tag);
+    let target_specs = [
+        ("cpu", RuntimeTarget::Cpu),
+        ("cuda", RuntimeTarget::Cuda),
+        ("rocm", RuntimeTarget::Rocm),
+        ("vulkan", RuntimeTarget::Vulkan),
+    ];
+    let targets: Vec<Value> = target_specs
+        .iter()
+        .map(|(id, target)| {
+            let installed = sdcpp::managed_is_installed(&state.data_dir, *target);
+            let installed_version = sdcpp::managed_installed_version(&state.data_dir, *target);
+            let update_available = installed
+                && latest_tag
+                    .as_deref()
+                    .is_some_and(|latest| Some(latest) != installed_version.as_deref());
+            json!({
+                "target": id,
+                "installed": installed,
+                "installed_version": installed_version,
+                "latest_version": latest_tag,
+                "update_available": update_available,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "latest_version": latest_tag,
+        "targets": targets,
+    })))
+}
+
+async fn ensure_sdcpp(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<EnsureLlamaRequest>,
+) -> Response {
+    let target = request.target;
+    let force = request.force;
+    if !query.stream {
+        return match state
+            .runtime
+            .ensure_sdcpp_binary_with_progress(target, force, Box::new(|_| {}))
+            .await
+        {
+            Ok(path) => {
+                state.invalidate_runtimes_cache().await;
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "binary": path.display().to_string(),
+                        "status": "ready"
+                    })),
+                )
+                    .into_response()
+            }
+            Err(error) => ApiError::internal(error).into_response(),
+        };
+    }
+    let (tx, rx) = progress_channel();
+    let runtime = state.runtime.clone();
+    let cache_state = state.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let result = runtime
+            .ensure_sdcpp_binary_with_progress(target, force, Box::new(move |event| {
+                push_progress(&progress_tx, event);
+            }))
+            .await;
+        if let Ok(path) = &result {
+            cache_state.invalidate_runtimes_cache().await;
+            push_progress(
+                &tx,
+                ProgressEvent::done(json!({
+                    "binary": path.display().to_string(),
+                    "status": "ready"
+                })),
+            );
+        }
+        if let Err(error) = result {
+            push_progress(&tx, ProgressEvent::error(error.to_string()));
+        }
+    });
+    progress_sse(rx)
+}
+
+#[derive(Debug, Deserialize)]
+struct GenerateImageApiRequest {
+    prompt: String,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    negative_prompt: Option<String>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default)]
+    steps: Option<u32>,
+    #[serde(default)]
+    seed: Option<i64>,
+    #[serde(default)]
+    cfg_scale: Option<f32>,
+    #[serde(default)]
+    init_image_blob: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GenerateVideoApiRequest {
+    prompt: String,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    negative_prompt: Option<String>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default)]
+    steps: Option<u32>,
+    #[serde(default)]
+    seed: Option<i64>,
+    #[serde(default)]
+    cfg_scale: Option<f32>,
+    #[serde(default)]
+    init_image_blob: Option<String>,
+    #[serde(default)]
+    video_frames: Option<u32>,
+}
+
+async fn generate_image(
+    State(state): State<AppState>,
+    Json(request): Json<GenerateImageApiRequest>,
+) -> ApiResult<Json<Value>> {
+    let settings = state.runtime.settings().await;
+    let model_id = request
+        .model_id
+        .or(settings.default_image_gen_model.clone())
+        .ok_or_else(|| ApiError::bad_request("model_id or default_image_gen_model is required"))?;
+    let init_image = if let Some(blob) = &request.init_image_blob {
+        Some(
+            blob_store::blob_path(&state.data_dir, blob)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let job = sdcpp::GenerateImageRequest {
+        prompt: request.prompt,
+        model_id,
+        negative_prompt: request.negative_prompt,
+        width: request.width.unwrap_or(512),
+        height: request.height.unwrap_or(512),
+        steps: request.steps.unwrap_or(20),
+        seed: request.seed,
+        cfg_scale: request.cfg_scale,
+        init_image,
+    };
+    let result = sdcpp::generate_image(
+        &state.data_dir,
+        settings.sdcpp_binary.as_deref(),
+        &job,
+    )
+    .await
+    .map_err(|e| {
+        if e.downcast_ref::<sdcpp::BusyError>().is_some() {
+            ApiError::bad_request(e.to_string())
+        } else {
+            ApiError::internal(e)
+        }
+    })?;
+    let bytes = tokio::fs::read(&result.output_path)
+        .await
+        .map_err(ApiError::internal)?;
+    let blob = blob_store::store_bytes(
+        &state.data_dir,
+        &bytes,
+        "image/png",
+        Some("generated.png"),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let _ = tokio::fs::remove_file(&result.output_path).await;
+    Ok(Json(json!({
+        "blob": blob,
+        "metadata": result.metadata,
+        "engine": "stable-diffusion.cpp",
+    })))
+}
+
+async fn generate_video(
+    State(state): State<AppState>,
+    Json(request): Json<GenerateVideoApiRequest>,
+) -> ApiResult<Json<Value>> {
+    let settings = state.runtime.settings().await;
+    let model_id = request
+        .model_id
+        .or(settings.default_video_gen_model.clone())
+        .ok_or_else(|| ApiError::bad_request("model_id or default_video_gen_model is required"))?;
+    let init_image = if let Some(blob) = &request.init_image_blob {
+        Some(
+            blob_store::blob_path(&state.data_dir, blob)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let job = sdcpp::GenerateVideoRequest {
+        prompt: request.prompt,
+        model_id,
+        negative_prompt: request.negative_prompt,
+        width: request.width.unwrap_or(512),
+        height: request.height.unwrap_or(512),
+        steps: request.steps.unwrap_or(20),
+        seed: request.seed,
+        cfg_scale: request.cfg_scale,
+        init_image,
+        video_frames: request.video_frames.unwrap_or(16),
+    };
+    let result = sdcpp::generate_video(
+        &state.data_dir,
+        settings.sdcpp_binary.as_deref(),
+        &job,
+    )
+    .await
+    .map_err(|e| {
+        if e.downcast_ref::<sdcpp::BusyError>().is_some() {
+            ApiError::bad_request(e.to_string())
+        } else {
+            ApiError::internal(e)
+        }
+    })?;
+    let bytes = tokio::fs::read(&result.output_path)
+        .await
+        .map_err(ApiError::internal)?;
+    let mime = if result
+        .output_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("webm"))
+    {
+        "video/webm"
+    } else {
+        "video/mp4"
+    };
+    let blob = blob_store::store_bytes(
+        &state.data_dir,
+        &bytes,
+        mime,
+        Some(
+            result
+                .output_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("generated.mp4"),
+        ),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let _ = tokio::fs::remove_file(&result.output_path).await;
+    Ok(Json(json!({
+        "blob": blob,
+        "metadata": result.metadata,
+        "engine": "stable-diffusion.cpp",
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateVoiceSessionRequest {
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    persona_text: Option<String>,
+    #[serde(default)]
+    voice_prompt_path: Option<String>,
+}
+
+async fn create_voice_session(
+    State(state): State<AppState>,
+    Json(request): Json<CreateVoiceSessionRequest>,
+) -> ApiResult<Json<Value>> {
+    let settings = state.runtime.settings().await;
+    let python = voice::resolve_python(&state.data_dir, settings.voice_python.as_deref())
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "PersonaPlex runtime is not installed. Build it from Manage → Runtimes.",
+            )
+        })?;
+    let model_path = voice::resolve_model_path(
+        &state.data_dir,
+        request
+            .model_id
+            .as_deref()
+            .or(settings.default_voice_model.as_deref()),
+    );
+    let persona = request
+        .persona_text
+        .or(settings.default_voice_persona.clone())
+        .unwrap_or_else(|| "You are a helpful assistant.".into());
+    let voice_prompt = request.voice_prompt_path.map(PathBuf::from);
+    let voice_state = state.runtime.voice_state().await;
+    let session = voice_state
+        .sessions
+        .create_session(
+            &python,
+            model_path.as_deref(),
+            persona.clone(),
+            voice_prompt.clone(),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    let ws_url = session.proxy_url().await;
+    Ok(Json(json!({
+        "id": session.id,
+        "ws_url": ws_url,
+        "persona_text": persona,
+        "voice_prompt": voice_prompt.map(|p| p.display().to_string()),
+        "protocol": {
+            "handshake": voice::protocol::HANDSHAKE,
+            "audio": voice::protocol::AUDIO,
+            "text": voice::protocol::TEXT,
+        },
+        "engine": "personaplex",
+    })))
+}
+
+async fn list_voice_session(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let voice_state = state.runtime.voice_state().await;
+    if let Some(session) = voice_state.sessions.active_session().await {
+        let ws_url = session.proxy_url().await;
+        Ok(Json(json!({
+            "session": {
+                "id": session.id,
+                "ws_url": ws_url,
+                "persona_text": session.persona_text,
+            }
+        })))
+    } else {
+        Ok(Json(json!({ "session": null })))
+    }
+}
+
+async fn end_voice_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let voice_state = state.runtime.voice_state().await;
+    voice_state
+        .sessions
+        .end_session(&id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "ended": id })))
+}
+
 async fn build_runtime(
     State(state): State<AppState>,
     Query(query): Query<StreamQuery>,
@@ -1759,6 +2280,65 @@ async fn download_streaming_asr_model(
     tokio::spawn(async move {
         let progress_tx = tx.clone();
         let result = download::download_streaming_asr_snapshot_with_progress(
+            &http,
+            &data_dir,
+            request,
+            Box::new(move |event| {
+                push_progress(&progress_tx, event);
+            }),
+            None,
+            None,
+        )
+        .await;
+        match result {
+            Ok(download_result) => {
+                cache_state.invalidate_models_cache().await;
+                push_progress(
+                    &tx,
+                    ProgressEvent::done(serde_json::to_value(&download_result).unwrap_or_default()),
+                );
+            }
+            Err(error) => {
+                push_progress(&tx, ProgressEvent::error(error.to_string()));
+            }
+        }
+    });
+    progress_sse(rx)
+}
+
+async fn download_personaplex_model(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<download::MlxDownloadRequest>,
+) -> Response {
+    let mut request = request;
+    request.engine = voice::ENGINE.to_owned();
+    if !query.stream {
+        let result = download::download_personaplex_snapshot_with_progress(
+            &state.http,
+            &state.data_dir,
+            request,
+            Box::new(|_| {}),
+            None,
+            None,
+        )
+        .await;
+        return match result {
+            Ok(result) => {
+                state.invalidate_models_cache().await;
+                (StatusCode::OK, Json(json!(result))).into_response()
+            }
+            Err(error) => ApiError::bad_request(error).into_response(),
+        };
+    }
+
+    let (tx, rx) = progress_channel();
+    let http = state.http.clone();
+    let data_dir = state.data_dir.clone();
+    let cache_state = state.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let result = download::download_personaplex_snapshot_with_progress(
             &http,
             &data_dir,
             request,

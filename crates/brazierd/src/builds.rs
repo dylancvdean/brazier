@@ -285,6 +285,13 @@ fn primary_binary_name(engine: &str) -> &'static str {
                 "whisper-cli"
             }
         }
+        "stable-diffusion.cpp" => {
+            if cfg!(windows) {
+                "sd-cli.exe"
+            } else {
+                "sd-cli"
+            }
+        }
         _ => {
             if cfg!(windows) {
                 "llama-server.exe"
@@ -343,6 +350,14 @@ fn install_python_env(venv: &Path, engine: &str) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(
             crate::streaming_asr::python_appears_runnable(&python),
             "Python environment at {} failed an import check for streaming ASR",
+            python.display()
+        );
+        return Ok(python);
+    }
+    if engine == crate::voice::ENGINE {
+        anyhow::ensure!(
+            crate::voice::python_appears_runnable(&python),
+            "Python environment at {} failed an import check for PersonaPlex/Moshi",
             python.display()
         );
         return Ok(python);

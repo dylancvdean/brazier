@@ -73,6 +73,14 @@ export type RuntimeSettings = {
   mlx_vlm_python?: string | null
   whisper_binary?: string | null
   whisper_model?: string | null
+  streaming_asr_python?: string | null
+  streaming_asr_model?: string | null
+  sdcpp_binary?: string | null
+  default_image_gen_model?: string | null
+  default_video_gen_model?: string | null
+  voice_python?: string | null
+  default_voice_model?: string | null
+  default_voice_persona?: string | null
   build_jobs: number
   extra_model_library_paths: string[]
 }
@@ -96,6 +104,10 @@ export type CapabilitiesResponse = {
       native_model_audio?: { available?: boolean; summary?: string }
       streaming_asr?: { available?: boolean; planned?: boolean; summary?: string }
       realtime_voice?: { available?: boolean; planned?: boolean; summary?: string }
+    }
+    generation_interfaces?: {
+      image_gen?: { available?: boolean; summary?: string }
+      video_gen?: { available?: boolean; summary?: string }
     }
   }
 }
@@ -703,6 +715,24 @@ export async function downloadStreamingAsrModel(
   return result
 }
 
+export async function downloadPersonaplexModel(
+  repoId: string,
+  onProgress: (event: ProgressEvent) => void,
+  revision = 'main'
+): Promise<DownloadResult> {
+  const final = await readProgressSse(
+    '/api/v1/models/download/personaplex?stream=true',
+    {
+      method: 'POST',
+      body: JSON.stringify({ repo_id: repoId, engine: 'personaplex', revision })
+    },
+    onProgress
+  )
+  const result = final.result as DownloadResult | undefined
+  if (!result?.model_id) throw new Error('Download completed without a model id.')
+  return result
+}
+
 export type ManagedLlamaTargetStatus = {
   target: string
   installed: boolean
@@ -734,6 +764,126 @@ export async function ensureLlamaEngine(
   const result = final.result as { binary?: string; status?: string } | undefined
   if (!result?.binary) throw new Error('Engine install completed without a binary path.')
   return { binary: result.binary, status: result.status ?? 'ready' }
+}
+
+export async function fetchManagedWhisperStatus(): Promise<{
+  latest_version: string | null
+  managed_supported: boolean
+  note?: string | null
+  targets: ManagedLlamaTargetStatus[]
+}> {
+  return request('/api/v1/engines/whisper.cpp/managed-status')
+}
+
+export async function ensureWhisperEngine(
+  onProgress: (event: ProgressEvent) => void,
+  options?: { target?: RuntimeTarget; force?: boolean }
+): Promise<{ binary: string; status: string }> {
+  const body = JSON.stringify({
+    ...(options?.target ? { target: options.target } : {}),
+    ...(options?.force ? { force: true } : {})
+  })
+  const final = await readProgressSse(
+    '/api/v1/engines/whisper.cpp/ensure?stream=true',
+    { method: 'POST', body },
+    onProgress
+  )
+  const result = final.result as { binary?: string; status?: string } | undefined
+  if (!result?.binary) throw new Error('Whisper install completed without a binary path.')
+  return { binary: result.binary, status: result.status ?? 'ready' }
+}
+
+export async function fetchManagedSdcppStatus(): Promise<{
+  latest_version: string | null
+  targets: ManagedLlamaTargetStatus[]
+}> {
+  return request('/api/v1/engines/stable-diffusion.cpp/managed-status')
+}
+
+export async function ensureSdcppEngine(
+  onProgress: (event: ProgressEvent) => void,
+  options?: { target?: RuntimeTarget; force?: boolean }
+): Promise<{ binary: string; status: string }> {
+  const body = JSON.stringify({
+    ...(options?.target ? { target: options.target } : {}),
+    ...(options?.force ? { force: true } : {})
+  })
+  const final = await readProgressSse(
+    '/api/v1/engines/stable-diffusion.cpp/ensure?stream=true',
+    { method: 'POST', body },
+    onProgress
+  )
+  const result = final.result as { binary?: string; status?: string } | undefined
+  if (!result?.binary) throw new Error('sd.cpp install completed without a binary path.')
+  return { binary: result.binary, status: result.status ?? 'ready' }
+}
+
+export type GenerateBlobResult = {
+  blob: { sha256: string; mime_type: string; size_bytes: number; original_name?: string | null }
+  metadata: unknown
+  engine: string
+}
+
+export function generateImage(body: {
+  prompt: string
+  model_id?: string
+  negative_prompt?: string
+  width?: number
+  height?: number
+  steps?: number
+  seed?: number
+  video_frames?: number
+}): Promise<GenerateBlobResult> {
+  return request('/api/v1/generate/image', {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+}
+
+export function generateVideo(body: {
+  prompt: string
+  model_id?: string
+  negative_prompt?: string
+  width?: number
+  height?: number
+  steps?: number
+  seed?: number
+  video_frames?: number
+}): Promise<GenerateBlobResult> {
+  return request('/api/v1/generate/video', {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+}
+
+export type VoiceSessionInfo = {
+  id: string
+  ws_url: string
+  persona_text: string
+  voice_prompt?: string | null
+  protocol?: { handshake: number; audio: number; text: number }
+  engine?: string
+}
+
+export function createVoiceSession(body?: {
+  model_id?: string
+  persona_text?: string
+  voice_prompt_path?: string
+}): Promise<VoiceSessionInfo> {
+  return request('/api/v1/voice/sessions', {
+    method: 'POST',
+    body: JSON.stringify(body ?? {})
+  })
+}
+
+export function getVoiceSession(): Promise<{ session: VoiceSessionInfo | null }> {
+  return request('/api/v1/voice/sessions')
+}
+
+export function endVoiceSession(id: string): Promise<{ ended: string }> {
+  return request(`/api/v1/voice/sessions/${encodeURIComponent(id)}`, {
+    method: 'DELETE'
+  })
 }
 
 export type RuntimeEntry = {

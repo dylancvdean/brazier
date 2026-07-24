@@ -106,6 +106,35 @@ fn compatible(tags: &[String], engine: &str) -> bool {
                 "safetensors" | "transformers" | "text-generation"
             )
         }),
+        "stable-diffusion.cpp" => {
+            tags_contain_any(
+                tags,
+                &[
+                    "text-to-image",
+                    "image-to-image",
+                    "text-to-video",
+                    "image-to-video",
+                    "diffusers",
+                ],
+            ) || tags.iter().any(|tag| {
+                let tag = tag.to_ascii_lowercase();
+                tag.contains("stable-diffusion")
+                    || tag.contains("flux")
+                    || tag.contains("wan")
+                    || tag.contains("ltx")
+                    || tag.contains("sdxl")
+                    || tag.contains("qwen-image")
+            })
+        }
+        "personaplex" => {
+            tags_contain_any(tags, &["audio-to-audio", "text-to-speech", "speech"])
+                || tags.iter().any(|tag| {
+                    let tag = tag.to_ascii_lowercase();
+                    tag.contains("personaplex")
+                        || tag.contains("moshi")
+                        || tag.contains("speech-to-speech")
+                })
+        }
         _ => true,
     }
 }

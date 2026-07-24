@@ -1,0 +1,12 @@
+# Pinned PersonaPlex / Moshi runtime dependencies.
+# Keep conservative; CUDA torch wheels are platform-selected by the installer.
+torch>=2.4.0
+numpy>=1.26.0
+aiohttp>=3.9.0
+sphn>=0.1.4
+sentencepiece>=0.2.0
+safetensors>=0.4.0
+huggingface-hub>=0.24.0
+einops>=0.8.0
+sounddevice>=0.5.0
+websockets>=12.0

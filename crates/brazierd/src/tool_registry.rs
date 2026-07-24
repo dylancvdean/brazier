@@ -75,7 +75,14 @@ pub async fn execute(
 ) -> ToolInvocation {
     let logical = harmony::logical_tool_name(name);
     if crate::tools::is_builtin(&logical) {
-        return crate::tools::execute(ctx.http, call_id, &logical, arguments).await;
+        return crate::tools::execute_with_data_dir(
+            ctx.http,
+            Some(ctx.data_dir),
+            call_id,
+            &logical,
+            arguments,
+        )
+        .await;
     }
     if let Some((server_id, tool_name)) = mcp::parse_tool_name(&logical) {
         let mut invocation = mcp::call_tool(ctx.data_dir, &server_id, &tool_name, arguments).await;

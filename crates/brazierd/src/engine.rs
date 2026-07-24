@@ -15,10 +15,12 @@ use crate::{
     progress::{ProgressCallback, ProgressEvent},
     runtime_settings::{self, RuntimeSettings},
     runtimes,
+    sdcpp,
+    streaming_asr,
     tool_registry::{self, ToolContext},
     tools,
-    streaming_asr,
     types::{ChatCompletionRequest, ModelCapabilities, ModelDescriptor, OpenAiMessage},
+    voice,
     whisper,
 };
 
@@ -86,6 +88,16 @@ struct StreamingAsrState {
     python: Option<PathBuf>,
 }
 
+struct SdCppState {
+    binary: Option<PathBuf>,
+}
+
+pub struct VoiceState {
+    pub python: Option<PathBuf>,
+    pub server: Option<voice::VoiceServer>,
+    pub sessions: voice::SessionManager,
+}
+
 enum ActiveBackend {
     Llama(String),
     Mlx(String),
@@ -99,6 +111,8 @@ pub struct Runtime {
     mlx: Mutex<MlxState>,
     whisper: Mutex<WhisperState>,
     streaming_asr: Mutex<StreamingAsrState>,
+    sdcpp: Mutex<SdCppState>,
+    voice: Mutex<VoiceState>,
     settings: Mutex<RuntimeSettings>,
     models_cache: Mutex<Option<Vec<ModelDescriptor>>>,
 }
@@ -142,6 +156,8 @@ impl Runtime {
             &data_dir,
             settings.streaming_asr_python.as_deref(),
         );
+        let sdcpp_binary = sdcpp::resolve_binary(&data_dir, settings.sdcpp_binary.as_deref());
+        let voice_python = voice::resolve_python(&data_dir, settings.voice_python.as_deref());
         Arc::new(Self {
             data_dir,
             http,
@@ -159,6 +175,14 @@ impl Runtime {
             }),
             streaming_asr: Mutex::new(StreamingAsrState {
                 python: streaming_asr_python,
+            }),
+            sdcpp: Mutex::new(SdCppState {
+                binary: sdcpp_binary,
+            }),
+            voice: Mutex::new(VoiceState {
+                python: voice_python,
+                server: None,
+                sessions: voice::SessionManager::new(),
             }),
             settings: Mutex::new(settings),
             models_cache: Mutex::new(None),
@@ -286,17 +310,26 @@ impl Runtime {
         let mlx = self.mlx.lock().await;
         let whisper = self.whisper.lock().await.binary.clone();
         let streaming_asr = self.streaming_asr.lock().await.python.clone();
+        let sdcpp = self.sdcpp.lock().await.binary.clone();
+        let voice = self.voice.lock().await.python.clone();
         runtimes::ActiveRuntimes {
             llama,
             mlx_lm: mlx.lm_python.clone(),
             mlx_vlm: mlx.vlm_python.clone(),
             whisper,
             streaming_asr,
+            sdcpp,
+            voice,
         }
     }
 
     pub async fn settings(&self) -> RuntimeSettings {
         self.settings.lock().await.clone()
+    }
+
+    /// Lock the voice runtime state (PersonaPlex sessions).
+    pub async fn voice_state(&self) -> tokio::sync::MutexGuard<'_, VoiceState> {
+        self.voice.lock().await
     }
 
     pub async fn update_settings(
@@ -336,6 +369,18 @@ impl Runtime {
                 .as_ref()
                 .map(PathBuf::from)
                 .or_else(|| streaming_asr::resolve_python(&self.data_dir, None));
+            let mut sdcpp_state = self.sdcpp.lock().await;
+            sdcpp_state.binary = settings
+                .sdcpp_binary
+                .as_ref()
+                .map(PathBuf::from)
+                .or_else(|| sdcpp::resolve_binary(&self.data_dir, None));
+            let mut voice_state = self.voice.lock().await;
+            voice_state.python = settings
+                .voice_python
+                .as_ref()
+                .map(PathBuf::from)
+                .or_else(|| voice::resolve_python(&self.data_dir, None));
         }
         *current = settings.clone();
         drop(current);
@@ -435,6 +480,58 @@ impl Runtime {
         runtime_settings::save(&self.data_dir, &settings).await?;
         drop(settings);
         self.whisper.lock().await.binary = Some(path.clone());
+        Ok(path)
+    }
+
+    /// Pin an sd-cli binary and persist the choice.
+    pub async fn activate_sdcpp(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(path.is_file(), "sd-cli binary not found: {}", path.display());
+        let runnable = {
+            let candidate = path.clone();
+            tokio::task::spawn_blocking(move || sdcpp::binary_appears_runnable(&candidate))
+                .await
+                .unwrap_or(false)
+        };
+        anyhow::ensure!(
+            runnable,
+            "{} failed a smoke test (missing shared libraries or incompatible build)",
+            path.display()
+        );
+        let mut settings = self.settings.lock().await;
+        settings.sdcpp_binary = Some(path.display().to_string());
+        runtime_settings::save(&self.data_dir, &settings).await?;
+        drop(settings);
+        self.sdcpp.lock().await.binary = Some(path.clone());
+        Ok(path)
+    }
+
+    /// Pin a PersonaPlex / Moshi Python interpreter and persist the choice.
+    pub async fn activate_voice(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            path.is_file(),
+            "PersonaPlex Python not found: {}",
+            path.display()
+        );
+        let runnable = {
+            let candidate = path.clone();
+            tokio::task::spawn_blocking(move || voice::python_appears_runnable(&candidate))
+                .await
+                .unwrap_or(false)
+        };
+        anyhow::ensure!(
+            runnable,
+            "{} failed an import check for PersonaPlex/Moshi",
+            path.display()
+        );
+        let mut settings = self.settings.lock().await;
+        settings.voice_python = Some(path.display().to_string());
+        runtime_settings::save(&self.data_dir, &settings).await?;
+        drop(settings);
+        let mut voice_state = self.voice.lock().await;
+        if let Some(mut server) = voice_state.server.take() {
+            let _ = server.stop().await;
+        }
+        voice_state.python = Some(path.clone());
         Ok(path)
     }
 
@@ -596,6 +693,12 @@ impl Runtime {
                 self.activate_streaming_asr(PathBuf::from(&entry.path))
                     .await?;
             }
+            "stable-diffusion.cpp" => {
+                self.activate_sdcpp(PathBuf::from(&entry.path)).await?;
+            }
+            "personaplex" => {
+                self.activate_voice(PathBuf::from(&entry.path)).await?;
+            }
             _ => {
                 self.activate_binary(PathBuf::from(&entry.path)).await?;
             }
@@ -669,6 +772,94 @@ impl Runtime {
     pub async fn ensure_llama_binary(&self) -> anyhow::Result<PathBuf> {
         self.ensure_llama_binary_with_progress(None, false, Box::new(|_| {}))
             .await
+    }
+
+    pub async fn ensure_whisper_binary_with_progress(
+        &self,
+        target_override: Option<crate::runtime_settings::RuntimeTarget>,
+        force: bool,
+        mut progress: ProgressCallback,
+    ) -> anyhow::Result<PathBuf> {
+        let target = if let Some(target) = target_override {
+            target
+        } else {
+            self.settings.lock().await.target
+        };
+        if target_override.is_none() && !force {
+            let guard = self.whisper.lock().await;
+            if let Some(path) = &guard.binary
+                && path.is_file()
+                && whisper::binary_appears_runnable(path)
+            {
+                progress(ProgressEvent::phase(
+                    "skip",
+                    "Using the active whisper-cli binary",
+                ));
+                progress(ProgressEvent::done(serde_json::json!({
+                    "binary": path.display().to_string(),
+                    "status": "ready",
+                    "source": "active"
+                })));
+                return Ok(path.clone());
+            }
+        }
+        let path = whisper::ensure_binary_with_progress(
+            &self.http,
+            &self.data_dir,
+            target,
+            force,
+            progress,
+        )
+        .await?;
+        if target_override.is_none() {
+            let mut guard = self.whisper.lock().await;
+            guard.binary = Some(path.clone());
+        }
+        Ok(path)
+    }
+
+    pub async fn ensure_sdcpp_binary_with_progress(
+        &self,
+        target_override: Option<crate::runtime_settings::RuntimeTarget>,
+        force: bool,
+        mut progress: ProgressCallback,
+    ) -> anyhow::Result<PathBuf> {
+        let target = if let Some(target) = target_override {
+            target
+        } else {
+            self.settings.lock().await.target
+        };
+        if target_override.is_none() && !force {
+            let guard = self.sdcpp.lock().await;
+            if let Some(path) = &guard.binary
+                && path.is_file()
+                && sdcpp::binary_appears_runnable(path)
+            {
+                progress(ProgressEvent::phase(
+                    "skip",
+                    "Using the active sd-cli binary",
+                ));
+                progress(ProgressEvent::done(serde_json::json!({
+                    "binary": path.display().to_string(),
+                    "status": "ready",
+                    "source": "active"
+                })));
+                return Ok(path.clone());
+            }
+        }
+        let path = sdcpp::ensure_binary_with_progress(
+            &self.http,
+            &self.data_dir,
+            target,
+            force,
+            progress,
+        )
+        .await?;
+        if target_override.is_none() {
+            let mut guard = self.sdcpp.lock().await;
+            guard.binary = Some(path.clone());
+        }
+        Ok(path)
     }
 
     pub async fn ensure_llama_binary_with_progress(

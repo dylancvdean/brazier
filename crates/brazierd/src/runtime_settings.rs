@@ -67,6 +67,24 @@ pub struct RuntimeSettings {
     /// Preferred streaming ASR model id (`streaming-asr:…`) or absolute path.
     #[serde(default)]
     pub streaming_asr_model: Option<String>,
+    /// Absolute path of an activated sd-cli binary.
+    #[serde(default)]
+    pub sdcpp_binary: Option<String>,
+    /// Default image generation model id (`sdcpp-image:…`) for tools and Generate mode.
+    #[serde(default)]
+    pub default_image_gen_model: Option<String>,
+    /// Default video generation model id (`sdcpp-video:…`) for tools and Generate mode.
+    #[serde(default)]
+    pub default_video_gen_model: Option<String>,
+    /// Absolute path of an activated PersonaPlex / Moshi Python interpreter.
+    #[serde(default)]
+    pub voice_python: Option<String>,
+    /// Preferred PersonaPlex model id (`personaplex:…`) or absolute path.
+    #[serde(default)]
+    pub default_voice_model: Option<String>,
+    /// Default persona text prompt for realtime voice sessions.
+    #[serde(default)]
+    pub default_voice_persona: Option<String>,
     /// Parallel compile jobs for source builds (`cmake --build … --parallel`).
     #[serde(default = "default_build_jobs")]
     pub build_jobs: u16,
@@ -105,6 +123,12 @@ impl Default for RuntimeSettings {
             whisper_model: None,
             streaming_asr_python: None,
             streaming_asr_model: None,
+            sdcpp_binary: None,
+            default_image_gen_model: None,
+            default_video_gen_model: None,
+            voice_python: None,
+            default_voice_model: None,
+            default_voice_persona: None,
             build_jobs: default_build_jobs(),
             extra_model_library_paths: Vec::new(),
         }
