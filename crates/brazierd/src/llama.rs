@@ -48,6 +48,26 @@ pub fn managed_binary_path_for_target(data_dir: &Path, target: RuntimeTarget) ->
         .join(binary_name())
 }
 
+/// Root directory where managed install metadata (VERSION) lives for a target.
+pub fn managed_install_root(data_dir: &Path, target: RuntimeTarget) -> PathBuf {
+    let engine_dir = managed_engine_dir(data_dir);
+    match target {
+        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal => engine_dir,
+        _ => engine_dir.join(target.as_str()),
+    }
+}
+
+pub fn managed_is_installed(data_dir: &Path, target: RuntimeTarget) -> bool {
+    managed_binary_path_for_target(data_dir, target).is_file()
+}
+
+pub fn managed_installed_version(data_dir: &Path, target: RuntimeTarget) -> Option<String> {
+    std::fs::read_to_string(managed_install_root(data_dir, target).join("VERSION"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 /// Directory that must appear on `LD_LIBRARY_PATH` / `PATH` for managed builds.
 pub fn managed_lib_dir(data_dir: &Path) -> PathBuf {
     managed_engine_dir(data_dir).join("bin")
@@ -186,6 +206,12 @@ pub fn translate_chat_request(
             "enable_thinking": request.enable_reasoning.unwrap_or(settings.enable_reasoning)
         }
     });
+    if let Some(budget) = request
+        .reasoning_budget_tokens
+        .or(settings.reasoning_budget_tokens)
+    {
+        body["thinking_budget_tokens"] = serde_json::json!(budget);
+    }
     if let Some(value) = request.max_tokens.or(settings.max_tokens) {
         body["max_tokens"] = serde_json::json!(value);
     }
@@ -755,13 +781,14 @@ pub fn binary_appears_runnable(binary: &Path) -> bool {
 
 /// Ensure a llama-server binary is available, installing a managed build if needed.
 pub async fn ensure_binary(client: &reqwest::Client, data_dir: &Path) -> anyhow::Result<PathBuf> {
-    ensure_binary_with_progress(client, data_dir, RuntimeTarget::Auto, Box::new(|_| {})).await
+    ensure_binary_with_progress(client, data_dir, RuntimeTarget::Auto, false, Box::new(|_| {})).await
 }
 
 pub async fn ensure_binary_with_progress(
     client: &reqwest::Client,
     data_dir: &Path,
     target: RuntimeTarget,
+    force: bool,
     mut progress: ProgressCallback,
 ) -> anyhow::Result<PathBuf> {
     let target = if target == RuntimeTarget::Auto {
@@ -769,6 +796,9 @@ pub async fn ensure_binary_with_progress(
     } else {
         target
     };
+    if force {
+        return install_managed_binary_with_progress(client, data_dir, target, progress).await;
+    }
     let managed = managed_binary_path_for_target(data_dir, target);
     progress(ProgressEvent::phase(
         "discover",
@@ -1160,6 +1190,7 @@ mod tests {
             max_tokens: None,
             seed: None,
             enable_reasoning: None,
+            reasoning_budget_tokens: None,
             builtin_tools: None,
         };
         let settings = RuntimeSettings::default();

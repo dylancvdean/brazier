@@ -26,6 +26,7 @@ import {
   downloadModel,
   downloadMlxModel,
   ensureLlamaEngine,
+  fetchManagedLlamaStatus,
   fetchModelTrust,
   formatBytes,
   clearHuggingFaceToken,
@@ -33,6 +34,7 @@ import {
   listDownloadJobs,
   type DownloadJob,
   type HardwareInfo,
+  type ManagedLlamaTargetStatus,
   type HubFile,
   type LocalModel,
   type ModelTrust,
@@ -54,7 +56,8 @@ import {
   engineLabel,
   modelEngine,
   modelLibraryKey,
-  runtimeNoticeForModel
+  runtimeNoticeForModel,
+  runtimesForModel
 } from '../model-utils'
 import type { HubModel } from '../types'
 
@@ -110,9 +113,13 @@ type ManagePanelProps = {
   initialRuntimes?: RuntimeEntry[] | null
   selectedModel: string
   onSelectModel: (modelId: string) => void
+  modelBindings?: Record<string, string>
+  onSetModelBinding?: (modelId: string, runtimeId: string | null) => void
   settings: RuntimeSettings | null
   onSettingsSaved: (settings: RuntimeSettings) => void
   hardware: HardwareInfo | null
+  pendingBuild?: { engine: BuildEngine; repository: string } | null
+  onPendingBuildConsumed?: () => void
 }
 
 const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Element }> = [
@@ -537,7 +544,14 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
           const isSelected = model.id === props.selectedModel
           const isExternal = isExternalModel(model)
           const engine = modelEngine(model)
-          const runtimeNotice = runtimeNoticeForModel(model.id, props.models, runtimes)
+          const runtimeNotice = runtimeNoticeForModel(
+            model.id,
+            props.models,
+            runtimes,
+            props.modelBindings
+          )
+          const compatibleRuntimes = runtimesForModel(model, runtimes)
+          const boundRuntimeId = props.modelBindings?.[model.id] ?? ''
           return (
             <article className="library-card" key={model.id}>
               <div className="library-card-info">
@@ -553,6 +567,27 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                   {model.size_bytes != null ? ` · ${formatBytes(model.size_bytes)}` : ''}
                   {isExternal ? ' · read-only' : ''}
                 </span>
+                {compatibleRuntimes.length > 0 && props.onSetModelBinding && (
+                  <label className="library-runtime-picker">
+                    <span>Runtime</span>
+                    <select
+                      value={boundRuntimeId}
+                      onChange={(event) => {
+                        const value = event.target.value
+                        props.onSetModelBinding?.(model.id, value || null)
+                      }}
+                    >
+                      <option value="">Default (active global runtime)</option>
+                      {compatibleRuntimes.map((runtime) => (
+                        <option key={runtime.id} value={runtime.id}>
+                          {runtime.label}
+                          {runtime.active ? ' · active' : ''}
+                          {runtime.repository ? ` · fork` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {runtimeNotice && (
                   <span className="library-runtime-note">{runtimeNotice}</span>
                 )}
@@ -1206,6 +1241,13 @@ function managedRuntimeInstalled(
   )
 }
 
+function managedTargetStatus(
+  target: RuntimeTarget,
+  statuses: ManagedLlamaTargetStatus[] | null
+): ManagedLlamaTargetStatus | null {
+  return statuses?.find((entry) => entry.target === target) ?? null
+}
+
 function pythonRuntimeInstalled(runtimes: RuntimeEntry[], engine: BuildEngine): boolean {
   return runtimes.some((runtime) => runtime.engine === engine)
 }
@@ -1261,7 +1303,33 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     emptyJobProgress('Preparing source build')
   )
   const [buildWarning, setBuildWarning] = useState<string | null>(null)
+  const [managedStatuses, setManagedStatuses] = useState<ManagedLlamaTargetStatus[] | null>(
+    null
+  )
   const logRef = useRef<HTMLPreElement>(null)
+
+  function applyBuildEngine(engine: BuildEngine, repositoryOverride?: string): void {
+    const defaults = BUILD_ENGINE_DEFAULTS[engine]
+    setBuildEngine(engine)
+    setRepository(repositoryOverride ?? defaults.repository)
+    setRevision(defaults.revision)
+  }
+
+  useEffect(() => {
+    if (!props.pendingBuild) return
+    applyBuildEngine(props.pendingBuild.engine, props.pendingBuild.repository)
+    setBuildOpen(true)
+    props.onPendingBuildConsumed?.()
+  }, [props.pendingBuild, props.onPendingBuildConsumed])
+
+  async function refreshManagedStatuses(): Promise<void> {
+    try {
+      const response = await fetchManagedLlamaStatus()
+      setManagedStatuses(response.targets)
+    } catch {
+      setManagedStatuses(null)
+    }
+  }
 
   async function refreshRuntimes(): Promise<void> {
     try {
@@ -1279,6 +1347,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
 
   useEffect(() => {
     void refreshRuntimes()
+    void refreshManagedStatuses()
   }, [])
 
   useEffect(() => {
@@ -1362,21 +1431,27 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     }
   }
 
-  async function installManaged(target: RuntimeTarget): Promise<void> {
+  async function installManaged(target: RuntimeTarget, force = false): Promise<void> {
     const label = llamaRuntimeLabel(target)
     setInstallingTarget(target)
-    setInstallProgress(emptyJobProgress(`Installing ${label}`))
+    setInstallProgress(
+      emptyJobProgress(force ? `Updating ${label}` : `Installing ${label}`)
+    )
     props.onError(null)
     try {
       await ensureLlamaEngine(
         (event) => {
           setInstallProgress((current) =>
-            applyJobProgress(current ?? emptyJobProgress(`Installing ${label}`), event)
+            applyJobProgress(
+              current ?? emptyJobProgress(force ? `Updating ${label}` : `Installing ${label}`),
+              event
+            )
           )
         },
-        { target }
+        { target, force }
       )
       await refreshRuntimes()
+      await refreshManagedStatuses()
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -1385,7 +1460,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   }
 
   function openBuildForEngine(engine: BuildEngine): void {
-    setBuildEngine(engine)
+    applyBuildEngine(engine)
     setBuildOpen(true)
   }
 
@@ -1408,12 +1483,6 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     }
     return next
   }
-
-  useEffect(() => {
-    const defaults = BUILD_ENGINE_DEFAULTS[buildEngine]
-    setRepository(defaults.repository)
-    setRevision(defaults.revision)
-  }, [buildEngine])
 
   const isPythonBuild = buildEngine === 'mlx-lm' || buildEngine === 'mlx-vlm'
 
@@ -1489,6 +1558,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
 
   const targets = props.hardware?.targets ?? []
   const runtimeList = runtimes ?? []
+  const customRuntimes = runtimeList.filter((runtime) => runtime.kind !== 'managed')
 
   return (
     <section>
@@ -1555,7 +1625,18 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         <div className="runtime-offer-list">
           {managedTargets.map((target) => {
             const installed = managedRuntimeInstalled(runtimeList, target.id)
+            const status = managedTargetStatus(target.id, managedStatuses)
+            const updateAvailable = status?.update_available ?? false
+            const installedVersion = status?.installed_version
+            const latestVersion = status?.latest_version
             const installing = installingTarget === target.id
+            const versionLine = [
+              target.detail,
+              installed && installedVersion ? `Installed · ${installedVersion}` : null,
+              updateAvailable && latestVersion ? `Latest · ${latestVersion}` : null
+            ]
+              .filter(Boolean)
+              .join(' · ')
             return (
               <article
                 className={`runtime-offer ${target.available ? '' : 'unavailable'}`}
@@ -1565,24 +1646,34 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                   <strong>
                     {llamaRuntimeLabel(target.id)}
                     {target.recommended && <span className="active-badge">Recommended</span>}
-                    {installed && <span className="installed-badge">Installed</span>}
+                    {installed && !updateAvailable && (
+                      <span className="installed-badge">Up to date</span>
+                    )}
+                    {updateAvailable && <span className="installed-badge">Update</span>}
                   </strong>
-                  <span>{target.detail}</span>
+                  <span>{versionLine}</span>
                 </div>
                 <button
                   className="chip-button"
-                  disabled={!target.available || installing || installed}
+                  disabled={!target.available || installing || (installed && !updateAvailable)}
                   title={
                     !target.available
                       ? target.detail
-                      : installed
-                        ? 'Already downloaded'
-                        : `Download managed ${llamaRuntimeLabel(target.id)}`
+                      : updateAvailable
+                        ? `Update to ${latestVersion ?? 'latest'}`
+                        : installed
+                          ? `Installed (${installedVersion ?? 'unknown version'})`
+                          : `Download ${llamaRuntimeLabel(target.id)}`
                   }
-                  onClick={() => void installManaged(target.id)}
+                  onClick={() => void installManaged(target.id, updateAvailable)}
                 >
                   {installing ? (
                     <LoaderCircle className="spin" size={13} />
+                  ) : updateAvailable ? (
+                    <>
+                      <Download size={13} />
+                      Update
+                    </>
                   ) : installed ? (
                     <>
                       <Check size={13} />
@@ -1636,21 +1727,21 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       </div>
 
       <div className="settings-group">
-        <div className="section-label">Installed runtimes</div>
+        <div className="section-label">Custom runtimes</div>
         {runtimes == null && !props.initialRuntimes?.length && (
           <div className="manage-placeholder">
             <LoaderCircle className="spin" size={16} />
-            Scanning for installed runtimes…
+            Scanning for custom runtimes…
           </div>
         )}
-        {runtimes != null && runtimes.length === 0 && (
-          <div className="manage-placeholder">
+        {runtimes != null && customRuntimes.length === 0 && (
+          <div className="manage-placeholder compact">
             <Cpu size={16} />
-            No runtime installed yet. Download one above or build from source.
+            Source builds and forks appear here after you build them.
           </div>
         )}
         <div className="runtime-list">
-          {(runtimes ?? []).map((runtime) => (
+          {customRuntimes.map((runtime) => (
             <article
               className={runtime.active ? 'runtime-card active' : 'runtime-card'}
               key={runtime.id}
@@ -1661,9 +1752,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                   {runtime.active && <span className="active-badge">Active</span>}
                 </strong>
                 <span>
-                  {[runtime.kind, runtime.target, runtime.version].filter(Boolean).join(' · ')}
+                  {[runtime.version, runtime.target].filter(Boolean).join(' · ')}
                 </span>
-                <code>{runtime.path}</code>
+                <code title={runtime.path}>{runtime.path}</code>
               </div>
               <div className="library-card-actions">
                 {!runtime.active && (
@@ -1721,7 +1812,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 <span>Engine</span>
                 <select
                   value={buildEngine}
-                  onChange={(event) => setBuildEngine(event.target.value as BuildEngine)}
+                  onChange={(event) =>
+                    applyBuildEngine(event.target.value as BuildEngine)
+                  }
                 >
                   {(Object.keys(BUILD_ENGINE_DEFAULTS) as BuildEngine[]).map((engine) => (
                     <option key={engine} value={engine}>

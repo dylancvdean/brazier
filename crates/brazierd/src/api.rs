@@ -30,8 +30,10 @@ use crate::{
     db::ConversationExport,
     download::{self},
     engine::{Engine, StreamEvent},
+    fork_hints::{self, ModelLoadError, RuntimeForkHint},
     hf::{self, SearchQuery},
-    hf_auth, models_store,
+    hf_auth, model_bindings, models_store,
+    llama,
     progress::ProgressEvent,
     runtimes, tools,
     types::{
@@ -46,6 +48,7 @@ type ApiResult<T> = Result<T, ApiError>;
 pub struct ApiError {
     status: StatusCode,
     message: String,
+    fork_hints: Option<Vec<RuntimeForkHint>>,
 }
 
 impl ApiError {
@@ -53,6 +56,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: error.to_string(),
+            fork_hints: None,
         }
     }
 
@@ -61,17 +65,34 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "The request could not be completed.".to_owned(),
+            fork_hints: None,
         }
+    }
+
+    fn model_load(message: String, fork_hints: Vec<RuntimeForkHint>) -> Self {
+        tracing::error!(error = %message, "model load failed");
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message,
+            fork_hints: (!fork_hints.is_empty()).then_some(fork_hints),
+        }
+    }
+
+    fn from_anyhow(error: anyhow::Error) -> Self {
+        if let Some(load) = error.downcast_ref::<ModelLoadError>() {
+            return Self::model_load(load.cause.clone(), load.fork_hints.clone());
+        }
+        Self::internal(error)
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(json!({ "error": { "message": self.message } })),
-        )
-            .into_response()
+        let mut body = json!({ "error": { "message": self.message } });
+        if let Some(fork_hints) = self.fork_hints {
+            body["brazier"] = json!({ "fork_hints": fork_hints });
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -112,6 +133,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/huggingface/models/{repo_owner}/{repo_name}/trust",
             get(model_trust),
         )
+        .route(
+            "/api/v1/huggingface/models/{repo_owner}/{repo_name}/fork-hints",
+            get(model_fork_hints),
+        )
         .route("/api/v1/engines/build-plan", post(build_plan))
         .route("/api/v1/engines", get(engine_status))
         .route(
@@ -120,6 +145,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/hardware", get(hardware))
         .route("/api/v1/engines/llama.cpp/ensure", post(ensure_llama))
+        .route(
+            "/api/v1/engines/llama.cpp/managed-status",
+            get(managed_llama_status),
+        )
         .route("/api/v1/tools", get(list_tools))
         .route(
             "/api/v1/runtimes",
@@ -138,6 +167,8 @@ pub fn router(state: AppState) -> Router {
             get(model_library_path_suggestions),
         )
         .route("/api/v1/models", axum::routing::delete(delete_local_model))
+        .route("/api/v1/models/bindings", get(model_bindings_list).put(update_model_binding))
+        .route("/api/v1/models/prepare", post(prepare_model))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/responses", post(responses))
@@ -459,6 +490,17 @@ async fn model_trust(
     Ok(Json(json!(trust)))
 }
 
+async fn model_fork_hints(
+    State(state): State<AppState>,
+    Path((repo_owner, repo_name)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let repo_id = format!("{repo_owner}/{repo_name}");
+    let fork_hints = fork_hints::hints_for_repo(&state.http, &state.data_dir, &repo_id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "repo_id": repo_id, "fork_hints": fork_hints })))
+}
+
 async fn list_download_jobs(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let jobs = state
         .db
@@ -596,6 +638,9 @@ struct RuntimeIdRequest {
 struct EnsureLlamaRequest {
     #[serde(default)]
     target: Option<crate::runtime_settings::RuntimeTarget>,
+    /// When true, download the latest managed release even if one is installed.
+    #[serde(default)]
+    force: bool,
 }
 
 async fn activate_runtime(
@@ -685,6 +730,115 @@ async fn delete_local_model(
     Ok(Json(json!({ "deleted": request.model_id })))
 }
 
+async fn model_bindings_list(State(state): State<AppState>) -> Json<Value> {
+    let bindings = model_bindings::load(&state.data_dir);
+    Json(json!({ "bindings": bindings.bindings }))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateModelBindingRequest {
+    model_id: String,
+    #[serde(default)]
+    runtime_id: Option<String>,
+}
+
+async fn update_model_binding(
+    State(state): State<AppState>,
+    Json(request): Json<UpdateModelBindingRequest>,
+) -> ApiResult<Json<Value>> {
+    let bindings = if let Some(runtime_id) = request.runtime_id.filter(|id| !id.is_empty()) {
+        state
+            .runtime
+            .activate_runtime_by_id(&runtime_id)
+            .await
+            .map_err(ApiError::bad_request)?;
+        state.invalidate_runtimes_cache().await;
+        model_bindings::set_binding(&state.data_dir, &request.model_id, &runtime_id)
+            .await
+            .map_err(ApiError::internal)?
+    } else {
+        model_bindings::clear_binding(&state.data_dir, &request.model_id)
+            .await
+            .map_err(ApiError::internal)?
+    };
+    Ok(Json(json!({
+        "model_id": request.model_id,
+        "bindings": bindings.bindings
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct PrepareModelRequest {
+    model_id: String,
+}
+
+async fn prepare_model(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<PrepareModelRequest>,
+) -> ApiResult<Response> {
+    if !query.stream {
+        match state
+            .runtime
+            .prepare_model_stream(&request.model_id)
+            .await
+        {
+            Ok(mut rx) => {
+                while let Some(item) = rx.recv().await {
+                    match item {
+                        Ok(StreamEvent::Load { .. }) => {}
+                        Ok(_) => {}
+                        Err(error) => return Err(ApiError::from_anyhow(error)),
+                    }
+                }
+                state.invalidate_runtimes_cache().await;
+                return Ok(Json(json!({ "status": "ready", "model_id": request.model_id })).into_response());
+            }
+            Err(error) => return Err(ApiError::from_anyhow(error)),
+        }
+    }
+
+    let mut event_rx = state
+        .runtime
+        .prepare_model_stream(&request.model_id)
+        .await
+        .map_err(ApiError::from_anyhow)?;
+    let model_id = request.model_id.clone();
+    let cache_state = state.clone();
+    let events = stream! {
+        while let Some(item) = event_rx.recv().await {
+            match item {
+                Ok(StreamEvent::Load { phase, message }) => {
+                    let chunk = json!({
+                        "model_id": model_id,
+                        "phase": phase,
+                        "message": message,
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let fork_hints = error
+                        .downcast_ref::<ModelLoadError>()
+                        .map(|load| load.fork_hints.clone());
+                    let mut body = json!({ "error": { "message": error.to_string() } });
+                    if let Some(fork_hints) = fork_hints.filter(|hints| !hints.is_empty()) {
+                        body["brazier"] = json!({ "fork_hints": fork_hints });
+                    }
+                    yield Ok::<Event, Infallible>(Event::default().data(body.to_string()));
+                    return;
+                }
+            }
+        }
+        cache_state.invalidate_runtimes_cache().await;
+        let done = json!({ "status": "ready", "model_id": model_id });
+        yield Ok::<Event, Infallible>(Event::default().data(done.to_string()));
+    };
+    Ok(Sse::new(events)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
+        .into_response())
+}
+
 async fn model_library_path_suggestions(State(state): State<AppState>) -> Json<Value> {
     let settings = state.runtime.settings().await;
     Json(json!({
@@ -726,16 +880,56 @@ fn progress_sse(mut rx: mpsc::UnboundedReceiver<ProgressEvent>) -> Response {
         .into_response()
 }
 
+async fn managed_llama_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    use crate::runtime_settings::RuntimeTarget;
+
+    let latest_tag = llama::resolve_managed_release(&state.http, RuntimeTarget::Cpu)
+        .await
+        .ok()
+        .map(|(tag, _)| tag);
+
+    let target_specs = [
+        ("cpu", RuntimeTarget::Cpu),
+        ("cuda", RuntimeTarget::Cuda),
+        ("rocm", RuntimeTarget::Rocm),
+        ("vulkan", RuntimeTarget::Vulkan),
+    ];
+    let targets: Vec<Value> = target_specs
+        .iter()
+        .map(|(id, target)| {
+            let installed = llama::managed_is_installed(&state.data_dir, *target);
+            let installed_version = llama::managed_installed_version(&state.data_dir, *target);
+            let update_available = installed
+                && latest_tag
+                    .as_deref()
+                    .is_some_and(|latest| Some(latest) != installed_version.as_deref());
+            json!({
+                "target": id,
+                "installed": installed,
+                "installed_version": installed_version,
+                "latest_version": latest_tag,
+                "update_available": update_available,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "latest_version": latest_tag,
+        "targets": targets,
+    })))
+}
+
 async fn ensure_llama(
     State(state): State<AppState>,
     Query(query): Query<StreamQuery>,
     Json(request): Json<EnsureLlamaRequest>,
 ) -> Response {
     let target = request.target;
+    let force = request.force;
     if !query.stream {
         return match state
             .runtime
-            .ensure_llama_binary_with_progress(target, Box::new(|_| {}))
+            .ensure_llama_binary_with_progress(target, force, Box::new(|_| {}))
             .await
         {
             Ok(path) => {
@@ -759,7 +953,7 @@ async fn ensure_llama(
     tokio::spawn(async move {
         let progress_tx = tx.clone();
         let result = runtime
-            .ensure_llama_binary_with_progress(target, Box::new(move |event| {
+            .ensure_llama_binary_with_progress(target, force, Box::new(move |event| {
                 push_progress(&progress_tx, event);
             }))
             .await;
@@ -1125,7 +1319,7 @@ async fn chat_completions(
             .runtime
             .generate(&request)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(|error| ApiError::from_anyhow(error))?;
         return Ok(Json(json!({
             "id": completion_id,
             "object": "chat.completion",
@@ -1154,10 +1348,24 @@ async fn chat_completions(
         .runtime
         .generate_stream(&request)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(|error| ApiError::from_anyhow(error))?;
     let events = stream! {
         while let Some(item) = token_rx.recv().await {
             match item {
+                Ok(StreamEvent::Load { phase, message }) => {
+                    let chunk = json!({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": null
+                        }],
+                        "brazier": { "load": { "phase": phase, "message": message } }
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
+                }
                 Ok(StreamEvent::Content(content)) => {
                     let chunk = json!({
                         "id": completion_id,
@@ -1189,7 +1397,11 @@ async fn chat_completions(
                 Ok(StreamEvent::End) => break,
                 Err(error) => {
                     tracing::error!(error = %error, "stream generation failed");
-                    let chunk = json!({
+                    let fork_hints = error
+                        .downcast_ref::<ModelLoadError>()
+                        .map(|load| load.fork_hints.clone())
+                        .filter(|hints| !hints.is_empty());
+                    let mut chunk = json!({
                         "id": completion_id,
                         "object": "chat.completion.chunk",
                         "model": model,
@@ -1200,6 +1412,9 @@ async fn chat_completions(
                         }],
                         "error": { "message": error.to_string() }
                     });
+                    if let Some(fork_hints) = fork_hints {
+                        chunk["brazier"] = json!({ "fork_hints": fork_hints });
+                    }
                     yield Ok(Event::default().data(chunk.to_string()));
                     break;
                 }
@@ -1267,6 +1482,7 @@ async fn responses(
         max_tokens: request.max_output_tokens,
         seed: request.seed,
         enable_reasoning: request.enable_reasoning,
+        reasoning_budget_tokens: request.reasoning_budget_tokens,
         builtin_tools: request.builtin_tools,
     };
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
@@ -1307,6 +1523,7 @@ async fn responses(
             .data(json!({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}).to_string()));
         while let Some(item) = token_rx.recv().await {
             match item {
+                Ok(StreamEvent::Load { .. }) => {}
                 Ok(StreamEvent::Content(content)) => {
                     yield Ok(Event::default()
                         .event("response.output_text.delta")

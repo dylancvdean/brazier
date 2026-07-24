@@ -104,13 +104,20 @@ export function modelDisplayName(
 export function runtimeNoticeForModel(
   modelId: string,
   models: LocalModel[],
-  runtimes: RuntimeEntry[] | null | undefined
+  runtimes: RuntimeEntry[] | null | undefined,
+  bindings?: Record<string, string> | null
 ): string | null {
   if (!modelId || !runtimes) return null
   const model = models.find((entry) => entry.id === modelId)
   if (!model) return null
   const engine = modelEngine(model)
   if (!engine) return null
+  const boundId = bindings?.[modelId]
+  if (boundId) {
+    const bound = runtimes.find((entry) => entry.id === boundId)
+    if (bound) return null
+    return 'The paired runtime is missing. Choose another runtime below.'
+  }
   const active = runtimes.some((entry) => entry.engine === engine && entry.active)
   if (active) return null
   if (engine === 'llama.cpp') {
@@ -120,6 +127,15 @@ export function runtimeNoticeForModel(
     return `This model needs ${engineLabel(engine)}. Open Manage → Runtimes to build and activate it.`
   }
   return null
+}
+
+export function runtimesForModel(
+  model: LocalModel | undefined,
+  runtimes: RuntimeEntry[] | null | undefined
+): RuntimeEntry[] {
+  const engine = modelEngine(model)
+  if (!engine || !runtimes) return []
+  return runtimes.filter((entry) => entry.engine === engine)
 }
 
 export function visionCapabilityTitle(

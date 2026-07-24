@@ -43,6 +43,9 @@ pub struct RuntimeSettings {
     pub top_p: f32,
     pub max_tokens: Option<u32>,
     pub enable_reasoning: bool,
+    /// Token cap for thinking models when reasoning mode is `budget`.
+    #[serde(default)]
+    pub reasoning_budget_tokens: Option<u32>,
     /// Absolute path of an explicitly activated llama-server binary. When set,
     /// it takes precedence over discovery and managed installs.
     pub binary_override: Option<String>,
@@ -82,6 +85,7 @@ impl Default for RuntimeSettings {
             top_p: 0.95,
             max_tokens: None,
             enable_reasoning: true,
+            reasoning_budget_tokens: None,
             binary_override: None,
             mlx_lm_python: None,
             mlx_vlm_python: None,
@@ -116,6 +120,14 @@ impl RuntimeSettings {
         anyhow::ensure!(
             self.top_p.is_finite() && (0.0..=1.0).contains(&self.top_p),
             "top_p must be between 0 and 1"
+        );
+        anyhow::ensure!(
+            self.max_tokens.is_none_or(|value| value > 0),
+            "max_tokens must be greater than zero"
+        );
+        anyhow::ensure!(
+            self.reasoning_budget_tokens.is_none_or(|value| value > 0),
+            "reasoning_budget_tokens must be greater than zero"
         );
         for value in [&self.kv_cache_type_k, &self.kv_cache_type_v] {
             anyhow::ensure!(

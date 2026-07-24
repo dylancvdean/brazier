@@ -37,6 +37,8 @@ export type LocalModel = {
     streaming: boolean
     tools: boolean
     reasoning: boolean
+    max_context_length?: number | null
+    reasoning_modes?: string[]
   }
 }
 
@@ -62,6 +64,7 @@ export type RuntimeSettings = {
   top_p: number
   max_tokens: number | null
   enable_reasoning: boolean
+  reasoning_budget_tokens?: number | null
   binary_override: string | null
   build_jobs: number
   extra_model_library_paths: string[]
@@ -276,6 +279,39 @@ export type ToolCallRecord = {
   is_error: boolean
 }
 
+export type RuntimeForkHint = {
+  engine: string
+  display_name: string
+  repository: string
+  trusted: boolean
+  summary: string
+}
+
+export class GenerationFailure extends Error {
+  forkHints: RuntimeForkHint[]
+
+  constructor(message: string, forkHints: RuntimeForkHint[] = []) {
+    super(message)
+    this.name = 'GenerationFailure'
+    this.forkHints = forkHints
+  }
+}
+
+function forkHintsFromPayload(payload: unknown): RuntimeForkHint[] {
+  if (!payload || typeof payload !== 'object') return []
+  const brazier = (payload as { brazier?: { fork_hints?: RuntimeForkHint[] } }).brazier
+  return Array.isArray(brazier?.fork_hints) ? brazier.fork_hints : []
+}
+
+export async function fetchForkHints(repoId: string): Promise<RuntimeForkHint[]> {
+  const [owner, name] = repoId.split('/')
+  if (!owner || !name) throw new Error('Repository id must be owner/name.')
+  const response = await request<{ fork_hints: RuntimeForkHint[] }>(
+    `/api/v1/huggingface/models/${owner}/${name}/fork-hints`
+  )
+  return response.fork_hints ?? []
+}
+
 export async function streamCompletion(
   messages: Message[],
   model: string,
@@ -284,6 +320,7 @@ export async function streamCompletion(
   options?: {
     builtinTools?: boolean
     onToolCall?: (record: ToolCallRecord) => void
+    onLoad?: (event: { phase: string; message: string }) => void
   }
 ): Promise<void> {
   const daemon = await connection()
@@ -306,8 +343,12 @@ export async function streamCompletion(
   if (!response.ok || !response.body) {
     const payload = (await response.json().catch(() => null)) as {
       error?: { message?: string }
+      brazier?: { fork_hints?: RuntimeForkHint[] }
     } | null
-    throw new Error(payload?.error?.message ?? `Generation failed (${response.status}).`)
+    throw new GenerationFailure(
+      payload?.error?.message ?? `Generation failed (${response.status}).`,
+      forkHintsFromPayload(payload)
+    )
   }
 
   const reader = response.body.getReader()
@@ -328,10 +369,17 @@ export async function streamCompletion(
       if (!data || data === '[DONE]') continue
       const chunk = JSON.parse(data) as {
         choices?: Array<{ delta?: { content?: string } }>
-        brazier?: { tool_call?: ToolCallRecord }
+        brazier?: {
+          tool_call?: ToolCallRecord
+          fork_hints?: RuntimeForkHint[]
+          load?: { phase: string; message: string }
+        }
         error?: { message?: string }
       }
-      if (chunk.error?.message) throw new Error(chunk.error.message)
+      if (chunk.error?.message) {
+        throw new GenerationFailure(chunk.error.message, chunk.brazier?.fork_hints ?? [])
+      }
+      if (chunk.brazier?.load) options?.onLoad?.(chunk.brazier.load)
       if (chunk.brazier?.tool_call) options?.onToolCall?.(chunk.brazier.tool_call)
       const token = chunk.choices?.[0]?.delta?.content
       if (token) onToken(token)
@@ -508,11 +556,29 @@ export async function downloadMlxModel(
   return result
 }
 
+export type ManagedLlamaTargetStatus = {
+  target: string
+  installed: boolean
+  installed_version: string | null
+  latest_version: string | null
+  update_available: boolean
+}
+
+export async function fetchManagedLlamaStatus(): Promise<{
+  latest_version: string | null
+  targets: ManagedLlamaTargetStatus[]
+}> {
+  return request('/api/v1/engines/llama.cpp/managed-status')
+}
+
 export async function ensureLlamaEngine(
   onProgress: (event: ProgressEvent) => void,
-  options?: { target?: RuntimeTarget }
+  options?: { target?: RuntimeTarget; force?: boolean }
 ): Promise<{ binary: string; status: string }> {
-  const body = options?.target ? JSON.stringify({ target: options.target }) : '{}'
+  const body = JSON.stringify({
+    ...(options?.target ? { target: options.target } : {}),
+    ...(options?.force ? { force: true } : {})
+  })
   const final = await readProgressSse(
     '/api/v1/engines/llama.cpp/ensure?stream=true',
     { method: 'POST', body },
@@ -530,6 +596,7 @@ export type RuntimeEntry = {
   label: string
   target: string | null
   version: string | null
+  repository?: string | null
   path: string
   active: boolean
   deletable: boolean
@@ -564,6 +631,87 @@ export function deleteModel(modelId: string): Promise<{ deleted: string }> {
     method: 'DELETE',
     body: JSON.stringify({ model_id: modelId })
   })
+}
+
+export async function fetchModelBindings(): Promise<Record<string, string>> {
+  const response = await request<{ bindings: Record<string, string> }>('/api/v1/models/bindings')
+  return response.bindings ?? {}
+}
+
+export async function setModelBinding(
+  modelId: string,
+  runtimeId: string | null
+): Promise<Record<string, string>> {
+  const response = await request<{ bindings: Record<string, string> }>(
+    '/api/v1/models/bindings',
+    {
+      method: 'PUT',
+      body: JSON.stringify({ model_id: modelId, runtime_id: runtimeId })
+    }
+  )
+  return response.bindings ?? {}
+}
+
+export async function prepareModel(
+  modelId: string,
+  options?: {
+    signal?: AbortSignal
+    onLoad?: (event: { phase: string; message: string }) => void
+  }
+): Promise<void> {
+  const daemon = await connection()
+  const response = await fetch(`${daemon.address}/api/v1/models/prepare?stream=true`, {
+    method: 'POST',
+    signal: options?.signal,
+    headers: {
+      'content-type': 'application/json',
+      ...(daemon.api_key ? { authorization: `Bearer ${daemon.api_key}` } : {})
+    },
+    body: JSON.stringify({ model_id: modelId })
+  })
+  if (!response.ok || !response.body) {
+    const payload = (await response.json().catch(() => null)) as {
+      error?: { message?: string }
+      brazier?: { fork_hints?: RuntimeForkHint[] }
+    } | null
+    throw new GenerationFailure(
+      payload?.error?.message ?? `Model prepare failed (${response.status}).`,
+      forkHintsFromPayload(payload)
+    )
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const frames = buffer.split('\n\n')
+    buffer = frames.pop() ?? ''
+    for (const frame of frames) {
+      const data = frame
+        .split('\n')
+        .find((line) => line.startsWith('data:'))
+        ?.slice(5)
+        .trim()
+      if (!data || data === '[DONE]') continue
+      const chunk = JSON.parse(data) as {
+        phase?: string
+        message?: string
+        status?: string
+        error?: { message?: string }
+        brazier?: { fork_hints?: RuntimeForkHint[] }
+      }
+      if (chunk.error?.message) {
+        throw new GenerationFailure(chunk.error.message, chunk.brazier?.fork_hints ?? [])
+      }
+      if (chunk.phase && chunk.message) {
+        options?.onLoad?.({ phase: chunk.phase, message: chunk.message })
+      }
+      if (chunk.status === 'ready') return
+    }
+  }
 }
 
 export type BundledTool = {

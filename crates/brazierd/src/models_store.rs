@@ -207,6 +207,33 @@ pub fn mlx_kind_for_model_id(model_id: &str) -> Option<MlxKind> {
     MlxKind::from_model_id(model_id)
 }
 
+/// Best-effort Hugging Face repo id for a local model id.
+pub fn managed_repo_id(model_id: &str) -> Option<String> {
+    if model_id.starts_with("mlx-ext:")
+        || model_id.starts_with("mlx-vlm-ext:")
+        || model_id.starts_with("gguf-ext:")
+    {
+        let key = model_id
+            .split_once(':')
+            .and_then(|(_, rest)| rest.split_once(':').map(|(_, path)| path))?;
+        let parts: Vec<&str> = key.split('/').collect();
+        if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            return Some(format!("{}/{}", parts[0], parts[1]));
+        }
+        return None;
+    }
+    if let Ok(repo_id) = mlx_repo_id(model_id) {
+        return Some(repo_id.to_owned());
+    }
+    if let Some(key) = model_id.strip_prefix("gguf:") {
+        let parts: Vec<&str> = key.split('/').collect();
+        if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            return Some(format!("{}/{}", parts[0], parts[1]));
+        }
+    }
+    None
+}
+
 pub fn mlx_repo_id(model_id: &str) -> anyhow::Result<&str> {
     if model_id.starts_with("mlx-ext:") || model_id.starts_with("mlx-vlm-ext:") {
         anyhow::bail!("not a managed MLX repo id: {model_id}");
@@ -362,17 +389,89 @@ fn dir_has_projector(dir: &Path) -> bool {
     })
 }
 
-fn gguf_capabilities(has_projector: bool) -> ModelCapabilities {
+fn gguf_capabilities(has_projector: bool, model_key: &str) -> ModelCapabilities {
     let mut input_modalities = vec!["text".into()];
     if has_projector {
         input_modalities.extend(["image".into(), "audio".into(), "video".into()]);
     }
+    let (reasoning, reasoning_modes) = infer_reasoning_profile(model_key, None);
     ModelCapabilities {
         input_modalities,
         output_modalities: vec!["text".into()],
         streaming: true,
         tools: true,
-        reasoning: true,
+        reasoning,
+        max_context_length: infer_gguf_context_hint(model_key),
+        reasoning_modes,
+    }
+}
+
+fn infer_gguf_context_hint(model_key: &str) -> Option<u32> {
+    let lower = model_key.to_ascii_lowercase();
+    for (needle, context) in [
+        ("128k", 131_072),
+        ("64k", 65_536),
+        ("32k", 32_768),
+        ("16k", 16_384),
+        ("8k", 8_192),
+        ("4k", 4_096),
+    ] {
+        if lower.contains(needle) {
+            return Some(context);
+        }
+    }
+    None
+}
+
+fn max_context_from_config(value: &serde_json::Value) -> Option<u32> {
+    for pointer in [
+        "/max_position_embeddings",
+        "/text_config/max_position_embeddings",
+        "/sliding_window",
+        "/max_seq_len",
+    ] {
+        if let Some(number) = value.pointer(pointer).and_then(|entry| entry.as_u64()) {
+            if number >= 512 {
+                return Some(number.min(u32::MAX as u64) as u32);
+            }
+        }
+    }
+    None
+}
+
+fn infer_reasoning_profile(
+    model_key: &str,
+    config: Option<&serde_json::Value>,
+) -> (bool, Vec<String>) {
+    let lower = model_key.to_ascii_lowercase();
+    let model_type = config
+        .and_then(|value| value.get("model_type"))
+        .and_then(|entry| entry.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let thinking_model = [
+        "qwen3",
+        "qwq",
+        "deepseek-r1",
+        "deepseek_r1",
+        "command-r",
+        "command_r",
+        "phi-4-reasoning",
+        "magistral",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle) || model_type.contains(needle));
+    if !thinking_model {
+        return (false, Vec::new());
+    }
+    let budget_supported = lower.contains("qwen3")
+        || lower.contains("qwq")
+        || model_type.contains("qwen3")
+        || model_type.contains("qwq");
+    if budget_supported {
+        (true, vec!["off".into(), "on".into(), "budget".into()])
+    } else {
+        (true, vec!["off".into(), "on".into()])
     }
 }
 
@@ -488,13 +587,16 @@ fn config_value_indicates_vlm(value: &serde_json::Value) -> bool {
     false
 }
 
-fn mlx_capabilities(kind: MlxKind, dir: &Path) -> ModelCapabilities {
+fn mlx_capabilities(kind: MlxKind, dir: &Path, model_key: &str) -> ModelCapabilities {
     let mut input_modalities = vec!["text".into()];
     if matches!(kind, MlxKind::Vlm) {
         input_modalities.push("image".into());
     }
-    let config = std::fs::read_to_string(dir.join("config.json")).ok();
-    if config.as_deref().is_some_and(|text| {
+    let config_text = std::fs::read_to_string(dir.join("config.json")).ok();
+    let config_value = config_text
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+    if config_text.as_deref().is_some_and(|text| {
         let lower = text.to_ascii_lowercase();
         lower.contains("vision") || lower.contains("image") || lower.contains("vl")
     }) {
@@ -502,12 +604,18 @@ fn mlx_capabilities(kind: MlxKind, dir: &Path) -> ModelCapabilities {
             input_modalities.push("image".into());
         }
     }
+    let (reasoning, reasoning_modes) =
+        infer_reasoning_profile(model_key, config_value.as_ref());
     ModelCapabilities {
         input_modalities,
         output_modalities: vec!["text".into()],
         streaming: true,
         tools: true,
-        reasoning: true,
+        reasoning,
+        max_context_length: config_value
+            .as_ref()
+            .and_then(max_context_from_config),
+        reasoning_modes,
     }
 }
 
@@ -562,7 +670,7 @@ pub fn list_mlx_models(data_dir: &Path) -> anyhow::Result<Vec<ModelDescriptor>> 
                 id,
                 name: repo_id.clone(),
                 engine: kind.engine_id().to_owned(),
-                capabilities: mlx_capabilities(kind, &model_dir),
+                capabilities: mlx_capabilities(kind, &model_dir, &repo_id),
                 size_bytes: Some(directory_size_bytes(&model_dir)),
                 read_only: false,
                 library_label: None,
@@ -641,9 +749,9 @@ fn collect_external_library(
                     .unwrap_or_else(|| id.clone());
                 models.push(ModelDescriptor {
                     id,
-                    name,
+                    name: name.clone(),
                     engine: kind.engine_id().to_owned(),
-                    capabilities: mlx_capabilities(kind, &path),
+                    capabilities: mlx_capabilities(kind, &path, &name),
                     size_bytes: Some(directory_size_bytes(&path)),
                     read_only: true,
                     library_label: Some(label.to_owned()),
@@ -671,11 +779,15 @@ fn collect_external_library(
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| id.clone());
+        let key = id
+            .strip_prefix("gguf-ext:")
+            .and_then(|payload| payload.split_once(':').map(|(_, path)| path.to_owned()))
+            .unwrap_or_else(|| name.clone());
         models.push(ModelDescriptor {
             id,
             name,
             engine: "llama.cpp".to_owned(),
-            capabilities: gguf_capabilities(has_projector),
+            capabilities: gguf_capabilities(has_projector, &key),
             size_bytes: std::fs::metadata(&path).ok().map(|meta| meta.len()),
             read_only: true,
             library_label: Some(label.to_owned()),
@@ -705,6 +817,10 @@ fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> a
             continue;
         }
         let id = model_id_for_path(root, &path)?;
+        let key = id
+            .strip_prefix("gguf:")
+            .map(|value| value.to_owned())
+            .unwrap_or_else(|| id.clone());
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -713,7 +829,7 @@ fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> a
             id,
             name,
             engine: "llama.cpp".to_owned(),
-            capabilities: gguf_capabilities(has_projector),
+            capabilities: gguf_capabilities(has_projector, &key),
             size_bytes: std::fs::metadata(&path).ok().map(|meta| meta.len()),
             read_only: false,
             library_label: None,
@@ -867,6 +983,27 @@ mod tests {
             prefer_gguf_filename(&names).as_deref(),
             Some("model-q4_k_m.gguf")
         );
+    }
+
+    #[test]
+    fn infers_thinking_model_reasoning_modes() {
+        let (_, modes) = infer_reasoning_profile("mlx-community/Qwen3-8B", None);
+        assert!(modes.contains(&"budget".into()));
+        let (_, modes) = infer_reasoning_profile("acme/Llama-3", None);
+        assert!(modes.is_empty());
+    }
+
+    #[test]
+    fn managed_repo_id_extracts_hf_repo() {
+        assert_eq!(
+            managed_repo_id("mlx:mlx-community/Qwen2.5-0.5B-Instruct"),
+            Some("mlx-community/Qwen2.5-0.5B-Instruct".into())
+        );
+        assert_eq!(
+            managed_repo_id("gguf:unsloth/Tiny-GGUF/model-Q4_K_M.gguf"),
+            Some("unsloth/Tiny-GGUF".into())
+        );
+        assert_eq!(managed_repo_id("gguf-ext:0:owner/repo/file.gguf"), Some("owner/repo".into()));
     }
 
     #[test]

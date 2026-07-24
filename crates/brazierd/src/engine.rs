@@ -2,13 +2,14 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use anyhow::Context;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::{
+    fork_hints::{self, ModelLoadError},
     llama::{self, LlamaServer},
     mlx::{self, MlxKind, MlxServer},
+    model_bindings,
     models_store,
     progress::{ProgressCallback, ProgressEvent},
     runtime_settings::{self, RuntimeSettings},
@@ -27,6 +28,11 @@ pub struct Generation {
 /// One item in a streamed generation.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
+    /// Model/server preparation progress.
+    Load {
+        phase: String,
+        message: String,
+    },
     /// Assistant content delta.
     Content(String),
     /// A bundled tool was executed server-side.
@@ -34,6 +40,8 @@ pub enum StreamEvent {
     /// Generation finished.
     End,
 }
+
+type LoadNotifier = Option<tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>>;
 
 /// Maximum model round-trips when the model keeps requesting tools.
 const MAX_TOOL_ROUNDS: usize = 4;
@@ -447,15 +455,95 @@ impl Runtime {
         }
     }
 
+    async fn activate_runtime_entry(&self, entry: &runtimes::RuntimeEntry) -> anyhow::Result<()> {
+        match entry.engine.as_str() {
+            "mlx-lm" => {
+                self.activate_python(MlxKind::Lm, PathBuf::from(&entry.path))
+                    .await?;
+            }
+            "mlx-vlm" => {
+                self.activate_python(MlxKind::Vlm, PathBuf::from(&entry.path))
+                    .await?;
+            }
+            _ => {
+                self.activate_binary(PathBuf::from(&entry.path)).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Activate a runtime by inventory id (used for per-model bindings).
+    pub async fn activate_runtime_by_id(&self, runtime_id: &str) -> anyhow::Result<()> {
+        let path_env = std::env::var("PATH").ok();
+        let active = self.active_runtimes().await;
+        let entry = runtimes::find(
+            &self.data_dir,
+            path_env.as_deref(),
+            runtime_id,
+            false,
+            &active,
+        )
+        .ok_or_else(|| anyhow::anyhow!("unknown runtime `{runtime_id}`"))?;
+        self.activate_runtime_entry(&entry).await
+    }
+
+    async fn apply_model_binding(&self, model_id: &str) -> anyhow::Result<()> {
+        let bindings = model_bindings::load(&self.data_dir);
+        let Some(runtime_id) = bindings.get(model_id) else {
+            return Ok(());
+        };
+        self.activate_runtime_by_id(runtime_id).await
+    }
+
+    async fn prepare_with_recovery(
+        &self,
+        request: &ChatCompletionRequest,
+        load_tx: LoadNotifier,
+    ) -> anyhow::Result<(ActiveBackend, RuntimeSettings, ChatCompletionRequest)> {
+        self.apply_model_binding(&request.model).await?;
+        match self.prepare_generation(request, load_tx.clone()).await {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let Some(load_err) = error.downcast_ref::<ModelLoadError>() else {
+                    return Err(error);
+                };
+                for hint in &load_err.fork_hints {
+                    let active = self.active_runtimes().await;
+                    let Some(entry) = runtimes::find_for_fork(&self.data_dir, &active, hint) else {
+                        continue;
+                    };
+                    model_bindings::set_binding(&self.data_dir, &request.model, &entry.id)
+                        .await?;
+                    self.activate_runtime_entry(&entry).await?;
+                    if let Some(tx) = &load_tx {
+                        let _ = tx
+                            .send(Ok(StreamEvent::Load {
+                                phase: "fork".to_owned(),
+                                message: format!("Paired with {} — retrying load…", entry.label),
+                            }))
+                            .await;
+                    }
+                    return self.prepare_generation(request, load_tx).await;
+                }
+                Err(ModelLoadError {
+                    cause: load_err.cause.clone(),
+                    fork_hints: load_err.fork_hints.clone(),
+                }
+                .into())
+            }
+        }
+    }
+
     /// Discover an existing binary or download a managed release.
     pub async fn ensure_llama_binary(&self) -> anyhow::Result<PathBuf> {
-        self.ensure_llama_binary_with_progress(None, Box::new(|_| {}))
+        self.ensure_llama_binary_with_progress(None, false, Box::new(|_| {}))
             .await
     }
 
     pub async fn ensure_llama_binary_with_progress(
         &self,
         target_override: Option<crate::runtime_settings::RuntimeTarget>,
+        force: bool,
         mut progress: ProgressCallback,
     ) -> anyhow::Result<PathBuf> {
         let target = if let Some(target) = target_override {
@@ -463,7 +551,7 @@ impl Runtime {
         } else {
             self.settings.lock().await.target
         };
-        if target_override.is_none() {
+        if target_override.is_none() && !force {
             let guard = self.llama.lock().await;
             if let Some(path) = &guard.binary
                 && path.is_file()
@@ -481,8 +569,14 @@ impl Runtime {
                 return Ok(path.clone());
             }
         }
-        let path = llama::ensure_binary_with_progress(&self.http, &self.data_dir, target, progress)
-            .await?;
+        let path = llama::ensure_binary_with_progress(
+            &self.http,
+            &self.data_dir,
+            target,
+            force,
+            progress,
+        )
+        .await?;
         if target_override.is_none() {
             let mut guard = self.llama.lock().await;
             guard.binary = Some(path.clone());
@@ -605,37 +699,77 @@ impl Runtime {
     async fn prepare_generation(
         &self,
         request: &ChatCompletionRequest,
+        load_tx: LoadNotifier,
     ) -> anyhow::Result<(ActiveBackend, RuntimeSettings, ChatCompletionRequest)> {
+        async fn emit(load_tx: &LoadNotifier, phase: &str, message: &str) {
+            if let Some(tx) = load_tx {
+                let _ = tx
+                    .send(Ok(StreamEvent::Load {
+                        phase: phase.to_owned(),
+                        message: message.to_owned(),
+                    }))
+                    .await;
+            }
+        }
+
+        emit(&load_tx, "resolve", "Locating model files…").await;
         let extra = self.extra_library_paths().await;
         let (backend, model_id) = self.resolve_model(&request.model, &extra)?;
         match &backend {
             ActiveBackend::Llama(model_path) => {
+                emit(&load_tx, "server", "Starting llama.cpp server…").await;
+                emit(
+                    &load_tx,
+                    "load",
+                    "Loading GGUF weights into memory…",
+                )
+                .await;
                 if let Err(error) = self
                     .ensure_server_for_model(std::path::Path::new(model_path))
                     .await
                 {
                     let mut guard = self.llama.lock().await;
                     guard.server = None;
-                    return Err(error);
+                    return Err(
+                        fork_hints::load_error_with_hints(
+                            &self.http,
+                            &self.data_dir,
+                            &model_id,
+                            error,
+                        )
+                        .await
+                        .into(),
+                    );
                 }
             }
             ActiveBackend::Mlx(_) => {
+                emit(&load_tx, "server", "Starting MLX server…").await;
+                emit(&load_tx, "load", "Loading MLX model weights…").await;
                 let (kind, mismatch) = models_store::resolve_mlx_launch_kind(
                     &self.data_dir,
                     &model_id,
                     &extra,
-                )
-                .context("MLX model kind could not be resolved")?;
+                )?;
                 if let Some(notice) = mismatch {
                     tracing::warn!("{notice}");
                 }
                 if let Err(error) = self.ensure_mlx_server_for_model(&model_id, kind).await {
                     let mut guard = self.mlx.lock().await;
                     guard.server = None;
-                    return Err(error);
+                    return Err(
+                        fork_hints::load_error_with_hints(
+                            &self.http,
+                            &self.data_dir,
+                            &model_id,
+                            error,
+                        )
+                        .await
+                        .into(),
+                    );
                 }
             }
         }
+        emit(&load_tx, "ready", "Model ready — generating…").await;
         let settings = self.settings.lock().await.clone();
         let mut request = request.clone();
         if request.builtin_tools.unwrap_or(false) {
@@ -683,17 +817,70 @@ impl Runtime {
     /// chunking). When bundled tools are enabled, tool calls are executed
     /// server-side and generation continues in additional rounds.
     pub async fn generate_stream(
-        &self,
+        self: &Arc<Self>,
         request: &ChatCompletionRequest,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<StreamEvent>>> {
-        let (backend, settings, request) = self.prepare_generation(request).await?;
-        let base_url = self.backend_base_url(&backend).await?;
-        let builtin = request.builtin_tools.unwrap_or(false);
-        let http = self.http.clone();
+        let runtime = Arc::clone(self);
+        let request = request.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         tokio::spawn(async move {
+            let prepared = runtime
+                .prepare_with_recovery(&request, Some(tx.clone()))
+                .await;
+            let (backend, settings, request) = match prepared {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = tx.send(Err(error)).await;
+                    return;
+                }
+            };
+            let base_url = match runtime.backend_base_url(&backend).await {
+                Ok(url) => url,
+                Err(error) => {
+                    let _ = tx.send(Err(error)).await;
+                    return;
+                }
+            };
+            let builtin = request.builtin_tools.unwrap_or(false);
+            let http = runtime.http.clone();
             if let Err(error) =
                 stream_tool_rounds(&http, &base_url, request, settings, builtin, &tx).await
+            {
+                let _ = tx.send(Err(error)).await;
+            }
+        });
+        Ok(rx)
+    }
+
+    /// Load a model and its runtime without generating tokens (warmup on select).
+    pub async fn prepare_model_stream(
+        self: &Arc<Self>,
+        model_id: &str,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<StreamEvent>>> {
+        let runtime = Arc::clone(self);
+        let request = ChatCompletionRequest {
+            model: model_id.to_owned(),
+            messages: vec![OpenAiMessage {
+                role: "user".to_owned(),
+                content: serde_json::json!(""),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            stream: false,
+            tools: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            seed: None,
+            enable_reasoning: None,
+            reasoning_budget_tokens: None,
+            builtin_tools: None,
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            if let Err(error) = runtime
+                .prepare_with_recovery(&request, Some(tx.clone()))
+                .await
             {
                 let _ = tx.send(Err(error)).await;
             }
@@ -726,7 +913,7 @@ impl Engine for Runtime {
     }
 
     async fn generate(&self, request: &ChatCompletionRequest) -> anyhow::Result<Generation> {
-        let (backend, settings, mut request) = self.prepare_generation(request).await?;
+        let (backend, settings, mut request) = self.prepare_generation(request, None).await?;
         let base_url = self.backend_base_url(&backend).await?;
         let builtin = request.builtin_tools.unwrap_or(false);
         let mut invocations = Vec::new();
@@ -903,6 +1090,7 @@ mod tests {
                 max_tokens: None,
                 seed: None,
                 enable_reasoning: None,
+                reasoning_budget_tokens: None,
                 builtin_tools: None,
             })
             .await
@@ -930,6 +1118,7 @@ mod tests {
                 max_tokens: None,
                 seed: None,
                 enable_reasoning: None,
+                reasoning_budget_tokens: None,
                 builtin_tools: None,
             })
             .await

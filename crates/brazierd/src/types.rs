@@ -60,6 +60,12 @@ pub struct ModelCapabilities {
     pub streaming: bool,
     pub tools: bool,
     pub reasoning: bool,
+    /// Model-native context window when known from config/metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_length: Option<u32>,
+    /// Supported reasoning controls: `off`, `on`, and optionally `budget`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_modes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +111,8 @@ pub struct ChatCompletionRequest {
     pub seed: Option<i64>,
     #[serde(default)]
     pub enable_reasoning: Option<bool>,
+    #[serde(default)]
+    pub reasoning_budget_tokens: Option<u32>,
     /// When true, the daemon offers its bundled tools to the model and
     /// executes returned tool calls server-side.
     #[serde(default)]
@@ -134,6 +142,8 @@ pub struct ResponsesRequest {
     pub seed: Option<i64>,
     #[serde(default)]
     pub enable_reasoning: Option<bool>,
+    #[serde(default)]
+    pub reasoning_budget_tokens: Option<u32>,
     #[serde(default)]
     pub builtin_tools: Option<bool>,
 }

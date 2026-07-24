@@ -14,6 +14,21 @@ pub const ENGINE: &str = "llama.cpp";
 const MANAGED_FLAVORS: &[&str] = &["cuda", "rocm", "vulkan"];
 const PYTHON_ENGINES: &[&str] = &["mlx-lm", "mlx-vlm"];
 
+fn llama_target_label(target: &str) -> &str {
+    match target {
+        "cpu" => "CPU",
+        "cuda" => "CUDA",
+        "rocm" => "ROCm",
+        "vulkan" => "Vulkan",
+        "metal" => "Metal",
+        _ => target,
+    }
+}
+
+fn llama_managed_label(target: &str) -> String {
+    format!("llama.cpp · {}", llama_target_label(target))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ActiveRuntimes {
     pub llama: Option<PathBuf>,
@@ -29,6 +44,9 @@ pub struct RuntimeEntry {
     pub label: String,
     pub target: Option<String>,
     pub version: Option<String>,
+    /// Source repository URL when this runtime was built from a fork.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     pub path: String,
     pub active: bool,
     pub deletable: bool,
@@ -70,9 +88,10 @@ pub fn list(
             id: "managed".to_owned(),
             engine: ENGINE.to_owned(),
             kind: "managed".to_owned(),
-            label: "Managed release".to_owned(),
+            label: llama_managed_label("cpu"),
             target: Some("cpu".to_owned()),
             version: read_version(&engine_dir),
+            repository: None,
             path: default_binary.display().to_string(),
             active: is_active(&default_binary, &active.llama),
             deletable: true,
@@ -92,9 +111,10 @@ pub fn list(
                 id: format!("managed-{flavor}"),
                 engine: ENGINE.to_owned(),
                 kind: "managed".to_owned(),
-                label: format!("Managed release ({flavor})"),
+                label: llama_managed_label(flavor),
                 target: Some((*flavor).to_owned()),
                 version: read_version(&flavor_dir),
+                repository: None,
                 path: binary.display().to_string(),
                 active: is_active(&binary, &active.llama),
                 deletable: true,
@@ -109,9 +129,10 @@ pub fn list(
             id: format!("source-{build_id}"),
             engine: ENGINE.to_owned(),
             kind: "source".to_owned(),
-            label: format!("Source build · {}", record.revision),
+            label: format!("llama.cpp · Source · {}", record.revision),
             target: Some(record.target.clone()),
             version: Some(record.revision.clone()),
+            repository: Some(record.repository.clone()),
             path: record.binary.clone(),
             active: is_active(&path, &active.llama),
             deletable: true,
@@ -133,6 +154,7 @@ pub fn list(
                 label: format!("{display} · {}", record.revision),
                 target: Some(record.target.clone()),
                 version: Some(record.revision.clone()),
+                repository: Some(record.repository.clone()),
                 path: record.binary.clone(),
                 active: is_active(
                     &path,
@@ -175,9 +197,10 @@ pub fn list(
             id: format!("system-{}", canonical.display()),
             engine: ENGINE.to_owned(),
             kind: "system".to_owned(),
-            label: "System binary".to_owned(),
+            label: "llama.cpp · System".to_owned(),
             target: None,
             version: None,
+            repository: None,
             path: candidate.display().to_string(),
             active: is_active(&candidate, &active.llama),
             deletable: false,
@@ -197,6 +220,28 @@ pub fn find(
     list(data_dir, active, path_env, include_system)
         .into_iter()
         .find(|entry| entry.id == id)
+}
+
+/// Find an installed runtime that matches a README fork hint.
+pub fn find_for_fork(
+    data_dir: &Path,
+    active: &ActiveRuntimes,
+    hint: &crate::fork_hints::RuntimeForkHint,
+) -> Option<RuntimeEntry> {
+    let normalized = crate::fork_hints::normalize_github_repo_url(&hint.repository)?;
+    list(data_dir, active, None, false)
+        .into_iter()
+        .find(|entry| {
+            if entry.engine != hint.engine {
+                return false;
+            }
+            entry
+                .repository
+                .as_deref()
+                .and_then(crate::fork_hints::normalize_github_repo_url)
+                .as_deref()
+                == Some(normalized.as_str())
+        })
 }
 
 /// Delete a managed or source runtime installation. Returns the binary path
@@ -341,5 +386,35 @@ mod tests {
         assert!(!build_root.exists());
         assert!(delete(dir.path(), "source-../evil").is_err());
         assert!(delete(dir.path(), "system-/usr/bin/llama-server").is_err());
+    }
+
+    #[test]
+    fn find_for_fork_matches_source_repository() {
+        let dir = tempdir().unwrap();
+        let build_root = builds::builds_root(dir.path(), ENGINE).join("fork-1");
+        let build_binary = build_root.join("install").join("bin").join("llama-server");
+        touch(&build_binary);
+        std::fs::write(
+            build_root.join("build.json"),
+            serde_json::to_vec(&builds::BuildRecord {
+                engine: ENGINE.into(),
+                repository: "https://github.com/example/llama.cpp".into(),
+                revision: "main".into(),
+                target: "cpu".into(),
+                created_at: "1".into(),
+                binary: build_binary.display().to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let hint = crate::fork_hints::RuntimeForkHint {
+            engine: ENGINE.into(),
+            display_name: "llama.cpp".into(),
+            repository: "https://github.com/example/llama.cpp".into(),
+            trusted: false,
+            summary: "test".into(),
+        };
+        let entry = find_for_fork(dir.path(), &ActiveRuntimes::default(), &hint).unwrap();
+        assert_eq!(entry.id, "source-fork-1");
     }
 }

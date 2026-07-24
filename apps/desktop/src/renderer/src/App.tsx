@@ -22,11 +22,12 @@ import {
   Wrench,
   X
 } from 'lucide-react'
-import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   createConversation,
   createMessage,
   engineStatus,
+  fetchModelBindings,
   health,
   exportConversation,
   importConversation,
@@ -35,11 +36,15 @@ import {
   listModels,
   listRuntimes,
   listRunSnapshots,
+  GenerationFailure,
+  prepareModel,
+  setModelBinding,
   type ConversationExport,
   type HardwareInfo,
   type LocalModel,
   type RunSnapshot,
   type RuntimeEntry,
+  type RuntimeForkHint,
   type RuntimeSettings,
   type ToolCallRecord,
   recordRun,
@@ -200,11 +205,21 @@ export function App(): React.JSX.Element {
   const [streamingTools, setStreamingTools] = useState<ToolCallRecord[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [forkHints, setForkHints] = useState<RuntimeForkHint[]>([])
+  const [modelLoadStatus, setModelLoadStatus] = useState<string | null>(null)
+  const [pendingBuild, setPendingBuild] = useState<{
+    engine: 'llama.cpp' | 'mlx-lm' | 'mlx-vlm'
+    repository: string
+  } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [localModels, setLocalModels] = useState<LocalModel[]>(() => readCachedModels())
   const [modelsLoading, setModelsLoading] = useState(() => readCachedModels().length === 0)
   const [modelsLoadFailed, setModelsLoadFailed] = useState(false)
-  const [selectedModel, setSelectedModel] = useState(() => readCachedModels()[0]?.id ?? '')
+  const [selectedModel, setSelectedModel] = useState('')
+  const [modelPrepareState, setModelPrepareState] = useState<
+    'idle' | 'loading' | 'ready' | 'error'
+  >('idle')
+  const [modelBindings, setModelBindings] = useState<Record<string, string>>({})
   const [prefetchedRuntimes, setPrefetchedRuntimes] = useState<RuntimeEntry[] | null>(() => {
     const cached = readCachedRuntimes()
     return cached.length > 0 ? cached : null
@@ -224,6 +239,7 @@ export function App(): React.JSX.Element {
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
 
   const abortRef = useRef<AbortController | undefined>(undefined)
+  const prepareAbortRef = useRef<AbortController | undefined>(undefined)
   const fileInput = useRef<HTMLInputElement>(null)
   const importInput = useRef<HTMLInputElement>(null)
   const scrollAnchor = useRef<HTMLDivElement>(null)
@@ -236,11 +252,11 @@ export function App(): React.JSX.Element {
     }
     return modelDisplayName(selectedModel, localModels.find((m) => m.id === selectedModel))
   }, [selectedModel, localModels, modelsLoading])
-  const canChat = Boolean(selectedModel)
+  const canChat = Boolean(selectedModel) && modelPrepareState === 'ready'
   const selectedCapabilities = localModels.find((model) => model.id === selectedModel)?.capabilities
   const runtimeWarning = useMemo(
-    () => runtimeNoticeForModel(selectedModel, localModels, prefetchedRuntimes),
-    [selectedModel, localModels, prefetchedRuntimes]
+    () => runtimeNoticeForModel(selectedModel, localModels, prefetchedRuntimes, modelBindings),
+    [selectedModel, localModels, prefetchedRuntimes, modelBindings]
   )
   const canAttach = Boolean(
     selectedCapabilities?.input_modalities.some((modality) =>
@@ -254,8 +270,61 @@ export function App(): React.JSX.Element {
     writeCachedModels(models)
     setSelectedModel((current) => {
       if (current && models.some((model) => model.id === current)) return current
-      return models[0]?.id ?? ''
+      return ''
     })
+  }
+
+  const selectModel = useCallback((modelId: string): void => {
+    prepareAbortRef.current?.abort()
+    setSelectedModel(modelId)
+    setForkHints([])
+    if (!modelId) {
+      setModelPrepareState('idle')
+      setModelLoadStatus(null)
+      setError(null)
+      return
+    }
+    setModelPrepareState('loading')
+    setModelLoadStatus('Preparing model…')
+    setError(null)
+    const controller = new AbortController()
+    prepareAbortRef.current = controller
+    void prepareModel(modelId, {
+      signal: controller.signal,
+      onLoad: (event) => setModelLoadStatus(event.message)
+    })
+      .then(() => {
+        if (controller.signal.aborted) return
+        setModelPrepareState('ready')
+        setModelLoadStatus(null)
+        void prefetchRuntimes()
+        void fetchModelBindings().then(setModelBindings).catch(() => {})
+      })
+      .catch((cause: unknown) => {
+        if ((cause as Error).name === 'AbortError') return
+        setModelPrepareState('error')
+        setModelLoadStatus(null)
+        if (cause instanceof GenerationFailure) {
+          setError(cause.message)
+          setForkHints(cause.forkHints)
+        } else {
+          setError(cause instanceof Error ? cause.message : String(cause))
+        }
+      })
+  }, [])
+
+  async function updateModelBinding(modelId: string, runtimeId: string | null): Promise<void> {
+    setError(null)
+    try {
+      const bindings = await setModelBinding(modelId, runtimeId)
+      setModelBindings(bindings)
+      await prefetchRuntimes()
+      if (modelId === selectedModel) {
+        selectModel(modelId)
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
   }
 
   async function loadLocalModels(): Promise<void> {
@@ -344,6 +413,7 @@ export function App(): React.JSX.Element {
       setError(cause instanceof Error ? cause.message : String(cause))
     )
     void prefetchRuntimes()
+    void fetchModelBindings().then(setModelBindings).catch(() => {})
     void refreshRuntime().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
@@ -411,7 +481,21 @@ export function App(): React.JSX.Element {
     setSavingInference(true)
     setError(null)
     try {
-      const saved = await saveRuntimeSettings(next)
+      const model = localModels.find((entry) => entry.id === selectedModel)
+      const caps = model?.capabilities
+      let adjusted = { ...next }
+      const maxContext = caps?.max_context_length
+      if (maxContext && adjusted.context_size > maxContext) {
+        adjusted = { ...adjusted, context_size: maxContext }
+      }
+      const reasoningModes =
+        caps?.reasoning_modes ?? (caps?.reasoning ? ['off', 'on'] : [])
+      if (reasoningModes.length === 0) {
+        adjusted = { ...adjusted, enable_reasoning: false, reasoning_budget_tokens: null }
+      } else if (!reasoningModes.includes('budget')) {
+        adjusted = { ...adjusted, reasoning_budget_tokens: null }
+      }
+      const saved = await saveRuntimeSettings(adjusted)
       setRuntime(saved)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -422,6 +506,15 @@ export function App(): React.JSX.Element {
 
   function openManage(section: ManageSection): void {
     setManageSection(section)
+    setManageOpen(true)
+  }
+
+  function startForkBuild(hint: RuntimeForkHint): void {
+    setPendingBuild({
+      engine: hint.engine as 'llama.cpp' | 'mlx-lm' | 'mlx-vlm',
+      repository: hint.repository
+    })
+    setManageSection('runtimes')
     setManageOpen(true)
   }
 
@@ -458,6 +551,8 @@ export function App(): React.JSX.Element {
     }
     setBusy(true)
     setError(null)
+    setForkHints([])
+    setModelLoadStatus('Preparing model…')
     setStreamingText('')
     setStreamingTools([])
     const controller = new AbortController()
@@ -493,11 +588,13 @@ export function App(): React.JSX.Element {
         selectedModel,
         controller.signal,
         (token) => {
+          setModelLoadStatus(null)
           responseText += token
           setStreamingText(responseText)
         },
         {
           builtinTools: toolsEnabled,
+          onLoad: (event) => setModelLoadStatus(event.message),
           onToolCall: (record) => {
             toolRecords.push(record)
             setStreamingTools([...toolRecords])
@@ -531,15 +628,23 @@ export function App(): React.JSX.Element {
       }
       setStreamingText('')
       setStreamingTools([])
+      setModelLoadStatus(null)
       await refreshMessages(activeConversationId, assistant.id)
       await refreshConversations()
       void listRunSnapshots(activeConversationId).then(setRunSnapshots).catch(() => {})
     } catch (cause) {
       if ((cause as Error).name !== 'AbortError') {
-        setError(cause instanceof Error ? cause.message : String(cause))
+        if (cause instanceof GenerationFailure) {
+          setError(cause.message)
+          setForkHints(cause.forkHints)
+        } else {
+          setError(cause instanceof Error ? cause.message : String(cause))
+          setForkHints([])
+        }
       }
     } finally {
       setBusy(false)
+      setModelLoadStatus(null)
       abortRef.current = undefined
     }
   }
@@ -658,9 +763,19 @@ export function App(): React.JSX.Element {
               <Cpu size={14} /> {runtime?.target ?? 'auto'}
             </span>
             <span title="Context window">
-              <Gauge size={14} /> {runtime?.context_size ?? 4096} ctx
+              <Gauge size={14} /> {runtime?.context_size?.toLocaleString() ?? '4,096'} ctx
+              {selectedCapabilities?.max_context_length
+                ? ` · ${selectedCapabilities.max_context_length.toLocaleString()} max`
+                : ''}
             </span>
-            <span className={selectedCapabilities?.reasoning ? '' : 'unavailable'}>
+            <span
+              className={
+                (selectedCapabilities?.reasoning_modes?.length ??
+                  (selectedCapabilities?.reasoning ? 1 : 0)) > 0
+                  ? ''
+                  : 'unavailable'
+              }
+            >
               <Brain size={14} /> Reasoning
             </span>
             <span
@@ -696,7 +811,20 @@ export function App(): React.JSX.Element {
           </div>
         )}
 
+        {modelPrepareState === 'loading' && modelLoadStatus && (
+          <div className="runtime-notice model-prepare-notice">
+            <LoaderCircle className="spin" size={16} />
+            <span>{modelLoadStatus}</span>
+          </div>
+        )}
+
         <div className="chat">
+          {modelLoadStatus && (modelPrepareState === 'loading' || (busy && !streamingText)) && (
+            <div className="model-load-status">
+              <LoaderCircle className="spin" size={18} />
+              <span>{modelLoadStatus}</span>
+            </div>
+          )}
           {chain.length === 0 && !streamingText ? (
             <div className="welcome">
               <div className="welcome-mark">
@@ -706,9 +834,15 @@ export function App(): React.JSX.Element {
               <p>
                 {modelsLoading
                   ? 'Starting the local runtime and loading your model library…'
-                  : canChat
-                    ? 'Chat privately with local models. Attach media or start with a question.'
-                    : 'Download a model from Hugging Face to start chatting locally.'}
+                  : !selectedModel
+                    ? 'Choose a model to load it locally. Nothing is selected yet.'
+                    : modelPrepareState === 'loading'
+                      ? 'Loading the model and runtime…'
+                      : modelPrepareState === 'error'
+                        ? 'Model load failed. Check the error below or open Manage to adjust the runtime pairing.'
+                        : canChat
+                          ? 'Chat privately with local models. Attach media or start with a question.'
+                          : 'Download a model from Hugging Face to start chatting locally.'}
               </p>
               <div className="starter-grid">
                 {canChat ? (
@@ -817,8 +951,31 @@ export function App(): React.JSX.Element {
         <div className="composer-area">
           {error && (
             <div className="error-banner">
-              <span>{error}</span>
-              <button onClick={() => setError(null)}>
+              <div className="error-banner-body">
+                <span>{error}</span>
+                {forkHints.length > 0 && (
+                  <div className="fork-hints">
+                    <div className="section-label">Runtime forks linked in model README</div>
+                    {forkHints.map((hint) => (
+                      <div className="fork-hint-row" key={`${hint.engine}:${hint.repository}`}>
+                        <div>
+                          <strong>{hint.display_name}</strong>
+                          <span>{hint.repository}</span>
+                        </div>
+                        <button type="button" onClick={() => startForkBuild(hint)}>
+                          Build fork
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => {
+                  setError(null)
+                  setForkHints([])
+                }}
+              >
                 <X size={14} />
               </button>
             </div>
@@ -848,11 +1005,15 @@ export function App(): React.JSX.Element {
             <textarea
               aria-label="Message"
               placeholder={
-                !canChat
+                !selectedModel
                   ? 'Select a model to start chatting…'
-                  : tipId
-                    ? 'Continue this branch…'
-                    : 'Message a local model…'
+                  : modelPrepareState === 'loading'
+                    ? 'Loading model…'
+                    : modelPrepareState === 'error'
+                      ? 'Fix model load to chat…'
+                      : tipId
+                        ? 'Continue this branch…'
+                        : 'Message a local model…'
               }
               rows={1}
               value={draft}
@@ -928,7 +1089,7 @@ export function App(): React.JSX.Element {
           models={localModels}
           selectedModel={selectedModel}
           loading={modelsLoading}
-          onSelect={setSelectedModel}
+          onSelect={selectModel}
           onManage={() => openManage(modelsLoadFailed || localModels.length === 0 ? 'discover' : 'library')}
           onClose={() => setModelMenuOpen(false)}
         />
@@ -936,6 +1097,8 @@ export function App(): React.JSX.Element {
       {inferenceMenuOpen && (
         <InferenceMenu
           settings={runtime}
+          selectedModel={selectedModel}
+          models={localModels}
           saving={savingInference}
           onApply={(next) => void applyInferenceSettings(next)}
           onClose={() => setInferenceMenuOpen(false)}
@@ -949,12 +1112,16 @@ export function App(): React.JSX.Element {
             setManageOpen(false)
             void prefetchRuntimes()
           }}
+          pendingBuild={pendingBuild}
+          onPendingBuildConsumed={() => setPendingBuild(null)}
           models={localModels}
           modelsLoading={modelsLoading}
           refreshModels={refreshLocalModels}
           initialRuntimes={prefetchedRuntimes}
           selectedModel={selectedModel}
-          onSelectModel={setSelectedModel}
+          onSelectModel={selectModel}
+          modelBindings={modelBindings}
+          onSetModelBinding={(modelId, runtimeId) => void updateModelBinding(modelId, runtimeId)}
           settings={runtime}
           onSettingsSaved={setRuntime}
           hardware={hardware}
