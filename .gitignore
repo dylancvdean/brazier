@@ -17,3 +17,12 @@ test-results/
 .env.*
 !.env.example
 .uv-cache/
+
+# Local Cargo cache (when CARGO_HOME is set inside the repo).
+.cargo-home/
+
+# Ephemeral local daemon data dirs from dev/testing.
+.mlx-test-*/
+
+# TypeScript incremental build info.
+*.tsbuildinfo
