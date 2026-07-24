@@ -128,15 +128,18 @@ mod tests {
             conversation_id: "c".into(),
             parent_id: None,
             role: Role::Tool,
-            content: json!(serde_json::to_string(&json!({
-                "brazier_tool_calls": [{
-                    "call_id": "call_1",
-                    "name": "calculator",
-                    "arguments": "{\"expression\":\"1+1\"}",
-                    "output": "2",
-                    "is_error": false
-                }]
-            })).unwrap()),
+            content: json!(
+                serde_json::to_string(&json!({
+                    "brazier_tool_calls": [{
+                        "call_id": "call_1",
+                        "name": "calculator",
+                        "arguments": "{\"expression\":\"1+1\"}",
+                        "output": "2",
+                        "is_error": false
+                    }]
+                }))
+                .unwrap()
+            ),
             model: None,
             tool_calls: None,
             tool_call_id: None,

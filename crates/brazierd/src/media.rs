@@ -25,7 +25,11 @@ pub struct PipelineFeatures {
     pub video_preprocess: bool,
 }
 
-pub fn detect_pipeline_features(data_dir: &Path, whisper_binary: Option<&str>, whisper_model: Option<&str>) -> PipelineFeatures {
+pub fn detect_pipeline_features(
+    data_dir: &Path,
+    whisper_binary: Option<&str>,
+    whisper_model: Option<&str>,
+) -> PipelineFeatures {
     let binary = whisper::resolve_binary(data_dir, whisper_binary);
     let model = whisper::resolve_model_path(data_dir, whisper_model);
     PipelineFeatures {
@@ -120,9 +124,8 @@ pub async fn prepare_messages(
                     .is_some_and(|mode| mode == "native");
                 if native {
                     emit("hydrate", &format!("Preparing native audio for {name}…"));
-                    next_parts.push(
-                        native_audio_part_from_blob(ctx.data_dir, sha256, mime, name).await?,
-                    );
+                    next_parts
+                        .push(native_audio_part_from_blob(ctx.data_dir, sha256, mime, name).await?);
                 } else if ctx.features.asr {
                     emit("transcribe", &format!("Transcribing {name} via batch ASR…"));
                     let transcript = transcribe_blob(ctx, sha256, mime, name).await?;
@@ -160,11 +163,7 @@ pub async fn prepare_messages(
     Ok(())
 }
 
-async fn image_part_from_blob(
-    data_dir: &Path,
-    sha256: &str,
-    mime: &str,
-) -> anyhow::Result<Value> {
+async fn image_part_from_blob(data_dir: &Path, sha256: &str, mime: &str) -> anyhow::Result<Value> {
     let (bytes, stored_mime) = blob_store::read_blob(data_dir, sha256).await?;
     let mime = if stored_mime.starts_with("image/") {
         stored_mime
@@ -212,9 +211,9 @@ async fn native_audio_part_from_blob(
 
 pub fn messages_contain_input_audio(messages: &[OpenAiMessage]) -> bool {
     messages.iter().any(|message| match &message.content {
-        Value::Array(parts) => parts.iter().any(|part| {
-            part.get("type").and_then(Value::as_str) == Some("input_audio")
-        }),
+        Value::Array(parts) => parts
+            .iter()
+            .any(|part| part.get("type").and_then(Value::as_str) == Some("input_audio")),
         _ => false,
     })
 }
@@ -274,7 +273,10 @@ pub async fn fallback_native_audio_to_asr(
                 .get("brazier_mime_type")
                 .and_then(Value::as_str)
                 .unwrap_or("audio/wav");
-            emit("transcribe", &format!("Engine rejected native audio; transcribing {name}…"));
+            emit(
+                "transcribe",
+                &format!("Engine rejected native audio; transcribing {name}…"),
+            );
             let transcript = transcribe_blob(ctx, sha256, mime, name).await?;
             next_parts.push(json!({
                 "type": "text",
@@ -410,7 +412,11 @@ async fn prepare_video(
     let input = blob_to_temp_file(ctx.data_dir, sha256, extension_for_mime(mime)).await?;
     let duration = probe_duration_seconds(&input).await.unwrap_or(1.0).max(0.1);
     let frame_count = MAX_VIDEO_FRAMES.min(((duration / 2.0).ceil() as usize).max(1));
-    let frame_dir = ctx.data_dir.join("tmp").join("media").join(format!("{sha256}-frames"));
+    let frame_dir = ctx
+        .data_dir
+        .join("tmp")
+        .join("media")
+        .join(format!("{sha256}-frames"));
     tokio::fs::create_dir_all(&frame_dir)
         .await
         .context("create frame directory")?;
@@ -571,9 +577,7 @@ async fn probe_duration_seconds(path: &Path) -> anyhow::Result<f64> {
         .context("run ffprobe")?;
     anyhow::ensure!(output.status.success(), "ffprobe failed");
     let text = String::from_utf8_lossy(&output.stdout);
-    text.trim()
-        .parse::<f64>()
-        .context("parse ffprobe duration")
+    text.trim().parse::<f64>().context("parse ffprobe duration")
 }
 
 #[cfg(test)]
@@ -583,8 +587,12 @@ mod tests {
 
     #[test]
     fn detects_audio_rejection_and_input_audio_parts() {
-        assert!(looks_like_audio_rejection("unsupported content type input_audio"));
-        assert!(looks_like_audio_rejection("Model does not support audio modality"));
+        assert!(looks_like_audio_rejection(
+            "unsupported content type input_audio"
+        ));
+        assert!(looks_like_audio_rejection(
+            "Model does not support audio modality"
+        ));
         assert!(!looks_like_audio_rejection("context length exceeded"));
         let messages = vec![OpenAiMessage {
             role: "user".into(),

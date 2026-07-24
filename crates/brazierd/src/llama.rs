@@ -807,7 +807,14 @@ pub fn binary_appears_runnable(binary: &Path) -> bool {
 
 /// Ensure a llama-server binary is available, installing a managed build if needed.
 pub async fn ensure_binary(client: &reqwest::Client, data_dir: &Path) -> anyhow::Result<PathBuf> {
-    ensure_binary_with_progress(client, data_dir, RuntimeTarget::Auto, false, Box::new(|_| {})).await
+    ensure_binary_with_progress(
+        client,
+        data_dir,
+        RuntimeTarget::Auto,
+        false,
+        Box::new(|_| {}),
+    )
+    .await
 }
 
 pub async fn ensure_binary_with_progress(

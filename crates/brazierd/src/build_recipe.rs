@@ -15,8 +15,7 @@ const MLX_LM_LOCK: &str = include_str!("../../../engine-recipes/mlx-lm.lock");
 const MLX_VLM_LOCK: &str = include_str!("../../../engine-recipes/mlx-vlm.lock");
 const STREAMING_ASR_LOCK: &str = include_str!("../../../engine-recipes/streaming-asr.lock");
 const PERSONAPLEX_LOCK: &str = include_str!("../../../engine-recipes/personaplex.lock");
-const STREAMING_ASR_PYPROJECT: &str =
-    include_str!("../python/streaming_asr_pkg/pyproject.toml");
+const STREAMING_ASR_PYPROJECT: &str = include_str!("../python/streaming_asr_pkg/pyproject.toml");
 const STREAMING_ASR_INIT: &str =
     include_str!("../python/streaming_asr_pkg/brazier_streaming_asr/__init__.py");
 const STREAMING_ASR_MAIN: &str =
@@ -277,7 +276,11 @@ mod tests {
         assert!(plan.skip_checkout);
         assert!(plan.checkout.is_empty());
         assert!(plan.trusted_origin);
-        assert!(plan.build.iter().any(|step| step.label.contains("streaming ASR")));
+        assert!(
+            plan.build
+                .iter()
+                .any(|step| step.label.contains("streaming ASR"))
+        );
     }
 
     #[test]
@@ -285,8 +288,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = ensure_recipe_files(dir.path()).unwrap();
         assert!(root.join("streaming-asr.lock").is_file());
-        assert!(root
-            .join("streaming_asr_pkg/brazier_streaming_asr/__main__.py")
-            .is_file());
+        assert!(
+            root.join("streaming_asr_pkg/brazier_streaming_asr/__main__.py")
+                .is_file()
+        );
     }
 }

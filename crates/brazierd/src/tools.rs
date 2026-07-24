@@ -338,22 +338,13 @@ async fn generate_image_tool(data_dir: &std::path::Path, args: &Value) -> anyhow
             .map(|v| v as f32),
         init_image: None,
     };
-    let result = crate::sdcpp::generate_image(
-        data_dir,
-        settings.sdcpp_binary.as_deref(),
-        &request,
-    )
-    .await?;
+    let result =
+        crate::sdcpp::generate_image(data_dir, settings.sdcpp_binary.as_deref(), &request).await?;
     let bytes = tokio::fs::read(&result.output_path)
         .await
         .context("read generated image")?;
-    let blob = crate::blob_store::store_bytes(
-        data_dir,
-        &bytes,
-        "image/png",
-        Some("generated.png"),
-    )
-    .await?;
+    let blob = crate::blob_store::store_bytes(data_dir, &bytes, "image/png", Some("generated.png"))
+        .await?;
     let _ = tokio::fs::remove_file(&result.output_path).await;
     Ok(format!(
         "Generated image stored as brazier_blob:{} ({} bytes).",
@@ -405,12 +396,8 @@ async fn generate_video_tool(data_dir: &std::path::Path, args: &Value) -> anyhow
             .map(|v| v as u32)
             .unwrap_or(16),
     };
-    let result = crate::sdcpp::generate_video(
-        data_dir,
-        settings.sdcpp_binary.as_deref(),
-        &request,
-    )
-    .await?;
+    let result =
+        crate::sdcpp::generate_video(data_dir, settings.sdcpp_binary.as_deref(), &request).await?;
     let bytes = tokio::fs::read(&result.output_path)
         .await
         .context("read generated video")?;
@@ -428,7 +415,13 @@ async fn generate_video_tool(data_dir: &std::path::Path, args: &Value) -> anyhow
         data_dir,
         &bytes,
         mime,
-        Some(result.output_path.file_name().and_then(|n| n.to_str()).unwrap_or("generated.mp4")),
+        Some(
+            result
+                .output_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("generated.mp4"),
+        ),
     )
     .await?;
     let _ = tokio::fs::remove_file(&result.output_path).await;

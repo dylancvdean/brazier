@@ -38,10 +38,7 @@ impl DownloadQueue {
     }
 
     pub async fn enqueue(&self, work: QueuedDownload) -> anyhow::Result<()> {
-        self.tx
-            .send(work)
-            .await
-            .context("download queue is closed")
+        self.tx.send(work).await.context("download queue is closed")
     }
 }
 

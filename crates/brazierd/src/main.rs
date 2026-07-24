@@ -6,8 +6,8 @@ use std::{
 
 use anyhow::Context;
 use brazierd::{
-    active_downloads::ActiveDownloads, AppState, api, builds, db::Database, download_queue::DownloadQueue,
-    engine::Runtime,
+    AppState, active_downloads::ActiveDownloads, api, builds, db::Database,
+    download_queue::DownloadQueue, engine::Runtime,
 };
 use clap::Parser;
 use tokio::sync::Mutex;

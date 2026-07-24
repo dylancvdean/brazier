@@ -201,10 +201,7 @@ pub fn list(
                 id: format!("sdcpp-managed-{flavor}"),
                 engine: crate::sdcpp::ENGINE.to_owned(),
                 kind: "managed".to_owned(),
-                label: format!(
-                    "stable-diffusion.cpp · {}",
-                    llama_target_label(flavor)
-                ),
+                label: format!("stable-diffusion.cpp · {}", llama_target_label(flavor)),
                 target: Some((*flavor).to_owned()),
                 version: read_version(&flavor_dir),
                 repository: None,
@@ -630,7 +627,10 @@ pub fn delete(data_dir: &Path, id: &str) -> anyhow::Result<PathBuf> {
         );
         let flavor_dir = crate::sdcpp::managed_engine_dir(data_dir).join(flavor);
         let binary = flavor_dir.join("bin").join(crate::sdcpp::binary_name());
-        anyhow::ensure!(flavor_dir.is_dir(), "managed sd.cpp runtime `{id}` is not installed");
+        anyhow::ensure!(
+            flavor_dir.is_dir(),
+            "managed sd.cpp runtime `{id}` is not installed"
+        );
         std::fs::remove_dir_all(&flavor_dir).context("remove managed sd.cpp runtime")?;
         return Ok(binary);
     }

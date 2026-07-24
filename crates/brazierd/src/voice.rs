@@ -36,8 +36,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    builds,
-    models_store,
+    builds, models_store,
     types::{ModelCapabilities, ModelDescriptor},
 };
 
@@ -231,7 +230,10 @@ pub fn resolve_model_path(data_dir: &Path, preferred: Option<&str>) -> Option<Pa
 /// Prefers an explicit override, then falls back to the most recent
 /// completed source build recorded for the `personaplex` engine.
 pub fn resolve_python(data_dir: &Path, override_path: Option<&str>) -> Option<PathBuf> {
-    if let Some(path) = override_path.map(PathBuf::from).filter(|path| path.is_file()) {
+    if let Some(path) = override_path
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
         return Some(path);
     }
     for (_, record) in builds::list_builds(data_dir, ENGINE) {
@@ -412,7 +414,10 @@ async fn wait_until_listening(
             }
             anyhow::bail!("PersonaPlex server exited during startup with {status}: {stderr}");
         }
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
         if tokio::time::Instant::now() > deadline {
@@ -549,7 +554,10 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].engine, ENGINE);
         assert!(models[0].capabilities.streaming);
-        assert_eq!(models[0].capabilities.audio_input.as_deref(), Some("native"));
+        assert_eq!(
+            models[0].capabilities.audio_input.as_deref(),
+            Some("native")
+        );
     }
 
     #[test]
@@ -571,7 +579,9 @@ mod tests {
     #[test]
     fn rejects_invalid_download_filenames() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(download_destination(dir.path(), "kyutai/moshika", "../escape.safetensors").is_err());
+        assert!(
+            download_destination(dir.path(), "kyutai/moshika", "../escape.safetensors").is_err()
+        );
         assert!(download_destination(dir.path(), "kyutai/moshika", "/abs.safetensors").is_err());
         assert!(download_destination(dir.path(), "kyutai/moshika", "config.json").is_ok());
         assert!(download_destination(dir.path(), "kyutai/moshika", "model.safetensors").is_ok());
@@ -581,7 +591,9 @@ mod tests {
     fn missing_model_id_does_not_resolve() {
         let dir = tempfile::tempdir().unwrap();
         assert!(path_for_model_id(dir.path(), "personaplex:kyutai/does-not-exist").is_err());
-        assert!(resolve_model_path(dir.path(), Some("personaplex:kyutai/does-not-exist")).is_none());
+        assert!(
+            resolve_model_path(dir.path(), Some("personaplex:kyutai/does-not-exist")).is_none()
+        );
     }
 
     #[test]
@@ -600,7 +612,10 @@ mod tests {
     #[test]
     fn realtime_voice_available_requires_python() {
         assert!(!realtime_voice_available(None, None));
-        assert!(!realtime_voice_available(Some(Path::new("/nonexistent/python")), None));
+        assert!(!realtime_voice_available(
+            Some(Path::new("/nonexistent/python")),
+            None
+        ));
     }
 
     #[test]

@@ -26,21 +26,20 @@ use crate::{
     AppState, blob_store,
     build_recipe::{self, BuildPlanRequest},
     builds,
-    db::CreateRunSnapshot,
     db::ConversationExport,
+    db::CreateRunSnapshot,
     download::{self},
     engine::{Engine, StreamEvent},
     fork_hints::{self, ModelLoadError, RuntimeForkHint},
     hf::{self, SearchQuery},
-    hf_auth, media, model_bindings, models_store,
-    llama,
-    mcp,
+    hf_auth, llama, mcp, media, model_bindings, models_store,
     progress::ProgressEvent,
-    runtimes, sdcpp, streaming_asr, tool_registry, toolchain_hints, voice, whisper,
+    runtimes, sdcpp, streaming_asr, tool_registry, toolchain_hints,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
     },
+    voice, whisper,
 };
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -175,7 +174,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(end_voice_session),
         )
         .route("/api/v1/tools", get(list_tools))
-        .route("/api/v1/mcp/servers", get(list_mcp_servers).post(create_mcp_server))
+        .route(
+            "/api/v1/mcp/servers",
+            get(list_mcp_servers).post(create_mcp_server),
+        )
         .route(
             "/api/v1/mcp/servers/{id}",
             axum::routing::put(update_mcp_server).delete(delete_mcp_server),
@@ -186,7 +188,10 @@ pub fn router(state: AppState) -> Router {
             get(list_runtimes).delete(delete_runtime),
         )
         .route("/api/v1/runtimes/activate", post(activate_runtime))
-        .route("/api/v1/runtimes/check-updates", post(check_runtime_updates))
+        .route(
+            "/api/v1/runtimes/check-updates",
+            post(check_runtime_updates),
+        )
         .route("/api/v1/runtimes/build", post(build_runtime))
         .route("/api/v1/runtimes/build/cancel", post(cancel_build))
         .route("/api/v1/models/download", post(download_model))
@@ -200,14 +205,20 @@ pub fn router(state: AppState) -> Router {
             post(download_personaplex_model),
         )
         .route("/api/v1/models/download/queue", post(queue_model_download))
-        .route("/api/v1/models/download/cancel", post(cancel_model_download))
+        .route(
+            "/api/v1/models/download/cancel",
+            post(cancel_model_download),
+        )
         .route("/api/v1/models/downloads", get(list_download_jobs))
         .route(
             "/api/v1/models/library-paths/suggestions",
             get(model_library_path_suggestions),
         )
         .route("/api/v1/models", axum::routing::delete(delete_local_model))
-        .route("/api/v1/models/bindings", get(model_bindings_list).put(update_model_binding))
+        .route(
+            "/api/v1/models/bindings",
+            get(model_bindings_list).put(update_model_binding),
+        )
         .route("/api/v1/models/prepare", post(prepare_model))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -300,10 +311,8 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             .as_deref()
             .is_some_and(|id| sdcpp::path_for_model_id(&state.data_dir, id).is_ok());
     let voice_python = voice::resolve_python(&state.data_dir, settings.voice_python.as_deref());
-    let voice_model = voice::resolve_model_path(
-        &state.data_dir,
-        settings.default_voice_model.as_deref(),
-    );
+    let voice_model =
+        voice::resolve_model_path(&state.data_dir, settings.default_voice_model.as_deref());
     let realtime_voice_available =
         voice::realtime_voice_available(voice_python.as_deref(), voice_model.as_deref());
     Ok(Json(json!({
@@ -623,7 +632,9 @@ async fn model_fork_hints(
     let fork_hints = fork_hints::hints_for_repo(&state.http, &state.data_dir, &repo_id)
         .await
         .map_err(ApiError::bad_request)?;
-    Ok(Json(json!({ "repo_id": repo_id, "fork_hints": fork_hints })))
+    Ok(Json(
+        json!({ "repo_id": repo_id, "fork_hints": fork_hints }),
+    ))
 }
 
 async fn list_download_jobs(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -969,12 +980,8 @@ async fn delete_local_model(
         .iter()
         .map(PathBuf::from)
         .collect();
-    let _path = models_store::path_for_model_id(
-        &state.data_dir,
-        &request.model_id,
-        &extra_paths,
-    )
-    .map_err(ApiError::bad_request)?;
+    let _path = models_store::path_for_model_id(&state.data_dir, &request.model_id, &extra_paths)
+        .map_err(ApiError::bad_request)?;
     state.runtime.release_model(&request.model_id).await;
     models_store::delete_model(&state.data_dir, &request.model_id, &extra_paths)
         .map_err(ApiError::bad_request)?;
@@ -1030,11 +1037,7 @@ async fn prepare_model(
     Json(request): Json<PrepareModelRequest>,
 ) -> ApiResult<Response> {
     if !query.stream {
-        match state
-            .runtime
-            .prepare_model_stream(&request.model_id)
-            .await
-        {
+        match state.runtime.prepare_model_stream(&request.model_id).await {
             Ok(mut rx) => {
                 while let Some(item) = rx.recv().await {
                     match item {
@@ -1044,7 +1047,10 @@ async fn prepare_model(
                     }
                 }
                 state.invalidate_runtimes_cache().await;
-                return Ok(Json(json!({ "status": "ready", "model_id": request.model_id })).into_response());
+                return Ok(
+                    Json(json!({ "status": "ready", "model_id": request.model_id }))
+                        .into_response(),
+                );
             }
             Err(error) => return Err(ApiError::from_anyhow(error)),
         }
@@ -1205,9 +1211,13 @@ async fn ensure_llama(
     tokio::spawn(async move {
         let progress_tx = tx.clone();
         let result = runtime
-            .ensure_llama_binary_with_progress(target, force, Box::new(move |event| {
-                push_progress(&progress_tx, event);
-            }))
+            .ensure_llama_binary_with_progress(
+                target,
+                force,
+                Box::new(move |event| {
+                    push_progress(&progress_tx, event);
+                }),
+            )
             .await;
         if let Ok(path) = &result {
             cache_state.invalidate_runtimes_cache().await;
@@ -1304,9 +1314,13 @@ async fn ensure_whisper(
     tokio::spawn(async move {
         let progress_tx = tx.clone();
         let result = runtime
-            .ensure_whisper_binary_with_progress(target, force, Box::new(move |event| {
-                push_progress(&progress_tx, event);
-            }))
+            .ensure_whisper_binary_with_progress(
+                target,
+                force,
+                Box::new(move |event| {
+                    push_progress(&progress_tx, event);
+                }),
+            )
             .await;
         if let Ok(path) = &result {
             cache_state.invalidate_runtimes_cache().await;
@@ -1395,9 +1409,13 @@ async fn ensure_sdcpp(
     tokio::spawn(async move {
         let progress_tx = tx.clone();
         let result = runtime
-            .ensure_sdcpp_binary_with_progress(target, force, Box::new(move |event| {
-                push_progress(&progress_tx, event);
-            }))
+            .ensure_sdcpp_binary_with_progress(
+                target,
+                force,
+                Box::new(move |event| {
+                    push_progress(&progress_tx, event);
+                }),
+            )
             .await;
         if let Ok(path) = &result {
             cache_state.invalidate_runtimes_cache().await;
@@ -1500,12 +1518,8 @@ async fn generate_image(
         init_image,
     };
     let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
-    let generated = sdcpp::generate_image(
-        &state.data_dir,
-        settings.sdcpp_binary.as_deref(),
-        &job,
-    )
-    .await;
+    let generated =
+        sdcpp::generate_image(&state.data_dir, settings.sdcpp_binary.as_deref(), &job).await;
     state.runtime.restore_after_generation(memory_plan).await;
     let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
@@ -1517,14 +1531,9 @@ async fn generate_image(
     let bytes = tokio::fs::read(&result.output_path)
         .await
         .map_err(ApiError::internal)?;
-    let blob = blob_store::store_bytes(
-        &state.data_dir,
-        &bytes,
-        "image/png",
-        Some("generated.png"),
-    )
-    .await
-    .map_err(ApiError::internal)?;
+    let blob = blob_store::store_bytes(&state.data_dir, &bytes, "image/png", Some("generated.png"))
+        .await
+        .map_err(ApiError::internal)?;
     let _ = tokio::fs::remove_file(&result.output_path).await;
     Ok(Json(json!({
         "blob": blob,
@@ -1564,12 +1573,8 @@ async fn generate_video(
         video_frames: request.video_frames.unwrap_or(16),
     };
     let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
-    let generated = sdcpp::generate_video(
-        &state.data_dir,
-        settings.sdcpp_binary.as_deref(),
-        &job,
-    )
-    .await;
+    let generated =
+        sdcpp::generate_video(&state.data_dir, settings.sdcpp_binary.as_deref(), &job).await;
     state.runtime.restore_after_generation(memory_plan).await;
     let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
@@ -1759,9 +1764,8 @@ async fn build_runtime(
                 push_progress(
                     &tx,
                     ProgressEvent::build_failed(
-                        &serde_json::to_value(&report).unwrap_or_else(|_| {
-                            json!({ "message": report.message })
-                        }),
+                        &serde_json::to_value(&report)
+                            .unwrap_or_else(|_| json!({ "message": report.message })),
                     ),
                 );
             }
@@ -1821,9 +1825,7 @@ async fn download_model(
         let cancel = job_id
             .as_ref()
             .map(|id| state.active_downloads.register(id));
-        let job_handle = job_id
-            .as_ref()
-            .map(|id| (state.db.clone(), id.clone()));
+        let job_handle = job_id.as_ref().map(|id| (state.db.clone(), id.clone()));
         let result = download::download_gguf_with_progress(
             &state.http,
             &state.data_dir,
@@ -1869,9 +1871,7 @@ async fn download_model(
             .await
             .ok()
             .map(|entry| entry.id);
-        let cancel = job_id
-            .as_ref()
-            .map(|id| active_downloads.register(id));
+        let cancel = job_id.as_ref().map(|id| active_downloads.register(id));
         let job_handle = job_id.as_ref().map(|id| (db.clone(), id.clone()));
         let result = download::download_gguf_with_progress(
             &http,
@@ -1992,7 +1992,9 @@ async fn cancel_model_download(
         Ok(Json(json!({ "cancelled": request.job_id })))
     } else {
         let _ = state.db.cancel_download_job(&request.job_id).await;
-        Ok(Json(json!({ "cancelled": request.job_id, "queued_only": true })))
+        Ok(Json(
+            json!({ "cancelled": request.job_id, "queued_only": true }),
+        ))
     }
 }
 
@@ -2013,7 +2015,10 @@ async fn queue_model_download(
         })
         .await
         .map_err(ApiError::internal)?;
-    Ok((StatusCode::ACCEPTED, Json(json!({ "job_id": job.id, "status": job.status }))))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "job_id": job.id, "status": job.status })),
+    ))
 }
 
 async fn list_models(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -2079,14 +2084,10 @@ async fn resolve_transcription_blob(
             "provide file_sha256 or file_base64 for transcription",
         ));
     };
-    let stored = blob_store::store_bytes(
-        &state.data_dir,
-        &bytes,
-        &mime,
-        Some("transcription-input"),
-    )
-    .await
-    .map_err(ApiError::bad_request)?;
+    let stored =
+        blob_store::store_bytes(&state.data_dir, &bytes, &mime, Some("transcription-input"))
+            .await
+            .map_err(ApiError::bad_request)?;
     Ok((stored.sha256, mime))
 }
 
@@ -2149,8 +2150,10 @@ async fn audio_transcriptions(
                 }
             }
             let _ = tokio::fs::remove_file(&wav).await;
-            return Ok(Json(json!({ "text": text.trim(), "engine": streaming_asr::ENGINE }))
-                .into_response());
+            return Ok(
+                Json(json!({ "text": text.trim(), "engine": streaming_asr::ENGINE }))
+                    .into_response(),
+            );
         }
         let stream_events = stream! {
             while let Some(item) = events.recv().await {
@@ -2718,11 +2721,11 @@ mod tests {
         models_store::{self, download_destination},
     };
     use axum::body::Body;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use std::sync::Arc;
     use tempfile::tempdir;
+    use tokio::sync::Mutex;
     use tower::ServiceExt;
 
     #[test]
@@ -2793,7 +2796,8 @@ mod tests {
         assert!(!ids.contains(&"brazier/mock"));
         assert!(ids.contains(&"gguf:acme/demo/weights.gguf"));
         assert_eq!(
-            models_store::path_for_model_id(dir.path(), "gguf:acme/demo/weights.gguf", &[]).unwrap(),
+            models_store::path_for_model_id(dir.path(), "gguf:acme/demo/weights.gguf", &[])
+                .unwrap(),
             gguf
         );
 

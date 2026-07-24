@@ -20,11 +20,7 @@ use flate2::read::GzDecoder;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tar::Archive;
-use tokio::{
-    io::AsyncWriteExt,
-    process::Command,
-    sync::Mutex as AsyncMutex,
-};
+use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex as AsyncMutex};
 
 use crate::{
     models_store,
@@ -35,8 +31,7 @@ use crate::{
 
 pub const ENGINE: &str = "stable-diffusion.cpp";
 
-const GITHUB_API: &str =
-    "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/latest";
+const GITHUB_API: &str = "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/latest";
 const USER_AGENT: &str = "brazier-sdcpp-manager";
 
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -51,7 +46,11 @@ pub fn managed_engine_dir(data_dir: &Path) -> PathBuf {
 }
 
 pub fn binary_name() -> &'static str {
-    if cfg!(windows) { "sd-cli.exe" } else { "sd-cli" }
+    if cfg!(windows) {
+        "sd-cli.exe"
+    } else {
+        "sd-cli"
+    }
 }
 
 pub fn managed_binary_path(data_dir: &Path) -> PathBuf {
@@ -139,8 +138,7 @@ pub fn select_release_asset_for_target<'a>(
             if lower.contains("cudart") {
                 return false;
             }
-            if !(lower.ends_with(".zip") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz"))
-            {
+            if !(lower.ends_with(".zip") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz")) {
                 return false;
             }
             match platform_tag {
@@ -246,8 +244,7 @@ pub async fn resolve_managed_release(
 
 fn should_keep_extracted_file(file_name: &str) -> bool {
     let lower = file_name.to_ascii_lowercase();
-    let is_lib =
-        lower.contains(".so") || lower.ends_with(".dll") || lower.ends_with(".dylib");
+    let is_lib = lower.contains(".so") || lower.ends_with(".dll") || lower.ends_with(".dylib");
     let is_cli = file_name == binary_name();
     is_lib
         || is_cli
@@ -510,9 +507,12 @@ pub fn resolve_binary(data_dir: &Path, override_path: Option<&str>) -> Option<Pa
     {
         return Some(path);
     }
-    discovery_candidates(data_dir, std::env::var_os("PATH").as_deref().and_then(|p| p.to_str()))
-        .into_iter()
-        .find(|path| path.is_file())
+    discovery_candidates(
+        data_dir,
+        std::env::var_os("PATH").as_deref().and_then(|p| p.to_str()),
+    )
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 fn prepend_library_path(command: &mut Command, dir: &Path) {
@@ -1359,8 +1359,13 @@ mod tests {
             image_root(dir.path()).join("acme/flux-schnell/vae.safetensors")
         );
         assert!(
-            download_destination(dir.path(), Modality::Image, "not-a-repo-id", "vae.safetensors")
-                .is_err()
+            download_destination(
+                dir.path(),
+                Modality::Image,
+                "not-a-repo-id",
+                "vae.safetensors"
+            )
+            .is_err()
         );
         assert!(
             download_destination(dir.path(), Modality::Image, "acme/flux-schnell", "../evil")

@@ -10,18 +10,14 @@ use crate::{
     llama::{self, LlamaServer},
     media::{self, MediaContext},
     mlx::{self, MlxKind, MlxServer},
-    model_bindings,
-    models_store,
+    model_bindings, models_store,
     progress::{ProgressCallback, ProgressEvent},
     runtime_settings::{self, RuntimeSettings},
-    runtimes,
-    sdcpp,
-    streaming_asr,
+    runtimes, sdcpp, streaming_asr,
     tool_registry::{self, ToolContext},
     tools,
     types::{ChatCompletionRequest, ModelCapabilities, ModelDescriptor, OpenAiMessage},
-    voice,
-    whisper,
+    voice, whisper,
 };
 
 #[derive(Debug, Clone)]
@@ -39,10 +35,7 @@ pub struct Generation {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// Model/server preparation progress.
-    Load {
-        phase: String,
-        message: String,
-    },
+    Load { phase: String, message: String },
     /// Assistant content delta.
     Content(String),
     /// A bundled or MCP tool was executed server-side.
@@ -177,14 +170,9 @@ impl Runtime {
                 .skip(1)
                 .find(|path| path.is_file())
             });
-        let whisper_binary = whisper::resolve_binary(
-            &data_dir,
-            settings.whisper_binary.as_deref(),
-        );
-        let streaming_asr_python = streaming_asr::resolve_python(
-            &data_dir,
-            settings.streaming_asr_python.as_deref(),
-        );
+        let whisper_binary = whisper::resolve_binary(&data_dir, settings.whisper_binary.as_deref());
+        let streaming_asr_python =
+            streaming_asr::resolve_python(&data_dir, settings.streaming_asr_python.as_deref());
         let sdcpp_binary = sdcpp::resolve_binary(&data_dir, settings.sdcpp_binary.as_deref());
         let voice_python = voice::resolve_python(&data_dir, settings.voice_python.as_deref());
         Arc::new(Self {
@@ -389,9 +377,11 @@ impl Runtime {
             mlx.lm_python = settings.mlx_lm_python.as_ref().map(PathBuf::from);
             mlx.vlm_python = settings.mlx_vlm_python.as_ref().map(PathBuf::from);
             let mut whisper = self.whisper.lock().await;
-            whisper.binary = settings.whisper_binary.as_ref().map(PathBuf::from).or_else(|| {
-                whisper::resolve_binary(&self.data_dir, None)
-            });
+            whisper.binary = settings
+                .whisper_binary
+                .as_ref()
+                .map(PathBuf::from)
+                .or_else(|| whisper::resolve_binary(&self.data_dir, None));
             let mut streaming_asr = self.streaming_asr.lock().await;
             streaming_asr.python = settings
                 .streaming_asr_python
@@ -514,7 +504,11 @@ impl Runtime {
 
     /// Pin an sd-cli binary and persist the choice.
     pub async fn activate_sdcpp(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
-        anyhow::ensure!(path.is_file(), "sd-cli binary not found: {}", path.display());
+        anyhow::ensure!(
+            path.is_file(),
+            "sd-cli binary not found: {}",
+            path.display()
+        );
         let runnable = {
             let candidate = path.clone();
             tokio::task::spawn_blocking(move || sdcpp::binary_appears_runnable(&candidate))
@@ -686,7 +680,11 @@ impl Runtime {
             }
             return;
         }
-        if model_id.starts_with("mlx:") || model_id.starts_with("mlx-vlm:") || model_id.starts_with("mlx-ext:") || model_id.starts_with("mlx-vlm-ext:") {
+        if model_id.starts_with("mlx:")
+            || model_id.starts_with("mlx-vlm:")
+            || model_id.starts_with("mlx-ext:")
+            || model_id.starts_with("mlx-vlm-ext:")
+        {
             if let Ok(model_ref) = models_store::mlx_server_model_ref(
                 &self.data_dir,
                 model_id,
@@ -741,8 +739,7 @@ impl Runtime {
                     // Unknown system memory: keep the chat model to avoid churn.
                     false
                 } else {
-                    let headroom =
-                        u64::from(settings.generation_memory_headroom_mb) * 1024 * 1024;
+                    let headroom = u64::from(settings.generation_memory_headroom_mb) * 1024 * 1024;
                     let budget = (total as f64 * USABLE_MEMORY_FRACTION) as u64;
                     resident_bytes
                         .saturating_add(gen_bytes)
@@ -859,8 +856,7 @@ impl Runtime {
                     let Some(entry) = runtimes::find_for_fork(&self.data_dir, &active, hint) else {
                         continue;
                     };
-                    model_bindings::set_binding(&self.data_dir, &request.model, &entry.id)
-                        .await?;
+                    model_bindings::set_binding(&self.data_dir, &request.model, &entry.id).await?;
                     self.activate_runtime_entry(&entry).await?;
                     if let Some(tx) = &load_tx {
                         let _ = tx
@@ -960,14 +956,9 @@ impl Runtime {
                 return Ok(path.clone());
             }
         }
-        let path = sdcpp::ensure_binary_with_progress(
-            &self.http,
-            &self.data_dir,
-            target,
-            force,
-            progress,
-        )
-        .await?;
+        let path =
+            sdcpp::ensure_binary_with_progress(&self.http, &self.data_dir, target, force, progress)
+                .await?;
         if target_override.is_none() {
             let mut guard = self.sdcpp.lock().await;
             guard.binary = Some(path.clone());
@@ -1004,14 +995,9 @@ impl Runtime {
                 return Ok(path.clone());
             }
         }
-        let path = llama::ensure_binary_with_progress(
-            &self.http,
-            &self.data_dir,
-            target,
-            force,
-            progress,
-        )
-        .await?;
+        let path =
+            llama::ensure_binary_with_progress(&self.http, &self.data_dir, target, force, progress)
+                .await?;
         if target_override.is_none() {
             let mut guard = self.llama.lock().await;
             guard.binary = Some(path.clone());
@@ -1080,8 +1066,7 @@ impl Runtime {
             }
         };
         let extra = self.extra_library_paths().await;
-        let model_ref =
-            models_store::mlx_server_model_ref(&self.data_dir, model_id, &extra)?;
+        let model_ref = models_store::mlx_server_model_ref(&self.data_dir, model_id, &extra)?;
 
         let mut guard = self.mlx.lock().await;
         if let Some(server) = guard.server.as_mut() {
@@ -1117,7 +1102,10 @@ impl Runtime {
             let model_path =
                 models_store::path_for_model_id(&self.data_dir, model, extra_library_paths)?;
             anyhow::ensure!(model_path.is_file(), "model file not found for {model}");
-            return Ok((ActiveBackend::Llama(model_path.display().to_string()), model.to_owned()));
+            return Ok((
+                ActiveBackend::Llama(model_path.display().to_string()),
+                model.to_owned(),
+            ));
         }
         if MlxKind::from_model_id(model).is_some() {
             if model.starts_with("mlx-ext:") || model.starts_with("mlx-vlm-ext:") {
@@ -1159,54 +1147,42 @@ impl Runtime {
         match &backend {
             ActiveBackend::Llama(model_path) => {
                 emit(&load_tx, "server", "Starting llama.cpp server…").await;
-                emit(
-                    &load_tx,
-                    "load",
-                    "Loading GGUF weights into memory…",
-                )
-                .await;
+                emit(&load_tx, "load", "Loading GGUF weights into memory…").await;
                 if let Err(error) = self
                     .ensure_server_for_model(std::path::Path::new(model_path))
                     .await
                 {
                     let mut guard = self.llama.lock().await;
                     guard.server = None;
-                    return Err(
-                        fork_hints::load_error_with_hints(
-                            &self.http,
-                            &self.data_dir,
-                            &model_id,
-                            error,
-                        )
-                        .await
-                        .into(),
-                    );
+                    return Err(fork_hints::load_error_with_hints(
+                        &self.http,
+                        &self.data_dir,
+                        &model_id,
+                        error,
+                    )
+                    .await
+                    .into());
                 }
             }
             ActiveBackend::Mlx(_) => {
                 emit(&load_tx, "server", "Starting MLX server…").await;
                 emit(&load_tx, "load", "Loading MLX model weights…").await;
-                let (kind, mismatch) = models_store::resolve_mlx_launch_kind(
-                    &self.data_dir,
-                    &model_id,
-                    &extra,
-                )?;
+                let (kind, mismatch) =
+                    models_store::resolve_mlx_launch_kind(&self.data_dir, &model_id, &extra)?;
                 if let Some(notice) = mismatch {
                     tracing::warn!("{notice}");
                 }
                 if let Err(error) = self.ensure_mlx_server_for_model(&model_id, kind).await {
                     let mut guard = self.mlx.lock().await;
                     guard.server = None;
-                    return Err(
-                        fork_hints::load_error_with_hints(
-                            &self.http,
-                            &self.data_dir,
-                            &model_id,
-                            error,
-                        )
-                        .await
-                        .into(),
-                    );
+                    return Err(fork_hints::load_error_with_hints(
+                        &self.http,
+                        &self.data_dir,
+                        &model_id,
+                        error,
+                    )
+                    .await
+                    .into());
                 }
             }
         }
@@ -1264,9 +1240,7 @@ impl Runtime {
         media::prepare_messages(&media_ctx, &mut request.messages, progress).await?;
         emit(&load_tx, "ready", "Model ready — generating…").await;
         let harmony = crate::harmony::is_harmony_model(&model_id);
-        if let Some(merged) =
-            tool_registry::merge_definitions(&self.data_dir, &request, harmony)
-        {
+        if let Some(merged) = tool_registry::merge_definitions(&self.data_dir, &request, harmony) {
             request.tools = Some(merged);
         }
         Ok((backend, settings, request))
@@ -1405,15 +1379,8 @@ impl Runtime {
                 &request,
                 crate::harmony::is_harmony_model(&request.model),
             );
-            if let Err(error) = stream_tool_rounds(
-                &runtime,
-                &base_url,
-                request,
-                settings,
-                tools_active,
-                &tx,
-            )
-            .await
+            if let Err(error) =
+                stream_tool_rounds(&runtime, &base_url, request, settings, tools_active, &tx).await
             {
                 let _ = tx.send(Err(error)).await;
             }
@@ -1486,8 +1453,11 @@ impl Engine for Runtime {
     async fn generate(&self, request: &ChatCompletionRequest) -> anyhow::Result<Generation> {
         let (backend, settings, mut request) = self.prepare_generation(request, None).await?;
         let base_url = self.backend_base_url(&backend).await?;
-        let tools_active =
-            tool_registry::tools_enabled(&self.data_dir, &request, crate::harmony::is_harmony_model(&request.model));
+        let tools_active = tool_registry::tools_enabled(
+            &self.data_dir,
+            &request,
+            crate::harmony::is_harmony_model(&request.model),
+        );
         let mut invocations = Vec::new();
         let mut transcript = Vec::new();
         let ctx = ToolContext {

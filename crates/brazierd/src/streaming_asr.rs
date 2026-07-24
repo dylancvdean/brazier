@@ -23,7 +23,10 @@ pub fn models_root(data_dir: &Path) -> PathBuf {
 }
 
 pub fn resolve_python(data_dir: &Path, override_path: Option<&str>) -> Option<PathBuf> {
-    if let Some(path) = override_path.map(PathBuf::from).filter(|path| path.is_file()) {
+    if let Some(path) = override_path
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
         return Some(path);
     }
     for (_, record) in builds::list_builds(data_dir, ENGINE) {
@@ -366,7 +369,9 @@ mod tests {
         assert!(looks_like_streaming_asr_repo(
             "nvidia/nemotron-speech-streaming-en-0.6b"
         ));
-        assert!(looks_like_streaming_asr_repo("nemotron-3.5-asr-streaming-0.6b"));
+        assert!(looks_like_streaming_asr_repo(
+            "nemotron-3.5-asr-streaming-0.6b"
+        ));
         assert!(!looks_like_streaming_asr_repo("mlx-community/Qwen2.5-0.5B"));
     }
 

@@ -4,8 +4,8 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models_store::prefer_gguf_filename;
 use crate::hf_auth;
+use crate::models_store::prefer_gguf_filename;
 
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
@@ -95,9 +95,7 @@ fn compatible(tags: &[String], engine: &str) -> bool {
                 ],
             ) || tags.iter().any(|tag| {
                 let tag = tag.to_ascii_lowercase();
-                tag.contains("nemotron")
-                    || tag.contains("streaming")
-                    || tag.contains("asr")
+                tag.contains("nemotron") || tag.contains("streaming") || tag.contains("asr")
             })
         }
         "vllm" => tags.iter().any(|tag| {
@@ -388,7 +386,10 @@ mod tests {
     fn engine_compatibility_is_a_hard_filter() {
         assert!(compatible(&["gguf".into()], "llama.cpp"));
         assert!(!compatible(&["mlx".into()], "llama.cpp"));
-        assert!(compatible(&["mlx".into(), "text-generation".into()], "mlx-lm"));
+        assert!(compatible(
+            &["mlx".into(), "text-generation".into()],
+            "mlx-lm"
+        ));
         assert!(!compatible(
             &["mlx".into(), "image-text-to-text".into()],
             "mlx-lm"
@@ -397,6 +398,9 @@ mod tests {
             &["mlx".into(), "image-text-to-text".into()],
             "mlx-vlm"
         ));
-        assert!(!compatible(&["mlx".into(), "text-generation".into()], "mlx-vlm"));
+        assert!(!compatible(
+            &["mlx".into(), "text-generation".into()],
+            "mlx-vlm"
+        ));
     }
 }

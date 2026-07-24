@@ -10,9 +10,7 @@ pub const FUNCTIONS_PREFIX: &str = "functions.";
 /// True when the model id or path indicates a gpt-oss / Harmony-trained checkpoint.
 pub fn is_harmony_model(model_id: &str) -> bool {
     let lower = model_id.to_ascii_lowercase();
-    lower.contains("gpt-oss")
-        || lower.contains("gpt_oss")
-        || lower.contains("gptoss")
+    lower.contains("gpt-oss") || lower.contains("gpt_oss") || lower.contains("gptoss")
 }
 
 /// Tool name sent to the model (Harmony expects `functions.{name}` for builtins).
@@ -97,17 +95,8 @@ mod tests {
 
     #[test]
     fn round_trips_tool_names() {
-        assert_eq!(
-            wire_tool_name("calculator", true),
-            "functions.calculator"
-        );
-        assert_eq!(
-            logical_tool_name("functions.calculator"),
-            "calculator"
-        );
-        assert_eq!(
-            wire_tool_name("mcp/demo/ping", true),
-            "mcp/demo/ping"
-        );
+        assert_eq!(wire_tool_name("calculator", true), "functions.calculator");
+        assert_eq!(logical_tool_name("functions.calculator"), "calculator");
+        assert_eq!(wire_tool_name("mcp/demo/ping", true), "mcp/demo/ping");
     }
 }

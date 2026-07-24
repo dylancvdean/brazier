@@ -307,7 +307,11 @@ fn primary_binary_name(engine: &str) -> &'static str {
 }
 
 /// Copy the built binary and any shared libraries into `install/bin`.
-fn install_artifacts(build_dir: &Path, install_bin: &Path, engine: &str) -> anyhow::Result<PathBuf> {
+fn install_artifacts(
+    build_dir: &Path,
+    install_bin: &Path,
+    engine: &str,
+) -> anyhow::Result<PathBuf> {
     let server_name = primary_binary_name(engine);
     let built_bin = build_dir.join("bin");
     let server = built_bin.join(server_name);
@@ -658,7 +662,11 @@ pub async fn run_build_with_progress(
                 &flags,
                 parallel_jobs,
             );
-            progress(ProgressEvent::build_step(index + 1, total, step.label.clone()));
+            progress(ProgressEvent::build_step(
+                index + 1,
+                total,
+                step.label.clone(),
+            ));
             run_step(
                 &step.label,
                 &step.program,
@@ -894,16 +902,14 @@ mod tests {
             "CMake Error: Could not find any instance of Visual Studio",
             RuntimeTarget::Cpu,
         );
-        assert!(
-            report.hints.iter().any(|hint| {
-                let lower = hint.to_ascii_lowercase();
-                lower.contains("c++")
-                    || lower.contains("compiler")
-                    || lower.contains("visual studio")
-                    || lower.contains("build-essential")
-                    || lower.contains("base-devel")
-            })
-        );
+        assert!(report.hints.iter().any(|hint| {
+            let lower = hint.to_ascii_lowercase();
+            lower.contains("c++")
+                || lower.contains("compiler")
+                || lower.contains("visual studio")
+                || lower.contains("build-essential")
+                || lower.contains("base-devel")
+        }));
     }
 
     #[test]

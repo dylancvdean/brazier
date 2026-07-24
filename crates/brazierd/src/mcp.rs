@@ -170,12 +170,9 @@ impl JsonRpcClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = command.spawn().with_context(|| {
-            format!(
-                "spawn MCP server `{}` ({})",
-                config.name, config.command
-            )
-        })?;
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("spawn MCP server `{}` ({})", config.name, config.command))?;
         let stdin = child
             .stdin
             .take()
@@ -224,10 +221,7 @@ impl JsonRpcClient {
                 if let Some(error) = message.get("error") {
                     anyhow::bail!("MCP error: {error}");
                 }
-                return Ok(message
-                    .get("result")
-                    .cloned()
-                    .unwrap_or(Value::Null));
+                return Ok(message.get("result").cloned().unwrap_or(Value::Null));
             }
         }
     }

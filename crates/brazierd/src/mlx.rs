@@ -9,10 +9,7 @@ use std::{
 use anyhow::Context;
 use tokio::process::{Child, Command};
 
-use crate::{
-    llama,
-    runtime_settings::RuntimeSettings,
-};
+use crate::{llama, runtime_settings::RuntimeSettings};
 
 /// Supported MLX Python engine packages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

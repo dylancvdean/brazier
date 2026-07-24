@@ -82,9 +82,10 @@ fn is_trusted_origin(repository: &str, engine: &str) -> bool {
     let Ok(recipe) = build_recipe::recipe(engine) else {
         return false;
     };
-    recipe.upstream_origins.iter().any(|origin| {
-        normalize_github_repo_url(origin).as_deref() == Some(repository)
-    })
+    recipe
+        .upstream_origins
+        .iter()
+        .any(|origin| normalize_github_repo_url(origin).as_deref() == Some(repository))
 }
 
 /// Extract GitHub repository URLs referenced in markdown or plain text.
@@ -95,9 +96,7 @@ pub fn extract_github_urls(text: &str) -> Vec<String> {
         let rest = &search[index..];
         let end = rest
             .char_indices()
-            .find(|(_, ch)| {
-                ch.is_whitespace() || matches!(ch, ')' | ']' | '"' | '\'' | '<' | '>')
-            })
+            .find(|(_, ch)| ch.is_whitespace() || matches!(ch, ')' | ']' | '"' | '\'' | '<' | '>'))
             .map(|(offset, _)| offset)
             .unwrap_or(rest.len());
         let candidate = rest[..end].trim_end_matches(['.', ',', ';']);
@@ -136,10 +135,7 @@ pub fn runtime_fork_hints_from_text(text: &str) -> Vec<RuntimeForkHint> {
                 display_name: recipe.display_name.clone(),
                 repository: repository.clone(),
                 trusted: false,
-                summary: format!(
-                    "README links a custom {} fork",
-                    recipe.display_name
-                ),
+                summary: format!("README links a custom {} fork", recipe.display_name),
             });
         }
     }

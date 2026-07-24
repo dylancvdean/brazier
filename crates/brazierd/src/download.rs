@@ -121,11 +121,7 @@ pub async fn download_gguf_with_progress(
     } else {
         download_destination(data_dir, &request.repo_id, &request.filename)?
     };
-    let engine_label = if whisper {
-        "whisper.cpp"
-    } else {
-        "llama.cpp"
-    };
+    let engine_label = if whisper { "whisper.cpp" } else { "llama.cpp" };
     if destination.is_file() {
         progress(ProgressEvent::phase(
             "skip",
@@ -135,7 +131,10 @@ pub async fn download_gguf_with_progress(
         progress(ProgressEvent::download(bytes, Some(bytes)));
         let sha256 = hash_file(&destination).await?;
         let model_id = if whisper {
-            crate::whisper::model_id_for_path(&crate::whisper::whisper_root(data_dir), &destination)?
+            crate::whisper::model_id_for_path(
+                &crate::whisper::whisper_root(data_dir),
+                &destination,
+            )?
         } else {
             model_id_for_path(&crate::models_store::gguf_root(data_dir), &destination)?
         };
@@ -484,8 +483,9 @@ pub async fn download_mlx_snapshot_with_progress(
     );
     let requested = MlxKind::from_engine_id(&request.engine)
         .ok_or_else(|| anyhow::anyhow!("unsupported MLX engine `{}`", request.engine))?;
-    let files = crate::hf::list_mlx_snapshot_files(client, data_dir, &request.repo_id, &request.revision)
-        .await?;
+    let files =
+        crate::hf::list_mlx_snapshot_files(client, data_dir, &request.repo_id, &request.revision)
+            .await?;
     anyhow::ensure!(
         !files.is_empty(),
         "no MLX snapshot files were found for {}",
@@ -493,22 +493,28 @@ pub async fn download_mlx_snapshot_with_progress(
     );
     progress(ProgressEvent::phase(
         "start",
-        format!("Downloading {} MLX files for {}", files.len(), request.repo_id),
+        format!(
+            "Downloading {} MLX files for {}",
+            files.len(),
+            request.repo_id
+        ),
     ));
     if let Some((db, job_id)) = &job {
         let _ = db.start_download_job(job_id).await;
     }
     let mut total_bytes = 0_u64;
     for (index, file) in files.iter().enumerate() {
-        if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        if cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
             anyhow::bail!("download cancelled");
         }
         progress(ProgressEvent::phase(
             "download",
             format!("Fetching {} ({}/{})", file.path, index + 1, files.len()),
         ));
-        let destination =
-            mlx_download_destination(data_dir, &request.repo_id, &file.path)?;
+        let destination = mlx_download_destination(data_dir, &request.repo_id, &file.path)?;
         let bytes = download_file_to(
             client,
             data_dir,
@@ -582,8 +588,9 @@ pub async fn download_streaming_asr_snapshot_with_progress(
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')),
         "invalid revision"
     );
-    let files = crate::hf::list_mlx_snapshot_files(client, data_dir, &request.repo_id, &request.revision)
-        .await?;
+    let files =
+        crate::hf::list_mlx_snapshot_files(client, data_dir, &request.repo_id, &request.revision)
+            .await?;
     anyhow::ensure!(
         !files.is_empty(),
         "no streaming ASR snapshot files were found for {}",
@@ -602,7 +609,10 @@ pub async fn download_streaming_asr_snapshot_with_progress(
     }
     let mut total_bytes = 0_u64;
     for (index, file) in files.iter().enumerate() {
-        if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        if cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
             anyhow::bail!("download cancelled");
         }
         progress(ProgressEvent::phase(
@@ -674,8 +684,9 @@ pub async fn download_personaplex_snapshot_with_progress(
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')),
         "invalid revision"
     );
-    let files = crate::hf::list_mlx_snapshot_files(client, data_dir, &request.repo_id, &request.revision)
-        .await?;
+    let files =
+        crate::hf::list_mlx_snapshot_files(client, data_dir, &request.repo_id, &request.revision)
+            .await?;
     anyhow::ensure!(
         !files.is_empty(),
         "no PersonaPlex snapshot files were found for {}",
@@ -694,7 +705,10 @@ pub async fn download_personaplex_snapshot_with_progress(
     }
     let mut total_bytes = 0_u64;
     for (index, file) in files.iter().enumerate() {
-        if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        if cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
             anyhow::bail!("download cancelled");
         }
         progress(ProgressEvent::phase(

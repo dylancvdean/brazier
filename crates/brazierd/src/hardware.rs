@@ -67,10 +67,7 @@ fn linux_gpu() -> (bool, bool, Option<String>) {
 #[cfg(target_os = "windows")]
 fn windows_gpu() -> (bool, Option<String>) {
     let nvidia = command_exists("nvidia-smi");
-    (
-        nvidia,
-        nvidia.then(|| "NVIDIA GPU".to_owned()),
-    )
+    (nvidia, nvidia.then(|| "NVIDIA GPU".to_owned()))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -122,7 +119,8 @@ fn detect_uncached() -> HardwareInfo {
     let vulkan = command_exists("vulkaninfo")
         || Path::new("/usr/lib/libvulkan.so").exists()
         || Path::new("/usr/lib64/libvulkan.so").exists()
-        || (cfg!(target_os = "windows") && Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists());
+        || (cfg!(target_os = "windows")
+            && Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists());
     let recommended_target = if metal {
         RuntimeTarget::Metal
     } else if nvidia {

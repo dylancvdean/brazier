@@ -104,12 +104,7 @@ fn trim_os_value(value: &str) -> String {
 
 fn infer_package_manager(id: &str, id_like: &[String]) -> PackageManager {
     let id = id.to_ascii_lowercase();
-    if id == "arch"
-        || id == "manjaro"
-        || id == "endeavouros"
-        || id == "garuda"
-        || id == "cachyos"
-    {
+    if id == "arch" || id == "manjaro" || id == "endeavouros" || id == "garuda" || id == "cachyos" {
         return PackageManager::Pacman;
     }
     if id == "ubuntu"
@@ -393,19 +388,20 @@ fn generic_fallback(package: ToolchainPackage, family: OsFamily) -> String {
 /// Snapshot of host toolchain tools used by the welcome / setup screen.
 pub fn toolchain_status() -> serde_json::Value {
     let os = detect_os();
-    let tool = |id: &str, label: &str, available: bool, package: ToolchainPackage, summary: &str| {
-        serde_json::json!({
-            "id": id,
-            "label": label,
-            "available": available,
-            "required_for": summary,
-            "install_hint": if available {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::String(install_hint_for_os(package, &os))
-            },
-        })
-    };
+    let tool =
+        |id: &str, label: &str, available: bool, package: ToolchainPackage, summary: &str| {
+            serde_json::json!({
+                "id": id,
+                "label": label,
+                "available": available,
+                "required_for": summary,
+                "install_hint": if available {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(install_hint_for_os(package, &os))
+                },
+            })
+        };
     let ffmpeg = command_on_path("ffmpeg") && command_on_path("ffprobe");
     serde_json::json!({
         "os": {
@@ -473,12 +469,13 @@ pub fn validate_build_target_for_os(target: RuntimeTarget, os: &OsInfo) -> Optio
             "{} builds are not supported on macOS. Use CPU or Metal.",
             target.as_str().to_ascii_uppercase()
         )),
-        (OsFamily::Windows, RuntimeTarget::Rocm) => Some(
-            "ROCm builds are Linux-only. Use CPU, CUDA, or Vulkan on Windows.".into(),
-        ),
-        (OsFamily::Linux | OsFamily::Windows, RuntimeTarget::Metal) => {
-            Some("Metal builds require macOS with Apple Silicon or an Intel Mac with Metal support.".into())
+        (OsFamily::Windows, RuntimeTarget::Rocm) => {
+            Some("ROCm builds are Linux-only. Use CPU, CUDA, or Vulkan on Windows.".into())
         }
+        (OsFamily::Linux | OsFamily::Windows, RuntimeTarget::Metal) => Some(
+            "Metal builds require macOS with Apple Silicon or an Intel Mac with Metal support."
+                .into(),
+        ),
         _ => None,
     }
 }

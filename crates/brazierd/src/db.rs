@@ -3,11 +3,11 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use sqlx::{
     FromRow, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
@@ -386,7 +386,10 @@ impl Database {
             .replace('_', "\\_")
     }
 
-    pub async fn list_conversations(&self, query: Option<&str>) -> anyhow::Result<Vec<Conversation>> {
+    pub async fn list_conversations(
+        &self,
+        query: Option<&str>,
+    ) -> anyhow::Result<Vec<Conversation>> {
         let Some(raw) = query.map(str::trim).filter(|value| !value.is_empty()) else {
             return Ok(sqlx::query_as::<_, Conversation>(
                 r#"SELECT id, title, created_at, updated_at

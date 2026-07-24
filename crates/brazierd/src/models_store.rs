@@ -3,7 +3,11 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::{model_library, mlx::MlxKind, types::{ModelCapabilities, ModelDescriptor}};
+use crate::{
+    mlx::MlxKind,
+    model_library,
+    types::{ModelCapabilities, ModelDescriptor},
+};
 
 /// Content-keyed root for downloaded GGUF weights.
 pub fn gguf_root(data_dir: &Path) -> PathBuf {
@@ -434,8 +438,7 @@ pub fn looks_like_native_audio_model(model_key: &str, config_text: Option<&str>)
         || lower.contains("nemotron-speech")
         || lower.contains("nemotron-3.5-asr")
         || lower.contains("nemotron_3.5_asr")
-        || lower.contains("canary-")
-            && !lower.contains("canary-qwen")
+        || lower.contains("canary-") && !lower.contains("canary-qwen")
         || (lower.contains("asr") && !lower.contains("audio"))
     {
         return false;
@@ -647,11 +650,18 @@ fn config_value_indicates_vlm(value: &serde_json::Value) -> bool {
             return true;
         }
     }
-    if let Some(architectures) = value.get("architectures").and_then(|entry| entry.as_array()) {
-        if architectures.iter().filter_map(|entry| entry.as_str()).any(|name| {
-            let name = name.to_ascii_lowercase();
-            name.contains("vision") || name.contains("vl") || name.contains("llava")
-        }) {
+    if let Some(architectures) = value
+        .get("architectures")
+        .and_then(|entry| entry.as_array())
+    {
+        if architectures
+            .iter()
+            .filter_map(|entry| entry.as_str())
+            .any(|name| {
+                let name = name.to_ascii_lowercase();
+                name.contains("vision") || name.contains("vl") || name.contains("llava")
+            })
+        {
             return true;
         }
     }
@@ -679,17 +689,14 @@ fn mlx_capabilities(kind: MlxKind, dir: &Path, model_key: &str) -> ModelCapabili
     if native_audio && !input_modalities.iter().any(|value| value == "audio") {
         input_modalities.push("audio".into());
     }
-    let (reasoning, reasoning_modes) =
-        infer_reasoning_profile(model_key, config_value.as_ref());
+    let (reasoning, reasoning_modes) = infer_reasoning_profile(model_key, config_value.as_ref());
     ModelCapabilities {
         input_modalities,
         output_modalities: vec!["text".into()],
         streaming: true,
         tools: true,
         reasoning,
-        max_context_length: config_value
-            .as_ref()
-            .and_then(max_context_from_config),
+        max_context_length: config_value.as_ref().and_then(max_context_from_config),
         reasoning_modes,
         harmony: crate::harmony::is_harmony_model(model_key),
         audio_input: native_audio.then(|| "native".to_owned()),
@@ -733,16 +740,11 @@ pub fn list_mlx_models(data_dir: &Path) -> anyhow::Result<Vec<ModelDescriptor>> 
             if !model_dir.is_dir() || !directory_is_mlx_model(&model_dir) {
                 continue;
             }
-            let repo_id = format!(
-                "{}/{}",
-                owner,
-                name_entry.file_name().to_string_lossy()
-            );
+            let repo_id = format!("{}/{}", owner, name_entry.file_name().to_string_lossy());
             validate_repo_id(&repo_id).ok();
             let kind = detect_mlx_kind(&model_dir);
-            let id = mlx_model_id(kind, &repo_id).unwrap_or_else(|_| {
-                format!("{}:{repo_id}", engine_prefix(kind))
-            });
+            let id = mlx_model_id(kind, &repo_id)
+                .unwrap_or_else(|_| format!("{}:{repo_id}", engine_prefix(kind)));
             models.push(ModelDescriptor {
                 id,
                 name: repo_id.clone(),
@@ -1076,16 +1078,30 @@ mod tests {
                 .input_modalities
                 .contains(&"image".to_owned())
         );
-        assert!(!models[0].capabilities.input_modalities.contains(&"audio".to_owned()));
+        assert!(
+            !models[0]
+                .capabilities
+                .input_modalities
+                .contains(&"audio".to_owned())
+        );
         assert!(models[0].capabilities.audio_input.is_none());
     }
 
     #[test]
     fn detects_native_audio_llms_not_whisper_asr() {
-        assert!(looks_like_native_audio_model("Qwen2-Audio-7B-Instruct", None));
+        assert!(looks_like_native_audio_model(
+            "Qwen2-Audio-7B-Instruct",
+            None
+        ));
         assert!(looks_like_native_audio_model("ultravox-v0.5", None));
-        assert!(!looks_like_native_audio_model("ggml-whisper-large-v3", None));
-        assert!(!looks_like_native_audio_model("nemotron-3.5-asr-streaming-0.6b", None));
+        assert!(!looks_like_native_audio_model(
+            "ggml-whisper-large-v3",
+            None
+        ));
+        assert!(!looks_like_native_audio_model(
+            "nemotron-3.5-asr-streaming-0.6b",
+            None
+        ));
         assert!(!looks_like_native_audio_model("ordinary-chat-q4_k_m", None));
     }
 
@@ -1131,7 +1147,10 @@ mod tests {
             managed_repo_id("gguf:unsloth/Tiny-GGUF/model-Q4_K_M.gguf"),
             Some("unsloth/Tiny-GGUF".into())
         );
-        assert_eq!(managed_repo_id("gguf-ext:0:owner/repo/file.gguf"), Some("owner/repo".into()));
+        assert_eq!(
+            managed_repo_id("gguf-ext:0:owner/repo/file.gguf"),
+            Some("owner/repo".into())
+        );
     }
 
     #[test]
@@ -1146,8 +1165,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(model.join("weights.safetensors"), b"mlx").unwrap();
-        let (kind, notice) =
-            resolve_mlx_launch_kind(dir.path(), "mlx:acme/vision", &[]).unwrap();
+        let (kind, notice) = resolve_mlx_launch_kind(dir.path(), "mlx:acme/vision", &[]).unwrap();
         assert_eq!(kind, MlxKind::Vlm);
         assert!(notice.is_some());
     }

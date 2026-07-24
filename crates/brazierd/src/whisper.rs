@@ -102,8 +102,7 @@ pub fn select_release_asset<'a>(
             if !(lower.ends_with(".tar.gz") || lower.ends_with(".zip")) {
                 return false;
             }
-            if lower.contains("xcframework") || lower.contains("cublas") || lower.contains("blas")
-            {
+            if lower.contains("xcframework") || lower.contains("cublas") || lower.contains("blas") {
                 return false;
             }
             if platform_tag.starts_with("ubuntu") {
@@ -468,7 +467,10 @@ pub fn whisper_root(data_dir: &Path) -> PathBuf {
 
 /// Resolve an activated or discovered whisper-cli binary.
 pub fn resolve_binary(data_dir: &Path, override_path: Option<&str>) -> Option<PathBuf> {
-    if let Some(path) = override_path.map(PathBuf::from).filter(|path| path.is_file()) {
+    if let Some(path) = override_path
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
         return Some(path);
     }
     for target in [
