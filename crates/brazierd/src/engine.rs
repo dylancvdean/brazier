@@ -1,6 +1,6 @@
 //! Engine adapters: llama.cpp runtime over on-disk GGUF models.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::Path, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -14,6 +14,7 @@ use crate::{
     progress::{ProgressCallback, ProgressEvent},
     runtime_settings::{self, RuntimeSettings},
     runtimes,
+    tool_registry::{self, ToolContext},
     tools,
     types::{ChatCompletionRequest, ModelDescriptor, OpenAiMessage},
 };
@@ -23,6 +24,10 @@ pub struct Generation {
     pub text: String,
     pub reasoning: Option<String>,
     pub tool_invocations: Vec<tools::ToolInvocation>,
+    /// Tool calls the client should execute (no server-side handler).
+    pub client_tool_calls: Vec<llama::AccumulatedToolCall>,
+    /// Assistant/tool messages produced during server-side tool rounds.
+    pub transcript: Vec<OpenAiMessage>,
 }
 
 /// One item in a streamed generation.
@@ -35,8 +40,14 @@ pub enum StreamEvent {
     },
     /// Assistant content delta.
     Content(String),
-    /// A bundled tool was executed server-side.
+    /// A bundled or MCP tool was executed server-side.
     Tool(tools::ToolInvocation),
+    /// Tool calls returned to the client for execution.
+    ClientToolCalls(Vec<llama::AccumulatedToolCall>),
+    /// Partial tool-call delta while the model is streaming.
+    ToolCallDelta(llama::ToolCallFragment),
+    /// A message added to context during a tool round (for faithful persistence).
+    TranscriptMessage(OpenAiMessage),
     /// Generation finished.
     End,
 }
@@ -610,7 +621,13 @@ impl Runtime {
             guard.server = None;
         }
 
-        let server = LlamaServer::start(&binary, model_path, &settings).await?;
+        let server = LlamaServer::start(
+            &binary,
+            model_path,
+            &settings,
+            crate::harmony::is_harmony_model(&model_path.to_string_lossy()),
+        )
+        .await?;
         guard.server = Some(server);
         guard.binary = Some(binary);
         Ok(())
@@ -772,8 +789,11 @@ impl Runtime {
         emit(&load_tx, "ready", "Model ready — generating…").await;
         let settings = self.settings.lock().await.clone();
         let mut request = request.clone();
-        if request.builtin_tools.unwrap_or(false) {
-            request.tools = Some(tools::definitions());
+        let harmony = crate::harmony::is_harmony_model(&model_id);
+        if let Some(merged) =
+            tool_registry::merge_definitions(&self.data_dir, &request, harmony)
+        {
+            request.tools = Some(merged);
         }
         Ok((backend, settings, request))
     }
@@ -841,10 +861,23 @@ impl Runtime {
                     return;
                 }
             };
-            let builtin = request.builtin_tools.unwrap_or(false);
+            let tools_active = tool_registry::tools_enabled(
+                &runtime.data_dir,
+                &request,
+                crate::harmony::is_harmony_model(&request.model),
+            );
             let http = runtime.http.clone();
-            if let Err(error) =
-                stream_tool_rounds(&http, &base_url, request, settings, builtin, &tx).await
+            let data_dir = runtime.data_dir.clone();
+            if let Err(error) = stream_tool_rounds(
+                &http,
+                &data_dir,
+                &base_url,
+                request,
+                settings,
+                tools_active,
+                &tx,
+            )
+            .await
             {
                 let _ = tx.send(Err(error)).await;
             }
@@ -874,6 +907,7 @@ impl Runtime {
             seed: None,
             enable_reasoning: None,
             reasoning_budget_tokens: None,
+            tool_choice: None,
             builtin_tools: None,
         };
         let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -915,8 +949,14 @@ impl Engine for Runtime {
     async fn generate(&self, request: &ChatCompletionRequest) -> anyhow::Result<Generation> {
         let (backend, settings, mut request) = self.prepare_generation(request, None).await?;
         let base_url = self.backend_base_url(&backend).await?;
-        let builtin = request.builtin_tools.unwrap_or(false);
+        let tools_active =
+            tool_registry::tools_enabled(&self.data_dir, &request, crate::harmony::is_harmony_model(&request.model));
         let mut invocations = Vec::new();
+        let mut transcript = Vec::new();
+        let ctx = ToolContext {
+            data_dir: &self.data_dir,
+            http: &self.http,
+        };
         for round in 0..MAX_TOOL_ROUNDS {
             let last_round = round + 1 == MAX_TOOL_ROUNDS;
             let mut body = llama::translate_chat_request(&request, &settings, "local", false);
@@ -931,72 +971,136 @@ impl Engine for Runtime {
                 }
             };
             let calls = llama::extract_tool_calls(&response);
-            if !builtin || calls.is_empty() {
+            if !tools_active || calls.is_empty() {
                 return Ok(Generation {
                     text: llama::extract_assistant_text(&response).unwrap_or_default(),
                     reasoning: None,
                     tool_invocations: invocations,
+                    client_tool_calls: Vec::new(),
+                    transcript,
                 });
             }
             let round_text = llama::extract_assistant_text(&response).unwrap_or_default();
-            append_tool_round(
+            match append_tool_round(
                 &mut request.messages,
                 round_text,
                 &calls,
-                &self.http,
+                &ctx,
                 &mut invocations,
+                &mut transcript,
                 None,
             )
-            .await;
+            .await
+            {
+                AppendRoundOutcome::Continue => {}
+                AppendRoundOutcome::Stop { client_tool_calls } => {
+                    return Ok(Generation {
+                        text: String::new(),
+                        reasoning: None,
+                        tool_invocations: invocations,
+                        client_tool_calls,
+                        transcript,
+                    });
+                }
+                AppendRoundOutcome::ChannelClosed => {
+                    return Ok(Generation {
+                        text: String::new(),
+                        reasoning: None,
+                        tool_invocations: invocations,
+                        client_tool_calls: Vec::new(),
+                        transcript,
+                    });
+                }
+            }
         }
-        anyhow::bail!("generation exceeded the bundled tool round limit");
+        anyhow::bail!("generation exceeded the tool round limit");
     }
 }
 
 /// Execute one round of tool calls: append the assistant tool-call message and
 /// one `tool` message per executed call. Streams invocations to `events` when
 /// provided.
+enum AppendRoundOutcome {
+    Continue,
+    Stop {
+        client_tool_calls: Vec<llama::AccumulatedToolCall>,
+    },
+    ChannelClosed,
+}
+
 async fn append_tool_round(
     messages: &mut Vec<OpenAiMessage>,
     round_text: String,
     calls: &[llama::AccumulatedToolCall],
-    http: &reqwest::Client,
+    ctx: &ToolContext<'_>,
     invocations: &mut Vec<tools::ToolInvocation>,
+    transcript: &mut Vec<OpenAiMessage>,
     events: Option<&tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>>,
-) -> bool {
-    messages.push(OpenAiMessage {
+) -> AppendRoundOutcome {
+    let assistant = OpenAiMessage {
         role: "assistant".to_owned(),
         content: serde_json::Value::String(round_text),
         tool_calls: Some(llama::tool_calls_to_json(calls)),
         tool_call_id: None,
-    });
+    };
+    messages.push(assistant.clone());
+    transcript.push(assistant.clone());
+    if let Some(tx) = events
+        && tx
+            .send(Ok(StreamEvent::TranscriptMessage(assistant)))
+            .await
+            .is_err()
+    {
+        return AppendRoundOutcome::ChannelClosed;
+    }
+    let mut client_calls = Vec::new();
     for call in calls {
-        let invocation = tools::execute(http, &call.id, &call.name, &call.arguments).await;
-        messages.push(OpenAiMessage {
+        if !tool_registry::can_execute(&call.name) {
+            client_calls.push(call.clone());
+            continue;
+        }
+        let invocation = tool_registry::execute(ctx, &call.id, &call.name, &call.arguments).await;
+        let tool_message = OpenAiMessage {
             role: "tool".to_owned(),
             content: serde_json::Value::String(invocation.output.clone()),
             tool_calls: None,
             tool_call_id: Some(invocation.call_id.clone()),
-        });
+        };
+        messages.push(tool_message.clone());
+        transcript.push(tool_message.clone());
         invocations.push(invocation.clone());
-        if let Some(tx) = events
-            && tx.send(Ok(StreamEvent::Tool(invocation))).await.is_err()
-        {
-            return false;
+        if let Some(tx) = events {
+            if tx.send(Ok(StreamEvent::Tool(invocation))).await.is_err() {
+                return AppendRoundOutcome::ChannelClosed;
+            }
+            if tx
+                .send(Ok(StreamEvent::TranscriptMessage(tool_message)))
+                .await
+                .is_err()
+            {
+                return AppendRoundOutcome::ChannelClosed;
+            }
         }
     }
-    true
+    if !client_calls.is_empty() {
+        return AppendRoundOutcome::Stop {
+            client_tool_calls: client_calls,
+        };
+    }
+    AppendRoundOutcome::Continue
 }
 
-/// Streaming generation loop with server-side bundled tool execution.
+/// Streaming generation loop with server-side tool execution.
 async fn stream_tool_rounds(
     http: &reqwest::Client,
+    data_dir: &Path,
     base_url: &str,
     mut request: ChatCompletionRequest,
     settings: RuntimeSettings,
-    builtin: bool,
+    tools_active: bool,
     tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
 ) -> anyhow::Result<()> {
+    let ctx = ToolContext { data_dir, http };
     for round in 0..MAX_TOOL_ROUNDS {
         let last_round = round + 1 == MAX_TOOL_ROUNDS;
         let mut body = llama::translate_chat_request(&request, &settings, "local", true);
@@ -1014,25 +1118,44 @@ async fn stream_tool_rounds(
                     return Ok(());
                 }
             }
+            for fragment in &chunk.tool_calls {
+                if tx
+                    .send(Ok(StreamEvent::ToolCallDelta(fragment.clone())))
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
             accumulator.absorb(&chunk.tool_calls);
         }
         let calls = accumulator.into_calls();
-        if !builtin || calls.is_empty() {
+        if !tools_active || calls.is_empty() {
             let _ = tx.send(Ok(StreamEvent::End)).await;
             return Ok(());
         }
         let mut invocations = Vec::new();
-        if !append_tool_round(
+        let mut transcript = Vec::new();
+        match append_tool_round(
             &mut request.messages,
             round_text,
             &calls,
-            http,
+            &ctx,
             &mut invocations,
+            &mut transcript,
             Some(tx),
         )
         .await
         {
-            return Ok(());
+            AppendRoundOutcome::Continue => {}
+            AppendRoundOutcome::Stop { client_tool_calls } => {
+                let _ = tx
+                    .send(Ok(StreamEvent::ClientToolCalls(client_tool_calls)))
+                    .await;
+                let _ = tx.send(Ok(StreamEvent::End)).await;
+                return Ok(());
+            }
+            AppendRoundOutcome::ChannelClosed => return Ok(()),
         }
     }
     let _ = tx.send(Ok(StreamEvent::End)).await;
@@ -1091,6 +1214,7 @@ mod tests {
                 seed: None,
                 enable_reasoning: None,
                 reasoning_budget_tokens: None,
+                tool_choice: None,
                 builtin_tools: None,
             })
             .await
@@ -1119,6 +1243,7 @@ mod tests {
                 seed: None,
                 enable_reasoning: None,
                 reasoning_budget_tokens: None,
+                tool_choice: None,
                 builtin_tools: None,
             })
             .await

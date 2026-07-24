@@ -221,6 +221,9 @@ pub fn translate_chat_request(
     if let Some(value) = &request.tools {
         body["tools"] = value.clone();
     }
+    if let Some(value) = &request.tool_choice {
+        body["tool_choice"] = value.clone();
+    }
     body
 }
 
@@ -394,6 +397,7 @@ impl ToolCallAccumulator {
                 if call.arguments.is_empty() {
                     call.arguments = "{}".to_owned();
                 }
+                call.name = crate::harmony::logical_tool_name(&call.name);
                 call
             })
             .filter(|call| !call.name.is_empty())
@@ -419,7 +423,7 @@ pub fn extract_tool_calls(body: &serde_json::Value) -> Vec<AccumulatedToolCall> 
                             .and_then(serde_json::Value::as_str)
                             .map(ToOwned::to_owned)
                             .unwrap_or_else(|| format!("call_{index}")),
-                        name: name.to_owned(),
+                        name: crate::harmony::logical_tool_name(name),
                         arguments: call
                             .pointer("/function/arguments")
                             .and_then(serde_json::Value::as_str)
@@ -446,6 +450,28 @@ pub fn tool_calls_to_json(calls: &[AccumulatedToolCall]) -> serde_json::Value {
             })
             .collect(),
     )
+}
+
+/// Serialize one streamed tool-call fragment into an OpenAI `delta.tool_calls` entry.
+pub fn tool_call_fragment_to_delta(fragment: &ToolCallFragment) -> serde_json::Value {
+    let mut entry = serde_json::json!({ "index": fragment.index, "type": "function" });
+    if let Some(id) = &fragment.id {
+        entry["id"] = serde_json::Value::String(id.clone());
+    }
+    let mut function = serde_json::Map::new();
+    if let Some(name) = &fragment.name {
+        function.insert("name".into(), serde_json::Value::String(name.clone()));
+    }
+    if let Some(arguments) = &fragment.arguments {
+        function.insert(
+            "arguments".into(),
+            serde_json::Value::String(arguments.clone()),
+        );
+    }
+    if !function.is_empty() {
+        entry["function"] = serde_json::Value::Object(function);
+    }
+    entry
 }
 
 fn message_to_openai_json(message: &OpenAiMessage) -> serde_json::Value {
@@ -850,6 +876,7 @@ impl LlamaServer {
         binary: &Path,
         model_path: &Path,
         settings: &RuntimeSettings,
+        harmony: bool,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             binary.is_file(),
@@ -917,8 +944,13 @@ impl LlamaServer {
         if let Some(threads) = settings.threads {
             command.arg("--threads").arg(threads.to_string());
         }
-        if settings.jinja {
+        if settings.jinja || harmony {
             command.arg("--jinja");
+        }
+        if harmony {
+            command
+                .arg("--reasoning-format")
+                .arg(crate::harmony::llama_reasoning_format());
         }
         // Managed releases ship companion .so files next to llama-server.
         if let Some(dir) = binary.parent() {
@@ -1191,6 +1223,7 @@ mod tests {
             seed: None,
             enable_reasoning: None,
             reasoning_budget_tokens: None,
+            tool_choice: None,
             builtin_tools: None,
         };
         let settings = RuntimeSettings::default();

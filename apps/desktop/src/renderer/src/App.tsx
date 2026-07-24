@@ -67,7 +67,7 @@ import {
   writeCachedModels,
   writeCachedRuntimes
 } from './inventoryCache'
-import type { Attachment, ContentPart, Conversation, Message } from './types'
+import type { Attachment, ContentPart, Conversation, Message, Role } from './types'
 
 function contentText(message: Message): string {
   if (typeof message.content === 'string') return message.content
@@ -93,9 +93,21 @@ function contentMedia(message: Message): Array<'image' | 'audio' | 'video'> {
   })
 }
 
-/** Tool records are persisted as a `tool` role message with JSON content. */
+/** Tool records for UI display from native or legacy tool messages. */
 function toolRecordsFromMessage(message: Message): ToolCallRecord[] | null {
-  if (message.role !== 'tool' || typeof message.content !== 'string') return null
+  if (message.role !== 'tool') return null
+  if (message.tool_call_id && typeof message.content === 'string') {
+    return [
+      {
+        call_id: message.tool_call_id,
+        name: 'tool',
+        arguments: '',
+        output: message.content,
+        is_error: false
+      }
+    ]
+  }
+  if (typeof message.content !== 'string') return null
   try {
     const parsed = JSON.parse(message.content) as { brazier_tool_calls?: ToolCallRecord[] }
     return Array.isArray(parsed.brazier_tool_calls) ? parsed.brazier_tool_calls : null
@@ -263,6 +275,7 @@ export function App(): React.JSX.Element {
       ['image', 'audio', 'video'].includes(modality)
     )
   )
+  const canUseTools = selectedCapabilities?.tools !== false
 
   async function refreshLocalModels(): Promise<void> {
     const models = await listModels()
@@ -575,40 +588,56 @@ export function App(): React.JSX.Element {
         role: 'user',
         content
       })
-      const requestMessages = [...chain, userMessage]
+      let requestMessages = [...chain, userMessage]
       setMessages((current) => [...current, userMessage])
       setTipId(userMessage.id)
       setDraft('')
       setAttachments([])
 
+      let parentId = userMessage.id
       let responseText = ''
       const toolRecords: ToolCallRecord[] = []
-      await streamCompletion(
-        requestMessages,
-        selectedModel,
-        controller.signal,
-        (token) => {
-          setModelLoadStatus(null)
-          responseText += token
-          setStreamingText(responseText)
-        },
-        {
-          builtinTools: toolsEnabled,
-          onLoad: (event) => setModelLoadStatus(event.message),
-          onToolCall: (record) => {
-            toolRecords.push(record)
-            setStreamingTools([...toolRecords])
+      const maxClientRounds = 4
+      for (let round = 0; round < maxClientRounds; round += 1) {
+        const result = await streamCompletion(
+          requestMessages,
+          selectedModel,
+          controller.signal,
+          (token) => {
+            setModelLoadStatus(null)
+            responseText += token
+            setStreamingText(responseText)
+          },
+          {
+            builtinTools: toolsEnabled,
+            toolChoice: toolsEnabled ? 'auto' : undefined,
+            onLoad: (event) => setModelLoadStatus(event.message),
+            onToolCall: (record) => {
+              toolRecords.push(record)
+              setStreamingTools([...toolRecords])
+            }
           }
+        )
+        responseText = result.responseText
+        for (const entry of result.transcript) {
+          const role = entry.role as Role
+          const created = await createMessage(activeConversationId, {
+            parent_id: parentId,
+            role,
+            content: entry.content ?? '',
+            tool_calls: entry.tool_calls ?? null,
+            tool_call_id: entry.tool_call_id ?? null,
+            model: role === 'assistant' ? selectedModel : undefined
+          })
+          requestMessages = [...requestMessages, created]
+          parentId = created.id
         }
-      )
-      let parentId = userMessage.id
-      if (toolRecords.length > 0) {
-        const toolMessage = await createMessage(activeConversationId, {
-          parent_id: parentId,
-          role: 'tool',
-          content: JSON.stringify({ brazier_tool_calls: toolRecords })
-        })
-        parentId = toolMessage.id
+        if (result.clientToolCalls.length === 0) {
+          break
+        }
+        throw new GenerationFailure(
+          `The model requested client-side tools that Brazier cannot execute: ${result.clientToolCalls.map((call) => call.name).join(', ')}`
+        )
       }
       const assistant = await createMessage(activeConversationId, {
         parent_id: parentId,
@@ -1037,10 +1066,13 @@ export function App(): React.JSX.Element {
               <button
                 className={toolsEnabled ? 'attach-button tools-on' : 'attach-button'}
                 type="button"
+                disabled={!canUseTools}
                 title={
-                  toolsEnabled
-                    ? 'Bundled tools enabled: time, calculator, web fetch, JS sandbox'
-                    : 'Enable bundled tools (time, calculator, web fetch, JS sandbox)'
+                  !canUseTools
+                    ? 'This model does not advertise tool support'
+                    : toolsEnabled
+                      ? 'Tools enabled: bundled tools and MCP servers'
+                      : 'Enable tools (bundled + MCP)'
                 }
                 onClick={() => setToolsEnabled((enabled) => !enabled)}
               >
@@ -1079,7 +1111,13 @@ export function App(): React.JSX.Element {
           </form>
           <p className="composer-hint">
             Local models can be inaccurate. Verify important information.
-            {toolsEnabled ? ' Bundled tools are enabled for this chat.' : ''}
+            {toolsEnabled && canUseTools ? ' Tools are enabled (bundled + MCP).' : ''}
+            {toolsEnabled && canUseTools && runtime && !runtime.jinja
+              ? ' Enable Jinja templates in Engine configuration for reliable tool calling.'
+              : ''}
+            {selectedCapabilities?.harmony
+              ? ' This model uses OpenAI Harmony (gpt-oss); reasoning is routed automatically.'
+              : ''}
           </p>
         </div>
       </section>

@@ -24,6 +24,8 @@ export type Message = {
   role: Role
   content: string | ContentPart[]
   model: string | null
+  tool_calls?: unknown[] | null
+  tool_call_id?: string | null
   created_at: string
 }
 

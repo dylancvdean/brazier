@@ -95,13 +95,15 @@ pub fn catalog() -> Value {
                 "name": "get_current_time",
                 "title": "Current time",
                 "description": "Current UTC date, time, and Unix timestamp.",
-                "network": false
+                "network": false,
+                "source": "builtin"
             },
             {
                 "name": "calculator",
                 "title": "Calculator",
                 "description": "Arithmetic expressions with + - * / % ^ and parentheses.",
-                "network": false
+                "network": false,
+                "source": "builtin"
             },
             {
                 "name": "fetch_url",
@@ -111,7 +113,8 @@ pub fn catalog() -> Value {
                     FETCH_MAX_BYTES / 1024,
                     FETCH_TIMEOUT.as_secs()
                 ),
-                "network": true
+                "network": true,
+                "source": "builtin"
             },
             {
                 "name": "run_javascript",
@@ -121,7 +124,8 @@ pub fn catalog() -> Value {
                     crate::js_sandbox::MAX_CODE_BYTES / 1024,
                     JS_SANDBOX_TIMEOUT.as_secs()
                 ),
-                "network": false
+                "network": false,
+                "source": "builtin"
             }
         ]
     })

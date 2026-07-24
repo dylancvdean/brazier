@@ -403,6 +403,7 @@ fn gguf_capabilities(has_projector: bool, model_key: &str) -> ModelCapabilities 
         reasoning,
         max_context_length: infer_gguf_context_hint(model_key),
         reasoning_modes,
+        harmony: crate::harmony::is_harmony_model(model_key),
     }
 }
 
@@ -616,6 +617,7 @@ fn mlx_capabilities(kind: MlxKind, dir: &Path, model_key: &str) -> ModelCapabili
             .as_ref()
             .and_then(max_context_from_config),
         reasoning_modes,
+        harmony: crate::harmony::is_harmony_model(model_key),
     }
 }
 

@@ -9,6 +9,7 @@ import {
   Hammer,
   HardDrive,
   LoaderCircle,
+  Plug,
   Search,
   Settings2,
   ShieldAlert,
@@ -22,6 +23,8 @@ import {
   cancelBuild,
   cancelDownloadJob,
   deleteModel,
+  createMcpServer,
+  deleteMcpServer,
   deleteRuntime,
   downloadModel,
   downloadMlxModel,
@@ -39,7 +42,11 @@ import {
   type LocalModel,
   type ModelTrust,
   listHubFiles,
+  listMcpServers,
   listRuntimes,
+  listTools,
+  type BundledTool,
+  type McpServer,
   modelLibraryPathSuggestions,
   type ModelLibraryPathSuggestion,
   type ProgressEvent,
@@ -49,7 +56,9 @@ import {
   saveRuntimeSettings,
   searchHub,
   setHuggingFaceToken,
-  queueModelDownload
+  queueModelDownload,
+  refreshMcpServer,
+  updateMcpServer
 } from '../api'
 import {
   engineBadgeClass,
@@ -101,7 +110,7 @@ function defaultDiscoverEngine(hardware: HardwareInfo | null): DiscoverEngine {
   return 'llama.cpp'
 }
 
-export type ManageSection = 'library' | 'discover' | 'runtimes' | 'engine'
+export type ManageSection = 'library' | 'discover' | 'runtimes' | 'engine' | 'mcp'
 
 type ManagePanelProps = {
   section: ManageSection
@@ -126,6 +135,7 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'library', label: 'Model library', icon: <Box size={15} /> },
   { id: 'discover', label: 'Download models', icon: <Download size={15} /> },
   { id: 'runtimes', label: 'Runtimes', icon: <Cpu size={15} /> },
+  { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
   { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> }
 ]
 
@@ -299,6 +309,7 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
           {props.section === 'library' && <LibrarySection {...props} onError={setError} />}
           {props.section === 'discover' && <DiscoverSection {...props} onError={setError} />}
           {props.section === 'runtimes' && <RuntimesSection {...props} onError={setError} />}
+          {props.section === 'mcp' && <McpSection {...props} onError={setError} />}
           {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
         </div>
       </aside>
@@ -2104,6 +2115,227 @@ function EngineSection(props: SectionProps): React.JSX.Element {
           {saving ? <LoaderCircle className="spin" size={15} /> : 'Apply & restart'}
         </button>
       </div>
+    </section>
+  )
+}
+
+function McpSection(props: SectionProps): React.JSX.Element {
+  const [servers, setServers] = useState<McpServer[]>([])
+  const [catalog, setCatalog] = useState<BundledTool[]>([])
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [draft, setDraft] = useState({
+    id: '',
+    name: '',
+    command: '',
+    args: ''
+  })
+
+  async function reload(): Promise<void> {
+    setLoading(true)
+    props.onError(null)
+    try {
+      const [serverList, tools] = await Promise.all([listMcpServers(), listTools()])
+      setServers(serverList)
+      setCatalog(tools)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void reload()
+  }, [])
+
+  async function addServer(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    if (!draft.id.trim() || !draft.command.trim()) return
+    setSaving(true)
+    props.onError(null)
+    try {
+      await createMcpServer({
+        id: draft.id.trim(),
+        name: draft.name.trim() || draft.id.trim(),
+        command: draft.command.trim(),
+        args: draft.args
+          .split(',')
+          .map((part) => part.trim())
+          .filter(Boolean)
+      })
+      setDraft({ id: '', name: '', command: '', args: '' })
+      await reload()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function toggleEnabled(server: McpServer): Promise<void> {
+    props.onError(null)
+    try {
+      await updateMcpServer(server.id, {
+        id: server.id,
+        name: server.name,
+        command: server.command,
+        args: server.args,
+        enabled: !server.enabled
+      })
+      await reload()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function removeServer(id: string): Promise<void> {
+    props.onError(null)
+    try {
+      await deleteMcpServer(id)
+      await reload()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function refreshTools(id: string): Promise<void> {
+    setRefreshing(id)
+    props.onError(null)
+    try {
+      await refreshMcpServer(id)
+      await reload()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setRefreshing(null)
+    }
+  }
+
+  const builtinTools = catalog.filter((tool) => tool.source !== 'mcp')
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>MCP servers</h2>
+        <p>
+          Connect Model Context Protocol servers over stdio. Their tools are merged with bundled
+          tools when tools are enabled in chat.
+        </p>
+      </header>
+
+      {loading ? (
+        <div className="manage-placeholder">
+          <LoaderCircle className="spin" size={16} />
+          Loading…
+        </div>
+      ) : (
+        <>
+          <div className="runtime-list">
+            {servers.length === 0 ? (
+              <p className="model-help">No MCP servers configured yet.</p>
+            ) : (
+              servers.map((server) => (
+                <article className="runtime-card" key={server.id}>
+                  <div className="runtime-card-info">
+                    <strong>{server.name}</strong>
+                    <span>
+                      {server.command} {server.args.join(' ')}
+                    </span>
+                    {server.tools.length > 0 && (
+                      <span>
+                        {server.tools.length} tool{server.tools.length === 1 ? '' : 's'} cached
+                      </span>
+                    )}
+                  </div>
+                  <div className="library-card-actions">
+                    <label className="chip-button subtle" title="Enable server">
+                      <input
+                        type="checkbox"
+                        checked={server.enabled}
+                        onChange={() => void toggleEnabled(server)}
+                      />
+                      Enabled
+                    </label>
+                    <button
+                      className="chip-button"
+                      disabled={refreshing === server.id}
+                      onClick={() => void refreshTools(server.id)}
+                    >
+                      {refreshing === server.id ? (
+                        <LoaderCircle className="spin" size={13} />
+                      ) : (
+                        'Refresh tools'
+                      )}
+                    </button>
+                    <button
+                      className="chip-button danger"
+                      onClick={() => void removeServer(server.id)}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+
+          <form className="settings-group" onSubmit={(event) => void addServer(event)}>
+            <div className="section-label">Add server</div>
+            <div className="settings-grid">
+              <label>
+                <span>ID</span>
+                <input
+                  value={draft.id}
+                  onChange={(event) => setDraft({ ...draft, id: event.target.value })}
+                  placeholder="filesystem"
+                  required
+                />
+              </label>
+              <label>
+                <span>Display name</span>
+                <input
+                  value={draft.name}
+                  onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+                  placeholder="Filesystem tools"
+                />
+              </label>
+              <label>
+                <span>Command</span>
+                <input
+                  value={draft.command}
+                  onChange={(event) => setDraft({ ...draft, command: event.target.value })}
+                  placeholder="npx"
+                  required
+                />
+              </label>
+              <label>
+                <span>Args (comma-separated)</span>
+                <input
+                  value={draft.args}
+                  onChange={(event) => setDraft({ ...draft, args: event.target.value })}
+                  placeholder="-y,@modelcontextprotocol/server-filesystem,/Users/me"
+                />
+              </label>
+            </div>
+            <div className="runtime-actions">
+              <button className="primary-action" type="submit" disabled={saving}>
+                {saving ? <LoaderCircle className="spin" size={15} /> : 'Add server'}
+              </button>
+            </div>
+          </form>
+
+          {builtinTools.length > 0 && (
+            <div className="settings-group">
+              <div className="section-label">Bundled tools</div>
+              <p className="model-help">
+                {builtinTools.map((tool) => tool.title).join(' · ')}
+              </p>
+            </div>
+          )}
+        </>
+      )}
     </section>
   )
 }

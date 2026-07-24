@@ -34,8 +34,9 @@ use crate::{
     hf::{self, SearchQuery},
     hf_auth, model_bindings, models_store,
     llama,
+    mcp,
     progress::ProgressEvent,
-    runtimes, tools,
+    runtimes, tool_registry,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
@@ -150,6 +151,12 @@ pub fn router(state: AppState) -> Router {
             get(managed_llama_status),
         )
         .route("/api/v1/tools", get(list_tools))
+        .route("/api/v1/mcp/servers", get(list_mcp_servers).post(create_mcp_server))
+        .route(
+            "/api/v1/mcp/servers/{id}",
+            axum::routing::put(update_mcp_server).delete(delete_mcp_server),
+        )
+        .route("/api/v1/mcp/servers/{id}/refresh", post(refresh_mcp_server))
         .route(
             "/api/v1/runtimes",
             get(list_runtimes).delete(delete_runtime),
@@ -625,8 +632,107 @@ async fn update_runtime_settings(
     Ok(Json(json!(settings)))
 }
 
-async fn list_tools() -> Json<Value> {
-    Json(tools::catalog())
+async fn list_tools(State(state): State<AppState>) -> Json<Value> {
+    Json(tool_registry::combined_catalog(&state.data_dir))
+}
+
+#[derive(Debug, Deserialize)]
+struct McpServerUpsert {
+    id: String,
+    name: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: std::collections::HashMap<String, String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+async fn list_mcp_servers(State(state): State<AppState>) -> Json<Value> {
+    Json(mcp::catalog(&state.data_dir))
+}
+
+async fn create_mcp_server(
+    State(state): State<AppState>,
+    Json(request): Json<McpServerUpsert>,
+) -> ApiResult<Json<Value>> {
+    let mut config = mcp::load(&state.data_dir);
+    if config.servers.iter().any(|server| server.id == request.id) {
+        return Err(ApiError::bad_request(format!(
+            "MCP server `{}` already exists",
+            request.id
+        )));
+    }
+    config.servers.push(mcp::McpServerConfig {
+        id: request.id.clone(),
+        name: request.name,
+        command: request.command,
+        args: request.args,
+        env: request.env,
+        enabled: request.enabled,
+        tools: Vec::new(),
+    });
+    mcp::save(&state.data_dir, &config)
+        .await
+        .map_err(ApiError::internal)?;
+    if request.enabled {
+        let _ = mcp::refresh_tools(&state.data_dir, &request.id).await;
+    }
+    Ok(Json(json!({ "id": request.id, "status": "created" })))
+}
+
+async fn update_mcp_server(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<McpServerUpsert>,
+) -> ApiResult<Json<Value>> {
+    let mut config = mcp::load(&state.data_dir);
+    let Some(server) = config.find_mut(&id) else {
+        return Err(ApiError::bad_request(format!("unknown MCP server `{id}`")));
+    };
+    server.name = request.name;
+    server.command = request.command;
+    server.args = request.args;
+    server.env = request.env;
+    server.enabled = request.enabled;
+    mcp::save(&state.data_dir, &config)
+        .await
+        .map_err(ApiError::internal)?;
+    if request.enabled {
+        let _ = mcp::refresh_tools(&state.data_dir, &id).await;
+    }
+    Ok(Json(json!({ "id": id, "status": "updated" })))
+}
+
+async fn delete_mcp_server(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let mut config = mcp::load(&state.data_dir);
+    let before = config.servers.len();
+    config.servers.retain(|server| server.id != id);
+    if config.servers.len() == before {
+        return Err(ApiError::bad_request(format!("unknown MCP server `{id}`")));
+    }
+    mcp::save(&state.data_dir, &config)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "id": id, "status": "deleted" })))
+}
+
+async fn refresh_mcp_server(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let tools = mcp::refresh_tools(&state.data_dir, &id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "id": id, "tools": tools })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1320,20 +1426,34 @@ async fn chat_completions(
             .generate(&request)
             .await
             .map_err(|error| ApiError::from_anyhow(error))?;
+        let mut message = json!({
+            "role": "assistant",
+            "content": if generation.text.is_empty() {
+                Value::Null
+            } else {
+                Value::String(generation.text.clone())
+            },
+            "reasoning_content": generation.reasoning
+        });
+        let finish_reason = if !generation.client_tool_calls.is_empty() {
+            message["tool_calls"] = llama::tool_calls_to_json(&generation.client_tool_calls);
+            "tool_calls"
+        } else {
+            "stop"
+        };
         return Ok(Json(json!({
             "id": completion_id,
             "object": "chat.completion",
             "model": request.model,
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": generation.text,
-                    "reasoning_content": generation.reasoning
-                },
-                "finish_reason": "stop"
+                "message": message,
+                "finish_reason": finish_reason
             }],
-            "brazier": { "tool_calls": generation.tool_invocations },
+            "brazier": {
+                "tool_calls": generation.tool_invocations,
+                "transcript": generation.transcript,
+            },
             "usage": {
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
@@ -1391,6 +1511,50 @@ async fn chat_completions(
                             "finish_reason": null
                         }],
                         "brazier": { "tool_call": invocation }
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
+                }
+                Ok(StreamEvent::ToolCallDelta(fragment)) => {
+                    let chunk = json!({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [llama::tool_call_fragment_to_delta(&fragment)]
+                            },
+                            "finish_reason": null
+                        }]
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
+                }
+                Ok(StreamEvent::ClientToolCalls(calls)) => {
+                    let chunk = json!({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": llama::tool_calls_to_json(&calls)
+                            },
+                            "finish_reason": "tool_calls"
+                        }]
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
+                }
+                Ok(StreamEvent::TranscriptMessage(message)) => {
+                    let chunk = json!({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": null
+                        }],
+                        "brazier": { "transcript_message": message }
                     });
                     yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
                 }
@@ -1483,6 +1647,7 @@ async fn responses(
         seed: request.seed,
         enable_reasoning: request.enable_reasoning,
         reasoning_budget_tokens: request.reasoning_budget_tokens,
+        tool_choice: request.tool_choice,
         builtin_tools: request.builtin_tools,
     };
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
@@ -1533,6 +1698,23 @@ async fn responses(
                     yield Ok(Event::default()
                         .event("response.brazier.tool_call")
                         .data(json!({"type": "response.brazier.tool_call", "tool_call": invocation}).to_string()));
+                }
+                Ok(StreamEvent::ToolCallDelta(_)) => {}
+                Ok(StreamEvent::ClientToolCalls(calls)) => {
+                    yield Ok(Event::default()
+                        .event("response.brazier.client_tool_calls")
+                        .data(json!({
+                            "type": "response.brazier.client_tool_calls",
+                            "tool_calls": llama::tool_calls_to_json(&calls)
+                        }).to_string()));
+                }
+                Ok(StreamEvent::TranscriptMessage(message)) => {
+                    yield Ok(Event::default()
+                        .event("response.brazier.transcript_message")
+                        .data(json!({
+                            "type": "response.brazier.transcript_message",
+                            "message": message
+                        }).to_string()));
                 }
                 Ok(StreamEvent::End) => break,
                 Err(error) => {

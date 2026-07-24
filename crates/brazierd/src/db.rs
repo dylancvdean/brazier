@@ -124,6 +124,8 @@ struct MessageRow {
     role: String,
     content_json: String,
     model: Option<String>,
+    tool_calls_json: Option<String>,
+    tool_call_id: Option<String>,
     created_at: String,
 }
 
@@ -182,6 +184,12 @@ impl TryFrom<MessageRow> for Message {
             role,
             content: serde_json::from_str(&row.content_json)?,
             model: row.model,
+            tool_calls: row
+                .tool_calls_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
+            tool_call_id: row.tool_call_id,
             created_at: row.created_at,
         })
     }
@@ -353,6 +361,19 @@ impl Database {
             sqlx::query("INSERT INTO schema_migrations(version) VALUES (4)")
                 .execute(&self.pool)
                 .await?;
+            version = 4;
+        }
+
+        if version < 5 {
+            sqlx::query("ALTER TABLE messages ADD COLUMN tool_calls_json TEXT")
+                .execute(&self.pool)
+                .await?;
+            sqlx::query("ALTER TABLE messages ADD COLUMN tool_call_id TEXT")
+                .execute(&self.pool)
+                .await?;
+            sqlx::query("INSERT INTO schema_migrations(version) VALUES (5)")
+                .execute(&self.pool)
+                .await?;
         }
 
         Ok(())
@@ -411,7 +432,8 @@ impl Database {
 
     pub async fn list_messages(&self, conversation_id: &str) -> anyhow::Result<Vec<Message>> {
         let rows = sqlx::query_as::<_, MessageRow>(
-            r#"SELECT id, conversation_id, parent_id, role, content_json, model, created_at
+            r#"SELECT id, conversation_id, parent_id, role, content_json, model,
+                      tool_calls_json, tool_call_id, created_at
                FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid"#,
         )
         .bind(conversation_id)
@@ -439,9 +461,15 @@ impl Database {
 
         let id = Uuid::new_v4().to_string();
         let content_json = serde_json::to_string(&message.content)?;
+        let tool_calls_json = message
+            .tool_calls
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         sqlx::query(
-            r#"INSERT INTO messages(id, conversation_id, parent_id, role, content_json, model)
-               VALUES(?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT INTO messages(id, conversation_id, parent_id, role, content_json, model,
+                                   tool_calls_json, tool_call_id)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&id)
         .bind(conversation_id)
@@ -449,6 +477,8 @@ impl Database {
         .bind(message.role.as_str())
         .bind(content_json)
         .bind(&message.model)
+        .bind(tool_calls_json)
+        .bind(&message.tool_call_id)
         .execute(&self.pool)
         .await?;
         sqlx::query("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?")
@@ -559,7 +589,8 @@ impl Database {
 
     async fn get_message(&self, id: &str) -> anyhow::Result<Message> {
         let row = sqlx::query_as::<_, MessageRow>(
-            r#"SELECT id, conversation_id, parent_id, role, content_json, model, created_at
+            r#"SELECT id, conversation_id, parent_id, role, content_json, model,
+                      tool_calls_json, tool_call_id, created_at
                FROM messages WHERE id = ?"#,
         )
         .bind(id)
@@ -664,9 +695,15 @@ impl Database {
                 .and_then(|parent| id_map.get(parent))
                 .cloned();
             let content_json = serde_json::to_string(&message.content)?;
+            let tool_calls_json = message
+                .tool_calls
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
             sqlx::query(
-                r#"INSERT INTO messages(id, conversation_id, parent_id, role, content_json, model, created_at)
-                   VALUES(?, ?, ?, ?, ?, ?, ?)"#,
+                r#"INSERT INTO messages(id, conversation_id, parent_id, role, content_json, model,
+                                       tool_calls_json, tool_call_id, created_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
             )
             .bind(new_id)
             .bind(&conversation.id)
@@ -674,6 +711,8 @@ impl Database {
             .bind(message.role.as_str())
             .bind(content_json)
             .bind(&message.model)
+            .bind(tool_calls_json)
+            .bind(&message.tool_call_id)
             .bind(&message.created_at)
             .execute(&self.pool)
             .await?;
@@ -843,6 +882,8 @@ mod tests {
                     role: Role::User,
                     content: json!("Hello"),
                     model: None,
+                    tool_calls: None,
+                    tool_call_id: None,
                 },
             )
             .await
@@ -855,6 +896,8 @@ mod tests {
                     role: Role::Assistant,
                     content: json!(text),
                     model: Some("gguf:acme/demo/model.gguf".into()),
+                    tool_calls: None,
+                    tool_call_id: None,
                 },
             )
             .await

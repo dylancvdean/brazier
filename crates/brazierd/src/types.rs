@@ -37,6 +37,10 @@ pub struct Message {
     pub role: Role,
     pub content: Value,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     pub created_at: String,
 }
 
@@ -51,6 +55,10 @@ pub struct CreateMessage {
     pub role: Role,
     pub content: Value,
     pub model: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Value>,
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +74,9 @@ pub struct ModelCapabilities {
     /// Supported reasoning controls: `off`, `on`, and optionally `budget`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_modes: Vec<String>,
+    /// Uses OpenAI Harmony wire format (gpt-oss family).
+    #[serde(default)]
+    pub harmony: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +93,7 @@ pub struct ModelDescriptor {
     pub library_label: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OpenAiMessage {
     pub role: String,
     pub content: Value,
@@ -113,10 +124,20 @@ pub struct ChatCompletionRequest {
     pub enable_reasoning: Option<bool>,
     #[serde(default)]
     pub reasoning_budget_tokens: Option<u32>,
+    /// How the model should use tools (`auto`, `none`, or a specific function).
+    #[serde(default)]
+    pub tool_choice: Option<Value>,
     /// When true, the daemon offers its bundled tools to the model and
     /// executes returned tool calls server-side.
     #[serde(default)]
     pub builtin_tools: Option<bool>,
+}
+
+impl ChatCompletionRequest {
+    /// Whether any server-side tools (bundled, MCP, or request-supplied schemas) are active.
+    pub fn tools_active(&self) -> bool {
+        self.builtin_tools.unwrap_or(false) || self.tools.is_some()
+    }
 }
 
 fn default_model() -> String {
@@ -144,6 +165,8 @@ pub struct ResponsesRequest {
     pub enable_reasoning: Option<bool>,
     #[serde(default)]
     pub reasoning_budget_tokens: Option<u32>,
+    #[serde(default)]
+    pub tool_choice: Option<Value>,
     #[serde(default)]
     pub builtin_tools: Option<bool>,
 }

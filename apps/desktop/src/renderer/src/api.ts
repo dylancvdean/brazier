@@ -39,6 +39,7 @@ export type LocalModel = {
     reasoning: boolean
     max_context_length?: number | null
     reasoning_modes?: string[]
+    harmony?: boolean
   }
 }
 
@@ -263,12 +264,34 @@ export function createMessage(
     role: Role
     content: string | ContentPart[]
     model?: string
+    tool_calls?: unknown[] | null
+    tool_call_id?: string | null
   }
 ): Promise<Message> {
   return request(`/api/v1/conversations/${conversationId}/messages`, {
     method: 'POST',
     body: JSON.stringify(message)
   })
+}
+
+export type ClientToolCall = {
+  id: string
+  name: string
+  arguments: string
+}
+
+export type TranscriptMessagePayload = {
+  role: string
+  content: string | null
+  tool_calls?: unknown[] | null
+  tool_call_id?: string | null
+}
+
+export type StreamCompletionResult = {
+  responseText: string
+  toolRecords: ToolCallRecord[]
+  clientToolCalls: ClientToolCall[]
+  transcript: TranscriptMessagePayload[]
 }
 
 export type ToolCallRecord = {
@@ -319,11 +342,18 @@ export async function streamCompletion(
   onToken: (token: string) => void,
   options?: {
     builtinTools?: boolean
+    toolChoice?: 'auto' | 'none' | { type: 'function'; function: { name: string } }
     onToolCall?: (record: ToolCallRecord) => void
     onLoad?: (event: { phase: string; message: string }) => void
   }
-): Promise<void> {
+): Promise<StreamCompletionResult> {
   const daemon = await connection()
+  const toolChoice =
+    options?.toolChoice === 'auto' || options?.toolChoice === 'none'
+      ? options.toolChoice
+      : options?.toolChoice
+        ? options.toolChoice
+        : undefined
   const response = await fetch(`${daemon.address}/v1/chat/completions`, {
     method: 'POST',
     signal,
@@ -335,9 +365,8 @@ export async function streamCompletion(
       model,
       stream: true,
       ...(options?.builtinTools ? { builtin_tools: true } : {}),
-      messages: messages
-        .filter(({ role }) => role !== 'tool')
-        .map(({ role, content }) => ({ role, content }))
+      ...(toolChoice ? { tool_choice: toolChoice } : {}),
+      messages: messagesForCompletion(messages)
     })
   })
   if (!response.ok || !response.body) {
@@ -354,6 +383,10 @@ export async function streamCompletion(
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  const toolRecords: ToolCallRecord[] = []
+  const clientToolCalls: ClientToolCall[] = []
+  const transcript: TranscriptMessagePayload[] = []
+  let responseText = ''
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -368,9 +401,21 @@ export async function streamCompletion(
         .trim()
       if (!data || data === '[DONE]') continue
       const chunk = JSON.parse(data) as {
-        choices?: Array<{ delta?: { content?: string } }>
+        choices?: Array<{
+          delta?: {
+            content?: string
+            tool_calls?: Array<{
+              index?: number
+              id?: string
+              type?: string
+              function?: { name?: string; arguments?: string }
+            }>
+          }
+          finish_reason?: string | null
+        }>
         brazier?: {
           tool_call?: ToolCallRecord
+          transcript_message?: TranscriptMessagePayload
           fork_hints?: RuntimeForkHint[]
           load?: { phase: string; message: string }
         }
@@ -380,11 +425,34 @@ export async function streamCompletion(
         throw new GenerationFailure(chunk.error.message, chunk.brazier?.fork_hints ?? [])
       }
       if (chunk.brazier?.load) options?.onLoad?.(chunk.brazier.load)
-      if (chunk.brazier?.tool_call) options?.onToolCall?.(chunk.brazier.tool_call)
+      if (chunk.brazier?.tool_call) {
+        toolRecords.push(chunk.brazier.tool_call)
+        options?.onToolCall?.(chunk.brazier.tool_call)
+      }
+      if (chunk.brazier?.transcript_message) {
+        transcript.push(chunk.brazier.transcript_message)
+      }
+      const finishReason = chunk.choices?.[0]?.finish_reason
+      const toolCalls = chunk.choices?.[0]?.delta?.tool_calls
+      if (finishReason === 'tool_calls' && toolCalls?.length) {
+        for (const call of toolCalls) {
+          if (call.id && call.function?.name) {
+            clientToolCalls.push({
+              id: call.id,
+              name: call.function.name,
+              arguments: call.function.arguments ?? ''
+            })
+          }
+        }
+      }
       const token = chunk.choices?.[0]?.delta?.content
-      if (token) onToken(token)
+      if (token) {
+        responseText += token
+        onToken(token)
+      }
     }
   }
+  return { responseText, toolRecords, clientToolCalls, transcript }
 }
 
 export async function searchHub(query: string, engine: string): Promise<HubModel[]> {
@@ -717,12 +785,143 @@ export async function prepareModel(
 export type BundledTool = {
   name: string
   title: string
-  description: string
+  description?: string
   network: boolean
+  source?: string
+}
+
+export type McpServer = {
+  id: string
+  name: string
+  command: string
+  args: string[]
+  enabled: boolean
+  tools: BundledTool[]
 }
 
 export async function listTools(): Promise<BundledTool[]> {
   return (await request<{ data: BundledTool[] }>('/api/v1/tools')).data
+}
+
+export async function listMcpServers(): Promise<McpServer[]> {
+  return (await request<{ data: McpServer[] }>('/api/v1/mcp/servers')).data
+}
+
+export async function createMcpServer(body: {
+  id: string
+  name: string
+  command: string
+  args?: string[]
+  enabled?: boolean
+}): Promise<{ id: string }> {
+  return request('/api/v1/mcp/servers', {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+}
+
+export async function updateMcpServer(
+  id: string,
+  body: {
+    id: string
+    name: string
+    command: string
+    args?: string[]
+    enabled?: boolean
+  }
+): Promise<{ id: string }> {
+  return request(`/api/v1/mcp/servers/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body)
+  })
+}
+
+export async function deleteMcpServer(id: string): Promise<void> {
+  await request(`/api/v1/mcp/servers/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export async function refreshMcpServer(id: string): Promise<{ tools: unknown[] }> {
+  return request(`/api/v1/mcp/servers/${encodeURIComponent(id)}/refresh`, { method: 'POST' })
+}
+
+type OpenAiToolCall = {
+  id: string
+  type: 'function'
+  function: { name: string; arguments: string }
+}
+
+type OpenAiChatMessage = {
+  role: Role
+  content?: string | ContentPart[]
+  tool_calls?: OpenAiToolCall[]
+  tool_call_id?: string
+}
+
+function messageContentForApi(content: string | ContentPart[]): string | ContentPart[] {
+  return content
+}
+
+function messagesForCompletion(messages: Message[]): OpenAiChatMessage[] {
+  const payload: OpenAiChatMessage[] = []
+  for (const message of messages) {
+    if (message.role === 'tool' && message.tool_call_id) {
+      payload.push({
+        role: 'tool',
+        tool_call_id: message.tool_call_id,
+        content:
+          typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content)
+      })
+      continue
+    }
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      payload.push({
+        role: 'assistant',
+        content:
+          typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content),
+        tool_calls: message.tool_calls as OpenAiToolCall[]
+      })
+      continue
+    }
+    if (message.role === 'tool') {
+      let records: ToolCallRecord[] | null = null
+      if (typeof message.content === 'string') {
+        try {
+          const parsed = JSON.parse(message.content) as { brazier_tool_calls?: ToolCallRecord[] }
+          records = Array.isArray(parsed.brazier_tool_calls) ? parsed.brazier_tool_calls : null
+        } catch {
+          records = null
+        }
+      }
+      if (records && records.length > 0) {
+        payload.push({
+          role: 'assistant',
+          content: '',
+          tool_calls: records.map((record) => ({
+            id: record.call_id,
+            type: 'function',
+            function: { name: record.name, arguments: record.arguments }
+          }))
+        })
+        for (const record of records) {
+          payload.push({
+            role: 'tool',
+            tool_call_id: record.call_id,
+            content: record.output
+          })
+        }
+        continue
+      }
+    }
+    payload.push({
+      role: message.role,
+      content: messageContentForApi(message.content)
+    })
+  }
+  return payload
 }
 
 export async function buildRuntime(
