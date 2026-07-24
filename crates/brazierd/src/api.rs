@@ -1156,10 +1156,10 @@ fn progress_sse(mut rx: mpsc::UnboundedReceiver<ProgressEvent>) -> Response {
 async fn managed_llama_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     use crate::runtime_settings::RuntimeTarget;
 
-    let latest_tag = llama::resolve_managed_release(&state.http, RuntimeTarget::Cpu)
-        .await
-        .ok()
-        .map(|(tag, _)| tag);
+    // Local install state answers immediately; the upstream tag is filled in
+    // from cache, with `latest_pending` telling the UI a check is still running.
+    let cached = llama::cached_release_tag(&state.http);
+    let latest_tag = cached.release.map(|release| release.tag_name);
 
     let target_specs = [
         ("cpu", RuntimeTarget::Cpu),
@@ -1188,6 +1188,7 @@ async fn managed_llama_status(State(state): State<AppState>) -> ApiResult<Json<V
 
     Ok(Json(json!({
         "latest_version": latest_tag,
+        "latest_pending": cached.refreshing,
         "targets": targets,
     })))
 }
@@ -1255,14 +1256,15 @@ async fn managed_whisper_status(State(state): State<AppState>) -> ApiResult<Json
     use crate::runtime_settings::RuntimeTarget;
 
     let supported = whisper::managed_prebuilts_supported();
-    let latest_tag = if supported {
-        whisper::resolve_managed_release(&state.http, RuntimeTarget::Cpu)
-            .await
-            .ok()
-            .map(|(tag, _)| tag)
+    let cached = if supported {
+        whisper::cached_release_tag(&state.http)
     } else {
-        None
+        crate::github_releases::CachedRelease {
+            release: None,
+            refreshing: false,
+        }
     };
+    let latest_tag = cached.release.map(|release| release.tag_name);
     let target_specs = [("cpu", RuntimeTarget::Cpu), ("cuda", RuntimeTarget::Cuda)];
     let targets: Vec<Value> = target_specs
         .iter()
@@ -1286,6 +1288,7 @@ async fn managed_whisper_status(State(state): State<AppState>) -> ApiResult<Json
         .collect();
     Ok(Json(json!({
         "latest_version": latest_tag,
+        "latest_pending": cached.refreshing,
         "managed_supported": supported,
         "targets": targets,
         "note": if supported {
@@ -1357,10 +1360,8 @@ async fn ensure_whisper(
 async fn managed_sdcpp_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     use crate::runtime_settings::RuntimeTarget;
 
-    let latest_tag = sdcpp::resolve_managed_release(&state.http, RuntimeTarget::Cpu)
-        .await
-        .ok()
-        .map(|(tag, _)| tag);
+    let cached = sdcpp::cached_release_tag(&state.http);
+    let latest_tag = cached.release.map(|release| release.tag_name);
     let target_specs = [
         ("cpu", RuntimeTarget::Cpu),
         ("cuda", RuntimeTarget::Cuda),
@@ -1387,6 +1388,7 @@ async fn managed_sdcpp_status(State(state): State<AppState>) -> ApiResult<Json<V
         .collect();
     Ok(Json(json!({
         "latest_version": latest_tag,
+        "latest_pending": cached.refreshing,
         "targets": targets,
     })))
 }

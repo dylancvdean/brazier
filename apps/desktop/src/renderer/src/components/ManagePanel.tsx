@@ -1791,6 +1791,8 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const [managedStatuses, setManagedStatuses] = useState<ManagedLlamaTargetStatus[] | null>(
     null
   )
+  /** Set while the daemon is still checking upstream for newer releases. */
+  const [updateCheckPending, setUpdateCheckPending] = useState(false)
   const logRef = useRef<HTMLPreElement>(null)
   const [updates, setUpdates] = useState<Record<string, SourceRuntimeUpdate>>({})
   const [checkingUpdates, setCheckingUpdates] = useState(false)
@@ -1841,13 +1843,25 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         fetchManagedSdcppStatus().catch(() => null)
       ])
       setManagedStatuses(llama.targets)
+      setUpdateCheckPending(
+        Boolean(llama.latest_pending || whisper?.latest_pending || sdcpp?.latest_pending)
+      )
       // Surface whisper/sd.cpp availability in the install helper copy via statuses.
       void whisper
       void sdcpp
     } catch {
       setManagedStatuses(null)
+      setUpdateCheckPending(false)
     }
   }
+
+  // Installed versions arrive immediately; the upstream check runs in the
+  // background, so poll briefly until it reports a result.
+  useEffect(() => {
+    if (!updateCheckPending) return
+    const timer = window.setTimeout(() => void refreshManagedStatuses(), 3000)
+    return () => window.clearTimeout(timer)
+  }, [updateCheckPending, managedStatuses])
 
   async function refreshRuntimes(): Promise<void> {
     try {
@@ -2187,7 +2201,8 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             const versionLine = [
               target.detail,
               installed && installedVersion ? `Installed · ${installedVersion}` : null,
-              updateAvailable && latestVersion ? `Latest · ${latestVersion}` : null
+              updateAvailable && latestVersion ? `Latest · ${latestVersion}` : null,
+              installed && !latestVersion && updateCheckPending ? 'Checking for updates…' : null
             ]
               .filter(Boolean)
               .join(' · ')
@@ -2201,7 +2216,10 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                     {llamaRuntimeLabel(target.id)}
                     {target.recommended && <span className="active-badge">Recommended</span>}
                     {installed && !updateAvailable && (
-                      <span className="installed-badge">Up to date</span>
+                      // Without an upstream tag we only know it is installed.
+                      <span className="installed-badge">
+                        {latestVersion ? 'Up to date' : 'Installed'}
+                      </span>
                     )}
                     {updateAvailable && <span className="installed-badge">Update</span>}
                   </strong>

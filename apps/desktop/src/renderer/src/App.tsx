@@ -66,14 +66,19 @@ import { WelcomeScreen } from './components/WelcomeScreen'
 import { hasCompletedWelcome, markWelcomeCompleted } from './welcomePrefs'
 import {
   isChatModel,
+  isImageGenModel,
+  isVideoGenModel,
+  isVoiceModel,
   modelDisplayName,
   runtimeNoticeForModel,
   visionCapabilityTitle
 } from './model-utils'
 import { childCounts, messageChain } from './graph'
 import {
+  readCachedConversations,
   readCachedModels,
   readCachedRuntimes,
+  writeCachedConversations,
   writeCachedModels,
   writeCachedRuntimes
 } from './inventoryCache'
@@ -237,7 +242,7 @@ function RunHistory({
 }
 
 export function App(): React.JSX.Element {
-  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [conversations, setConversations] = useState<Conversation[]>(() => readCachedConversations())
   const [conversationSearch, setConversationSearch] = useState('')
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -286,6 +291,11 @@ export function App(): React.JSX.Element {
   const [showWelcome, setShowWelcome] = useState<boolean | null>(null)
   const [appMode, setAppMode] = useState<'chat' | 'generate' | 'voice'>('chat')
   const [realtimeVoiceAvailable, setRealtimeVoiceAvailable] = useState(false)
+  // Generate and Voice pick from their own model families; the top bar shows
+  // whichever belongs to the mode on screen.
+  const [voiceModel, setVoiceModel] = useState('')
+  const [generateModel, setGenerateModel] = useState('')
+  const [generateModality, setGenerateModality] = useState<'image' | 'video'>('image')
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
@@ -295,15 +305,17 @@ export function App(): React.JSX.Element {
 
   const chain = useMemo(() => messageChain(messages, tipId), [messages, tipId])
   const branches = useMemo(() => childCounts(messages), [messages])
-  const selectedMeta = useMemo(() => {
-    if (modelsLoading && localModels.length === 0) {
-      return { title: 'Loading models…', subtitle: 'Scanning local library' }
-    }
-    return modelDisplayName(selectedModel, localModels.find((m) => m.id === selectedModel))
-  }, [selectedModel, localModels, modelsLoading])
   const canChat = Boolean(selectedModel) && modelPrepareState === 'ready'
   const selectedCapabilities = localModels.find((model) => model.id === selectedModel)?.capabilities
   const chatModels = useMemo(() => localModels.filter((model) => isChatModel(model)), [localModels])
+  const voiceModels = useMemo(() => localModels.filter((model) => isVoiceModel(model)), [localModels])
+  const generateModels = useMemo(
+    () =>
+      localModels.filter((model) =>
+        generateModality === 'image' ? isImageGenModel(model) : isVideoGenModel(model)
+      ),
+    [localModels, generateModality]
+  )
   const [pipelineFeatures, setPipelineFeatures] = useState<PipelineFeatures>({
     asr: false,
     video_preprocess: false
@@ -415,6 +427,86 @@ export function App(): React.JSX.Element {
       })
   }, [])
 
+  /** Model list, selection, and setter for whichever mode is on screen. */
+  const modeModel = useMemo(() => {
+    if (appMode === 'voice') {
+      return {
+        models: voiceModels,
+        selected: voiceModel,
+        select: setVoiceModel,
+        emptyTitle: 'No voice model',
+        emptySubtitle: 'Download a PersonaPlex model'
+      }
+    }
+    if (appMode === 'generate') {
+      return {
+        models: generateModels,
+        selected: generateModel,
+        select: setGenerateModel,
+        emptyTitle: `No ${generateModality} model`,
+        emptySubtitle: 'Download one from the library'
+      }
+    }
+    return {
+      models: chatModels,
+      selected: selectedModel,
+      select: selectModel,
+      emptyTitle: 'Select a model',
+      emptySubtitle: 'No model loaded yet'
+    }
+  }, [
+    appMode,
+    voiceModels,
+    voiceModel,
+    generateModels,
+    generateModel,
+    generateModality,
+    chatModels,
+    selectedModel,
+    selectModel
+  ])
+
+  const selectedMeta = useMemo(() => {
+    if (modelsLoading && localModels.length === 0) {
+      return { title: 'Loading models…', subtitle: 'Scanning local library' }
+    }
+    if (!modeModel.selected) {
+      return { title: modeModel.emptyTitle, subtitle: modeModel.emptySubtitle }
+    }
+    return modelDisplayName(
+      modeModel.selected,
+      localModels.find((model) => model.id === modeModel.selected)
+    )
+  }, [modeModel, localModels, modelsLoading])
+
+  // Seed the Voice and Generate selections from saved defaults, falling back to
+  // the first installed model of the right family.
+  useEffect(() => {
+    setVoiceModel((current) => {
+      if (current && voiceModels.some((model) => model.id === current)) return current
+      const preferred = runtime?.default_voice_model
+      if (preferred && voiceModels.some((model) => model.id === preferred)) return preferred
+      return voiceModels[0]?.id ?? ''
+    })
+  }, [voiceModels, runtime?.default_voice_model])
+
+  useEffect(() => {
+    setGenerateModel((current) => {
+      if (current && generateModels.some((model) => model.id === current)) return current
+      const preferred =
+        generateModality === 'image'
+          ? runtime?.default_image_gen_model
+          : runtime?.default_video_gen_model
+      if (preferred && generateModels.some((model) => model.id === preferred)) return preferred
+      return generateModels[0]?.id ?? ''
+    })
+  }, [
+    generateModels,
+    generateModality,
+    runtime?.default_image_gen_model,
+    runtime?.default_video_gen_model
+  ])
+
   async function updateModelBinding(modelId: string, runtimeId: string | null): Promise<void> {
     setError(null)
     try {
@@ -458,6 +550,8 @@ export function App(): React.JSX.Element {
   async function refreshConversations(query = conversationSearch): Promise<void> {
     const data = await listConversations(query)
     setConversations(data)
+    // Only an unfiltered list is worth caching for the next cold start.
+    if (!query.trim()) writeCachedConversations(data)
     if (!conversationId && data[0]) setConversationId(data[0].id)
   }
 
@@ -947,9 +1041,14 @@ export function App(): React.JSX.Element {
           </div>
           <button
             className="model-picker"
-            title="Choose which installed model to chat with"
+            title={
+              appMode === 'chat'
+                ? 'Choose which installed model to chat with'
+                : appMode === 'voice'
+                  ? 'Choose which PersonaPlex model to speak with'
+                  : `Choose which ${generateModality} model to generate with`
+            }
             onClick={() => setModelMenuOpen(true)}
-            disabled={appMode !== 'chat'}
           >
             <div className="model-icon">
               <Box size={16} />
@@ -1040,7 +1139,10 @@ export function App(): React.JSX.Element {
 
         {appMode === 'generate' ? (
           <GenerateMode
-            models={localModels}
+            models={generateModels}
+            modality={generateModality}
+            onModalityChange={setGenerateModality}
+            modelId={generateModel}
             settings={runtime}
             onError={setError}
           />
@@ -1050,6 +1152,7 @@ export function App(): React.JSX.Element {
             models={localModels}
             settings={runtime}
             realtimeAvailable={realtimeVoiceAvailable}
+            modelId={voiceModel}
             onError={setError}
           />
         ) : null}
@@ -1370,10 +1473,17 @@ export function App(): React.JSX.Element {
 
       {modelMenuOpen && (
         <ModelMenu
-          models={chatModels}
-          selectedModel={selectedModel}
+          models={modeModel.models}
+          title={
+            appMode === 'chat'
+              ? 'Choose a model'
+              : appMode === 'voice'
+                ? 'Choose a voice model'
+                : `Choose a ${generateModality} model`
+          }
+          selectedModel={modeModel.selected}
           loading={modelsLoading}
-          onSelect={selectModel}
+          onSelect={modeModel.select}
           onManage={() => openManage(modelsLoadFailed || localModels.length === 0 ? 'discover' : 'library')}
           onClose={() => setModelMenuOpen(false)}
         />

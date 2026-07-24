@@ -3020,10 +3020,60 @@ a.inline-link {
 
 .mode-toggle button,
 .voice-actions button,
-.generate-form button.primary {
+.generate-form button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+/* Action buttons in the Voice and Generate panels share the chip language
+   used by the Manage panel: neutral by default, accent for the primary
+   action, warm red for the destructive one. */
+.voice-actions button,
+.generate-form button {
+  justify-content: center;
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--soft);
+  background: #1c1f1a;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition:
+    filter 120ms ease,
+    border-color 120ms ease;
+}
+
+.voice-actions button:hover:not(:disabled),
+.generate-form button:hover:not(:disabled) {
+  border-color: #46503c;
+  filter: brightness(1.08);
+}
+
+.voice-actions button.primary,
+.generate-form button.primary {
+  border-color: #a8d45f;
+  color: #18200f;
+  background: var(--accent);
+}
+
+.voice-actions button.toggled {
+  border-color: #6a7357;
+  color: var(--accent);
+  background: var(--accent-dark);
+}
+
+.voice-actions button.danger {
+  border-color: #674039;
+  color: #e8b7ad;
+  background: #2c1d1a;
+}
+
+.voice-actions button:disabled,
+.generate-form button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .mode-toggle button {
@@ -3112,6 +3162,44 @@ a.inline-link {
   gap: 8px;
 }
 
+.voice-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.voice-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #4b5142;
+}
+
+.voice-status.live .voice-status-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(214, 255, 127, 0.15);
+}
+
+.voice-status-model {
+  margin-left: auto;
+  color: var(--soft);
+}
+
+.voice-meters {
+  display: grid;
+  gap: 6px;
+}
+
+.voice-meter-row {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+}
+
 .voice-meter {
   height: 8px;
   border-radius: 999px;
@@ -3123,6 +3211,10 @@ a.inline-link {
   height: 100%;
   background: linear-gradient(90deg, #5a7d4a, #b7d48a);
   transition: width 80ms linear;
+}
+
+.voice-meter-fill.model {
+  background: linear-gradient(90deg, #4a6a7d, #8ac0d4);
 }
 
 .voice-transcript {

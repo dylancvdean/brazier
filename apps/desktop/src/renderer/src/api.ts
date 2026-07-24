@@ -756,10 +756,14 @@ export type ManagedLlamaTargetStatus = {
   update_available: boolean
 }
 
-export async function fetchManagedLlamaStatus(): Promise<{
+export type ManagedEngineStatus = {
   latest_version: string | null
+  /** True while the daemon is still checking upstream for the newest release. */
+  latest_pending?: boolean
   targets: ManagedLlamaTargetStatus[]
-}> {
+}
+
+export async function fetchManagedLlamaStatus(): Promise<ManagedEngineStatus> {
   return request('/api/v1/engines/llama.cpp/managed-status')
 }
 
@@ -781,12 +785,9 @@ export async function ensureLlamaEngine(
   return { binary: result.binary, status: result.status ?? 'ready' }
 }
 
-export async function fetchManagedWhisperStatus(): Promise<{
-  latest_version: string | null
-  managed_supported: boolean
-  note?: string | null
-  targets: ManagedLlamaTargetStatus[]
-}> {
+export async function fetchManagedWhisperStatus(): Promise<
+  ManagedEngineStatus & { managed_supported: boolean; note?: string | null }
+> {
   return request('/api/v1/engines/whisper.cpp/managed-status')
 }
 
@@ -808,10 +809,7 @@ export async function ensureWhisperEngine(
   return { binary: result.binary, status: result.status ?? 'ready' }
 }
 
-export async function fetchManagedSdcppStatus(): Promise<{
-  latest_version: string | null
-  targets: ManagedLlamaTargetStatus[]
-}> {
+export async function fetchManagedSdcppStatus(): Promise<ManagedEngineStatus> {
   return request('/api/v1/engines/stable-diffusion.cpp/managed-status')
 }
 

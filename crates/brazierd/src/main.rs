@@ -76,6 +76,9 @@ async fn main() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&data_dir)
         .await
         .context("create data directory")?;
+    // Release lookups persist across restarts so Manage → Runtimes never waits
+    // on GitHub just to show what is installed.
+    brazierd::github_releases::set_cache_dir(data_dir.join("state"));
     let db = Database::open(&data_dir.join("brazier.sqlite")).await?;
     let api_key = if args.no_auth {
         None

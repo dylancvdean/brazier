@@ -1,5 +1,5 @@
 import { Image, LoaderCircle, Video } from 'lucide-react'
-import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, useEffect, useState } from 'react'
 import {
   fetchBlobObjectUrl,
   generateImage,
@@ -8,12 +8,16 @@ import {
   type LocalModel,
   type RuntimeSettings
 } from '../api'
-import { isImageGenModel, isVideoGenModel, modelDisplayName } from '../model-utils'
 
 type Modality = 'image' | 'video'
 
 type Props = {
+  /** Installed models for the active modality. */
   models: LocalModel[]
+  modality: Modality
+  onModalityChange: (modality: Modality) => void
+  /** Model chosen in the top bar; empty when none is installed. */
+  modelId: string
   settings: RuntimeSettings | null
   onError: (message: string | null) => void
 }
@@ -23,7 +27,7 @@ function errorText(cause: unknown): string {
 }
 
 export function GenerateMode(props: Props) {
-  const [modality, setModality] = useState<Modality>('image')
+  const modality = props.modality
   const [prompt, setPrompt] = useState('')
   const [negative, setNegative] = useState('')
   const [width, setWidth] = useState(512)
@@ -31,7 +35,6 @@ export function GenerateMode(props: Props) {
   const [steps, setSteps] = useState(20)
   const [frames, setFrames] = useState(16)
   const [seed, setSeed] = useState('')
-  const [modelId, setModelId] = useState('')
   const [busy, setBusy] = useState(false)
   const [results, setResults] = useState<GenerateBlobResult[]>([])
   const [urls, setUrls] = useState<Record<string, string>>({})
@@ -58,22 +61,8 @@ export function GenerateMode(props: Props) {
     }
   }, [results])
 
-  const imageModels = useMemo(
-    () => props.models.filter((model) => isImageGenModel(model)),
-    [props.models]
-  )
-  const videoModels = useMemo(
-    () => props.models.filter((model) => isVideoGenModel(model)),
-    [props.models]
-  )
-  const available = modality === 'image' ? imageModels : videoModels
-  const selected =
-    modelId ||
-    (modality === 'image'
-      ? props.settings?.default_image_gen_model
-      : props.settings?.default_video_gen_model) ||
-    available[0]?.id ||
-    ''
+  const available = props.models
+  const selected = props.modelId
 
   async function onSubmit(event: FormEvent): Promise<void> {
     event.preventDefault()
@@ -114,7 +103,7 @@ export function GenerateMode(props: Props) {
           role="tab"
           className={modality === 'image' ? 'active' : ''}
           aria-selected={modality === 'image'}
-          onClick={() => setModality('image')}
+          onClick={() => props.onModalityChange('image')}
         >
           <Image size={16} /> Image
         </button>
@@ -123,7 +112,7 @@ export function GenerateMode(props: Props) {
           role="tab"
           className={modality === 'video' ? 'active' : ''}
           aria-selected={modality === 'video'}
-          onClick={() => setModality('video')}
+          onClick={() => props.onModalityChange('video')}
         >
           <Video size={16} /> Video
         </button>
@@ -136,19 +125,6 @@ export function GenerateMode(props: Props) {
         </p>
       ) : (
         <form className="generate-form" onSubmit={(event) => void onSubmit(event)}>
-          <label>
-            Model
-            <select value={selected} onChange={(event) => setModelId(event.target.value)}>
-              {available.map((model) => {
-                const names = modelDisplayName(model.id, model)
-                return (
-                  <option key={model.id} value={model.id}>
-                    {names.title}
-                  </option>
-                )
-              })}
-            </select>
-          </label>
           <label>
             Prompt
             <textarea

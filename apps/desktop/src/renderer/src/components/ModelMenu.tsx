@@ -6,6 +6,8 @@ type ModelMenuProps = {
   models: LocalModel[]
   selectedModel: string
   loading: boolean
+  /** Heading for the popover; names the family the list is filtered to. */
+  title?: string
   onSelect: (modelId: string) => void
   onManage: () => void
   onClose: () => void
@@ -19,6 +21,7 @@ export function ModelMenu({
   models,
   selectedModel,
   loading,
+  title = 'Choose a model',
   onSelect,
   onManage,
   onClose
@@ -26,7 +29,7 @@ export function ModelMenu({
   return (
     <div className="menu-backdrop" onMouseDown={onClose}>
       <div className="popover model-menu" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="popover-title">Choose a model</div>
+        <div className="popover-title">{title}</div>
         {loading && (
           <div className="popover-empty">
             <LoaderCircle className="spin" size={16} />

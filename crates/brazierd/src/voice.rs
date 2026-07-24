@@ -43,6 +43,9 @@ use crate::{
 pub const ENGINE: &str = "personaplex";
 /// Apple Silicon MLX port (`mu-hashmi/personaplex-mlx`); same Moshi wire protocol.
 pub const ENGINE_MLX: &str = "personaplex-mlx";
+/// Weight quantization the MLX backend runs at; 4-bit is the practical
+/// default for on-device Apple Silicon.
+const MLX_QUANTIZATION: u8 = 4;
 
 /// Which Python package backs a given voice interpreter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +217,72 @@ fn dir_size(path: &Path) -> anyhow::Result<u64> {
     Ok(total)
 }
 
+// ---------------------------------------------------------------------------
+// Local snapshot -> PersonaPlex-MLX launch flags.
+//
+// `personaplex_mlx.local_web` treats `--hf-repo` strictly as a Hugging Face
+// repo id (it is handed to `huggingface_hub.hf_hub_download`), so a local
+// snapshot directory cannot be passed there. Instead the repo id the snapshot
+// came from is passed as `--hf-repo` and every asset already on disk is wired
+// up through the explicit per-file flags.
+// ---------------------------------------------------------------------------
+
+/// Hugging Face repo id implied by a snapshot directory laid out as
+/// `.../{owner}/{name}` (how [`download_root`] stores them).
+fn repo_id_from_snapshot_dir(dir: &Path) -> Option<String> {
+    let name = dir.file_name()?.to_str()?;
+    let owner = dir.parent()?.file_name()?.to_str()?;
+    let repo_id = format!("{owner}/{name}");
+    models_store::validate_repo_id(&repo_id).ok()?;
+    Some(repo_id)
+}
+
+/// Language-model weight file to load, preferring a pre-quantized variant
+/// matching `quantized` so MLX skips the quantize-after-load pass.
+fn snapshot_lm_weight(dir: &Path, quantized: u8) -> Option<PathBuf> {
+    let prequantized = dir.join(format!("model.q{quantized}.safetensors"));
+    if prequantized.is_file() {
+        return Some(prequantized);
+    }
+    let full = dir.join("model.safetensors");
+    full.is_file().then_some(full)
+}
+
+/// Mimi audio-tokenizer checkpoint (`tokenizer-{hash}-checkpoint{n}.safetensors`).
+fn snapshot_mimi_weight(dir: &Path) -> Option<PathBuf> {
+    dir.read_dir()
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            name.starts_with("tokenizer-") && name.ends_with(".safetensors")
+        })
+}
+
+/// Directory of built-in voice prompts, extracting `voices.tgz` on first use.
+///
+/// Returns `None` when the snapshot has no voices archive, in which case the
+/// server falls back to downloading it from `--hf-repo`.
+fn snapshot_voice_prompt_dir(dir: &Path) -> Option<PathBuf> {
+    let voices = dir.join("voices");
+    if voices.is_dir() {
+        return Some(voices);
+    }
+    let archive = dir.join("voices.tgz");
+    if !archive.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(&archive).ok()?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    // The archive already contains a single top-level `voices/` directory.
+    tar.unpack(dir).ok()?;
+    voices.is_dir().then_some(voices)
+}
+
 /// Resolve a preferred model id/path, falling back to the first on-disk snapshot.
 pub fn resolve_model_path(data_dir: &Path, preferred: Option<&str>) -> Option<PathBuf> {
     if let Some(id) = preferred {
@@ -344,10 +413,14 @@ impl VoiceServer {
     ///
     /// Moshi: `python -m moshi.server --host --port [--hf-repo]`.
     /// MLX: `python -m personaplex_mlx.local_web --host --port --no-browser
-    ///       --text-prompt --voice|-voice-prompt [-q 4] [--hf-repo]`.
+    ///       --text-prompt --voice|-voice-prompt [-q 4] [--static none]
+    ///       [--hf-repo] [--lm-config --tokenizer --moshi-weight
+    ///       --mimi-weight --voice-prompt-dir]`.
     ///
-    /// When `model_path` is provided (a local snapshot directory), it is
-    /// passed via `--hf-repo` so the server loads it instead of downloading.
+    /// When `model_path` is provided (a local snapshot directory), Moshi loads
+    /// it directly via `--hf-repo`; MLX instead takes the repo id in
+    /// `--hf-repo` and each local asset through its own flag, since it only
+    /// ever resolves `--hf-repo` through the Hugging Face hub.
     pub async fn start(
         python: &Path,
         model_path: Option<&Path>,
@@ -420,7 +493,11 @@ impl VoiceServer {
                     .arg(persona)
                     // 4-bit is the practical default for on-device Apple Silicon.
                     .arg("-q")
-                    .arg("4");
+                    .arg(MLX_QUANTIZATION.to_string())
+                    // Clients talk to the WS proxy, never the bundled web UI;
+                    // skipping it also avoids a `dist.tgz` download on startup.
+                    .arg("--static")
+                    .arg("none");
                 if let Some(path) = options.voice_prompt.as_ref() {
                     command.arg("--voice-prompt").arg(path);
                 } else {
@@ -431,8 +508,30 @@ impl VoiceServer {
                         .unwrap_or("NATF2");
                     command.arg("--voice").arg(voice);
                 }
-                if let Some(path) = model_path {
-                    command.arg("--hf-repo").arg(path);
+                if let Some(dir) = model_path {
+                    // `--hf-repo` must stay a repo id (the server downloads
+                    // through it, and the 7B config fallback keys off its
+                    // exact value); local files are passed file by file.
+                    if let Some(repo_id) = repo_id_from_snapshot_dir(dir) {
+                        command.arg("--hf-repo").arg(repo_id);
+                    }
+                    let config = dir.join("config.json");
+                    if config.is_file() {
+                        command.arg("--lm-config").arg(config);
+                    }
+                    let tokenizer = dir.join("tokenizer_spm_32k_3.model");
+                    if tokenizer.is_file() {
+                        command.arg("--tokenizer").arg(tokenizer);
+                    }
+                    if let Some(weight) = snapshot_lm_weight(dir, MLX_QUANTIZATION) {
+                        command.arg("--moshi-weight").arg(weight);
+                    }
+                    if let Some(weight) = snapshot_mimi_weight(dir) {
+                        command.arg("--mimi-weight").arg(weight);
+                    }
+                    if let Some(voices) = snapshot_voice_prompt_dir(dir) {
+                        command.arg("--voice-prompt-dir").arg(voices);
+                    }
                 }
             }
         }
@@ -717,6 +816,57 @@ mod tests {
         let root = models_root(dir.path());
         let snapshot = write_snapshot(&root, "kyutai/moshiko-pytorch-bf16");
         assert_eq!(resolve_model_path(dir.path(), None), Some(snapshot));
+    }
+
+    #[test]
+    fn snapshot_dir_yields_its_repo_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = models_root(dir.path());
+        let snapshot = write_snapshot(&root, "nvidia/personaplex-7b-v1");
+        assert_eq!(
+            repo_id_from_snapshot_dir(&snapshot).as_deref(),
+            Some("nvidia/personaplex-7b-v1")
+        );
+        assert!(repo_id_from_snapshot_dir(Path::new("/")).is_none());
+    }
+
+    #[test]
+    fn snapshot_weights_prefer_prequantized() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = models_root(dir.path());
+        let snapshot = write_snapshot(&root, "nvidia/personaplex-7b-v1");
+        assert_eq!(
+            snapshot_lm_weight(&snapshot, 4),
+            Some(snapshot.join("model.safetensors"))
+        );
+
+        std::fs::write(snapshot.join("model.q4.safetensors"), b"quantized").unwrap();
+        assert_eq!(
+            snapshot_lm_weight(&snapshot, 4),
+            Some(snapshot.join("model.q4.safetensors"))
+        );
+        // A different bit width must not pick up the q4 file.
+        assert_eq!(
+            snapshot_lm_weight(&snapshot, 8),
+            Some(snapshot.join("model.safetensors"))
+        );
+
+        assert!(snapshot_mimi_weight(&snapshot).is_none());
+        let mimi = snapshot.join("tokenizer-e351c8d8-checkpoint125.safetensors");
+        std::fs::write(&mimi, b"mimi").unwrap();
+        assert_eq!(snapshot_mimi_weight(&snapshot), Some(mimi));
+    }
+
+    #[test]
+    fn voice_prompt_dir_is_absent_without_an_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = models_root(dir.path());
+        let snapshot = write_snapshot(&root, "nvidia/personaplex-7b-v1");
+        assert!(snapshot_voice_prompt_dir(&snapshot).is_none());
+
+        let voices = snapshot.join("voices");
+        std::fs::create_dir_all(&voices).unwrap();
+        assert_eq!(snapshot_voice_prompt_dir(&snapshot), Some(voices));
     }
 
     #[test]

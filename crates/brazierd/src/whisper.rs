@@ -9,7 +9,6 @@ use std::{
 use anyhow::Context;
 use flate2::read::GzDecoder;
 use futures::StreamExt;
-use serde::Deserialize;
 use tar::Archive;
 use tokio::{io::AsyncWriteExt, process::Command};
 
@@ -159,22 +158,18 @@ pub fn select_release_asset_for_target<'a>(
     None
 }
 
-#[derive(Debug, Deserialize)]
-struct GithubRelease {
-    tag_name: String,
-    assets: Vec<GithubAsset>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GithubAsset {
-    name: String,
-    browser_download_url: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct ReleaseAsset {
     pub name: String,
     pub browser_download_url: String,
+}
+
+/// Newest release tag from cache, without waiting on GitHub.
+///
+/// Status views call this on every open, so a stale-but-instant answer beats
+/// a blocking lookup; the refresh it triggers lands in time for the next one.
+pub fn cached_release_tag(client: &reqwest::Client) -> crate::github_releases::CachedRelease {
+    crate::github_releases::cached_or_refresh(client, GITHUB_API, USER_AGENT)
 }
 
 pub async fn resolve_managed_release(
@@ -183,36 +178,20 @@ pub async fn resolve_managed_release(
 ) -> anyhow::Result<(String, ReleaseAsset)> {
     let platform = platform_asset_tag()
         .context("managed whisper.cpp CLI binaries are not available for this platform (macOS uses source builds)")?;
-    let release: GithubRelease = client
-        .get(GITHUB_API)
-        .header("user-agent", USER_AGENT)
-        .send()
-        .await
-        .context("contact GitHub releases")?
-        .error_for_status()
-        .context("GitHub releases request failed")?
-        .json()
-        .await
-        .context("decode GitHub release")?;
-    let names: Vec<String> = release
-        .assets
-        .iter()
-        .map(|asset| asset.name.clone())
-        .collect();
+    let release = crate::github_releases::latest_release(client, GITHUB_API, USER_AGENT).await?;
+    let names: Vec<String> = release.asset_names().map(str::to_owned).collect();
     let selected =
         select_release_asset_for_target(names.iter().map(String::as_str), platform, target)
             .context("no matching whisper.cpp release asset for this platform/target")?
             .to_owned();
     let asset = release
-        .assets
-        .into_iter()
-        .find(|asset| asset.name == selected)
+        .asset(&selected)
         .context("selected asset missing from release")?;
     Ok((
-        release.tag_name,
+        release.tag_name.clone(),
         ReleaseAsset {
-            name: asset.name,
-            browser_download_url: asset.browser_download_url,
+            name: asset.name.clone(),
+            browser_download_url: asset.browser_download_url.clone(),
         },
     ))
 }
