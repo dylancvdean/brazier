@@ -40,6 +40,8 @@ export type LocalModel = {
     max_context_length?: number | null
     reasoning_modes?: string[]
     harmony?: boolean
+    /** `native` when the chat model consumes audio tokens directly. */
+    audio_input?: string | null
   }
 }
 
@@ -79,13 +81,22 @@ export type PipelineFeatures = {
   asr: boolean
   video_preprocess: boolean
   whisper_cpp_engine?: boolean
+  native_model_audio?: boolean
+  streaming_asr?: boolean
+  realtime_voice?: boolean
 }
 
 export type CapabilitiesResponse = {
   schema_version: number
-  features: Record<string, boolean> & {
+  features: Record<string, unknown> & {
     asr?: boolean
     video_preprocess?: boolean
+    audio_interfaces?: {
+      batch_asr?: { available?: boolean; summary?: string }
+      native_model_audio?: { available?: boolean; summary?: string }
+      streaming_asr?: { available?: boolean; planned?: boolean; summary?: string }
+      realtime_voice?: { available?: boolean; planned?: boolean; summary?: string }
+    }
   }
 }
 

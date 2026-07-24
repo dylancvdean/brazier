@@ -77,6 +77,14 @@ pub struct ModelCapabilities {
     /// Uses OpenAI Harmony wire format (gpt-oss family).
     #[serde(default)]
     pub harmony: bool,
+    /// How the chat model consumes audio attachments, when advertised.
+    ///
+    /// - omitted / null: no native audio; Brazier may still run **batch ASR**
+    ///   (whisper.cpp) and inject a transcript.
+    /// - `"native"`: model accepts audio features/tokens (OpenAI `input_audio`
+    ///   style). Prefer this path over ASR when both are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_input: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

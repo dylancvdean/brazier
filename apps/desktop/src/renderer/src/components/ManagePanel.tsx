@@ -609,11 +609,12 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                   <span className="library-runtime-note">{runtimeNotice}</span>
                 )}
                 <div className="library-caps">
-                  {engine === 'whisper.cpp' && <span>asr</span>}
+                  {engine === 'whisper.cpp' && <span>batch ASR</span>}
+                  {caps?.audio_input === 'native' && <span>native audio</span>}
                   {caps?.input_modalities.includes('image') && <span>vision</span>}
-                  {caps?.input_modalities.includes('audio') && engine !== 'whisper.cpp' && (
-                    <span>audio</span>
-                  )}
+                  {caps?.input_modalities.includes('audio') &&
+                    engine !== 'whisper.cpp' &&
+                    caps?.audio_input !== 'native' && <span>audio</span>}
                   {caps?.tools && <span>tools</span>}
                   {caps?.reasoning && <span>reasoning</span>}
                 </div>

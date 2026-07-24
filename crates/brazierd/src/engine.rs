@@ -867,6 +867,7 @@ impl Runtime {
                 max_context_length: None,
                 reasoning_modes: Vec::new(),
                 harmony: false,
+                audio_input: None,
             });
         let whisper_binary = self.whisper.lock().await.binary.clone().or_else(|| {
             whisper::resolve_binary(&self.data_dir, settings.whisper_binary.as_deref())

@@ -196,6 +196,8 @@ fn collect_whisper(
                 max_context_length: None,
                 reasoning_modes: Vec::new(),
                 harmony: false,
+                // Whisper weights are batch ASR engines, not native audio chat models.
+                audio_input: None,
             },
             size_bytes: Some(size),
             read_only: false,

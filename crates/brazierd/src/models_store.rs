@@ -392,8 +392,14 @@ fn dir_has_projector(dir: &Path) -> bool {
 fn gguf_capabilities(has_projector: bool, model_key: &str) -> ModelCapabilities {
     let mut input_modalities = vec!["text".into()];
     if has_projector {
-        // mmproj enables vision only; audio/video use the whisper.cpp + ffmpeg pipeline.
+        // mmproj enables vision only unless the checkpoint is a known audio LLM.
         input_modalities.push("image".into());
+    }
+    let native_audio = looks_like_native_audio_model(model_key, None);
+    if native_audio {
+        if !input_modalities.iter().any(|m| m == "audio") {
+            input_modalities.push("audio".into());
+        }
     }
     let (reasoning, reasoning_modes) = infer_reasoning_profile(model_key, None);
     ModelCapabilities {
@@ -405,7 +411,61 @@ fn gguf_capabilities(has_projector: bool, model_key: &str) -> ModelCapabilities 
         max_context_length: infer_gguf_context_hint(model_key),
         reasoning_modes,
         harmony: crate::harmony::is_harmony_model(model_key),
+        audio_input: native_audio.then(|| "native".to_owned()),
     }
+}
+
+/// True when the checkpoint is likely a chat model that consumes audio tokens
+/// directly (not a Whisper-class ASR weight and not vision-only mmproj).
+pub fn looks_like_native_audio_model(model_key: &str, config_text: Option<&str>) -> bool {
+    let lower = model_key.to_ascii_lowercase();
+    // Exclude dedicated ASR / Whisper weights — those are batch ASR engines.
+    if lower.contains("whisper")
+        || lower.contains("parakeet")
+        || lower.contains("nemotron-speech")
+        || lower.contains("nemotron-3.5-asr")
+        || lower.contains("nemotron_3.5_asr")
+        || lower.contains("canary-")
+            && !lower.contains("canary-qwen")
+        || (lower.contains("asr") && !lower.contains("audio"))
+    {
+        return false;
+    }
+    const NEEDLES: &[&str] = &[
+        "qwen2-audio",
+        "qwen2_audio",
+        "qwen-audio",
+        "qwen_audio",
+        "ultravox",
+        "mini-omni",
+        "mini_omni",
+        "salmonn",
+        "speech_llm",
+        "speech-llm",
+        "audio-llm",
+        "audio_llm",
+        "audioflamingo",
+        "audio-flamingo",
+        "gamaudio",
+        "vita-audio",
+        "moshi",
+        "kyutai",
+    ];
+    if NEEDLES.iter().any(|needle| lower.contains(needle)) {
+        return true;
+    }
+    if let Some(config) = config_text {
+        let config_lower = config.to_ascii_lowercase();
+        if config_lower.contains("\"audio_config\"")
+            || config_lower.contains("\"audio_encoder\"")
+            || config_lower.contains("qwen2_audio")
+            || config_lower.contains("qwen2audio")
+            || config_lower.contains("ultravox")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn infer_gguf_context_hint(model_key: &str) -> Option<u32> {
@@ -606,6 +666,10 @@ fn mlx_capabilities(kind: MlxKind, dir: &Path, model_key: &str) -> ModelCapabili
             input_modalities.push("image".into());
         }
     }
+    let native_audio = looks_like_native_audio_model(model_key, config_text.as_deref());
+    if native_audio && !input_modalities.iter().any(|value| value == "audio") {
+        input_modalities.push("audio".into());
+    }
     let (reasoning, reasoning_modes) =
         infer_reasoning_profile(model_key, config_value.as_ref());
     ModelCapabilities {
@@ -619,6 +683,7 @@ fn mlx_capabilities(kind: MlxKind, dir: &Path, model_key: &str) -> ModelCapabili
             .and_then(max_context_from_config),
         reasoning_modes,
         harmony: crate::harmony::is_harmony_model(model_key),
+        audio_input: native_audio.then(|| "native".to_owned()),
     }
 }
 
@@ -970,6 +1035,17 @@ mod tests {
                 .input_modalities
                 .contains(&"image".to_owned())
         );
+        assert!(!models[0].capabilities.input_modalities.contains(&"audio".to_owned()));
+        assert!(models[0].capabilities.audio_input.is_none());
+    }
+
+    #[test]
+    fn detects_native_audio_llms_not_whisper_asr() {
+        assert!(looks_like_native_audio_model("Qwen2-Audio-7B-Instruct", None));
+        assert!(looks_like_native_audio_model("ultravox-v0.5", None));
+        assert!(!looks_like_native_audio_model("ggml-whisper-large-v3", None));
+        assert!(!looks_like_native_audio_model("nemotron-3.5-asr-streaming-0.6b", None));
+        assert!(!looks_like_native_audio_model("ordinary-chat-q4_k_m", None));
     }
 
     #[test]

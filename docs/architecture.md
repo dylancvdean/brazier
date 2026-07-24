@@ -49,6 +49,36 @@ The canonical capability record separately describes input modalities, output
 modalities, streaming, reasoning, and tools. Platform support is attached to an
 engine installation, not inferred from model metadata alone.
 
+## Audio and media interfaces
+
+Brazier treats several different “audio” paths as distinct products. Do not
+collapse them into a single Audio badge meaning.
+
+1. **Batch ASR (preprocess)** — Implemented via `whisper.cpp`. An attached
+   audio file is transcribed offline; the transcript is injected as text into
+   the chat request. Works with ordinary text chat models. Exposed as
+   `features.asr` / `features.audio_interfaces.batch_asr` and
+   `POST /v1/audio/transcriptions`.
+
+2. **Native model audio** — The selected chat model accepts audio tokens or
+   OpenAI-style `input_audio` parts (`capabilities.audio_input = "native"`).
+   Brazier hydrates blobs to `input_audio` instead of running Whisper. Detection
+   is conservative (name/config heuristics for known audio-LLMs). Engine
+   adapters must still accept the wire format.
+
+3. **Streaming ASR** — Low-latency chunked transcription while audio arrives
+   (for example NVIDIA Nemotron ASR Streaming). Not implemented; see roadmap.
+
+4. **Realtime voice / PersonaPlex-class** — Full-duplex speech-to-speech with
+   persona control (NVIDIA PersonaPlex / Nemotron VoiceChat). Not implemented;
+   see roadmap. This is not the same as attaching a file to a text chat.
+
+**Vision** attachments hydrate to `image_url` data URLs when the chat model
+advertises `image`. **Video** uses system ffmpeg to sample frames into that
+vision path, optionally with batch ASR on the soundtrack.
+
+Unsupported modalities fail in `brazierd` before inference.
+
 ## Engine builds
 
 Build recipes in `engine-recipes` are shipped and reviewed with Brazier. A user

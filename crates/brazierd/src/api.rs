@@ -243,6 +243,13 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         settings.whisper_binary.as_deref(),
         settings.whisper_model.as_deref(),
     );
+    let any_native_audio = models.iter().any(|model| {
+        model
+            .capabilities
+            .audio_input
+            .as_deref()
+            .is_some_and(|mode| mode == "native")
+    });
     Ok(Json(json!({
         "schema_version": 1,
         "models": models,
@@ -261,8 +268,34 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             "model_download_queue": true,
             "model_download_cancel": true,
             "model_trust_acknowledgement": true,
+            // Legacy aliases — prefer audio_interfaces below.
             "asr": features_pipeline.asr,
             "video_preprocess": features_pipeline.video_preprocess,
+            "audio_interfaces": {
+                "batch_asr": {
+                    "id": "batch_asr",
+                    "available": features_pipeline.asr,
+                    "engine": "whisper.cpp",
+                    "summary": "File/blob transcription via whisper.cpp before chat. Works with any text model."
+                },
+                "native_model_audio": {
+                    "id": "native_model_audio",
+                    "available": any_native_audio,
+                    "summary": "Chat model consumes audio tokens directly (OpenAI input_audio). Detected on specific audio-LLM checkpoints; not Whisper ASR weights."
+                },
+                "streaming_asr": {
+                    "id": "streaming_asr",
+                    "available": false,
+                    "planned": true,
+                    "summary": "Low-latency chunked transcription (for example NVIDIA Nemotron ASR Streaming). Not shipped yet."
+                },
+                "realtime_voice": {
+                    "id": "realtime_voice",
+                    "available": false,
+                    "planned": true,
+                    "summary": "Full-duplex speech-to-speech (PersonaPlex / Nemotron VoiceChat class). Not shipped yet."
+                }
+            }
         }
     })))
 }
@@ -1519,6 +1552,7 @@ async fn audio_transcriptions(
         max_context_length: None,
         reasoning_modes: Vec::new(),
         harmony: false,
+        audio_input: None,
     };
     let ctx = media::MediaContext {
         data_dir: &state.data_dir,

@@ -279,11 +279,17 @@ export function App(): React.JSX.Element {
     [selectedModel, localModels, prefetchedRuntimes, modelBindings]
   )
   const canAttachImage = Boolean(selectedCapabilities?.input_modalities.includes('image'))
-  const canAttachAudio = pipelineFeatures.asr
+  const selectedNativeAudio = selectedCapabilities?.audio_input === 'native'
+  const canAttachAudio = pipelineFeatures.asr || selectedNativeAudio
   const canAttachVideo =
     pipelineFeatures.video_preprocess && canAttachImage
   const canAttach = canAttachImage || canAttachAudio || canAttachVideo
   const canUseTools = selectedCapabilities?.tools !== false
+  const audioBadgeTitle = selectedNativeAudio
+    ? 'Native audio: this chat model can consume audio directly (not Whisper ASR)'
+    : pipelineFeatures.asr
+      ? 'Batch ASR: attachments are transcribed with whisper.cpp, then sent as text'
+      : 'No audio path yet — build whisper.cpp + download a Whisper model, or select a native-audio chat model. Realtime PersonaPlex voice is not available yet.'
 
   async function refreshLocalModels(): Promise<void> {
     const models = await listModels()
@@ -326,10 +332,14 @@ export function App(): React.JSX.Element {
         void fetchModelBindings().then(setModelBindings).catch(() => {})
         void fetchCapabilities()
           .then((payload) => {
+            const audio = payload.features.audio_interfaces
             setPipelineFeatures({
-              asr: Boolean(payload.features.asr),
+              asr: Boolean(payload.features.asr ?? audio?.batch_asr?.available),
               video_preprocess: Boolean(payload.features.video_preprocess),
-              whisper_cpp_engine: Boolean(payload.features.whisper_cpp_engine)
+              whisper_cpp_engine: Boolean(payload.features.whisper_cpp_engine),
+              native_model_audio: Boolean(audio?.native_model_audio?.available),
+              streaming_asr: Boolean(audio?.streaming_asr?.available),
+              realtime_voice: Boolean(audio?.realtime_voice?.available)
             })
           })
           .catch(() => {})
@@ -453,10 +463,14 @@ export function App(): React.JSX.Element {
     )
     void fetchCapabilities()
       .then((payload) => {
+        const audio = payload.features.audio_interfaces
         setPipelineFeatures({
-          asr: Boolean(payload.features.asr),
+          asr: Boolean(payload.features.asr ?? audio?.batch_asr?.available),
           video_preprocess: Boolean(payload.features.video_preprocess),
-          whisper_cpp_engine: Boolean(payload.features.whisper_cpp_engine)
+          whisper_cpp_engine: Boolean(payload.features.whisper_cpp_engine),
+          native_model_audio: Boolean(audio?.native_model_audio?.available),
+          streaming_asr: Boolean(audio?.streaming_asr?.available),
+          realtime_voice: Boolean(audio?.realtime_voice?.available)
         })
       })
       .catch(() => {})
@@ -573,7 +587,12 @@ export function App(): React.JSX.Element {
       if (accepted.length === 0 && files.length > 0) {
         const reasons: string[] = []
         if (!canAttachImage) reasons.push('vision model for images')
-        if (!canAttachAudio) reasons.push('whisper.cpp + Whisper model for audio')
+        if (!canAttachAudio)
+          reasons.push(
+            selectedNativeAudio
+              ? 'native-audio model path'
+              : 'batch ASR (whisper.cpp + Whisper model) or a native-audio chat model'
+          )
         if (!canAttachVideo) reasons.push('ffmpeg + vision model for video')
         setError(`Cannot attach that media yet. Need: ${reasons.join('; ')}.`)
         event.target.value = ''
@@ -854,13 +873,10 @@ export function App(): React.JSX.Element {
             </span>
             <span
               className={canAttachAudio ? '' : 'unavailable'}
-              title={
-                canAttachAudio
-                  ? 'Audio attachments are transcribed with whisper.cpp before chat'
-                  : 'Build whisper.cpp and download a Whisper model to enable audio'
-              }
+              title={audioBadgeTitle}
             >
-              <AudioLines size={14} /> Audio
+              <AudioLines size={14} />{' '}
+              {selectedNativeAudio ? 'Native audio' : pipelineFeatures.asr ? 'ASR' : 'Audio'}
             </span>
             <span
               className={canAttachVideo ? '' : 'unavailable'}

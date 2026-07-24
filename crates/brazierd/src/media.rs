@@ -113,17 +113,26 @@ pub async fn prepare_messages(
                 emit("hydrate", &format!("Preparing image {name}…"));
                 next_parts.push(image_part_from_blob(ctx.data_dir, sha256, mime).await?);
             } else if mime.starts_with("audio/") {
-                anyhow::ensure!(
-                    ctx.features.asr,
-                    "{}",
-                    asr_missing_message()
-                );
-                emit("transcribe", &format!("Transcribing {name}…"));
-                let transcript = transcribe_blob(ctx, sha256, mime, name).await?;
-                next_parts.push(json!({
-                    "type": "text",
-                    "text": format!("[Transcript of {name}]\n{transcript}")
-                }));
+                let native = ctx
+                    .model_caps
+                    .audio_input
+                    .as_deref()
+                    .is_some_and(|mode| mode == "native");
+                if native {
+                    emit("hydrate", &format!("Preparing native audio for {name}…"));
+                    next_parts.push(native_audio_part_from_blob(ctx.data_dir, sha256, mime).await?);
+                } else if ctx.features.asr {
+                    emit("transcribe", &format!("Transcribing {name} via batch ASR…"));
+                    let transcript = transcribe_blob(ctx, sha256, mime, name).await?;
+                    next_parts.push(json!({
+                        "type": "text",
+                        "text": format!("[Transcript of {name}]\n{transcript}")
+                    }));
+                } else {
+                    anyhow::bail!(
+                        "No audio path available. Either select a native-audio chat model (audio_input=native), or enable batch ASR by building whisper.cpp and downloading a Whisper model. Realtime voice (PersonaPlex / speech-to-speech) is not implemented yet."
+                    );
+                }
             } else if mime.starts_with("video/") {
                 anyhow::ensure!(
                     ctx.features.video_preprocess,
@@ -165,6 +174,31 @@ async fn image_part_from_blob(
         "type": "image_url",
         "image_url": {
             "url": format!("data:{mime};base64,{encoded}")
+        }
+    }))
+}
+
+/// OpenAI-style `input_audio` part for models with `audio_input: native`.
+async fn native_audio_part_from_blob(
+    data_dir: &Path,
+    sha256: &str,
+    mime: &str,
+) -> anyhow::Result<Value> {
+    let input = blob_to_temp_file(data_dir, sha256, extension_for_mime(mime)).await?;
+    let wav = ensure_wav(&input).await?;
+    let bytes = tokio::fs::read(&wav)
+        .await
+        .context("read converted wav for native audio")?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let _ = tokio::fs::remove_file(&input).await;
+    if wav != input {
+        let _ = tokio::fs::remove_file(&wav).await;
+    }
+    Ok(json!({
+        "type": "input_audio",
+        "input_audio": {
+            "data": encoded,
+            "format": "wav"
         }
     }))
 }
@@ -469,6 +503,7 @@ mod tests {
             max_context_length: None,
             reasoning_modes: Vec::new(),
             harmony: false,
+            audio_input: None,
         };
         let ctx = MediaContext {
             data_dir: dir.path(),
@@ -515,6 +550,7 @@ mod tests {
             max_context_length: None,
             reasoning_modes: Vec::new(),
             harmony: false,
+            audio_input: None,
         };
         let ctx = MediaContext {
             data_dir: dir.path(),
