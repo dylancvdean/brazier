@@ -77,8 +77,22 @@ export function VoiceMode(props: Props): React.JSX.Element {
   const task = snapshot.task
   const speaking = snapshot.speakingCorrelationId !== null
   const working = snapshot.activeCorrelationId !== null
-  const blocked =
-    !props.realtimeAvailable || !props.audioSupported || (needsTranscripts && !props.asrAvailable)
+  /**
+   * Why a conversation cannot start, in the order the user would fix them.
+   * Empty when nothing is in the way.
+   *
+   * "Not connected" on its own read like a fault and sent people hunting
+   * through Runtimes for a runtime that was already active, when what was
+   * actually missing was ASR.
+   */
+  const blockedReason = !props.realtimeAvailable
+    ? 'No PersonaPlex runtime or model — see below'
+    : !props.audioSupported
+      ? 'This build cannot capture audio — see below'
+      : needsTranscripts && !props.asrAvailable
+        ? 'No transcription installed — see below'
+        : ''
+  const blocked = blockedReason !== ''
 
   useEffect(() => {
     scrollAnchor.current?.scrollIntoView({ behavior: 'smooth' })
@@ -114,7 +128,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
             : 'Listening'
       : snapshot.voiceStatus === 'error'
         ? `Stopped: ${snapshot.voiceError ?? 'unknown error'}`
-        : 'Not connected'
+        : blockedReason || 'Ready — press Start conversation'
 
   return (
     <section className="voice-mode">

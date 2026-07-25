@@ -70,10 +70,86 @@ fn read_version(dir: &Path) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Whether a path is the `bin/python` of a virtual environment.
+///
+/// `pyvenv.cfg` beside the `bin` directory is what makes a virtualenv one, so
+/// it is the honest test.
+fn is_venv_interpreter(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::parent)
+        .is_some_and(|root| root.join("pyvenv.cfg").is_file())
+}
+
+/// Calendar date and time (UTC) for a Unix timestamp, as `YYYY-MM-DD HH:MM`.
+///
+/// The date alone is not enough: rebuilding a branch twice in an afternoon is
+/// the normal case, and that is exactly when the rows need telling apart.
+fn civil_timestamp(seconds: i64) -> String {
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    format!(
+        "{} {:02}:{:02}",
+        civil_date(seconds),
+        seconds_of_day / 3_600,
+        (seconds_of_day % 3_600) / 60
+    )
+}
+
+/// Calendar date (UTC) for a Unix timestamp, as `YYYY-MM-DD`.
+///
+/// Days-to-civil, from Howard Hinnant's `chrono`-compatible algorithm. One
+/// label does not justify a date dependency.
+fn civil_date(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    // Shift the epoch to 0000-03-01 so leap days land at the end of the cycle.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_position = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_position + 2) / 5 + 1;
+    let month = if month_position < 10 {
+        month_position + 3
+    } else {
+        month_position - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Build date, so rebuilds of one revision are distinguishable.
+///
+/// Every build of `main` is otherwise labelled identically, and the list then
+/// gives no way to tell the row just activated from the two beside it. Records
+/// store Unix seconds; older ones may hold an ISO timestamp.
+fn build_stamp(record: &builds::BuildRecord) -> String {
+    let raw = record.created_at.trim();
+    if let Ok(seconds) = raw.parse::<i64>() {
+        return civil_timestamp(seconds);
+    }
+    match raw.split('T').next().unwrap_or_default() {
+        "" => "undated".to_owned(),
+        date => date.to_owned(),
+    }
+}
+
 fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    // Two virtualenvs are two runtimes even when their interpreters are the
+    // same file: `venv/bin/python` is a symlink to a shared base interpreter,
+    // which uv guarantees, so resolving it throws away the only thing telling
+    // the builds apart and every one of them reports as the active runtime.
+    if is_venv_interpreter(a) && is_venv_interpreter(b) {
+        return false;
+    }
+    // Elsewhere resolving is what makes a discovered binary and the managed
+    // install it points at recognisable as one runtime.
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
-        _ => a == b,
+        _ => false,
     }
 }
 
@@ -140,7 +216,11 @@ pub fn list(
             id: format!("source-{build_id}"),
             engine: ENGINE.to_owned(),
             kind: "source".to_owned(),
-            label: format!("llama.cpp · Source · {}", record.revision),
+            label: format!(
+                "llama.cpp · Source · {} · {}",
+                record.revision,
+                build_stamp(&record)
+            ),
             target: Some(record.target.clone()),
             version: Some(record.revision.clone()),
             repository: Some(record.repository.clone()),
@@ -172,7 +252,7 @@ pub fn list(
                 id: format!("{engine}-source-{build_id}"),
                 engine: (*engine).to_owned(),
                 kind: "source".to_owned(),
-                label: format!("{display} · {}", record.revision),
+                label: format!("{display} · {} · {}", record.revision, build_stamp(&record)),
                 target: Some(record.target.clone()),
                 version: Some(record.revision.clone()),
                 repository: Some(record.repository.clone()),
@@ -885,6 +965,95 @@ mod tests {
         assert!(!entry.update_available);
         assert!(entry.error.is_none());
         assert_eq!(entry.current_commit.as_deref(), Some("0123456789ab"));
+    }
+
+    /// Two virtualenvs whose `bin/python` symlinks resolve to the same base
+    /// interpreter — which is what uv produces for every build — are two
+    /// runtimes. Resolving the symlink reported all of them as active at once.
+    #[test]
+    fn separate_virtualenvs_are_separate_runtimes() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("shared/bin");
+        std::fs::create_dir_all(&base).unwrap();
+        let interpreter = base.join("python3.12");
+        touch(&interpreter);
+
+        let mut venvs = Vec::new();
+        for name in ["one", "two"] {
+            let venv = dir.path().join(name).join("venv");
+            std::fs::create_dir_all(venv.join("bin")).unwrap();
+            std::fs::write(venv.join("pyvenv.cfg"), "home = /shared\n").unwrap();
+            let python = venv.join("bin").join("python");
+            std::os::unix::fs::symlink(&interpreter, &python).unwrap();
+            venvs.push(python);
+        }
+
+        assert!(same_file(&venvs[0], &venvs[0]));
+        assert!(
+            !same_file(&venvs[0], &venvs[1]),
+            "distinct venvs, one active"
+        );
+
+        // Outside a virtualenv, resolving is still what pairs a discovered
+        // binary with the managed install it points at.
+        let link = dir.path().join("llama-server");
+        std::os::unix::fs::symlink(&interpreter, &link).unwrap();
+        assert!(same_file(&link, &interpreter));
+        assert!(!same_file(&link, &dir.path().join("missing")));
+    }
+
+    #[test]
+    fn renders_unix_seconds_as_a_calendar_date() {
+        assert_eq!(civil_date(0), "1970-01-01");
+        assert_eq!(civil_date(86_399), "1970-01-01");
+        assert_eq!(civil_date(86_400), "1970-01-02");
+        // Leap day, and the day after it.
+        assert_eq!(civil_date(1_709_164_800), "2024-02-29");
+        assert_eq!(civil_date(1_709_251_200), "2024-03-01");
+        // Century that is not a leap year.
+        assert_eq!(civil_date(4_107_542_400), "2100-03-01");
+        // The builds on this machine.
+        assert_eq!(civil_date(1_785_015_875), "2026-07-25");
+        // Before the epoch, so the flooring division is exercised both ways.
+        assert_eq!(civil_date(-1), "1969-12-31");
+        assert_eq!(civil_timestamp(1_785_015_875), "2026-07-25 21:44");
+    }
+
+    #[test]
+    fn source_builds_of_one_revision_are_distinguishable() {
+        let record = builds::BuildRecord {
+            engine: "personaplex-mlx".into(),
+            repository: "https://github.com/example/personaplex-mlx".into(),
+            revision: "main".into(),
+            target: "metal".into(),
+            created_at: "1785015875".into(),
+            binary: "/venv/bin/python".into(),
+            commit: None,
+        };
+        assert_eq!(build_stamp(&record), "2026-07-25 21:44");
+        // Two builds of one branch on one afternoon must not read the same.
+        assert_ne!(
+            build_stamp(&builds::BuildRecord {
+                created_at: "1785013062".into(),
+                ..record.clone()
+            }),
+            build_stamp(&record)
+        );
+        // Records written before the switch to Unix seconds.
+        assert_eq!(
+            build_stamp(&builds::BuildRecord {
+                created_at: "2026-07-25T14:44:32Z".into(),
+                ..record.clone()
+            }),
+            "2026-07-25"
+        );
+        assert_eq!(
+            build_stamp(&builds::BuildRecord {
+                created_at: String::new(),
+                ..record
+            }),
+            "undated"
+        );
     }
 
     #[test]
