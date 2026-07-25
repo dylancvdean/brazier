@@ -111,6 +111,54 @@ builds safe: compilers and Python build backends execute code from the selected
 fork. The UI must show the complete plan and an untrusted-native-code warning
 for every non-whitelisted origin before execution.
 
+## Shared conversation: chat, voice, and the agent
+
+Chat, Voice, and Agent mode can work on one conversation instead of three. A
+session coordinator (`apps/desktop/src/renderer/src/session/`) sits between them
+and owns the rules; the three subsystems keep their own responsibilities and are
+reached only through adapters.
+
+The conversation is the daemon's existing message graph — there is no second
+store. A message now records the surface that produced it (`source`), the turn
+it belongs to (`correlation_id`), and what became of it (`status`: `partial`,
+`final`, `cancelled`, `superseded`, `failed`). A conversation records which
+agent session its turns go to, plus the compact summary a voice session is
+seeded with.
+
+Ownership is explicit, never inferred from timing. The agent owns the answer
+whenever a session is bound to the conversation; chat owns it otherwise;
+PersonaPlex owns nothing. It may acknowledge, and it may speak an answer it was
+handed, but it never decides a tool result, a completion, or a fact. Its own
+generated text is treated as untrusted model output: shown in the voice pane,
+never stored as an answer, never parsed as a command.
+
+Three cancellations stay separate, because they are different decisions:
+stopping the audio, dropping the current answer, and abandoning the agent task.
+Talking over the assistant does the first only — a long task survives a
+barge-in — unless the user explicitly asks for cancellation.
+
+Two things the plan for this needs are not in the Moshi protocol, and the voice
+adapter supplies them:
+
+- **User transcripts.** The socket's text frames are the model's own speech, so
+  the user's words come from segmenting the captured microphone stream and
+  transcribing each finished utterance through `/v1/audio/transcriptions`.
+- **Speaking specific text.** PersonaPlex takes its persona as a launch flag and
+  accepts audio only, so an authoritative answer is spoken verbatim through the
+  platform synthesizer. Since PersonaPlex answers on its own and cannot be told
+  to wait, its audio is gated off while that path is in use, so the user never
+  hears two different answers to one question. Where no synthesizer exists,
+  answers are shown and not spoken, and nothing claims otherwise.
+
+Voice-session renewal (duration, context size, a runtime restart) replaces the
+PersonaPlex process at a safe conversational boundary and re-seeds it from the
+bounded summary. The conversation and the agent session are untouched, and the
+agent run lives in the worker process, so voice failing or restarting never
+loses the task.
+
+See [voice-agent-integration.md](voice-agent-integration.md) for the component
+map and the mismatches this design had to resolve.
+
 ## Agent mode
 
 Agent mode is a workspace mode beside Chat, Voice, and Generate, not a separate

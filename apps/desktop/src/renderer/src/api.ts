@@ -393,12 +393,72 @@ export function createMessage(
     model?: string
     tool_calls?: unknown[] | null
     tool_call_id?: string | null
+    source?: string
+    correlation_id?: string
+    status?: string
+    metadata?: Record<string, unknown>
   }
 ): Promise<Message> {
   return request(`/api/v1/conversations/${conversationId}/messages`, {
     method: 'POST',
     body: JSON.stringify(message)
   })
+}
+
+/**
+ * Relabel or finalize a stored message. Used to mark a turn queued, cancelled,
+ * or superseded; it never removes the message.
+ */
+export function updateMessage(
+  conversationId: string,
+  messageId: string,
+  patch: {
+    content?: string | ContentPart[]
+    status?: string
+    metadata?: Record<string, unknown>
+  }
+): Promise<Message> {
+  return request(`/api/v1/conversations/${conversationId}/messages/${messageId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch)
+  })
+}
+
+export function getConversation(conversationId: string): Promise<Conversation> {
+  return request(`/api/v1/conversations/${conversationId}`)
+}
+
+/**
+ * Bind an agent session to a conversation, retitle it, or store the compact
+ * summary. Pass `agent_session_id: null` to unbind.
+ */
+export function updateConversation(
+  conversationId: string,
+  update: {
+    title?: string
+    agent_session_id?: string | null
+    summary?: string
+  }
+): Promise<Conversation> {
+  return request(`/api/v1/conversations/${conversationId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(update)
+  })
+}
+
+/** Transcribe one finished utterance through the daemon's ASR path. */
+export async function transcribeAudio(
+  wav: Uint8Array,
+  options: { signal?: AbortSignal } = {}
+): Promise<string> {
+  let binary = ''
+  for (let index = 0; index < wav.length; index += 1) binary += String.fromCharCode(wav[index])
+  const payload = await request<{ text?: string }>('/v1/audio/transcriptions', {
+    method: 'POST',
+    signal: options.signal,
+    body: JSON.stringify({ file_base64: btoa(binary), mime_type: 'audio/wav' })
+  })
+  return (payload.text ?? '').trim()
 }
 
 export type ClientToolCall = {

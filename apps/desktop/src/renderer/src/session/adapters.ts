@@ -1,0 +1,123 @@
+/**
+ * The integration boundary.
+ *
+ * The coordinator talks to the three existing subsystems only through these
+ * interfaces, so it holds no knowledge of the Moshi wire protocol, the agent
+ * worker IPC, or the daemon's REST shapes. Method names follow the integration
+ * plan; the implementations in this directory map them onto the real APIs.
+ */
+
+import type {
+  ConversationMessage,
+  MessagePatch,
+  MessageSource,
+  NewMessage,
+  SpeechRequest,
+  VoiceContext
+} from './types'
+
+// --- Chat -------------------------------------------------------------------
+
+/** Presentation and persistence of the shared conversation. */
+export interface ChatAdapter {
+  appendMessage(message: NewMessage): Promise<ConversationMessage>
+  updateMessage(messageId: string, patch: MessagePatch): Promise<ConversationMessage>
+  /** Transient status line: what the agent is doing, or a voice-mode error. */
+  showStatus(status: string | null): void
+  markQueued(messageId: string): void
+  markCancelled(messageId: string): void
+}
+
+/**
+ * Produces an ordinary non-agent chat answer. Separate from `ChatAdapter`
+ * because generating an answer is not presenting one, and because a
+ * conversation with no agent session bound still needs a responder.
+ */
+export interface ChatResponder {
+  respond(request: {
+    correlationId: string
+    text: string
+    onPartial?: (delta: string) => void
+  }): Promise<{ text: string }>
+  cancel(correlationId: string): void
+}
+
+// --- Agent ------------------------------------------------------------------
+
+export type AgentTurnRequest = {
+  correlationId: string
+  text: string
+  /** Attributed so the agent transcript shows where a turn came from. */
+  source: MessageSource
+  /** Set when the turn corrects a request already submitted. */
+  supersedes?: string
+}
+
+export type AgentRunStatusReport = {
+  correlationId: string
+  status: 'idle' | 'running' | 'completed' | 'cancelled' | 'failed' | 'awaiting-approval'
+  activeTool?: string
+}
+
+/** Normalized agent events. One per plan entry, minus runtime specifics. */
+export type AgentAdapterEvent =
+  | { type: 'runStarted'; correlationId: string }
+  | { type: 'statusUpdated'; correlationId: string; status: string; activeTool?: string }
+  | { type: 'responsePartial'; correlationId: string; delta: string }
+  | { type: 'responseFinal'; correlationId: string; text: string; runId?: string }
+  | { type: 'toolStarted'; correlationId: string; toolCallId: string; tool: string }
+  | {
+      type: 'toolCompleted'
+      correlationId: string
+      toolCallId: string
+      tool: string
+      /** Short, factual outcome the voice may state. Not the raw log. */
+      outcome: string
+    }
+  | { type: 'toolFailed'; correlationId: string; toolCallId: string; tool: string; error: string }
+  | { type: 'runFailed'; correlationId: string; error: string }
+  | { type: 'runCancelled'; correlationId: string }
+
+export interface AgentAdapter {
+  /** Bind the conversation to an agent session; null when none is available. */
+  attachSession(conversationId: string): Promise<string | null>
+  /** The session currently bound, without touching it. */
+  attachedSessionId(): string | null
+  submitTurn(request: AgentTurnRequest): Promise<void>
+  cancelRun(correlationId: string): Promise<void>
+  getStatus(correlationId: string): AgentRunStatusReport | null
+  subscribe(listener: (event: AgentAdapterEvent) => void): () => void
+}
+
+// --- Voice ------------------------------------------------------------------
+
+export type VoiceSessionHandle = {
+  id: string
+  startedAt: number
+}
+
+/** Normalized PersonaPlex events. */
+export type VoiceAdapterEvent =
+  | { type: 'userTranscriptPartial'; utteranceId: string; text: string }
+  | { type: 'userTranscriptFinal'; utteranceId: string; text: string }
+  /** The user started talking; the coordinator decides whether to duck audio. */
+  | { type: 'userSpeechStarted'; utteranceId: string }
+  | { type: 'speechStarted'; correlationId: string }
+  | { type: 'speechCompleted'; correlationId: string }
+  | { type: 'speechInterrupted'; correlationId: string }
+  /** Text PersonaPlex generated on its own. Never authoritative. */
+  | { type: 'modelText'; text: string }
+  | { type: 'sessionError'; error: string; fatal: boolean }
+  | { type: 'sessionLimitApproaching'; reason: string }
+
+export interface VoiceAdapter {
+  startSession(context: VoiceContext): Promise<VoiceSessionHandle>
+  updateContext(context: VoiceContext): Promise<void>
+  speak(request: SpeechRequest): Promise<void>
+  /** Stop audio for one turn, or all audio when no id is given. */
+  stopSpeaking(correlationId?: string): Promise<void>
+  endSession(): Promise<void>
+  /** Whether spoken delivery can actually be produced on this host. */
+  canSpeak(): boolean
+  subscribe(listener: (event: VoiceAdapterEvent) => void): () => void
+}

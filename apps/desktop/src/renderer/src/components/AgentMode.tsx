@@ -50,6 +50,12 @@ type Props = {
   /** Chat model chosen in the top bar; the agent uses the same picker. */
   modelId: string
   models: LocalModel[]
+  /**
+   * Bind the selected agent session to the open conversation, so voice and text
+   * turns in that conversation reach this session instead of opening their own.
+   * Null unbinds.
+   */
+  onSessionBound?: (agentSessionId: string | null) => void
   onError: (message: string | null) => void
 }
 
@@ -321,7 +327,7 @@ function TimelineRow({
 }
 
 export function AgentMode(props: Props): React.JSX.Element {
-  const { onError } = props
+  const { onError, onSessionBound } = props
   const [capabilities, setCapabilities] = useState<AgentCapabilities | null>(null)
   const [tools, setTools] = useState<AgentToolCatalogEntry[]>([])
   const [sessions, setSessions] = useState<AgentSessionSummary[]>([])
@@ -509,6 +515,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         const detail = await fetchAgentSession(id)
         setSession(detail.session)
         sessionIdRef.current = detail.session.id
+        onSessionBound?.(detail.session.id)
         setMessages(detail.messages.map((record) => record.payload))
         setTimeline(timelineFromRecords(detail.tool_executions))
         setApprovals(detail.pending_approvals)
@@ -521,7 +528,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         onError(errorText(cause))
       }
     },
-    [onError]
+    [onError, onSessionBound]
   )
 
   async function chooseWorkspace(): Promise<void> {
@@ -599,6 +606,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         sessionIdRef.current = active.id
         setSessions((current) => [active as AgentSessionSummary, ...current])
         setPendingWorkspace(null)
+        onSessionBound?.(active.id)
       } else if (active.model !== props.modelId) {
         // Model changes only take effect between runs.
         await window.brazier.agent.setModel(active.id, { id: props.modelId })
@@ -657,6 +665,9 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
     setSession(null)
     sessionIdRef.current = null
+    // Nothing is bound until the next task exists, so a voice turn falls back
+    // to an ordinary chat answer rather than reaching a closed session.
+    onSessionBound?.(null)
     setMessages([])
     setTimeline([])
     setApprovals([])

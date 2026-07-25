@@ -10,6 +10,7 @@ import {
   LoaderCircle,
   Menu,
   MessageSquarePlus,
+  Mic,
   Paperclip,
   Download,
   Search,
@@ -66,6 +67,8 @@ import { ToolsMenu } from './components/ToolsMenu'
 import { VoiceMode } from './components/VoiceMode'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { hasCompletedWelcome, markWelcomeCompleted } from './welcomePrefs'
+import { voiceStreamSupported } from './audio/voiceStream'
+import { useSessionCoordinator } from './session/useSessionCoordinator'
 import {
   isChatModel,
   isImageGenModel,
@@ -129,6 +132,21 @@ function contentMedia(message: Message): Array<'image' | 'audio' | 'video'> {
     if (part.type === 'input_video') return ['video'] as const
     return []
   })
+}
+
+/**
+ * Badge for a turn that did not run normally, so queued, cancelled, and
+ * superseded messages are visibly different from live ones.
+ */
+function turnLabel(message: Message): 'queued' | 'cancelled' | 'superseded' | 'failed' | null {
+  if (message.status === 'cancelled') return 'cancelled'
+  if (message.status === 'superseded') return 'superseded'
+  if (message.status === 'failed') return 'failed'
+  const metadata = message.metadata ?? {}
+  if (metadata.queued === true) return 'queued'
+  if (metadata.cancelled === true) return 'cancelled'
+  if (metadata.failed === true) return 'failed'
+  return null
 }
 
 /** Tool records for UI display from native or legacy tool messages. */
@@ -298,6 +316,8 @@ export function App(): React.JSX.Element {
   const [voiceModel, setVoiceModel] = useState('')
   const [generateModel, setGenerateModel] = useState('')
   const [generateModality, setGenerateModality] = useState<'image' | 'video'>('image')
+  const [persona, setPersona] = useState('You are a helpful assistant.')
+  const personaEdited = useRef(false)
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
@@ -480,6 +500,95 @@ export function App(): React.JSX.Element {
       localModels.find((model) => model.id === modeModel.selected)
     )
   }, [modeModel, localModels, modelsLoading])
+
+  // Engine settings arrive after the first render; adopt the saved persona
+  // unless the field has already been typed in.
+  useEffect(() => {
+    const saved = runtime?.default_voice_persona
+    if (saved && !personaEdited.current) setPersona(saved)
+  }, [runtime?.default_voice_persona])
+
+  /**
+   * Ordinary chat answers for the shared conversation, used when no agent
+   * session is bound to it. The same completion path the composer uses, so a
+   * spoken question is answered exactly like a typed one.
+   */
+  const chainRef = useRef<Message[]>([])
+  chainRef.current = chain
+  const voiceResponder = useMemo(() => {
+    const controllers = new Map<string, AbortController>()
+    return {
+      async respond({
+        correlationId,
+        text,
+        onPartial
+      }: {
+        correlationId: string
+        text: string
+        onPartial?: (delta: string) => void
+      }): Promise<{ text: string }> {
+        if (!selectedModel) {
+          throw new Error('Select a chat model before asking a question by voice.')
+        }
+        const controller = new AbortController()
+        controllers.set(correlationId, controller)
+        // The coordinator has already stored the user message; React has not
+        // re-rendered yet, so the request carries it explicitly.
+        const asked: Message = {
+          id: `pending-${correlationId}`,
+          conversation_id: conversationId ?? '',
+          parent_id: chainRef.current.at(-1)?.id ?? null,
+          role: 'user',
+          content: text,
+          model: null,
+          created_at: new Date().toISOString()
+        }
+        try {
+          const result = await streamCompletion(
+            [...chainRef.current, asked],
+            selectedModel,
+            controller.signal,
+            (token) => onPartial?.(token),
+            {
+              builtinTools: toolsEnabled,
+              builtinToolNames: toolsEnabled ? enabledTools : undefined,
+              toolChoice: toolsEnabled ? 'auto' : undefined
+            }
+          )
+          return { text: result.responseText }
+        } finally {
+          controllers.delete(correlationId)
+        }
+      },
+      cancel(correlationId: string): void {
+        controllers.get(correlationId)?.abort()
+      }
+    }
+  }, [conversationId, selectedModel, toolsEnabled, enabledTools])
+
+  const session = useSessionCoordinator({
+    conversationId,
+    messages,
+    summary: conversations.find((entry) => entry.id === conversationId)?.summary ?? null,
+    chatModelId: selectedModel,
+    voiceModelId: voiceModel,
+    persona,
+    responder: voiceResponder,
+    onMessage: (message) => {
+      setMessages((current) =>
+        current.some((entry) => entry.id === message.id)
+          ? current.map((entry) => (entry.id === message.id ? message : entry))
+          : [...current, message]
+      )
+      setTipId(message.id)
+    },
+    onStatus: setModelLoadStatus,
+    parentId: () => chainRef.current.at(-1)?.id ?? null
+  })
+  const voiceLive = session.snapshot.voiceStatus === 'live'
+  const audioSupported = useMemo(() => voiceStreamSupported(), [])
+  /** Whichever answer is streaming: the composer's own, or a coordinated turn. */
+  const liveText = streamingText || session.snapshot.streamingText
 
   // Seed the Voice and Generate selections from saved defaults, falling back to
   // the first installed model of the right family.
@@ -695,7 +804,16 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     scrollAnchor.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [chain.length, streamingText])
+  }, [chain.length, liveText])
+
+  // Voice writes into a conversation, so there has to be one before the user can
+  // start speaking.
+  useEffect(() => {
+    if (appMode !== 'voice' || conversationId) return
+    void newConversation().catch((cause: unknown) =>
+      setError(cause instanceof Error ? cause.message : String(cause))
+    )
+  }, [appMode, conversationId])
 
   async function newConversation(): Promise<void> {
     const conversation = await createConversation()
@@ -782,6 +900,15 @@ export function App(): React.JSX.Element {
     event.preventDefault()
     const text = draft.trim()
     if ((!text && attachments.length === 0) || busy) return
+    // With voice live, typing goes through the coordinator so both surfaces
+    // share one conversation and one agent session. Attachments keep the
+    // ordinary path, which knows how to hydrate them.
+    if (voiceLive && text && attachments.length === 0) {
+      setDraft('')
+      setError(null)
+      await session.submitText(text)
+      return
+    }
     if (!selectedModel) {
       setError('Select or download a local model first.')
       setModelMenuOpen(true)
@@ -1186,24 +1313,37 @@ export function App(): React.JSX.Element {
         {appMode === 'voice' ? (
           <VoiceMode
             models={localModels}
-            settings={runtime}
             realtimeAvailable={realtimeVoiceAvailable}
             modelId={voiceModel}
+            audioSupported={audioSupported}
+            persona={persona}
+            onPersonaChange={(next) => {
+              personaEdited.current = true
+              setPersona(next)
+            }}
+            session={session}
             onError={setError}
           />
         ) : null}
         {appMode === 'agent' ? (
-          <AgentMode modelId={selectedModel} models={localModels} onError={setError} />
+          <AgentMode
+            modelId={selectedModel}
+            models={localModels}
+            onSessionBound={(agentSessionId) => void session.bindAgentSession(agentSessionId)}
+            onError={setError}
+          />
         ) : null}
 
-        <div className="chat" hidden={appMode !== 'chat'}>
+        {/* Voice shares this transcript rather than keeping its own: a spoken
+            turn and a typed one are the same conversation. */}
+        <div className="chat" hidden={appMode !== 'chat' && appMode !== 'voice'}>
           {modelLoadStatus && (modelPrepareState === 'loading' || (busy && !streamingText)) && (
             <div className="model-load-status">
               <LoaderCircle className="spin" size={18} />
               <span>{modelLoadStatus}</span>
             </div>
           )}
-          {chain.length === 0 && !streamingText ? (
+          {chain.length === 0 && !liveText ? (
             <div className="welcome">
               <div className="welcome-mark">
                 <Bot size={30} />
@@ -1270,12 +1410,26 @@ export function App(): React.JSX.Element {
                 }
                 if (message.role === 'tool') return null
                 const media = contentMedia(message)
+                const spoken = message.source === 'user_voice'
+                const turn = turnLabel(message)
                 return (
                   <article className={`message ${message.role}`} key={message.id}>
                     <div className="avatar">{message.role === 'assistant' ? <Bot /> : 'You'}</div>
                     <div className="message-body">
                       <div className="message-meta">
-                        <strong>{message.role === 'assistant' ? 'Brazier' : 'You'}</strong>
+                        <strong>
+                          {message.role === 'assistant'
+                            ? message.source === 'assistant_agent'
+                              ? 'Agent'
+                              : 'Brazier'
+                            : 'You'}
+                        </strong>
+                        {spoken ? (
+                          <span className="message-source" title="Spoken, transcribed into chat">
+                            <Mic size={11} /> voice
+                          </span>
+                        ) : null}
+                        {turn ? <span className={`turn-badge ${turn}`}>{turn}</span> : null}
                         {branches.get(message.id) && branches.get(message.id)! > 1 ? (
                           <span className="branch-count">
                             <GitBranch size={12} /> {branches.get(message.id)} branches
@@ -1306,18 +1460,18 @@ export function App(): React.JSX.Element {
                   </article>
                 )
               })}
-              {(streamingText || streamingTools.length > 0) && (
+              {(liveText || streamingTools.length > 0) && (
                 <article className="message assistant">
                   <div className="avatar">
                     <Bot />
                   </div>
                   <div className="message-body">
                     <div className="message-meta">
-                      <strong>Brazier</strong>
+                      <strong>{session.snapshot.streamingText ? 'Agent' : 'Brazier'}</strong>
                       <LoaderCircle className="spin" size={14} />
                     </div>
                     {streamingTools.length > 0 && <ToolChips records={streamingTools} />}
-                    <p>{streamingText}</p>
+                    <p>{liveText}</p>
                   </div>
                 </article>
               )}
