@@ -66,6 +66,11 @@ fn candidate_paths() -> Vec<(&'static str, &'static str, PathBuf)> {
             "LM Studio (local share)",
             home.join(".local/share/lm-studio/models"),
         ));
+        candidates.push((
+            "lm-studio-flatpak",
+            "LM Studio (Flatpak)",
+            home.join(".var/app/ai.lmstudio.lm-studio/.lmstudio/models"),
+        ));
     }
     candidates.push((
         "huggingface-hub",
