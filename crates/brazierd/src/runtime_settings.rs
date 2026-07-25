@@ -266,7 +266,22 @@ pub fn load(data_dir: &Path) -> RuntimeSettings {
             .map_err(serde::de::Error::custom)
             .map(|_| settings)
     }) {
-        Ok(settings) => settings,
+        Ok(mut settings) => {
+            // An override that does not name llama-server cannot be a
+            // llama-server: earlier builds could store a voice interpreter here,
+            // which broke every chat request and, while it stayed set, also
+            // suppressed re-resolution when the acceleration target changed.
+            if let Some(binary) = settings.binary_override.as_deref()
+                && !crate::llama::is_llama_server_path(Path::new(binary))
+            {
+                tracing::warn!(
+                    binary,
+                    "discarding a binary_override that is not llama-server"
+                );
+                settings.binary_override = None;
+            }
+            settings
+        }
         Err(error) => {
             tracing::warn!(%error, path = %path.display(), "ignoring invalid runtime settings");
             RuntimeSettings::default()
@@ -286,4 +301,36 @@ pub async fn save(data_dir: &Path, settings: &RuntimeSettings) -> anyhow::Result
         .await
         .context("commit runtime settings")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reproduces a real poisoned settings file: activating the PersonaPlex MLX
+    /// runtime stored its virtualenv interpreter as the llama-server override,
+    /// and every chat request then ran `python -m <model>.gguf`.
+    #[tokio::test]
+    async fn load_discards_an_override_that_is_not_llama_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = RuntimeSettings::default();
+        settings.binary_override =
+            Some("/data/engines/personaplex-mlx/builds/main-1/venv/bin/python".into());
+        save(dir.path(), &settings).await.unwrap();
+
+        assert!(load(dir.path()).binary_override.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_keeps_a_real_llama_server_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = RuntimeSettings::default();
+        settings.binary_override = Some("/opt/homebrew/bin/llama-server".into());
+        save(dir.path(), &settings).await.unwrap();
+
+        assert_eq!(
+            load(dir.path()).binary_override.as_deref(),
+            Some("/opt/homebrew/bin/llama-server")
+        );
+    }
 }

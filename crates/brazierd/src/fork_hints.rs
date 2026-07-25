@@ -255,6 +255,30 @@ mod tests {
         assert!(runtime_fork_hints_from_text(text).is_empty());
     }
 
+    /// `ggerganov/llama.cpp` is where llama.cpp lived before the `ggml-org`
+    /// move, and GitHub still redirects it, so model cards link it constantly.
+    /// Treating it as a fork told people to build mainline as if it were one.
+    #[test]
+    fn the_historical_llama_cpp_url_is_still_mainline() {
+        for text in [
+            "Run it with https://github.com/ggerganov/llama.cpp",
+            "Clone https://github.com/ggerganov/llama.cpp.git and build",
+            "See https://github.com/ggerganov/llama.cpp/tree/master/examples/server",
+        ] {
+            assert!(
+                runtime_fork_hints_from_text(text).is_empty(),
+                "reported a fork for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_genuine_fork_is_still_reported() {
+        let hints = runtime_fork_hints_from_text("needs https://github.com/city96/llama.cpp");
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].repository, "https://github.com/city96/llama.cpp");
+    }
+
     #[test]
     fn detects_mlx_lm_fork() {
         let text = "Build https://github.com/acme/mlx-lm first.";

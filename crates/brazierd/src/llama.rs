@@ -72,12 +72,28 @@ pub fn managed_lib_dir(data_dir: &Path) -> PathBuf {
     managed_engine_dir(data_dir).join("bin")
 }
 
-fn binary_name() -> &'static str {
+pub fn binary_name() -> &'static str {
     if cfg!(windows) {
         "llama-server.exe"
     } else {
         "llama-server"
     }
+}
+
+/// Whether a path names a `llama-server` executable.
+///
+/// The smoke test in [`binary_appears_runnable`] only proves that *something*
+/// starts and tolerates `--version`, which a Python interpreter does. Pinning
+/// the wrong program produces a failure one step later, at the next chat
+/// request, phrased as though the model were at fault — so the name is checked
+/// before anything is pinned.
+pub fn is_llama_server_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower == "llama-server" || lower == "llama-server.exe"
+        })
 }
 
 /// Platform tag used to select a GitHub release asset.
@@ -1165,6 +1181,23 @@ mod tests {
     use super::*;
     use crate::types::{ChatCompletionRequest, OpenAiMessage};
     use serde_json::json;
+
+    #[test]
+    fn recognizes_only_llama_server_executables() {
+        assert!(is_llama_server_path(Path::new(
+            "/usr/local/bin/llama-server"
+        )));
+        // Written without a separator: `\` is not one off Windows, so a literal
+        // Windows path would compare as a single file name here.
+        assert!(is_llama_server_path(Path::new("llama-server.exe")));
+        // The path that got pinned in place of llama-server.
+        assert!(!is_llama_server_path(Path::new(
+            "/data/engines/personaplex-mlx/builds/main-1/venv/bin/python"
+        )));
+        assert!(!is_llama_server_path(Path::new("/usr/bin/python3")));
+        assert!(!is_llama_server_path(Path::new("/opt/bin/llama-cli")));
+        assert!(!is_llama_server_path(Path::new("/opt/bin")));
+    }
 
     #[test]
     fn selects_plain_ubuntu_cpu_asset() {
