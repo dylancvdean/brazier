@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 
+import { AgentSupervisor, registerAgentIpc } from './agent'
+
 /**
  * Linux launch flags must run before app.ready.
  *
@@ -52,6 +54,7 @@ type Connection = {
 
 let daemon: ChildProcessWithoutNullStreams | undefined
 let connection: Promise<Connection>
+const agent = new AgentSupervisor()
 
 function repositoryRoot(): string {
   const candidates = [
@@ -262,6 +265,29 @@ app.whenReady().then(async () => {
     }
     return result.filePaths[0] ?? null
   })
+  // Agent mode reaches the machine only through the daemon, so the worker gets
+  // the loopback address and bearer token once the daemon is ready.
+  registerAgentIpc(agent)
+  ipcMain.handle('brazier:agent:status', () => agent.status())
+  ipcMain.handle('brazier:select-workspace', async (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    const options = {
+      properties: ['openDirectory' as const],
+      title: 'Choose a workspace folder for the agent'
+    }
+    const result = window
+      ? await dialog.showOpenDialog(window, options)
+      : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0] ?? null
+  })
+  connection
+    .then((ready) => {
+      agent.setConnection({ address: ready.address, apiKey: ready.api_key })
+    })
+    .catch(() => {
+      // Reported below; Agent mode surfaces the daemon error when first used.
+    })
   connection.catch((error: unknown) => {
     console.error('[brazier] daemon failed to start', error)
   })
@@ -272,6 +298,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
+  void agent.shutdown()
   daemon?.kill()
 })
 

@@ -1,0 +1,278 @@
+/**
+ * HTTP client for the daemon's agent endpoints.
+ *
+ * This is the agent worker's only route to the machine: no filesystem, shell,
+ * or host API is reachable from the worker except through these calls, and the
+ * daemon applies policy and sandboxing on the far side.
+ */
+
+import type {
+  AgentApproval,
+  AgentEnvironment,
+  AgentMessage,
+  AgentToolDefinition,
+  ApprovalScope,
+  SandboxDescription,
+  ToolExecutionRecord,
+  ToolRiskLevel
+} from './types'
+
+export type BrokerConnection = {
+  address: string
+  apiKey: string | null
+}
+
+export type ToolExecStatus = 'completed' | 'failed' | 'denied' | 'approval_required'
+
+export type ToolExecResponse = {
+  status: ToolExecStatus
+  tool: string
+  tool_call_id?: string
+  environment: AgentEnvironment
+  risk: ToolRiskLevel
+  sandbox: SandboxDescription
+  execution_id?: string
+  output: string
+  truncated?: boolean
+  artifact_id?: string
+  exit_code?: number | null
+  changed_paths?: string[]
+  duration_ms: number
+  approval?: AgentApproval
+  denied_reason?: string
+  is_error: boolean
+}
+
+export type AgentSandboxCapabilities = {
+  backend: string
+  isolated: boolean
+  filesystem_scoping: boolean
+  network_isolation: boolean
+  process_isolation: boolean
+  profiles: string[]
+  detail: string
+  program?: string | null
+}
+
+export type AgentCapabilitiesResponse = {
+  schema_version: number
+  sandbox: AgentSandboxCapabilities
+  permission_modes: string[]
+  runtimes: Array<{
+    id: string
+    name: string
+    /** Version of the adapter contract, not of the runtime package. */
+    adapter_api_version: number
+    capabilities: Record<string, boolean>
+  }>
+  tool_output_limit_chars: number
+}
+
+export type DaemonSessionRecord = {
+  id: string
+  title: string
+  workspace_path?: string | null
+  model: string
+  runtime_id: string
+  permission_mode: 'ask' | 'sandbox-only' | 'skip-permissions'
+  permission_settings: {
+    auto_approve_sandboxed_actions: boolean
+    auto_approve_host_actions: boolean
+  }
+  enabled_tools?: string[] | null
+  last_run_status: string
+  compaction?: Record<string, unknown> | null
+  runtime_metadata?: Record<string, unknown> | null
+  created_at: string
+  updated_at: string
+}
+
+export type DaemonMessageRecord = {
+  id: string
+  session_id: string
+  seq: number
+  role: string
+  payload: AgentMessage
+  created_at: string
+}
+
+export class BrokerError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'BrokerError'
+    this.status = status
+  }
+}
+
+export class BrokerClient {
+  private readonly connection: BrokerConnection
+
+  constructor(connection: BrokerConnection) {
+    this.connection = connection
+  }
+
+  private async request<T>(
+    path: string,
+    init?: RequestInit & { signal?: AbortSignal }
+  ): Promise<T> {
+    const headers = new Headers(init?.headers)
+    headers.set('content-type', 'application/json')
+    if (this.connection.apiKey) {
+      headers.set('authorization', `Bearer ${this.connection.apiKey}`)
+    }
+    const response = await fetch(`${this.connection.address}${path}`, { ...init, headers })
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as {
+        error?: { message?: string }
+      } | null
+      throw new BrokerError(
+        payload?.error?.message ?? `Request failed with status ${response.status}.`,
+        response.status
+      )
+    }
+    return (await response.json()) as T
+  }
+
+  async capabilities(): Promise<AgentCapabilitiesResponse> {
+    return this.request('/api/v1/agent/capabilities')
+  }
+
+  /** Tool catalog, translated into the application's own tool shape. */
+  async tools(): Promise<AgentToolDefinition[]> {
+    const payload = await this.request<{
+      data: Array<{
+        name: string
+        label: string
+        description: string
+        input_schema: Record<string, unknown>
+        risk: ToolRiskLevel
+        executes: boolean
+        needs_workspace: boolean
+        default_environment: AgentEnvironment
+      }>
+    }>('/api/v1/agent/tools')
+    return payload.data.map((entry) => ({
+      name: entry.name,
+      label: entry.label,
+      description: entry.description,
+      inputSchema: entry.input_schema,
+      risk: entry.risk,
+      executes: entry.executes,
+      needsWorkspace: entry.needs_workspace,
+      defaultEnvironment: entry.default_environment
+    }))
+  }
+
+  async session(id: string): Promise<{
+    session: DaemonSessionRecord
+    messages: DaemonMessageRecord[]
+    tool_executions: ToolExecutionRecord[]
+    pending_approvals: AgentApproval[]
+    grants: string[]
+    sandbox: AgentSandboxCapabilities
+  }> {
+    return this.request(`/api/v1/agent/sessions/${id}`)
+  }
+
+  async systemPrompt(id: string): Promise<{ system_prompt: string; tools: string[] }> {
+    return this.request(`/api/v1/agent/sessions/${id}/prompt`)
+  }
+
+  async appendMessages(
+    sessionId: string,
+    messages: AgentMessage[],
+    replace = false
+  ): Promise<void> {
+    if (messages.length === 0 && !replace) return
+    await this.request(`/api/v1/agent/sessions/${sessionId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({
+        replace,
+        messages: messages.map((message) => ({ role: message.role, payload: message }))
+      })
+    })
+  }
+
+  async updateSession(
+    sessionId: string,
+    update: Record<string, unknown>
+  ): Promise<DaemonSessionRecord> {
+    return this.request(`/api/v1/agent/sessions/${sessionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(update)
+    })
+  }
+
+  async execTool(
+    request: {
+      sessionId: string
+      runId?: string
+      toolCallId?: string
+      tool: string
+      arguments: Record<string, unknown>
+      environment?: AgentEnvironment
+      reason?: string
+      approvalId?: string
+    },
+    signal?: AbortSignal
+  ): Promise<ToolExecResponse> {
+    return this.request('/api/v1/agent/exec', {
+      method: 'POST',
+      signal,
+      body: JSON.stringify({
+        session_id: request.sessionId,
+        run_id: request.runId,
+        tool_call_id: request.toolCallId,
+        tool: request.tool,
+        arguments: request.arguments,
+        environment: request.environment,
+        reason: request.reason,
+        approval_id: request.approvalId
+      })
+    })
+  }
+
+  /**
+   * Block until the user answers, or until `waitMs` elapses. The daemon holds
+   * the request open, so no polling loop is needed here.
+   */
+  async waitForApproval(
+    approvalId: string,
+    waitMs: number,
+    signal?: AbortSignal
+  ): Promise<AgentApproval> {
+    return this.request(`/api/v1/agent/approvals/${approvalId}?wait_ms=${waitMs}`, { signal })
+  }
+
+  async decideApproval(
+    approvalId: string,
+    decision: 'approve' | 'deny',
+    scope?: ApprovalScope,
+    note?: string
+  ): Promise<AgentApproval> {
+    return this.request(`/api/v1/agent/approvals/${approvalId}`, {
+      method: 'POST',
+      body: JSON.stringify({ decision, scope, note })
+    })
+  }
+
+  async cancel(sessionId: string): Promise<void> {
+    await this.request(`/api/v1/agent/sessions/${sessionId}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({})
+    })
+  }
+
+  /** OpenAI-compatible base URL the runtime points its model client at. */
+  openAiBaseUrl(): string {
+    return `${this.connection.address}/v1`
+  }
+
+  apiKey(): string {
+    // The daemon requires a bearer token; providers that insist on a non-empty
+    // key get a placeholder when auth is disabled.
+    return this.connection.apiKey ?? 'brazier-local'
+  }
+}

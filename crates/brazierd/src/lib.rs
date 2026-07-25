@@ -1,4 +1,10 @@
 pub mod active_downloads;
+pub mod agent_exec;
+pub mod agent_policy;
+pub mod agent_sandbox;
+pub mod agent_store;
+pub mod agent_tools;
+pub mod agent_types;
 pub mod api;
 pub mod blob_store;
 pub mod build_recipe;
@@ -57,6 +63,9 @@ pub struct AppState {
     pub active_downloads: Arc<ActiveDownloads>,
     pub download_queue: DownloadQueue,
     pub runtimes_cache: Arc<Mutex<Option<Vec<RuntimeEntry>>>>,
+    /// Policy, sandbox, and execution for Agent mode. The agent runtime reaches
+    /// the host only through this broker.
+    pub agent_broker: Arc<agent_exec::AgentBroker>,
 }
 
 impl AppState {

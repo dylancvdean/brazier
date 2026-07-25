@@ -127,7 +127,9 @@ impl From<DownloadJobRow> for DownloadJob {
 
 #[derive(Clone)]
 pub struct Database {
-    pool: SqlitePool,
+    /// Visible to sibling modules that own their own tables (see
+    /// `agent_store`), so those queries stay out of this file.
+    pub(crate) pool: SqlitePool,
 }
 
 #[derive(FromRow)]
@@ -454,6 +456,151 @@ impl Database {
             .execute(&mut *tx)
             .await?;
             sqlx::query("INSERT INTO schema_migrations(version) VALUES (6)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            version = 6;
+        }
+
+        if version < 7 {
+            // Agent mode state. Sessions are independent of chat conversations:
+            // they carry a workspace, a permission mode, a tool-execution
+            // ledger, and the approvals the user granted.
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    workspace_path TEXT,
+                    model TEXT NOT NULL,
+                    runtime_id TEXT NOT NULL,
+                    permission_mode TEXT NOT NULL CHECK (
+                        permission_mode IN ('ask', 'sandbox-only', 'skip-permissions')
+                    ),
+                    permission_settings_json TEXT NOT NULL,
+                    enabled_tools_json TEXT,
+                    last_run_status TEXT NOT NULL DEFAULT 'idle',
+                    compaction_json TEXT,
+                    runtime_metadata_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS agent_messages (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+                    seq INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE (session_id, seq)
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS agent_tool_executions (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+                    run_id TEXT,
+                    tool_call_id TEXT,
+                    tool TEXT NOT NULL,
+                    arguments_json TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    risk TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    exit_code INTEGER,
+                    output_preview TEXT,
+                    artifact_id TEXT,
+                    truncated INTEGER NOT NULL DEFAULT 0,
+                    changed_paths_json TEXT,
+                    sandbox_json TEXT,
+                    approval_id TEXT,
+                    error TEXT,
+                    duration_ms INTEGER,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS agent_tool_executions_session
+                 ON agent_tool_executions(session_id, created_at)",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS agent_approvals (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+                    tool TEXT NOT NULL,
+                    arguments_json TEXT NOT NULL,
+                    arguments_hash TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    risk TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    allow_session_scope INTEGER NOT NULL DEFAULT 0,
+                    elevation_json TEXT NOT NULL,
+                    sandbox_json TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('pending', 'approved', 'denied', 'expired', 'consumed')
+                    ),
+                    scope TEXT,
+                    note TEXT,
+                    decided_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS agent_approvals_session_status
+                 ON agent_approvals(session_id, status)",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS agent_grants (
+                    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+                    grant_key TEXT NOT NULL,
+                    approval_id TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (session_id, grant_key)
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS agent_artifacts (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+                    tool_execution_id TEXT,
+                    kind TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    mime_type TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO schema_migrations(version) VALUES (7)")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;

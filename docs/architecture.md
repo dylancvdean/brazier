@@ -111,6 +111,85 @@ builds safe: compilers and Python build backends execute code from the selected
 fork. The UI must show the complete plan and an untrusted-native-code warning
 for every non-whitelisted origin before execution.
 
+## Agent mode
+
+Agent mode is a workspace mode beside Chat, Voice, and Generate, not a separate
+application. It reuses model selection, engines, persistence, and the daemon
+API. Four processes are involved:
+
+```text
+renderer (sandboxed)  →  main  →  agent worker (utilityProcess)  →  brazierd
+                                         Pi runtime                 policy broker
+                                                                    sandbox / exec
+```
+
+The agent runtime is a dependency, not a component of Brazier. `Pi`
+(`@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, MIT) owns only the
+orchestration loop: tool-call parsing, streaming, context tracking, cancellation,
+and completion detection. It is reached exclusively through the adapter in
+`apps/desktop/src/agent/pi/`; a test fails the build if any Pi import appears
+outside that directory. Everything else — tool definitions, permission policy,
+sandboxing, execution, persistence, and the event stream — is Brazier's, in
+application-owned types under `apps/desktop/src/agent/core/`. Replacing the
+runtime means writing a sibling adapter and registering it.
+
+The worker process holds no privileges. It cannot touch the filesystem, spawn a
+shell, or read the environment for credentials: its only route to the machine is
+`POST /api/v1/agent/exec` on the daemon, and the daemon decides. Tool schemas and
+the agent system prompt are served by the daemon too
+(`/api/v1/agent/tools`, `/api/v1/agent/sessions/{id}/prompt`), so the contract a
+model sees always matches the executor and the policy behind it.
+
+### Policy and approvals
+
+Every call is judged by `agent_policy` from the session's permission mode, the
+tool's risk level, the paths in its arguments, and whether an OS sandbox actually
+exists. The result is allow, ask, or refuse:
+
+- `ask` — reads inside the workspace proceed; writes, execution, network use,
+  and anything outside the workspace ask first.
+- `sandbox-only` — sandboxed work proceeds without prompts and host access is
+  refused outright.
+- `skip-permissions` — sandboxed work is auto-approved; host actions still need
+  their own separate opt-in.
+
+An approval is a daemon-side record bound to one session, tool, and argument
+hash. The worker cannot fabricate or reuse one: a grant issued for different
+arguments, already spent, expired, or belonging to another session is refused.
+Destructive and host actions never accept a session-wide grant. Credential paths
+(`~/.ssh`, `~/.aws`, keychains, `~/.git-credentials`, and Brazier's own data
+directory) are refused in every mode, including `skip-permissions`, and the
+attempt is recorded.
+
+### Sandbox
+
+Sandboxing is per platform and reported honestly. macOS uses Seatbelt
+(`sandbox-exec`) with a generated profile; Linux uses Bubblewrap (`bwrap`) with a
+read-only root, a tmpfs over `$HOME`, and the workspace bound back in. Writes are
+confined to the workspace and a per-session scratch directory, which is also the
+only `TMPDIR` a tool sees — `/tmp` itself is not writable, so a tool that
+hardcodes it fails visibly instead of escaping. Network access is off unless the
+profile grants it.
+
+Where no backend exists (Windows today, or Linux without `bwrap`), the daemon
+reports `backend: "none"`, `isolated: false`, and the UI says "No sandbox"
+verbatim. Running a program is then treated as host execution: it is refused in
+`sandbox-only` mode and needs the host opt-in elsewhere. Nothing in the stack may
+claim isolation it did not apply.
+
+Filesystem tools run in the daemon rather than the sandbox, and enforce their own
+boundary: paths are normalized, then compared in canonical form so a symlink
+pointing out of the workspace counts as outside it and requires elevation.
+
+### Sessions and recovery
+
+Agent sessions are separate from chat conversations. The daemon stores the
+transcript in runtime-neutral form, plus the tool-execution ledger, approvals,
+standing grants, and stored artifacts for output too large to send to a model.
+Restoring a session rebuilds context and re-checks the workspace; it never
+re-runs a command. Compaction rewrites the transcript into a digest that keeps
+goals, decisions, changed files, commands, and unresolved failures.
+
 ## Tools
 
 Tool execution uses the same capability model as engines. Every tool declares

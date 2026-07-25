@@ -56,6 +56,7 @@ import {
   streamCompletion,
   uploadAttachmentBlob
 } from './api'
+import { AgentMode } from './components/AgentMode'
 import { DownloadTray } from './components/DownloadTray'
 import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
@@ -290,7 +291,7 @@ export function App(): React.JSX.Element {
   const [runSnapshots, setRunSnapshots] = useState<RunSnapshot[]>([])
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
   const [showWelcome, setShowWelcome] = useState<boolean | null>(null)
-  const [appMode, setAppMode] = useState<'chat' | 'generate' | 'voice'>('chat')
+  const [appMode, setAppMode] = useState<'chat' | 'agent' | 'generate' | 'voice'>('chat')
   const [realtimeVoiceAvailable, setRealtimeVoiceAvailable] = useState(false)
   // Generate and Voice pick from their own model families; the top bar shows
   // whichever belongs to the mode on screen.
@@ -1024,6 +1025,7 @@ export function App(): React.JSX.Element {
             {(
               [
                 ['chat', 'Chat'],
+                ['agent', 'Agent'],
                 ['generate', 'Generate'],
                 ['voice', 'Voice']
               ] as const
@@ -1045,9 +1047,11 @@ export function App(): React.JSX.Element {
             title={
               appMode === 'chat'
                 ? 'Choose which installed model to chat with'
-                : appMode === 'voice'
-                  ? 'Choose which PersonaPlex model to speak with'
-                  : `Choose which ${generateModality} model to generate with`
+                : appMode === 'agent'
+                  ? 'Choose which installed model drives the agent'
+                  : appMode === 'voice'
+                    ? 'Choose which PersonaPlex model to speak with'
+                    : `Choose which ${generateModality} model to generate with`
             }
             onClick={() => setModelMenuOpen(true)}
           >
@@ -1067,14 +1071,24 @@ export function App(): React.JSX.Element {
             <SlidersHorizontal size={17} />
           </button>
           <div className="capabilities">
-            <span title="Active acceleration target">
-              <Cpu size={14} /> {runtime?.target ?? 'auto'}
+            {/* Icons only: with four modes in the bar there is no room for
+                labels. Every value that used to be printed here moved into the
+                tooltip, which also carries the reason a capability is off. */}
+            <span
+              title={`Acceleration target: ${runtime?.target ?? 'auto'}`}
+              aria-label={`Acceleration target: ${runtime?.target ?? 'auto'}`}
+            >
+              <Cpu size={14} />
             </span>
-            <span title="Context window">
-              <Gauge size={14} /> {runtime?.context_size?.toLocaleString() ?? '4,096'} ctx
-              {selectedCapabilities?.max_context_length
-                ? ` · ${selectedCapabilities.max_context_length.toLocaleString()} max`
-                : ''}
+            <span
+              title={`Context window: ${runtime?.context_size?.toLocaleString() ?? '4,096'} tokens${
+                selectedCapabilities?.max_context_length
+                  ? ` · ${selectedCapabilities.max_context_length.toLocaleString()} supported by this model`
+                  : ''
+              }`}
+              aria-label="Context window"
+            >
+              <Gauge size={14} />
             </span>
             <span
               className={
@@ -1083,34 +1097,55 @@ export function App(): React.JSX.Element {
                   ? ''
                   : 'unavailable'
               }
+              title={
+                (selectedCapabilities?.reasoning_modes?.length ??
+                  (selectedCapabilities?.reasoning ? 1 : 0)) > 0
+                  ? 'Reasoning: this model can think before answering'
+                  : 'Reasoning: not advertised by this model'
+              }
+              aria-label="Reasoning"
             >
-              <Brain size={14} /> Reasoning
+              <Brain size={14} />
             </span>
             <span
               className={canAttachImage ? '' : 'unavailable'}
-              title={visionCapabilityTitle(selectedModel, localModels, canAttachImage)}
+              title={`Vision — ${visionCapabilityTitle(selectedModel, localModels, canAttachImage)}`}
+              aria-label="Vision"
             >
-              <Image size={14} /> Vision
+              <Image size={14} />
             </span>
             <span
               className={canAttachAudio ? '' : 'unavailable'}
-              title={audioBadgeTitle}
+              title={`${
+                selectedNativeAudio ? 'Native audio' : pipelineFeatures.asr ? 'ASR' : 'Audio'
+              } — ${audioBadgeTitle}`}
+              aria-label={
+                selectedNativeAudio ? 'Native audio' : pipelineFeatures.asr ? 'ASR' : 'Audio'
+              }
             >
-              <AudioLines size={14} />{' '}
-              {selectedNativeAudio ? 'Native audio' : pipelineFeatures.asr ? 'ASR' : 'Audio'}
+              <AudioLines size={14} />
             </span>
             <span
               className={canAttachVideo ? '' : 'unavailable'}
               title={
                 canAttachVideo
-                  ? 'Video is sampled with ffmpeg and transcribed when ASR is available'
-                  : 'Need ffmpeg plus a vision model (and whisper.cpp for soundtrack)'
+                  ? 'Video: sampled with ffmpeg and transcribed when ASR is available'
+                  : 'Video: needs ffmpeg plus a vision model (and whisper.cpp for the soundtrack)'
               }
+              aria-label="Video"
             >
-              <Video size={14} /> Video
+              <Video size={14} />
             </span>
-            <span className={selectedCapabilities?.tools ? '' : 'unavailable'}>
-              <Wrench size={14} /> Tools
+            <span
+              className={selectedCapabilities?.tools ? '' : 'unavailable'}
+              title={
+                selectedCapabilities?.tools
+                  ? 'Tools: this model advertises tool calling'
+                  : 'Tools: not advertised by this model'
+              }
+              aria-label="Tools"
+            >
+              <Wrench size={14} />
             </span>
           </div>
           <button
@@ -1156,6 +1191,9 @@ export function App(): React.JSX.Element {
             modelId={voiceModel}
             onError={setError}
           />
+        ) : null}
+        {appMode === 'agent' ? (
+          <AgentMode modelId={selectedModel} models={localModels} onError={setError} />
         ) : null}
 
         <div className="chat" hidden={appMode !== 'chat'}>
@@ -1341,7 +1379,12 @@ export function App(): React.JSX.Element {
               ))}
             </div>
           )}
-          <form className="composer" onSubmit={(event) => void submit(event)}>
+          {/* Agent mode brings its own composer; the chat one would duplicate it. */}
+          <form
+            className="composer"
+            hidden={appMode === 'agent'}
+            onSubmit={(event) => void submit(event)}
+          >
             <textarea
               aria-label="Message"
               placeholder={
@@ -1459,7 +1502,7 @@ export function App(): React.JSX.Element {
               )}
             </div>
           </form>
-          <p className="composer-hint">
+          <p className="composer-hint" hidden={appMode === 'agent'}>
             Local models can be inaccurate. Verify important information.
             {toolsEnabled && canUseTools ? ' Tools are enabled (bundled + MCP).' : ''}
             {toolsEnabled && canUseTools && runtime && !runtime.jinja
@@ -1478,9 +1521,11 @@ export function App(): React.JSX.Element {
           title={
             appMode === 'chat'
               ? 'Choose a model'
-              : appMode === 'voice'
-                ? 'Choose a voice model'
-                : `Choose a ${generateModality} model`
+              : appMode === 'agent'
+                ? 'Choose a model for the agent'
+                : appMode === 'voice'
+                  ? 'Choose a voice model'
+                  : `Choose a ${generateModality} model`
           }
           selectedModel={modeModel.selected}
           loading={modelsLoading}

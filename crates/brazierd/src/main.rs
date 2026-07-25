@@ -113,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         active_downloads,
         download_queue,
         runtimes_cache: Arc::new(Mutex::new(None)),
+        agent_broker: Arc::new(brazierd::agent_exec::AgentBroker::new()),
     };
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.host, args.port))

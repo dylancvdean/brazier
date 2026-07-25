@@ -18,3 +18,13 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+  # Transitive dependencies of the Pi agent runtime, pulled in for provider SDKs
+  # Brazier never calls (Agent mode talks to brazierd's local OpenAI-compatible
+  # endpoint). Their install scripts only build optional native/protobuf assets.
+  '@google/genai': false
+  protobufjs: false
+
+# The Pi agent runtime, added deliberately at a pinned version.
+minimumReleaseAgeExclude:
+  - '@earendil-works/pi-agent-core@0.82.1'
+  - '@earendil-works/pi-ai@0.82.1'

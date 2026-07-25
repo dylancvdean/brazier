@@ -21,6 +21,10 @@ provides:
 - bundled safe tools (time, calculator, bounded web fetch, QuickJS sandbox)
   executed by the daemon in a multi-round tool loop;
 - a capability model for text, vision, audio, video, reasoning, and tools;
+- an **Agent** workspace mode for coding and system tasks: the agent edits files
+  and runs commands inside a workspace folder you choose, sandboxed with Seatbelt
+  on macOS or Bubblewrap on Linux, with per-action approvals and a full record of
+  what ran;
 - a cross-platform Electron chat interface with separate surfaces for usage
   (model picker, inference settings) and management (library, downloads,
   runtimes, engine configuration).
@@ -62,4 +66,11 @@ that record for the desktop process.
 Brazier collects no telemetry. Model engines and source forks execute native
 code and must not be considered a security boundary. Non-upstream forks,
 remote-code models, network tools, and code execution require explicit trust.
+
+Agent mode runs model-chosen commands on your machine. It defaults to asking
+before anything writes, executes, or leaves the workspace, and the interface
+states plainly when no OS sandbox is available — on Windows there is none yet, so
+commands there are treated as host execution. `skip-permissions` mode exists and
+still refuses credential paths, but it removes the prompts; use it deliberately.
+
 Please report vulnerabilities as described in [SECURITY.md](SECURITY.md).

@@ -60,6 +60,14 @@ impl ApiError {
         }
     }
 
+    fn not_found(error: impl ToString) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: error.to_string(),
+            fork_hints: None,
+        }
+    }
+
     fn internal(error: impl ToString) -> Self {
         tracing::error!(error = %error.to_string(), "request failed");
         Self {
@@ -188,6 +196,42 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/voice/sessions/{id}",
             axum::routing::delete(end_voice_session),
         )
+        .route("/api/v1/agent/capabilities", get(agent_capabilities))
+        .route("/api/v1/agent/tools", get(agent_tool_catalog))
+        .route(
+            "/api/v1/agent/sessions",
+            get(list_agent_sessions).post(create_agent_session),
+        )
+        .route(
+            "/api/v1/agent/sessions/{id}",
+            get(get_agent_session)
+                .patch(patch_agent_session)
+                .delete(delete_agent_session),
+        )
+        .route(
+            "/api/v1/agent/sessions/{id}/messages",
+            get(list_agent_messages).post(append_agent_messages),
+        )
+        .route(
+            "/api/v1/agent/sessions/{id}/tool-executions",
+            get(list_agent_tool_executions),
+        )
+        .route(
+            "/api/v1/agent/sessions/{id}/approvals",
+            get(list_agent_approvals),
+        )
+        .route("/api/v1/agent/sessions/{id}/cancel", post(cancel_agent_run))
+        .route(
+            "/api/v1/agent/sessions/{id}/prompt",
+            get(agent_system_prompt),
+        )
+        .route("/api/v1/agent/exec", post(agent_exec_tool))
+        .route(
+            "/api/v1/agent/approvals/{id}",
+            get(get_agent_approval).post(decide_agent_approval),
+        )
+        .route("/api/v1/agent/artifacts/{id}", get(get_agent_artifact))
+        .route("/api/v1/agent/workspace", post(validate_agent_workspace))
         .route("/api/v1/tools", get(list_tools))
         .route(
             "/api/v1/mcp/servers",
@@ -2824,6 +2868,11 @@ async fn chat_completions(
         .await
         .map_err(|error| ApiError::from_anyhow(error))?;
     let events = stream! {
+        // Set once a terminal finish_reason has been sent, so the closing chunk
+        // does not overwrite `tool_calls` with `stop`. Clients that map the last
+        // finish_reason they see (including agent runtimes) would otherwise miss
+        // the tool round trip.
+        let mut finished = false;
         while let Some(item) = token_rx.recv().await {
             match item {
                 Ok(StreamEvent::Load { phase, message }) => {
@@ -2896,6 +2945,7 @@ async fn chat_completions(
                             "finish_reason": "tool_calls"
                         }]
                     });
+                    finished = true;
                     yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
                 }
                 Ok(StreamEvent::TranscriptMessage(message)) => {
@@ -2933,22 +2983,25 @@ async fn chat_completions(
                     if let Some(fork_hints) = fork_hints {
                         chunk["brazier"] = json!({ "fork_hints": fork_hints });
                     }
+                    finished = true;
                     yield Ok(Event::default().data(chunk.to_string()));
                     break;
                 }
             }
         }
-        let final_chunk = json!({
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop"
-            }]
-        });
-        yield Ok(Event::default().data(final_chunk.to_string()));
+        if !finished {
+            let final_chunk = json!({
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }]
+            });
+            yield Ok(Event::default().data(final_chunk.to_string()));
+        }
         yield Ok(Event::default().data("[DONE]"));
     };
     Ok(Sse::new(events)
@@ -3085,6 +3138,442 @@ async fn responses(
     Ok(Sse::new(events).into_response())
 }
 
+// ---------------------------------------------------------------------------
+// Agent mode
+//
+// The agent runtime is a separate process with no host privileges. It reaches
+// the machine only through these endpoints, which apply the policy broker,
+// the sandbox, and the execution broker in that order.
+// ---------------------------------------------------------------------------
+
+/// Sandbox backend, permission modes, and runtime descriptors for Agent mode.
+async fn agent_capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let sandbox = state.agent_broker.capabilities();
+    Ok(Json(json!({
+        "schema_version": 1,
+        "sandbox": sandbox,
+        "permission_modes": ["ask", "sandbox-only", "skip-permissions"],
+        "runtimes": [{
+            "id": "pi",
+            "name": "Pi",
+            // The daemon knows which adapter API it speaks, not which package
+            // version the agent worker loaded; the worker reports that itself
+            // when it comes up.
+            "adapter_api_version": 1,
+            "capabilities": {
+                "streaming": true,
+                "tool_calls": true,
+                "compaction": true,
+                "cancellation": true,
+                "session_restore": true,
+            }
+        }],
+        "tool_output_limit_chars": 24_000,
+    })))
+}
+
+async fn agent_tool_catalog() -> Json<Value> {
+    Json(crate::agent_tools::definitions())
+}
+
+async fn list_agent_sessions(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let sessions = state
+        .db
+        .list_agent_sessions()
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": sessions })))
+}
+
+async fn create_agent_session(
+    State(state): State<AppState>,
+    Json(request): Json<crate::agent_types::CreateAgentSession>,
+) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
+    if let Some(workspace) = &request.workspace_path {
+        validate_workspace_path(&state, workspace)?;
+    }
+    let session = state
+        .db
+        .create_agent_session(request)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(session))
+}
+
+async fn get_agent_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let session = state
+        .db
+        .agent_session(&id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let messages = state
+        .db
+        .agent_messages(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    let executions = state
+        .db
+        .list_tool_executions(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    let pending = state
+        .db
+        .pending_approvals(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    let grants = state
+        .db
+        .session_grants(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "session": session,
+        "messages": messages,
+        "tool_executions": executions,
+        "pending_approvals": pending,
+        "grants": grants,
+        "sandbox": state.agent_broker.capabilities(),
+    })))
+}
+
+async fn patch_agent_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(update): Json<crate::agent_types::UpdateAgentSession>,
+) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
+    if let Some(Some(workspace)) = &update.workspace_path {
+        validate_workspace_path(&state, workspace)?;
+    }
+    let session = state
+        .db
+        .update_agent_session(&id, update)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(session))
+}
+
+async fn delete_agent_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    state.agent_broker.terminate_session_processes(&id).await;
+    state
+        .db
+        .delete_agent_session(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "deleted": true })))
+}
+
+async fn list_agent_messages(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let messages = state
+        .db
+        .agent_messages(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": messages })))
+}
+
+async fn append_agent_messages(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::agent_types::AppendAgentMessages>,
+) -> ApiResult<Json<Value>> {
+    // Confirm the session exists before writing rows against it.
+    state
+        .db
+        .agent_session(&id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let messages = state
+        .db
+        .append_agent_messages(&id, &request.messages, request.replace)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": messages })))
+}
+
+async fn list_agent_tool_executions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let executions = state
+        .db
+        .list_tool_executions(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": executions })))
+}
+
+async fn list_agent_approvals(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let pending = state
+        .db
+        .pending_approvals(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": pending })))
+}
+
+/// Stop a run: kill the session's processes and refuse anything still waiting
+/// on the user, so no approved-after-the-fact command runs later.
+async fn cancel_agent_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let terminated = state.agent_broker.terminate_session_processes(&id).await;
+    let expired = state
+        .db
+        .expire_pending_approvals(Some(&id))
+        .await
+        .map_err(ApiError::internal)?;
+    state.agent_broker.notify_approvals();
+    state
+        .db
+        .update_agent_session(
+            &id,
+            crate::agent_types::UpdateAgentSession {
+                last_run_status: Some("cancelled".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "terminated_processes": terminated,
+        "expired_approvals": expired,
+    })))
+}
+
+/// System prompt for a session, built by the application from the live sandbox
+/// state and permission mode.
+async fn agent_system_prompt(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let session = state
+        .db
+        .agent_session(&id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let names = session
+        .enabled_tools
+        .clone()
+        .unwrap_or_else(crate::agent_tools::tool_names);
+    let prompt =
+        crate::agent_tools::system_prompt(&session, &state.agent_broker.capabilities(), &names);
+    Ok(Json(json!({ "system_prompt": prompt, "tools": names })))
+}
+
+/// The only way an agent tool call reaches the machine.
+async fn agent_exec_tool(
+    State(state): State<AppState>,
+    Json(request): Json<crate::agent_types::ToolExecRequest>,
+) -> ApiResult<Json<crate::agent_types::ToolExecResponse>> {
+    let session = state
+        .db
+        .agent_session(&request.session_id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    if let Some(enabled) = &session.enabled_tools {
+        if !enabled.iter().any(|name| name == &request.tool) {
+            return Err(ApiError::bad_request(format!(
+                "tool `{}` is not enabled for this session",
+                request.tool
+            )));
+        }
+    }
+    let context = crate::agent_exec::BrokerContext {
+        broker: state.agent_broker.as_ref(),
+        db: &state.db,
+        data_dir: &state.data_dir,
+        session: &session,
+    };
+    let response = crate::agent_exec::execute(&context, &request)
+        .await
+        .map_err(ApiError::from_anyhow)?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalWaitQuery {
+    /// Block until the approval is decided, up to this many milliseconds.
+    #[serde(default)]
+    wait_ms: Option<u64>,
+}
+
+/// Read an approval. With `wait_ms`, block until the user answers, so the agent
+/// worker does not have to poll.
+async fn get_agent_approval(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ApprovalWaitQuery>,
+) -> ApiResult<Json<crate::agent_types::AgentApproval>> {
+    use crate::agent_types::ApprovalStatus;
+
+    let deadline =
+        std::time::Instant::now() + Duration::from_millis(query.wait_ms.unwrap_or(0).min(600_000));
+    let notifier = state.agent_broker.approvals_notifier();
+    loop {
+        // Time out stale requests before reporting, so a forgotten dialog does
+        // not leave a run blocked forever.
+        state
+            .db
+            .expire_pending_approvals(None)
+            .await
+            .map_err(ApiError::internal)?;
+        let approval = state
+            .db
+            .approval(&id)
+            .await
+            .map_err(|error| ApiError::not_found(error.to_string()))?;
+        if approval.status != ApprovalStatus::Pending {
+            return Ok(Json(approval));
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(Json(approval));
+        }
+        // Woken by a decision, or re-checked periodically for expiry.
+        let notified = notifier.notified();
+        let _ = tokio::time::timeout((deadline - now).min(Duration::from_millis(1_000)), notified)
+            .await;
+    }
+}
+
+async fn decide_agent_approval(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::agent_types::ApprovalDecisionRequest>,
+) -> ApiResult<Json<crate::agent_types::AgentApproval>> {
+    let approved = match request.decision.as_str() {
+        "approve" => true,
+        "deny" => false,
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "decision must be `approve` or `deny`, not `{other}`"
+            )));
+        }
+    };
+    let approval = state
+        .db
+        .decide_approval(&id, approved, request.scope, request.note)
+        .await
+        .map_err(ApiError::bad_request)?;
+
+    // An approved call records itself when it runs. A refused one never runs, so
+    // record it here — otherwise the attempt would vanish from the activity
+    // timeline as soon as the session is reloaded.
+    if !approved {
+        let note = approval.note.clone();
+        state
+            .db
+            .record_tool_execution(crate::agent_store::NewToolExecution {
+                session_id: approval.session_id.clone(),
+                run_id: None,
+                tool_call_id: None,
+                tool: approval.tool.clone(),
+                arguments: approval.arguments.clone(),
+                environment: approval.environment,
+                risk: approval.risk,
+                status: "denied".to_owned(),
+                exit_code: None,
+                output_preview: Some(format!(
+                    "The user denied this action.{}",
+                    note.as_deref()
+                        .map(|note| format!(" Note: {note}"))
+                        .unwrap_or_default()
+                )),
+                artifact_id: None,
+                truncated: false,
+                changed_paths: Vec::new(),
+                sandbox: Some(approval.sandbox.clone()),
+                approval_id: Some(approval.id.clone()),
+                error: Some(note.unwrap_or_else(|| "denied by the user".to_owned())),
+                duration_ms: None,
+            })
+            .await
+            .map_err(ApiError::internal)?;
+    }
+
+    state.agent_broker.notify_approvals();
+    Ok(Json(approval))
+}
+
+/// Full text of a stored tool output. Truncated output is never lost.
+async fn get_agent_artifact(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let (_, path, _) = state
+        .db
+        .artifact(&id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let body = tokio::fs::read(&path).await.map_err(ApiError::internal)?;
+    Ok((
+        [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"))],
+        body,
+    )
+        .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceRequest {
+    path: String,
+}
+
+/// Check that a folder can serve as an agent workspace before a session uses it.
+async fn validate_agent_workspace(
+    State(state): State<AppState>,
+    Json(request): Json<WorkspaceRequest>,
+) -> ApiResult<Json<Value>> {
+    let resolved = validate_workspace_path(&state, &request.path)?;
+    let git = resolved.join(".git").exists();
+    Ok(Json(json!({
+        "path": resolved.display().to_string(),
+        "git_repository": git,
+        "sandbox": state.agent_broker.capabilities(),
+    })))
+}
+
+/// A workspace must exist, be a directory, and sit outside Brazier's own data
+/// and credential paths.
+fn validate_workspace_path(state: &AppState, raw: &str) -> ApiResult<PathBuf> {
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return Err(ApiError::bad_request("the workspace path must be absolute"));
+    }
+    let resolved = std::fs::canonicalize(&path)
+        .map_err(|_| ApiError::bad_request(format!("{raw} does not exist")))?;
+    if !resolved.is_dir() {
+        return Err(ApiError::bad_request(format!("{raw} is not a directory")));
+    }
+    for secret in crate::agent_sandbox::secret_paths(Some(&state.data_dir)) {
+        if crate::agent_policy::is_inside(&resolved, &secret) {
+            return Err(ApiError::bad_request(format!(
+                "{raw} is a credential or Brazier-owned path and cannot be an agent workspace"
+            )));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if resolved == home {
+            return Err(ApiError::bad_request(
+                "choose a project folder rather than the whole home directory",
+            ));
+        }
+    }
+    Ok(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3133,7 +3622,345 @@ mod tests {
             active_downloads,
             download_queue,
             runtimes_cache: Arc::new(Mutex::new(None)),
+            agent_broker: Arc::new(crate::agent_exec::AgentBroker::new()),
         }
+    }
+
+    async fn json_request(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, parsed)
+    }
+
+    async fn get_request(app: &Router, uri: &str) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, parsed)
+    }
+
+    /// The approval round trip an agent worker performs: a held call, a user
+    /// decision, then the same call with the approval attached.
+    #[tokio::test]
+    async fn agent_tool_calls_wait_for_approval_over_http() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+
+        let (status, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "title": "Add a test",
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        let session_id = session["id"].as_str().unwrap().to_owned();
+        assert_eq!(session["permission_mode"], "ask");
+
+        let arguments = json!({ "path": "hello.txt", "content": "hi" });
+        let (status, held) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/exec",
+            json!({
+                "session_id": session_id,
+                "tool": "fs_write",
+                "arguments": arguments,
+                "tool_call_id": "call-1"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{held}");
+        assert_eq!(held["status"], "approval_required");
+        assert!(!workspace.path().join("hello.txt").exists());
+        let approval_id = held["approval"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(held["approval"]["summary"].as_str().is_some(), true);
+
+        // A pending approval is visible to the UI even if the run is restarted.
+        let (_, pending) = get_request(
+            &app,
+            &format!("/api/v1/agent/sessions/{session_id}/approvals"),
+        )
+        .await;
+        assert_eq!(pending["data"].as_array().unwrap().len(), 1);
+
+        let (status, decided) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/agent/approvals/{approval_id}"),
+            json!({ "decision": "approve", "scope": "once" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{decided}");
+        assert_eq!(decided["status"], "approved");
+
+        let (status, done) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/exec",
+            json!({
+                "session_id": session_id,
+                "tool": "fs_write",
+                "arguments": arguments,
+                "tool_call_id": "call-1",
+                "approval_id": approval_id
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{done}");
+        assert_eq!(done["status"], "completed", "{done}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("hello.txt")).unwrap(),
+            "hi"
+        );
+
+        // The ledger holds one row for the call that ran, pointing at the
+        // approval that authorized it. The held attempt lives in the approval
+        // table rather than duplicating the timeline.
+        let (_, executions) = get_request(
+            &app,
+            &format!("/api/v1/agent/sessions/{session_id}/tool-executions"),
+        )
+        .await;
+        let rows = executions["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{executions}");
+        assert_eq!(rows[0]["status"], "completed");
+        assert_eq!(rows[0]["approval_id"], json!(approval_id));
+        assert_eq!(rows[0]["changed_paths"], json!(["hello.txt"]));
+    }
+
+    #[tokio::test]
+    async fn a_denied_approval_is_kept_in_the_tool_ledger() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (_, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+        )
+        .await;
+        let session_id = session["id"].as_str().unwrap().to_owned();
+        let (_, held) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/exec",
+            json!({
+                "session_id": session_id,
+                "tool": "shell_run",
+                "arguments": { "command": "rm -rf /" }
+            }),
+        )
+        .await;
+        let approval_id = held["approval"]["id"].as_str().unwrap().to_owned();
+        json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/agent/approvals/{approval_id}"),
+            json!({ "decision": "deny", "note": "absolutely not" }),
+        )
+        .await;
+
+        let (_, executions) = get_request(
+            &app,
+            &format!("/api/v1/agent/sessions/{session_id}/tool-executions"),
+        )
+        .await;
+        let rows = executions["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{executions}");
+        assert_eq!(rows[0]["status"], "denied");
+        assert_eq!(rows[0]["error"], "absolutely not");
+        assert_eq!(rows[0]["tool"], "shell_run");
+    }
+
+    #[tokio::test]
+    async fn agent_capabilities_never_overstate_the_sandbox() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (status, capabilities) = get_request(&app, "/api/v1/agent/capabilities").await;
+        assert_eq!(status, StatusCode::OK);
+        let sandbox = &capabilities["sandbox"];
+        let isolated = sandbox["isolated"].as_bool().unwrap();
+        // Whatever the host offers, the claim and the detail must agree.
+        if isolated {
+            assert_ne!(sandbox["backend"], "none");
+        } else {
+            assert_eq!(sandbox["backend"], "none");
+            assert!(sandbox["detail"].as_str().unwrap().len() > 10);
+        }
+        assert!(
+            capabilities["permission_modes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("skip-permissions"))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_agent_tool_catalog_is_served_with_schemas() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (status, catalog) = get_request(&app, "/api/v1/agent/tools").await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = catalog["data"].as_array().unwrap();
+        assert!(tools.iter().any(|tool| tool["name"] == "shell_run"));
+        for tool in tools {
+            assert!(tool["description"].as_str().unwrap().len() > 20);
+            assert_eq!(tool["input_schema"]["type"], "object");
+            assert!(tool["risk"].as_str().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_restricted_to_some_tools_refuses_the_others() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (_, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test",
+                "permission_mode": "skip-permissions",
+                "enabled_tools": ["fs_read", "fs_list"]
+            }),
+        )
+        .await;
+        let session_id = session["id"].as_str().unwrap();
+        let (status, refused) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/exec",
+            json!({
+                "session_id": session_id,
+                "tool": "shell_run",
+                "arguments": { "command": "echo nope" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
+    #[tokio::test]
+    async fn a_workspace_must_be_an_existing_directory_outside_brazier_state() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (status, _) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/workspace",
+            json!({ "path": "/definitely/not/here" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/workspace",
+            json!({ "path": dir.path().display().to_string() }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the daemon data directory cannot be a workspace"
+        );
+
+        let workspace = tempdir().unwrap();
+        let (status, body) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/workspace",
+            json!({ "path": workspace.path().display().to_string() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["git_repository"], false);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_run_expires_pending_approvals() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (_, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+        )
+        .await;
+        let session_id = session["id"].as_str().unwrap().to_owned();
+        let (_, held) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/exec",
+            json!({
+                "session_id": session_id,
+                "tool": "fs_delete",
+                "arguments": { "path": "anything.txt" }
+            }),
+        )
+        .await;
+        let approval_id = held["approval"]["id"].as_str().unwrap().to_owned();
+
+        let (status, cancelled) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/agent/sessions/{session_id}/cancel"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cancelled}");
+        assert_eq!(cancelled["expired_approvals"], 1);
+
+        // An approval answered after cancellation must not authorize anything.
+        let (status, _) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/agent/approvals/{approval_id}"),
+            json!({ "decision": "approve" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

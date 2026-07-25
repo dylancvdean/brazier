@@ -55,6 +55,18 @@
 - **Realtime voice (PersonaPlex / Moshi protocol)** — engine recipe, session
   API, Voice workspace mode with persona text; Apple Silicon Moshi/MLX and
   deeper duplex polish remain follow-ons.
+- **Agent mode** — interactive coding and system agent as a fourth workspace
+  mode. Pi (`@earendil-works/pi-*`, MIT) is the first runtime, installed as a
+  pinned dependency and reachable only through an adapter whose boundary a test
+  enforces. Brazier owns the rest: 19 filesystem, shell, workspace, and
+  permission tools with daemon-served schemas; a policy broker with `ask`,
+  `sandbox-only`, and `skip-permissions` modes; approvals bound to a session,
+  tool, and argument hash; Seatbelt and Bubblewrap sandboxes that report their
+  isolation honestly (and refuse to pretend when there is none); session,
+  transcript, tool-ledger, approval, grant, and artifact persistence;
+  cancellation, compaction, and argument repair for weak local models. The agent
+  runtime runs in its own `utilityProcess` and reaches the machine only through
+  `POST /api/v1/agent/exec`.
 
 ## Alpha
 
@@ -72,6 +84,20 @@
   Nemotron VoiceChat if open self-host packaging lands.
 - Broader generation families beyond sd.cpp (e.g. Diffusers for Hunyuan/CogVideoX)
   if needed.
+
+## Agent mode follow-ons
+
+- Verify Agent mode inside a packaged build: the worker is an ESM bundle that
+  imports Pi from `node_modules`, so `asarUnpack` coverage needs checking on all
+  three platforms.
+- Windows sandboxing. There is no backend today, so the daemon reports
+  `isolated: false` and command execution is treated as host execution.
+- Live output streaming for `shell_run` (long commands currently report at
+  completion; `shell_start` plus `shell_output` covers the interactive case).
+- Model-generated compaction summaries; V1 builds the digest deterministically
+  from the transcript and the tool ledger.
+- Optional MCP tools inside agent sessions, reusing the existing MCP client
+  behind the same policy broker.
 
 ## Tool packs and release hardening
 
