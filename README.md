@@ -61,6 +61,14 @@ The daemon prints a `BRAZIER_READY` JSON record containing the selected address.
 Authentication is enabled by default and a random session key is emitted in
 that record for the desktop process.
 
+The application icons are derived from `assets/brazier-logo.png` and committed,
+so building needs no image tooling. After changing the artwork, regenerate them
+and commit the result:
+
+```sh
+uv run --with pillow apps/desktop/scripts/make-icons.py
+```
+
 ## Security
 
 Brazier collects no telemetry. Model engines and source forks execute native
