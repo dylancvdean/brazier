@@ -153,6 +153,8 @@ impl Runtime {
         } else {
             settings.target
         };
+        // `runtime_settings::load` has already discarded an override that does
+        // not name llama-server.
         let pinned = settings
             .binary_override
             .as_ref()
@@ -445,6 +447,12 @@ impl Runtime {
             path.is_file(),
             "runtime binary not found: {}",
             path.display()
+        );
+        anyhow::ensure!(
+            llama::is_llama_server_path(&path),
+            "{} is not a {} binary",
+            path.display(),
+            llama::binary_name()
         );
         let runnable = {
             let candidate = path.clone();
@@ -816,34 +824,27 @@ impl Runtime {
         }
     }
 
-    async fn activate_runtime_entry(&self, entry: &runtimes::RuntimeEntry) -> anyhow::Result<()> {
+    /// Activate a runtime inventory entry into the slot its engine belongs to.
+    ///
+    /// The only dispatch point: an entry's engine decides which slot it fills,
+    /// and an engine with no slot is refused rather than falling through. A
+    /// missing arm here previously pinned a PersonaPlex virtualenv interpreter
+    /// as the llama-server binary, which then failed on the next chat request.
+    pub async fn activate_runtime_entry(
+        &self,
+        entry: &runtimes::RuntimeEntry,
+    ) -> anyhow::Result<PathBuf> {
+        let path = PathBuf::from(&entry.path);
         match entry.engine.as_str() {
-            "mlx-lm" => {
-                self.activate_python(MlxKind::Lm, PathBuf::from(&entry.path))
-                    .await?;
-            }
-            "mlx-vlm" => {
-                self.activate_python(MlxKind::Vlm, PathBuf::from(&entry.path))
-                    .await?;
-            }
-            "whisper.cpp" | "whisperkit" => {
-                self.activate_whisper(PathBuf::from(&entry.path)).await?;
-            }
-            "streaming-asr" => {
-                self.activate_streaming_asr(PathBuf::from(&entry.path))
-                    .await?;
-            }
-            "stable-diffusion.cpp" => {
-                self.activate_sdcpp(PathBuf::from(&entry.path)).await?;
-            }
-            "personaplex" | "personaplex-mlx" => {
-                self.activate_voice(PathBuf::from(&entry.path)).await?;
-            }
-            _ => {
-                self.activate_binary(PathBuf::from(&entry.path)).await?;
-            }
+            runtimes::ENGINE => self.activate_binary(path).await,
+            "mlx-lm" => self.activate_python(MlxKind::Lm, path).await,
+            "mlx-vlm" => self.activate_python(MlxKind::Vlm, path).await,
+            crate::whisper::ENGINE | crate::whisperkit::ENGINE => self.activate_whisper(path).await,
+            "streaming-asr" => self.activate_streaming_asr(path).await,
+            crate::sdcpp::ENGINE => self.activate_sdcpp(path).await,
+            voice::ENGINE | voice::ENGINE_MLX => self.activate_voice(path).await,
+            other => anyhow::bail!("`{other}` runtimes cannot be activated"),
         }
-        Ok(())
     }
 
     /// Activate a runtime by inventory id (used for per-model bindings).
@@ -858,7 +859,7 @@ impl Runtime {
             &active,
         )
         .ok_or_else(|| anyhow::anyhow!("unknown runtime `{runtime_id}`"))?;
-        self.activate_runtime_entry(&entry).await
+        self.activate_runtime_entry(&entry).await.map(|_| ())
     }
 
     async fn apply_model_binding(&self, model_id: &str) -> anyhow::Result<()> {
@@ -1843,6 +1844,72 @@ mod tests {
                 .any(|model| model.id == "gguf:acme/demo/m.gguf" && model.engine == "llama.cpp")
         );
         assert!(!models.iter().any(|model| model.id == "brazier/mock"));
+    }
+
+    /// The regression that made this check exist: activating a PersonaPlex
+    /// build pinned its virtualenv `python` as the llama-server binary, and the
+    /// next chat request ran `python -m <model>.gguf`.
+    #[tokio::test]
+    async fn refuses_to_pin_something_that_is_not_llama_server() {
+        let dir = tempdir().unwrap();
+        let venv = dir.path().join("personaplex-mlx/builds/main-1/venv/bin");
+        std::fs::create_dir_all(&venv).unwrap();
+        let python = venv.join("python");
+        std::fs::write(&python, b"#!/bin/sh\nexit 0\n").unwrap();
+
+        let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
+        let error = runtime
+            .activate_binary(python)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is not a llama-server binary"), "{error}");
+        assert!(runtime.active_binary().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn only_engines_with_a_slot_can_be_activated() {
+        let dir = tempdir().unwrap();
+        let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
+        let error = runtime
+            .activate_runtime_entry(&runtimes::RuntimeEntry {
+                id: "vllm-source-1".into(),
+                engine: "vllm".into(),
+                kind: "source".into(),
+                label: "vLLM".into(),
+                target: None,
+                version: None,
+                repository: None,
+                path: dir.path().join("python").display().to_string(),
+                active: false,
+                deletable: true,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        // Previously this fell through to the llama-server slot.
+        assert!(
+            error.contains("`vllm` runtimes cannot be activated"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_override_pointing_at_the_wrong_program_is_discarded() {
+        let dir = tempdir().unwrap();
+        let python = dir.path().join("venv/bin/python");
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(&python, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut settings = crate::runtime_settings::load(dir.path());
+        settings.binary_override = Some(python.display().to_string());
+        crate::runtime_settings::save(dir.path(), &settings)
+            .await
+            .unwrap();
+
+        // Recovery matters as much as the fix: an install poisoned by an earlier
+        // build has to come back on its own.
+        let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
+        assert_eq!(runtime.active_binary().await, None);
     }
 
     #[tokio::test]

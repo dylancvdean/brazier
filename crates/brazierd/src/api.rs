@@ -993,39 +993,13 @@ async fn activate_runtime(
         &active,
     )
     .ok_or_else(|| ApiError::bad_request(format!("unknown runtime `{}`", request.id)))?;
-    let path = match entry.engine.as_str() {
-        "mlx-lm" => state
-            .runtime
-            .activate_python(
-                crate::mlx::MlxKind::Lm,
-                std::path::PathBuf::from(&entry.path),
-            )
-            .await
-            .map_err(ApiError::bad_request)?,
-        "mlx-vlm" => state
-            .runtime
-            .activate_python(
-                crate::mlx::MlxKind::Vlm,
-                std::path::PathBuf::from(&entry.path),
-            )
-            .await
-            .map_err(ApiError::bad_request)?,
-        "whisper.cpp" | "whisperkit" => state
-            .runtime
-            .activate_whisper(std::path::PathBuf::from(&entry.path))
-            .await
-            .map_err(ApiError::bad_request)?,
-        "streaming-asr" => state
-            .runtime
-            .activate_streaming_asr(std::path::PathBuf::from(&entry.path))
-            .await
-            .map_err(ApiError::bad_request)?,
-        _ => state
-            .runtime
-            .activate_binary(std::path::PathBuf::from(&entry.path))
-            .await
-            .map_err(ApiError::bad_request)?,
-    };
+    // Dispatch lives in the runtime, so this endpoint cannot drift out of step
+    // with it and file a voice interpreter under llama-server.
+    let path = state
+        .runtime
+        .activate_runtime_entry(&entry)
+        .await
+        .map_err(ApiError::bad_request)?;
     state.invalidate_runtimes_cache().await;
     Ok(Json(json!({
         "active_binary": path.display().to_string(),

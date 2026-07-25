@@ -3,7 +3,9 @@
   "display_name": "llama.cpp",
   "upstream_origins": [
     "https://github.com/ggml-org/llama.cpp.git",
-    "https://github.com/ggml-org/llama.cpp"
+    "https://github.com/ggml-org/llama.cpp",
+    "https://github.com/ggerganov/llama.cpp.git",
+    "https://github.com/ggerganov/llama.cpp"
   ],
   "supported_platforms": ["linux-x64", "linux-arm64", "macos-x64", "macos-arm64", "windows-x64", "windows-arm64"],
   "steps": [
