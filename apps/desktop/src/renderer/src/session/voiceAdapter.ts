@@ -17,7 +17,13 @@
  * one question. Its text is still surfaced — and still treated as untrusted.
  */
 
-import { createVoiceSession, endVoiceSession, transcribeAudio } from '../api'
+import {
+  createVoiceSession,
+  endVoiceSession,
+  getVoiceSession,
+  transcribeAudio,
+  type VoiceSessionInfo
+} from '../api'
 import { VoiceStream, voiceStreamSupported } from '../audio/voiceStream'
 import { UtteranceSegmenter, encodeWav } from '../audio/utterance'
 import type { VoiceAdapter, VoiceAdapterEvent, VoiceSessionHandle } from './adapters'
@@ -71,12 +77,10 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     if (!voiceStreamSupported()) {
       throw new Error('This build lacks the WebCodecs Opus support realtime voice needs.')
     }
-    const session = await createVoiceSession({
-      model_id: this.options.modelId?.() || undefined,
-      // The bounded context becomes the launch persona: it is the only runtime
-      // guidance PersonaPlex accepts.
-      persona_text: renderVoicePrompt(context)
-    })
+    // The bounded context becomes the launch persona: it is the only runtime
+    // guidance PersonaPlex accepts.
+    const persona = renderVoicePrompt(context)
+    const session = await this.openSession(persona)
 
     this.segmenter = new UtteranceSegmenter({
       onSpeechStart: (utteranceId) => this.publish({ type: 'userSpeechStarted', utteranceId }),
@@ -110,6 +114,29 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     this.stream = stream
     this.sessionId = session.id
     return { id: session.id, startedAt: Date.now() }
+  }
+
+  /**
+   * Get a session to talk to, adopting one the daemon already has.
+   *
+   * The daemon allows exactly one realtime session, and it outlives the window:
+   * after a reload, or a start that failed partway, one is still registered and
+   * creating another is refused. Reusing it costs nothing when its persona
+   * already matches; when it does not, it is ended so the new context takes
+   * effect, which is worth the model reload.
+   */
+  private async openSession(persona: string): Promise<VoiceSessionInfo> {
+    const existing = await getVoiceSession()
+      .then((response) => response.session)
+      .catch(() => null)
+    if (existing) {
+      if (existing.persona_text === persona) return existing
+      await endVoiceSession(existing.id).catch(() => undefined)
+    }
+    return createVoiceSession({
+      model_id: this.options.modelId?.() || undefined,
+      persona_text: persona
+    })
   }
 
   /**

@@ -22,6 +22,12 @@ type Props = {
   modelId: string
   /** Whether the browser can capture and encode audio at all. */
   audioSupported: boolean
+  /**
+   * Whether the daemon can transcribe. PersonaPlex reports only its own speech,
+   * so without ASR a spoken turn never becomes text and nothing reaches the
+   * conversation — except with `neither`, which needs no transcript at all.
+   */
+  asrAvailable: boolean
   persona: string
   onPersonaChange: (persona: string) => void
   /** The shared conversation. Voice turns land in it beside typed ones. */
@@ -63,6 +69,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
   const [muted, setMuted] = useState(false)
   const [busy, setBusy] = useState(false)
 
+  const needsTranscripts = config.voiceSessionTarget !== 'neither'
   const live = snapshot.voiceStatus === 'live'
   const starting = snapshot.voiceStatus === 'starting' || busy
   const selected = props.models.find((model) => model.id === props.modelId)
@@ -125,6 +132,15 @@ export function VoiceMode(props: Props): React.JSX.Element {
           This build has no WebCodecs Opus support, which realtime voice needs for audio in and out.
         </p>
       ) : null}
+      {props.realtimeAvailable && !props.asrAvailable && needsTranscripts ? (
+        <p className="mode-empty">
+          Connecting voice to a conversation needs transcription, which is separate from PersonaPlex:
+          the voice model reports only what <em>it</em> says, so what <em>you</em> say is transcribed
+          by Whisper. Build WhisperKit under Manage → Runtimes, or download a Whisper model from
+          Discover if you already built whisper.cpp. Until then, use <strong>Neither</strong>, which
+          talks to PersonaPlex directly and needs no transcript.
+        </p>
+      ) : null}
 
       <div className="voice-controls">
         <label>
@@ -143,7 +159,12 @@ export function VoiceMode(props: Props): React.JSX.Element {
             <button
               type="button"
               className="primary"
-              disabled={starting || !props.realtimeAvailable || !props.audioSupported}
+              disabled={
+                starting ||
+                !props.realtimeAvailable ||
+                !props.audioSupported ||
+                (needsTranscripts && !props.asrAvailable)
+              }
               onClick={() => void guard(() => session.startVoice())}
             >
               {starting ? <LoaderCircle className="spin" size={16} /> : <Mic size={16} />}

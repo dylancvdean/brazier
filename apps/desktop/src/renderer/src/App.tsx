@@ -1330,6 +1330,7 @@ export function App(): React.JSX.Element {
             realtimeAvailable={realtimeVoiceAvailable}
             modelId={voiceModel}
             audioSupported={audioSupported}
+            asrAvailable={Boolean(pipelineFeatures.asr || pipelineFeatures.streaming_asr)}
             persona={persona}
             onPersonaChange={(next) => {
               personaEdited.current = true
