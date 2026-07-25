@@ -7,7 +7,12 @@
       "key": "stabilityai/sdxl-base-1.0",
       "summary": "The dependable baseline: one self-contained checkpoint, no separate text encoders, and the largest LoRA and finetune ecosystem.",
       "license": "openrail++",
-      "defaults": { "width": 1024, "height": 1024, "steps": 30, "cfg_scale": 7.0 },
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 30,
+        "cfg_scale": 7.0
+      },
       "components": [
         {
           "repo_id": "stabilityai/stable-diffusion-xl-base-1.0",
@@ -15,7 +20,8 @@
           "role": "Checkpoint (UNet + VAE + text encoders)",
           "approx_bytes": 6938040706
         }
-      ]
+      ],
+      "supports_init_image": true
     },
     {
       "id": "realvisxl-v5",
@@ -24,7 +30,12 @@
       "key": "SG161222/realvisxl-v5",
       "summary": "Photoreal SDXL finetune. Same single-file simplicity as SDXL base, noticeably better faces and lighting.",
       "license": "openrail++",
-      "defaults": { "width": 1024, "height": 1024, "steps": 30, "cfg_scale": 5.0 },
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 30,
+        "cfg_scale": 5.0
+      },
       "components": [
         {
           "repo_id": "SG161222/RealVisXL_V5.0",
@@ -32,7 +43,8 @@
           "role": "Checkpoint (UNet + VAE + text encoders)",
           "approx_bytes": 6938040706
         }
-      ]
+      ],
+      "supports_init_image": true
     },
     {
       "id": "flux1-schnell-q8",
@@ -41,7 +53,12 @@
       "key": "black-forest-labs/flux1-schnell-q8",
       "summary": "Best quality per second: Apache-2.0, four steps, and CFG pinned at 1.0. Pulls its two text encoders and VAE alongside the diffusion weights.",
       "license": "apache-2.0",
-      "defaults": { "width": 1024, "height": 1024, "steps": 4, "cfg_scale": 1.0 },
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 4,
+        "cfg_scale": 1.0
+      },
       "components": [
         {
           "repo_id": "city96/FLUX.1-schnell-gguf",
@@ -72,7 +89,8 @@
           "role": "Text encoder (T5-XXL)",
           "approx_bytes": 9787841024
         }
-      ]
+      ],
+      "supports_init_image": true
     },
     {
       "id": "wan2.2-ti2v-5b",
@@ -111,14 +129,15 @@
           "role": "Text encoder (umT5-XXL)",
           "approx_bytes": 6700000000
         }
-      ]
+      ],
+      "supports_init_image": true
     },
     {
       "id": "wan2.1-t2v-1.3b",
       "label": "Wan 2.1 T2V 1.3B",
       "modality": "video",
       "key": "wan-ai/wan2.1-t2v-1.3b",
-      "summary": "The small, fast video model. 480p clips in a fraction of the time — good for finding a prompt before committing to the 5B.",
+      "summary": "The small, fast video model. 480p clips in a fraction of the time \u2014 good for finding a prompt before committing to the 5B.",
       "license": "apache-2.0",
       "defaults": {
         "width": 832,
@@ -150,7 +169,8 @@
           "role": "Text encoder (umT5-XXL)",
           "approx_bytes": 6700000000
         }
-      ]
+      ],
+      "supports_init_image": false
     }
   ]
 }

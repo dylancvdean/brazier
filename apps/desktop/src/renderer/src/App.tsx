@@ -56,6 +56,7 @@ import {
   streamCompletion,
   uploadAttachmentBlob
 } from './api'
+import { DownloadTray } from './components/DownloadTray'
 import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
@@ -1483,6 +1484,7 @@ export function App(): React.JSX.Element {
           }
           selectedModel={modeModel.selected}
           loading={modelsLoading}
+          videoPipeline={Boolean(pipelineFeatures.video_preprocess)}
           onSelect={modeModel.select}
           onManage={() => openManage(modelsLoadFailed || localModels.length === 0 ? 'discover' : 'library')}
           onClose={() => setModelMenuOpen(false)}
@@ -1498,6 +1500,8 @@ export function App(): React.JSX.Element {
           onClose={() => setInferenceMenuOpen(false)}
         />
       )}
+      <DownloadTray onChanged={() => void refreshLocalModels().catch(() => {})} />
+
       {manageOpen && (
         <ManagePanel
           section={manageSection}

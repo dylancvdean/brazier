@@ -80,6 +80,10 @@ async fn main() -> anyhow::Result<()> {
     // on GitHub just to show what is installed.
     brazierd::github_releases::set_cache_dir(data_dir.join("state"));
     let db = Database::open(&data_dir.join("brazier.sqlite")).await?;
+    // Downloads do not survive a restart, but their partial files do; mark any
+    // that were mid-flight as paused so they can be resumed rather than
+    // appearing to still be running.
+    db.interrupt_running_download_jobs().await?;
     let api_key = if args.no_auth {
         None
     } else {

@@ -69,7 +69,15 @@ pub struct DownloadJob {
     pub repo_id: String,
     pub filename: String,
     pub revision: String,
+    /// `pending`, `downloading`, `paused`, `completed`, `failed`, `cancelled`.
     pub status: String,
+    /// Which downloader handles this job (`gguf`, `mlx`, `sdcpp-bundle`, …).
+    pub kind: String,
+    /// Serialized request, so a paused job can be resumed after a restart.
+    #[serde(skip_serializing)]
+    pub payload: Option<String>,
+    /// Human name for the queue UI.
+    pub label: Option<String>,
     pub bytes_downloaded: Option<i64>,
     pub total_bytes: Option<i64>,
     pub sha256: Option<String>,
@@ -85,6 +93,9 @@ struct DownloadJobRow {
     filename: String,
     revision: String,
     status: String,
+    kind: String,
+    payload: Option<String>,
+    label: Option<String>,
     bytes_downloaded: Option<i64>,
     total_bytes: Option<i64>,
     sha256: Option<String>,
@@ -101,6 +112,9 @@ impl From<DownloadJobRow> for DownloadJob {
             filename: row.filename,
             revision: row.revision,
             status: row.status,
+            kind: row.kind,
+            payload: row.payload,
+            label: row.label,
             bytes_downloaded: row.bytes_downloaded,
             total_bytes: row.total_bytes,
             sha256: row.sha256,
@@ -374,6 +388,75 @@ impl Database {
             sqlx::query("INSERT INTO schema_migrations(version) VALUES (5)")
                 .execute(&self.pool)
                 .await?;
+        }
+
+        if version < 6 {
+            // Queued work needs to survive a restart, and jobs can now be
+            // paused, so the status CHECK from migration 4 is replaced. The
+            // rebuild runs in one transaction on one connection: the pool
+            // hands out several, and a DROP on one is not visible to another
+            // mid-migration, which made the rename fail.
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("ALTER TABLE download_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'gguf'")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("ALTER TABLE download_jobs ADD COLUMN payload TEXT")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("ALTER TABLE download_jobs ADD COLUMN label TEXT")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE download_jobs_v6 (
+                    id TEXT PRIMARY KEY,
+                    repo_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    revision TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'pending', 'downloading', 'paused', 'completed', 'failed', 'cancelled'
+                    )),
+                    kind TEXT NOT NULL DEFAULT 'gguf',
+                    payload TEXT,
+                    label TEXT,
+                    bytes_downloaded INTEGER,
+                    total_bytes INTEGER,
+                    sha256 TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"INSERT INTO download_jobs_v6(
+                       id, repo_id, filename, revision, status, kind, payload, label,
+                       bytes_downloaded, total_bytes, sha256, error, created_at, updated_at)
+                   SELECT id, repo_id, filename, revision,
+                          CASE status WHEN 'running' THEN 'downloading' ELSE status END,
+                          kind, payload, label,
+                          bytes_downloaded, total_bytes, sha256, error, created_at, updated_at
+                   FROM download_jobs"#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DROP TABLE download_jobs")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("ALTER TABLE download_jobs_v6 RENAME TO download_jobs")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS download_jobs_updated ON download_jobs(updated_at DESC)",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO schema_migrations(version) VALUES (6)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
 
         Ok(())
@@ -734,18 +817,90 @@ impl Database {
         filename: &str,
         revision: &str,
     ) -> anyhow::Result<DownloadJob> {
+        self.create_queued_download_job(
+            repo_id,
+            filename,
+            revision,
+            "gguf",
+            None,
+            None,
+            "downloading",
+        )
+        .await
+    }
+
+    /// Record a job the queue will run later, keeping enough detail to
+    /// reconstruct the work after a pause or a restart.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_queued_download_job(
+        &self,
+        repo_id: &str,
+        filename: &str,
+        revision: &str,
+        kind: &str,
+        payload: Option<&str>,
+        label: Option<&str>,
+        status: &str,
+    ) -> anyhow::Result<DownloadJob> {
         let id = Uuid::new_v4().to_string();
         sqlx::query(
-            r#"INSERT INTO download_jobs(id, repo_id, filename, revision, status)
-               VALUES(?, ?, ?, ?, 'running')"#,
+            r#"INSERT INTO download_jobs(id, repo_id, filename, revision, status, kind, payload, label)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&id)
         .bind(repo_id)
         .bind(filename)
         .bind(revision)
+        .bind(status)
+        .bind(kind)
+        .bind(payload)
+        .bind(label)
         .execute(&self.pool)
         .await?;
         self.get_download_job(&id).await
+    }
+
+    /// Mark a job paused, keeping its partial file for a later resume.
+    pub async fn pause_download_job(&self, job_id: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE download_jobs
+               SET status = 'paused', updated_at = datetime('now')
+               WHERE id = ? AND status IN ('pending', 'downloading')"#,
+        )
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Put a paused or failed job back in line.
+    pub async fn requeue_download_job(&self, job_id: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE download_jobs
+               SET status = 'pending', error = NULL, updated_at = datetime('now')
+               WHERE id = ? AND status IN ('paused', 'failed', 'cancelled')"#,
+        )
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_download_job_public(&self, id: &str) -> anyhow::Result<DownloadJob> {
+        self.get_download_job(id).await
+    }
+
+    /// Jobs that were mid-flight when the daemon stopped, so they can be
+    /// marked paused rather than appearing stuck as running forever.
+    pub async fn interrupt_running_download_jobs(&self) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE download_jobs
+               SET status = 'paused', updated_at = datetime('now')
+               WHERE status IN ('pending', 'downloading')"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn update_download_job_progress(
@@ -827,7 +982,7 @@ impl Database {
 
     pub async fn list_download_jobs(&self, limit: i64) -> anyhow::Result<Vec<DownloadJob>> {
         let rows = sqlx::query_as::<_, DownloadJobRow>(
-            r#"SELECT id, repo_id, filename, revision, status, bytes_downloaded, total_bytes,
+            r#"SELECT id, repo_id, filename, revision, status, kind, payload, label, bytes_downloaded, total_bytes,
                       sha256, error, created_at, updated_at
                FROM download_jobs ORDER BY updated_at DESC LIMIT ?"#,
         )
@@ -839,7 +994,7 @@ impl Database {
 
     async fn get_download_job(&self, id: &str) -> anyhow::Result<DownloadJob> {
         let row = sqlx::query_as::<_, DownloadJobRow>(
-            r#"SELECT id, repo_id, filename, revision, status, bytes_downloaded, total_bytes,
+            r#"SELECT id, repo_id, filename, revision, status, kind, payload, label, bytes_downloaded, total_bytes,
                       sha256, error, created_at, updated_at
                FROM download_jobs WHERE id = ?"#,
         )

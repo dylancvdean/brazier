@@ -1,8 +1,8 @@
 {
   "comment": [
     "Rules for assembling a stable-diffusion.cpp bundle from an arbitrary Hugging",
-    "Face checkpoint. Detection reads the file's own header — GGUF exposes",
-    "general.architecture, safetensors exposes tensor names and shapes — so a new",
+    "Face checkpoint. Detection reads the file's own header \u2014 GGUF exposes",
+    "general.architecture, safetensors exposes tensor names and shapes \u2014 so a new",
     "model of a known architecture needs no entry here; only a genuinely new",
     "architecture does.",
     "",
@@ -11,7 +11,11 @@
   ],
   "self_contained_markers": {
     "comment": "A checkpoint carrying both a VAE and a text encoder needs no companions.",
-    "vae": ["first_stage_model.", "vae.encoder.", "vae.decoder."],
+    "vae": [
+      "first_stage_model.",
+      "vae.encoder.",
+      "vae.decoder."
+    ],
     "text_encoder": [
       "conditioner.embedders.",
       "cond_stage_model.",
@@ -25,9 +29,18 @@
       "label": "FLUX.1",
       "modality": "image",
       "detect": {
-        "gguf_arch": ["flux"],
-        "tensor_patterns": ["double_blocks.0.img_attn", "single_blocks.0.linear1"],
-        "name_patterns": ["flux1-", "flux.1-", "flux1_"]
+        "gguf_arch": [
+          "flux"
+        ],
+        "tensor_patterns": [
+          "double_blocks.0.img_attn",
+          "single_blocks.0.linear1"
+        ],
+        "name_patterns": [
+          "flux1-",
+          "flux.1-",
+          "flux1_"
+        ]
       },
       "requires": [
         {
@@ -50,24 +63,44 @@
           "path": "t5xxl_fp16.safetensors"
         }
       ],
-      "defaults": { "width": 1024, "height": 1024, "steps": 20, "cfg_scale": 1.0, "guidance": 3.5 },
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 20,
+        "cfg_scale": 1.0,
+        "guidance": 3.5
+      },
       "variants": [
         {
           "id": "flux-schnell",
           "label": "FLUX.1 schnell",
-          "when": { "name_patterns": ["schnell"] },
-          "defaults": { "steps": 4, "cfg_scale": 1.0 }
+          "when": {
+            "name_patterns": [
+              "schnell"
+            ]
+          },
+          "defaults": {
+            "steps": 4,
+            "cfg_scale": 1.0
+          }
         }
-      ]
+      ],
+      "supports_init_image": true
     },
     {
       "id": "chroma",
       "label": "Chroma",
       "modality": "image",
       "detect": {
-        "gguf_arch": ["chroma"],
-        "tensor_patterns": ["distilled_guidance_layer."],
-        "name_patterns": ["chroma"]
+        "gguf_arch": [
+          "chroma"
+        ],
+        "tensor_patterns": [
+          "distilled_guidance_layer."
+        ],
+        "name_patterns": [
+          "chroma"
+        ]
       },
       "requires": [
         {
@@ -84,16 +117,30 @@
           "path": "t5xxl_fp16.safetensors"
         }
       ],
-      "defaults": { "width": 1024, "height": 1024, "steps": 26, "cfg_scale": 4.0 }
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 26,
+        "cfg_scale": 4.0
+      },
+      "supports_init_image": true
     },
     {
       "id": "qwen_image",
       "label": "Qwen-Image",
       "modality": "image",
       "detect": {
-        "gguf_arch": ["qwen_image"],
-        "tensor_patterns": ["transformer_blocks.0.attn.to_q", "img_in.weight"],
-        "name_patterns": ["qwen-image", "qwen_image"]
+        "gguf_arch": [
+          "qwen_image"
+        ],
+        "tensor_patterns": [
+          "transformer_blocks.0.attn.to_q",
+          "img_in.weight"
+        ],
+        "name_patterns": [
+          "qwen-image",
+          "qwen_image"
+        ]
       },
       "requires": [
         {
@@ -109,16 +156,30 @@
           "path": "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"
         }
       ],
-      "defaults": { "width": 1024, "height": 1024, "steps": 20, "cfg_scale": 2.5 }
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 20,
+        "cfg_scale": 2.5
+      },
+      "supports_init_image": true
     },
     {
       "id": "sd3",
       "label": "Stable Diffusion 3.x",
       "modality": "image",
       "detect": {
-        "gguf_arch": ["sd3"],
-        "tensor_patterns": ["joint_blocks.0.context_block"],
-        "name_patterns": ["sd3", "sd3.5", "stable-diffusion-3"]
+        "gguf_arch": [
+          "sd3"
+        ],
+        "tensor_patterns": [
+          "joint_blocks.0.context_block"
+        ],
+        "name_patterns": [
+          "sd3",
+          "sd3.5",
+          "stable-diffusion-3"
+        ]
       },
       "requires": [
         {
@@ -134,16 +195,30 @@
           "path": "t5xxl_fp16.safetensors"
         }
       ],
-      "defaults": { "width": 1024, "height": 1024, "steps": 28, "cfg_scale": 4.5 }
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 28,
+        "cfg_scale": 4.5
+      },
+      "supports_init_image": true
     },
     {
       "id": "wan",
       "label": "Wan video",
       "modality": "video",
       "detect": {
-        "gguf_arch": ["wan"],
-        "tensor_patterns": ["blocks.0.cross_attn.norm_q", "patch_embedding.weight"],
-        "name_patterns": ["wan2.", "wan_2."]
+        "gguf_arch": [
+          "wan"
+        ],
+        "tensor_patterns": [
+          "blocks.0.cross_attn.norm_q",
+          "patch_embedding.weight"
+        ],
+        "name_patterns": [
+          "wan2.",
+          "wan_2."
+        ]
       },
       "requires": [
         {
@@ -172,7 +247,13 @@
           "id": "wan2.2-48ch",
           "label": "Wan 2.2 (48-channel VAE)",
           "comment": "The TI2V 5B model uses the new 2.2 VAE; its patch embedding takes 48 latent channels instead of 16.",
-          "when": { "tensor_channels": { "tensor": "patch_embedding.weight", "axis": 1, "equals": 48 } },
+          "when": {
+            "tensor_channels": {
+              "tensor": "patch_embedding.weight",
+              "axis": 1,
+              "equals": 48
+            }
+          },
           "requires": [
             {
               "flag": "vae",
@@ -187,21 +268,49 @@
               "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
             }
           ],
-          "defaults": { "width": 704, "height": 480, "steps": 20, "cfg_scale": 5.0, "fps": 24 }
+          "defaults": {
+            "width": 704,
+            "height": 480,
+            "steps": 20,
+            "cfg_scale": 5.0,
+            "fps": 24
+          },
+          "supports_init_image": true
         }
-      ]
+      ],
+      "supports_init_image": false
     },
     {
       "id": "sd-checkpoint",
       "label": "Stable Diffusion (SD 1.x / 2.x / XL)",
       "modality": "image",
       "detect": {
-        "gguf_arch": ["sd1", "sd2", "sdxl"],
-        "tensor_patterns": ["model.diffusion_model.input_blocks", "input_blocks.0.0.weight"],
-        "name_patterns": ["sd_xl", "sdxl", "stable-diffusion-v1", "dreamshaper", "juggernaut", "realvis"]
+        "gguf_arch": [
+          "sd1",
+          "sd2",
+          "sdxl"
+        ],
+        "tensor_patterns": [
+          "model.diffusion_model.input_blocks",
+          "input_blocks.0.0.weight"
+        ],
+        "name_patterns": [
+          "sd_xl",
+          "sdxl",
+          "stable-diffusion-v1",
+          "dreamshaper",
+          "juggernaut",
+          "realvis"
+        ]
       },
       "requires": [],
-      "defaults": { "width": 1024, "height": 1024, "steps": 30, "cfg_scale": 7.0 }
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 30,
+        "cfg_scale": 7.0
+      },
+      "supports_init_image": true
     }
   ]
 }

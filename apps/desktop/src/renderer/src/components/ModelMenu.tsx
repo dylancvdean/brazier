@@ -1,6 +1,7 @@
 import { Box, Check, HardDrive, LoaderCircle } from 'lucide-react'
 import { formatBytes, type LocalModel } from '../api'
 import { modelDisplayName } from '../model-utils'
+import { CapabilityIcons, capabilityFlags } from './CapabilityIcons'
 
 type ModelMenuProps = {
   models: LocalModel[]
@@ -8,6 +9,8 @@ type ModelMenuProps = {
   loading: boolean
   /** Heading for the popover; names the family the list is filtered to. */
   title?: string
+  /** Whether ffmpeg is available, which is what makes video input possible. */
+  videoPipeline?: boolean
   onSelect: (modelId: string) => void
   onManage: () => void
   onClose: () => void
@@ -22,6 +25,7 @@ export function ModelMenu({
   selectedModel,
   loading,
   title = 'Choose a model',
+  videoPipeline = false,
   onSelect,
   onManage,
   onClose
@@ -56,7 +60,10 @@ export function ModelMenu({
                 }}
               >
                 <div className="model-menu-item-name">
-                  <strong>{meta.title}</strong>
+                  <strong>
+                    {meta.title}
+                    <CapabilityIcons flags={capabilityFlags(model, videoPipeline)} />
+                  </strong>
                   <span>
                     {meta.subtitle}
                     {model.size_bytes != null ? ` · ${formatBytes(model.size_bytes)}` : ''}

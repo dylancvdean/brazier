@@ -76,6 +76,10 @@ export type RuntimeSettings = {
   streaming_asr_python?: string | null
   streaming_asr_model?: string | null
   sdcpp_binary?: string | null
+  /** Show generated images back to a vision model so it can iterate. */
+  show_generated_images_to_model?: boolean
+  /** Same for video, by sampling frames — far more context per clip. */
+  show_generated_video_to_model?: boolean
   default_image_gen_model?: string | null
   default_video_gen_model?: string | null
   voice_python?: string | null
@@ -286,6 +290,8 @@ export async function fetchModelDescription(repoId: string): Promise<string> {
 }
 
 export type DownloadJob = {
+  kind?: string
+  label?: string | null
   id: string
   repo_id: string
   filename: string
@@ -307,6 +313,43 @@ export async function cancelDownloadJob(jobId: string): Promise<void> {
   await request('/api/v1/models/download/cancel', {
     method: 'POST',
     body: JSON.stringify({ job_id: jobId })
+  })
+}
+
+export async function pauseDownloadJob(jobId: string): Promise<void> {
+  await request('/api/v1/models/download/pause', {
+    method: 'POST',
+    body: JSON.stringify({ job_id: jobId })
+  })
+}
+
+/** Put a paused, failed, or cancelled job back in line; it resumes in place. */
+export async function resumeDownloadJob(jobId: string): Promise<void> {
+  await request('/api/v1/models/download/resume', {
+    method: 'POST',
+    body: JSON.stringify({ job_id: jobId })
+  })
+}
+
+/** Queue a multi-file snapshot download (MLX, PersonaPlex, streaming ASR). */
+export async function queueSnapshotDownload(
+  kind: 'mlx' | 'personaplex' | 'streaming-asr',
+  repoId: string,
+  engine?: string
+): Promise<{ job_id: string }> {
+  return request(`/api/v1/models/download/queue/snapshot/${kind}`, {
+    method: 'POST',
+    body: JSON.stringify({ repo_id: repoId, engine })
+  })
+}
+
+/** Queue a stable-diffusion.cpp bundle install. */
+export async function queueSdcppInstall(
+  target: { id: string } | { bundle: SdcppBundle }
+): Promise<{ job_id: string }> {
+  return request('/api/v1/models/sdcpp/install/queue', {
+    method: 'POST',
+    body: JSON.stringify(target)
   })
 }
 
@@ -901,6 +944,8 @@ export type SdcppBundle = {
   approx_bytes?: number | null
   /** `builtin` ships with the app; `custom` lives in the data directory. */
   origin: 'builtin' | 'custom'
+  /** Whether the model can start from a supplied image. */
+  supports_init_image?: boolean
   defaults: SdcppDefaults
   components: SdcppBundleComponent[]
 }

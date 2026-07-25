@@ -221,6 +221,19 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/models/download/queue", post(queue_model_download))
         .route(
+            "/api/v1/models/download/queue/snapshot/{kind}",
+            post(queue_snapshot_download),
+        )
+        .route(
+            "/api/v1/models/sdcpp/install/queue",
+            post(queue_sdcpp_install),
+        )
+        .route("/api/v1/models/download/pause", post(pause_model_download))
+        .route(
+            "/api/v1/models/download/resume",
+            post(resume_model_download),
+        )
+        .route(
             "/api/v1/models/download/cancel",
             post(cancel_model_download),
         )
@@ -2037,27 +2050,167 @@ async fn cancel_model_download(
     }
 }
 
-async fn queue_model_download(
-    State(state): State<AppState>,
-    Json(request): Json<download::DownloadRequest>,
-) -> ApiResult<(StatusCode, Json<Value>)> {
+/// Add work to the download queue.
+///
+/// One transfer runs at a time, but anything can be queued while one is in
+/// flight, and the job row keeps enough detail to resume after a pause.
+async fn enqueue_work(
+    state: &AppState,
+    work: crate::download_queue::QueuedWork,
+) -> ApiResult<Json<Value>> {
+    let payload = serde_json::to_string(&work).map_err(ApiError::internal)?;
     let job = state
         .db
-        .create_download_job(&request.repo_id, &request.filename, &request.revision)
+        .create_queued_download_job(
+            &work.repo_id(),
+            &work.filename(),
+            &work.revision(),
+            work.kind(),
+            Some(&payload),
+            Some(&work.label()),
+            "pending",
+        )
         .await
         .map_err(ApiError::bad_request)?;
     state
         .download_queue
         .enqueue(crate::download_queue::QueuedDownload {
             job_id: job.id.clone(),
-            request,
+            work,
         })
         .await
         .map_err(ApiError::internal)?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({ "job_id": job.id, "status": job.status })),
-    ))
+    Ok(Json(json!({ "job_id": job.id, "status": job.status })))
+}
+
+async fn queue_model_download(
+    State(state): State<AppState>,
+    Json(request): Json<download::DownloadRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let body = enqueue_work(&state, crate::download_queue::QueuedWork::Gguf(request)).await?;
+    Ok((StatusCode::ACCEPTED, body))
+}
+
+#[derive(Debug, Deserialize)]
+struct QueueSnapshotRequest {
+    repo_id: String,
+    #[serde(default)]
+    engine: Option<String>,
+    #[serde(default = "default_main_revision")]
+    revision: String,
+}
+
+fn default_main_revision() -> String {
+    "main".to_owned()
+}
+
+/// Queue a multi-file snapshot: MLX, PersonaPlex, or streaming ASR.
+async fn queue_snapshot_download(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+    Json(request): Json<QueueSnapshotRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let engine = request.engine.unwrap_or_else(|| match kind.as_str() {
+        "personaplex" => voice::ENGINE.to_owned(),
+        "streaming-asr" => streaming_asr::ENGINE.to_owned(),
+        _ => "mlx-lm".to_owned(),
+    });
+    let snapshot = download::MlxDownloadRequest {
+        repo_id: request.repo_id,
+        engine,
+        revision: request.revision,
+    };
+    let work = match kind.as_str() {
+        "mlx" => crate::download_queue::QueuedWork::Mlx(snapshot),
+        "personaplex" => crate::download_queue::QueuedWork::Personaplex(snapshot),
+        "streaming-asr" => crate::download_queue::QueuedWork::StreamingAsr(snapshot),
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "unknown snapshot kind `{other}`"
+            )));
+        }
+    };
+    let body = enqueue_work(&state, work).await?;
+    Ok((StatusCode::ACCEPTED, body))
+}
+
+/// Queue a stable-diffusion.cpp bundle install.
+async fn queue_sdcpp_install(
+    State(state): State<AppState>,
+    Json(request): Json<InstallSdcppBundleRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let bundle = match (request.bundle, request.id) {
+        (Some(bundle), _) => {
+            sdcpp_catalog::validate(&bundle).map_err(ApiError::bad_request)?;
+            bundle
+        }
+        (None, Some(id)) => sdcpp_catalog::find(&state.data_dir, &id)
+            .ok_or_else(|| ApiError::bad_request(format!("unknown model bundle `{id}`")))?,
+        (None, None) => return Err(ApiError::bad_request("id or bundle is required")),
+    };
+    let body = enqueue_work(
+        &state,
+        crate::download_queue::QueuedWork::SdcppBundle(bundle),
+    )
+    .await?;
+    Ok((StatusCode::ACCEPTED, body))
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadJobRequest {
+    job_id: String,
+}
+
+/// Pause a download, keeping its partial file for a later resume.
+async fn pause_model_download(
+    State(state): State<AppState>,
+    Json(request): Json<DownloadJobRequest>,
+) -> ApiResult<Json<Value>> {
+    use crate::active_downloads::StopReason;
+    let signalled = state
+        .active_downloads
+        .stop(&request.job_id, StopReason::Pause);
+    // A job still waiting in line is paused directly; the queue skips it.
+    if !signalled {
+        state
+            .db
+            .pause_download_job(&request.job_id)
+            .await
+            .map_err(ApiError::bad_request)?;
+    }
+    Ok(Json(json!({ "paused": request.job_id })))
+}
+
+/// Put a paused, failed, or cancelled job back in line. The transfer resumes
+/// from its partial file rather than starting over.
+async fn resume_model_download(
+    State(state): State<AppState>,
+    Json(request): Json<DownloadJobRequest>,
+) -> ApiResult<Json<Value>> {
+    let job = state
+        .db
+        .get_download_job_public(&request.job_id)
+        .await
+        .map_err(|_| ApiError::bad_request("no such download job"))?;
+    let payload = job.payload.as_deref().ok_or_else(|| {
+        ApiError::bad_request("this job predates the queue and cannot be resumed")
+    })?;
+    let work: crate::download_queue::QueuedWork = serde_json::from_str(payload)
+        .map_err(|_| ApiError::bad_request("unreadable job payload"))?;
+    state
+        .db
+        .requeue_download_job(&request.job_id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    state
+        .download_queue
+        .enqueue(crate::download_queue::QueuedDownload {
+            job_id: job.id.clone(),
+            work,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "resumed": job.id })))
 }
 
 async fn list_models(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -2460,6 +2613,7 @@ fn bundle_json(
         "installed": bundle.installed(data_dir),
         "gated": bundle.gated(),
         "approx_bytes": bundle.approx_bytes(),
+        "supports_init_image": bundle.supports_init_image,
         "origin": origin,
         "defaults": bundle.defaults,
         "components": bundle.components.iter().map(|component| json!({

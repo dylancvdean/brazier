@@ -44,8 +44,9 @@ import {
   assembleSdcppBundle,
   deleteSdcppBundle,
   formatBytes,
-  installSdcppBundle,
   listSdcppBundles,
+  queueSdcppInstall,
+  queueSnapshotDownload,
   saveSdcppBundle,
   clearHuggingFaceToken,
   huggingFaceTokenStatus,
@@ -77,6 +78,7 @@ import {
   type SdcppBundle,
   type SdcppProposal
 } from '../api'
+import { CapabilityIcons, capabilityFlags, hubCapabilityFlags } from './CapabilityIcons'
 import {
   engineBadgeClass,
   engineLabel,
@@ -874,7 +876,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [bundles, setBundles] = useState<SdcppBundle[]>([])
   const [bundlesLoading, setBundlesLoading] = useState(false)
-  const [installingBundle, setInstallingBundle] = useState<string | null>(null)
+  const [queuedRepos, setQueuedRepos] = useState<Record<string, boolean>>({})
   const [assembleRepo, setAssembleRepo] = useState('')
   const [assemblePath, setAssemblePath] = useState('')
   const [assembling, setAssembling] = useState(false)
@@ -1044,22 +1046,12 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       )
       return
     }
-    const key = `bundle::${bundle.id}`
-    setDownloadProgress({ key, event: null })
-    setInstallingBundle(bundle.id)
     props.onError(null)
     try {
-      const result = await installSdcppBundle({ id: bundle.id }, (event) =>
-        setDownloadProgress({ key, event })
-      )
-      await props.refreshModels()
-      await refreshBundles()
-      if (result?.model_id) props.onSelectModel(result.model_id)
+      await queueSdcppInstall({ id: bundle.id })
+      setQueuedRepos((current) => ({ ...current, [bundle.id]: true }))
     } catch (cause) {
       props.onError(errorText(cause))
-    } finally {
-      setInstallingBundle(null)
-      setDownloadProgress(null)
     }
   }
 
@@ -1139,54 +1131,21 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       props.onError('Review and acknowledge the license / remote-code notice before downloading.')
       return
     }
-    const key = `${repoId}::snapshot`
-    setDownloadProgress({ key, event: null })
     props.onError(null)
+    // Queued rather than awaited, so more models can be added while this runs.
     try {
-      const result =
+      const kind =
         discoverEngine === 'streaming-asr'
-          ? await downloadStreamingAsrModel(repoId, (event) =>
-              setDownloadProgress({ key, event })
-            )
+          ? 'streaming-asr'
           : discoverEngine === 'personaplex'
-            ? await downloadPersonaplexModel(repoId, (event) =>
-                setDownloadProgress({ key, event })
-              )
-            : await downloadMlxModel(
-                repoId,
-                discoverEngine === 'mlx-vlm' ? 'mlx-vlm' : 'mlx-lm',
-                (event) => setDownloadProgress({ key, event })
-              )
-      await props.refreshModels()
-      if (result.model_id && discoverEngine !== 'streaming-asr') {
-        props.onSelectModel(result.model_id)
-      }
-      const engine = result.engine ?? discoverEngine
-      setEnginePhase(
-        discoverEngine === 'streaming-asr'
-          ? 'Checking the streaming ASR runtime…'
-          : 'Checking the MLX runtime…'
-      )
-      try {
-        const runtimeResponse = await listRuntimes()
-        const hasRuntime = runtimeResponse.data.some(
-          (entry) => entry.engine === engine && entry.active
-        )
-        if (result.notice) {
-          props.onError(result.notice)
-        } else if (!hasRuntime) {
-          props.onError(
-            `Model downloaded for ${engineLabel(engine)}, but that runtime is not active yet. ` +
-              'Build and activate it in the Runtimes section.'
-          )
-        }
-      } finally {
-        setEnginePhase(null)
-      }
+            ? 'personaplex'
+            : 'mlx'
+      const engine =
+        kind === 'mlx' ? (discoverEngine === 'mlx-vlm' ? 'mlx-vlm' : 'mlx-lm') : undefined
+      await queueSnapshotDownload(kind, repoId, engine)
+      setQueuedRepos((current) => ({ ...current, [repoId]: true }))
     } catch (cause) {
       props.onError(errorText(cause))
-    } finally {
-      setDownloadProgress(null)
     }
   }
 
@@ -1572,12 +1531,19 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
             </p>
           )}
           {bundles.map((bundle) => {
-            const installing = installingBundle === bundle.id
+            const queued = Boolean(queuedRepos[bundle.id])
             return (
               <article className="bundle-card" key={bundle.id}>
                 <div className="bundle-head">
                   <strong>
                     {bundle.label}
+                    <CapabilityIcons
+                      flags={{
+                        imageOut: bundle.modality === 'image',
+                        videoOut: bundle.modality === 'video',
+                        imageIn: bundle.supports_init_image
+                      }}
+                    />
                     {bundle.installed && <span className="installed-badge">Installed</span>}
                     {bundle.gated && !bundle.installed && (
                       <span className="installed-badge gated">Token required</span>
@@ -1605,12 +1571,12 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                 <div className="bundle-actions">
                 <button
                   className="chip-button"
-                  disabled={installing || bundle.installed || installingBundle != null}
+                  disabled={queued || bundle.installed}
                   onClick={() => void installBundle(bundle)}
                 >
-                  {installing ? (
+                  {queued ? (
                     <>
-                      <LoaderCircle className="spin" size={13} /> Installing…
+                      <LoaderCircle className="spin" size={13} /> Queued
                     </>
                   ) : bundle.installed ? (
                     <>
@@ -1676,6 +1642,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                     onClick={() => void toggleDescription(model.id)}
                   >
                     <span className="model-name-text">{model.id.split('/').at(-1)}</span>
+                    <CapabilityIcons flags={hubCapabilityFlags(model.tags)} inferred />
                     {openDescription === model.id ? (
                       <ChevronDown size={13} />
                     ) : (
@@ -3046,6 +3013,42 @@ function EngineSection(props: SectionProps): React.JSX.Element {
             ))}
           </div>
         )}
+      </div>
+      <div className="settings-group">
+        <div className="section-label">Generated media in chat</div>
+        <p className="model-help">
+          After a chat tool generates something, show it back to the model when the model can see
+          images. It can then check its own output against what was asked for.
+        </p>
+        <label className="settings-toggle">
+          <input
+            type="checkbox"
+            checked={draft.show_generated_images_to_model ?? true}
+            onChange={(event) =>
+              setDraft({ ...draft, show_generated_images_to_model: event.target.checked })
+            }
+          />
+          <span>
+            Show generated images to the model
+            <small>Adds one image per generation to the conversation.</small>
+          </span>
+        </label>
+        <label className="settings-toggle">
+          <input
+            type="checkbox"
+            checked={draft.show_generated_video_to_model ?? false}
+            onChange={(event) =>
+              setDraft({ ...draft, show_generated_video_to_model: event.target.checked })
+            }
+          />
+          <span>
+            Show generated video to the model
+            <small className="settings-warning">
+              More expensive: a clip is sampled into several frames, so each one costs many times
+              an image in context and time. Needs ffmpeg.
+            </small>
+          </span>
+        </label>
       </div>
       <div className="settings-group">
         <div className="section-label">Generation & voice defaults</div>

@@ -79,6 +79,9 @@ pub struct Bundle {
     pub license: Option<String>,
     #[serde(default)]
     pub defaults: GenerationDefaults,
+    /// Whether the model can animate or restyle a supplied image.
+    #[serde(default)]
+    pub supports_init_image: bool,
     pub components: Vec<Component>,
 }
 
@@ -117,6 +120,7 @@ impl Bundle {
             modality: self.modality,
             args,
             single_file,
+            supports_init_image: self.supports_init_image,
         }
     }
 
@@ -420,6 +424,7 @@ mod tests {
             summary: "test".into(),
             license: None,
             defaults: GenerationDefaults::default(),
+            supports_init_image: false,
             components: vec![Component {
                 repo_id: "acme/repo".into(),
                 path: "model.safetensors".into(),

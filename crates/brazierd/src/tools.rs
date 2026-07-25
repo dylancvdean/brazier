@@ -23,6 +23,17 @@ pub struct ToolInvocation {
     pub arguments: String,
     pub output: String,
     pub is_error: bool,
+    /// Blobs this call produced, so the caller can offer them back to a model
+    /// that can see them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media: Vec<ToolMedia>,
+}
+
+/// A blob produced by a tool call.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolMedia {
+    pub sha256: String,
+    pub mime_type: String,
 }
 
 /// OpenAI-style tool definitions for every bundled tool.
@@ -103,7 +114,11 @@ pub fn definitions() -> Value {
                         "width": { "type": "integer", "description": "Image width in pixels (default 512)." },
                         "height": { "type": "integer", "description": "Image height in pixels (default 512)." },
                         "steps": { "type": "integer", "description": "Diffusion steps (default 20)." },
-                        "seed": { "type": "integer", "description": "Optional RNG seed." }
+                        "seed": { "type": "integer", "description": "Optional RNG seed." },
+                        "init_image": {
+                            "type": "string",
+                            "description": "Start from an image the user shared instead of noise: pass `latest` for the most recent one, or its brazier_blob hash."
+                        }
                     },
                     "required": ["prompt"]
                 }
@@ -129,7 +144,11 @@ pub fn definitions() -> Value {
                         "height": { "type": "integer", "description": "Frame height in pixels (default 512)." },
                         "steps": { "type": "integer", "description": "Diffusion steps (default 20)." },
                         "video_frames": { "type": "integer", "description": "Number of frames (default 16)." },
-                        "seed": { "type": "integer", "description": "Optional RNG seed." }
+                        "seed": { "type": "integer", "description": "Optional RNG seed." },
+                        "init_image": {
+                            "type": "string",
+                            "description": "Animate an image the user shared: pass `latest` for the most recent one, or its brazier_blob hash. Only works with image-to-video models."
+                        }
                     },
                     "required": ["prompt"]
                 }
@@ -216,7 +235,7 @@ pub async fn execute(
     name: &str,
     arguments: &str,
 ) -> ToolInvocation {
-    execute_with_data_dir(client, None, call_id, name, arguments).await
+    execute_with_context(client, None, &[], call_id, name, arguments).await
 }
 
 pub async fn execute_with_data_dir(
@@ -226,8 +245,64 @@ pub async fn execute_with_data_dir(
     name: &str,
     arguments: &str,
 ) -> ToolInvocation {
+    execute_with_context(client, data_dir, &[], call_id, name, arguments).await
+}
+
+/// Run a built-in tool with the conversation's images available, so generation
+/// tools can start from a photo the user already attached.
+pub async fn execute_with_context(
+    client: &reqwest::Client,
+    data_dir: Option<&std::path::Path>,
+    images: &[crate::tool_registry::ConversationImage],
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+) -> ToolInvocation {
     let parsed: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
-    let result = match name {
+    let result: anyhow::Result<ToolOutput> = match name {
+        "generate_image" => match data_dir {
+            Some(dir) => generate_image_tool(dir, &parsed, images).await,
+            None => Err(anyhow::anyhow!(
+                "generate_image requires daemon data directory context"
+            )),
+        },
+        "generate_video" => match data_dir {
+            Some(dir) => generate_video_tool(dir, &parsed, images).await,
+            None => Err(anyhow::anyhow!(
+                "generate_video requires daemon data directory context"
+            )),
+        },
+        other => simple_tool(client, other, &parsed)
+            .await
+            .map(ToolOutput::from),
+    };
+    match result {
+        Ok(output) => ToolInvocation {
+            call_id: call_id.to_owned(),
+            name: name.to_owned(),
+            arguments: arguments.to_owned(),
+            output: output.text,
+            is_error: false,
+            media: output.media,
+        },
+        Err(error) => ToolInvocation {
+            call_id: call_id.to_owned(),
+            name: name.to_owned(),
+            arguments: arguments.to_owned(),
+            output: format!("Error: {error:#}"),
+            is_error: true,
+            media: Vec::new(),
+        },
+    }
+}
+
+/// Built-in tools that return plain text.
+async fn simple_tool(
+    client: &reqwest::Client,
+    name: &str,
+    parsed: &Value,
+) -> anyhow::Result<String> {
+    match name {
         "get_current_time" => Ok(current_time()),
         "calculator" => parsed
             .get("expression")
@@ -267,39 +342,64 @@ pub async fn execute_with_data_dir(
                 "run_javascript requires a `code` string argument"
             )),
         },
-        "generate_image" => match data_dir {
-            Some(dir) => generate_image_tool(dir, &parsed).await,
-            None => Err(anyhow::anyhow!(
-                "generate_image requires daemon data directory context"
-            )),
-        },
-        "generate_video" => match data_dir {
-            Some(dir) => generate_video_tool(dir, &parsed).await,
-            None => Err(anyhow::anyhow!(
-                "generate_video requires daemon data directory context"
-            )),
-        },
         other => Err(anyhow::anyhow!("unknown built-in tool `{other}`")),
-    };
-    match result {
-        Ok(output) => ToolInvocation {
-            call_id: call_id.to_owned(),
-            name: name.to_owned(),
-            arguments: arguments.to_owned(),
-            output,
-            is_error: false,
-        },
-        Err(error) => ToolInvocation {
-            call_id: call_id.to_owned(),
-            name: name.to_owned(),
-            arguments: arguments.to_owned(),
-            output: format!("Error: {error:#}"),
-            is_error: true,
-        },
     }
 }
 
-async fn generate_image_tool(data_dir: &std::path::Path, args: &Value) -> anyhow::Result<String> {
+/// What a built-in tool produced: text for the model, plus any blobs.
+struct ToolOutput {
+    text: String,
+    media: Vec<ToolMedia>,
+}
+
+impl From<String> for ToolOutput {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            media: Vec::new(),
+        }
+    }
+}
+
+/// Resolve an `init_image` argument to a stored blob.
+///
+/// The model can pass `latest` to mean the most recent image in the
+/// conversation, which is what it has when a user attaches a photo and asks
+/// for it to be animated or restyled, or an explicit blob hash.
+fn resolve_init_image(
+    data_dir: &std::path::Path,
+    args: &Value,
+    images: &[crate::tool_registry::ConversationImage],
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let Some(requested) = args.get("init_image").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let requested = requested.trim();
+    if requested.is_empty() || requested.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    let sha256 = if requested.eq_ignore_ascii_case("latest") {
+        images
+            .last()
+            .map(|image| image.sha256.clone())
+            .context("no image has been shared in this conversation yet")?
+    } else {
+        requested
+            .strip_prefix("brazier_blob:")
+            .unwrap_or(requested)
+            .to_owned()
+    };
+    let path = crate::blob_store::blob_path(data_dir, &sha256)
+        .context("that image is not in this conversation")?;
+    anyhow::ensure!(path.is_file(), "that image is no longer stored locally");
+    Ok(Some(path))
+}
+
+async fn generate_image_tool(
+    data_dir: &std::path::Path,
+    args: &Value,
+    images: &[crate::tool_registry::ConversationImage],
+) -> anyhow::Result<ToolOutput> {
     let prompt = args
         .get("prompt")
         .and_then(Value::as_str)
@@ -340,7 +440,7 @@ async fn generate_image_tool(data_dir: &std::path::Path, args: &Value) -> anyhow
             .get("guidance")
             .and_then(Value::as_f64)
             .map(|v| v as f32),
-        init_image: None,
+        init_image: resolve_init_image(data_dir, args, images)?,
     };
     let result =
         crate::sdcpp::generate_image(data_dir, settings.sdcpp_binary.as_deref(), &request).await?;
@@ -350,13 +450,23 @@ async fn generate_image_tool(data_dir: &std::path::Path, args: &Value) -> anyhow
     let blob = crate::blob_store::store_bytes(data_dir, &bytes, "image/png", Some("generated.png"))
         .await?;
     let _ = tokio::fs::remove_file(&result.output_path).await;
-    Ok(format!(
-        "Generated image stored as brazier_blob:{} ({} bytes).",
-        blob.sha256, blob.size_bytes
-    ))
+    Ok(ToolOutput {
+        text: format!(
+            "Generated image stored as brazier_blob:{} ({} bytes).",
+            blob.sha256, blob.size_bytes
+        ),
+        media: vec![ToolMedia {
+            sha256: blob.sha256.clone(),
+            mime_type: "image/png".to_owned(),
+        }],
+    })
 }
 
-async fn generate_video_tool(data_dir: &std::path::Path, args: &Value) -> anyhow::Result<String> {
+async fn generate_video_tool(
+    data_dir: &std::path::Path,
+    args: &Value,
+    images: &[crate::tool_registry::ConversationImage],
+) -> anyhow::Result<ToolOutput> {
     let prompt = args
         .get("prompt")
         .and_then(Value::as_str)
@@ -366,6 +476,13 @@ async fn generate_video_tool(data_dir: &std::path::Path, args: &Value) -> anyhow
         .default_video_gen_model
         .clone()
         .context("no default video generation model configured (set one in Manage → Engine)")?;
+    let init_image = resolve_init_image(data_dir, args, images)?;
+    if init_image.is_some() {
+        anyhow::ensure!(
+            crate::sdcpp::supports_init_image(data_dir, &model_id),
+            "`{model_id}` is text-to-video only. Install an image-to-video model (for example Wan 2.2 TI2V) to animate an attached photo."
+        );
+    }
     let request = crate::sdcpp::GenerateVideoRequest {
         prompt: prompt.to_owned(),
         model_id,
@@ -397,7 +514,7 @@ async fn generate_video_tool(data_dir: &std::path::Path, args: &Value) -> anyhow
             .get("guidance")
             .and_then(Value::as_f64)
             .map(|v| v as f32),
-        init_image: None,
+        init_image: init_image.clone(),
         video_frames: args
             .get("video_frames")
             .and_then(Value::as_u64)
@@ -434,10 +551,16 @@ async fn generate_video_tool(data_dir: &std::path::Path, args: &Value) -> anyhow
     )
     .await?;
     let _ = tokio::fs::remove_file(&result.output_path).await;
-    Ok(format!(
-        "Generated video stored as brazier_blob:{} ({} bytes).",
-        blob.sha256, blob.size_bytes
-    ))
+    Ok(ToolOutput {
+        text: format!(
+            "Generated video stored as brazier_blob:{} ({} bytes).",
+            blob.sha256, blob.size_bytes
+        ),
+        media: vec![ToolMedia {
+            sha256: blob.sha256.clone(),
+            mime_type: mime.to_owned(),
+        }],
+    })
 }
 
 fn current_time() -> String {
@@ -852,5 +975,143 @@ mod tests {
         .await;
         assert!(!result.is_error);
         assert_eq!(result.output, "42");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod generation_tests {
+    use super::*;
+    use crate::tool_registry::ConversationImage;
+
+    /// A stand-in for sd-cli that records its argv and writes an output file.
+    fn stub_sd_cli(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("fake-sd-cli");
+        // Records next to itself rather than via an env var, so tests running
+        // in parallel cannot clobber each other's log.
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "$0.argv"
+prev=""; out=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+[ -n "$out" ] && printf 'x' > "$out"
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        path
+    }
+
+    fn install_video_model(data_dir: &std::path::Path, key: &str, supports_init_image: bool) {
+        let dir = crate::sdcpp::video_root(data_dir).join(key);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"weights").unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "modality": "video",
+                "args": {},
+                "single_file": "model.safetensors",
+                "supports_init_image": supports_init_image
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    async fn setup(supports_init_image: bool) -> (tempfile::TempDir, String, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let binary = stub_sd_cli(&data_dir);
+        let argv_log = data_dir.join("fake-sd-cli.argv");
+        install_video_model(&data_dir, "test/model", supports_init_image);
+        let mut settings = crate::runtime_settings::RuntimeSettings::default();
+        settings.sdcpp_binary = Some(binary.display().to_string());
+        settings.default_video_gen_model = Some("sdcpp-video:test/model".into());
+        std::fs::write(
+            crate::runtime_settings::settings_path(&data_dir),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+        let blob =
+            crate::blob_store::store_bytes(&data_dir, b"fake png", "image/png", Some("p.png"))
+                .await
+                .unwrap();
+        (dir, blob.sha256, argv_log)
+    }
+
+    #[tokio::test]
+    async fn an_attached_photo_is_passed_to_an_image_to_video_model() {
+        let (dir, sha256, argv_log) = setup(true).await;
+        let images = vec![ConversationImage {
+            sha256: sha256.clone(),
+            mime_type: "image/png".into(),
+        }];
+        let invocation = execute_with_context(
+            &reqwest::Client::new(),
+            Some(dir.path()),
+            &images,
+            "call-1",
+            "generate_video",
+            r#"{"prompt":"make it move","init_image":"latest"}"#,
+        )
+        .await;
+
+        assert!(!invocation.is_error, "{}", invocation.output);
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        assert!(argv.contains("-i\n"), "init image flag missing:\n{argv}");
+        assert!(
+            argv.contains(&sha256[..16]),
+            "the attached photo should be the init image:\n{argv}"
+        );
+        // The result advertises its blob so the chat loop can show it back.
+        assert_eq!(invocation.media.len(), 1);
+        assert!(invocation.media[0].mime_type.starts_with("video/"));
+    }
+
+    #[tokio::test]
+    async fn text_to_video_models_refuse_an_init_image_with_a_useful_message() {
+        let (dir, sha256, _) = setup(false).await;
+        let images = vec![ConversationImage {
+            sha256,
+            mime_type: "image/png".into(),
+        }];
+        let invocation = execute_with_context(
+            &reqwest::Client::new(),
+            Some(dir.path()),
+            &images,
+            "call-2",
+            "generate_video",
+            r#"{"prompt":"make it move","init_image":"latest"}"#,
+        )
+        .await;
+        assert!(invocation.is_error);
+        assert!(
+            invocation.output.contains("image-to-video"),
+            "{}",
+            invocation.output
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_needs_an_image_to_have_been_shared() {
+        let (dir, _, _) = setup(true).await;
+        let invocation = execute_with_context(
+            &reqwest::Client::new(),
+            Some(dir.path()),
+            &[],
+            "call-3",
+            "generate_video",
+            r#"{"prompt":"move","init_image":"latest"}"#,
+        )
+        .await;
+        assert!(invocation.is_error);
+        assert!(
+            invocation.output.contains("no image"),
+            "{}",
+            invocation.output
+        );
     }
 }

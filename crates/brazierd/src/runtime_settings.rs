@@ -86,6 +86,14 @@ pub struct RuntimeSettings {
     #[serde(default)]
     pub sdcpp_binary: Option<String>,
     /// Default image generation model id (`sdcpp-image:…`) for tools and Generate mode.
+    /// Show generated images back to the chat model when it can see images,
+    /// so it can critique or iterate on its own output.
+    #[serde(default = "default_true")]
+    pub show_generated_images_to_model: bool,
+    /// Same for video, by sampling frames. Off by default: a clip becomes
+    /// several images, which costs far more context than a single picture.
+    #[serde(default)]
+    pub show_generated_video_to_model: bool,
     #[serde(default)]
     pub default_image_gen_model: Option<String>,
     /// Default video generation model id (`sdcpp-video:…`) for tools and Generate mode.
@@ -156,6 +164,8 @@ impl Default for RuntimeSettings {
             streaming_asr_python: None,
             streaming_asr_model: None,
             sdcpp_binary: None,
+            show_generated_images_to_model: true,
+            show_generated_video_to_model: false,
             default_image_gen_model: None,
             default_video_gen_model: None,
             voice_python: None,

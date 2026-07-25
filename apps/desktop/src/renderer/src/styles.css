@@ -231,6 +231,121 @@ code {
   color: #d4846a;
 }
 
+/* Global download queue, pinned bottom-right and reachable from any mode. */
+.download-tray {
+  position: fixed;
+  z-index: 45;
+  right: 16px;
+  bottom: 16px;
+  width: min(340px, calc(100vw - 32px));
+  border: 1px solid #3a4232;
+  border-radius: 12px;
+  background: rgba(18, 20, 16, 0.96);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  overflow: hidden;
+}
+
+.download-tray-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  color: var(--soft);
+  background: none;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.download-tray-head strong {
+  font-size: 12px;
+}
+
+.download-tray-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.download-tray-list {
+  display: grid;
+  gap: 10px;
+  max-height: 45vh;
+  padding: 0 12px 12px;
+  overflow-y: auto;
+}
+
+.download-tray-item {
+  display: grid;
+  gap: 5px;
+}
+
+.download-tray-item.failed .download-tray-detail {
+  color: #e8b7ad;
+}
+
+.download-tray-title,
+.download-tray-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.download-tray-name {
+  overflow: hidden;
+  color: var(--soft);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-tray-pct {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.download-tray-detail {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-tray-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.download-tray-actions button {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--soft);
+  background: #1c1f1a;
+  cursor: pointer;
+}
+
+.download-tray-actions button:hover:not(:disabled) {
+  border-color: #46503c;
+}
+
+.download-tray-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.progress-fill.paused {
+  background: #6a7357;
+}
+
 .download-progress-tray {
   position: fixed;
   z-index: 40;
@@ -3396,4 +3511,60 @@ button.danger {
 
 label.span-2 {
   grid-column: 1 / -1;
+}
+
+/* Toggles in Manage → Engine, including the costlier options. */
+.settings-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 10px;
+  color: var(--soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings-toggle input {
+  margin-top: 2px;
+}
+
+.settings-toggle small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.settings-toggle small.settings-warning {
+  color: #e8d3a0;
+}
+
+/* Capability icons in model lists: what a model takes in and puts out. */
+.capability-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 7px;
+  vertical-align: middle;
+}
+
+.capability-icon {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 5px;
+  color: var(--muted);
+  background: #22271d;
+}
+
+/* Outputs read as the model's product, so they carry the accent. */
+.capability-icon.out {
+  color: var(--accent);
+  background: var(--accent-dark);
+}
+
+/* Guesses from Hub tags are dimmer than confirmed capabilities. */
+.capability-icons.inferred .capability-icon {
+  opacity: 0.6;
 }

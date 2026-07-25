@@ -343,6 +343,7 @@ pub async fn call_tool(
             arguments: arguments.to_owned(),
             output: format!("Error: unknown MCP server `{server_id}`"),
             is_error: true,
+            media: Vec::new(),
         };
     };
     let parsed_args: Value =
@@ -355,6 +356,7 @@ pub async fn call_tool(
                 arguments: arguments.to_owned(),
                 output,
                 is_error: false,
+                media: Vec::new(),
             },
             Err(error) => ToolInvocation {
                 call_id,
@@ -362,6 +364,7 @@ pub async fn call_tool(
                 arguments: arguments.to_owned(),
                 output: format!("Error: {error:#}"),
                 is_error: true,
+                media: Vec::new(),
             },
         },
         Err(error) => ToolInvocation {
@@ -370,6 +373,7 @@ pub async fn call_tool(
             arguments: arguments.to_owned(),
             output: format!("Error: {error:#}"),
             is_error: true,
+            media: Vec::new(),
         },
     }
 }

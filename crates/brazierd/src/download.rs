@@ -3,10 +3,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -20,6 +17,7 @@ use tokio::{
 };
 
 use crate::{
+    active_downloads::{StopFlag, StopReason},
     db::Database,
     hf_auth,
     mlx::MlxKind,
@@ -31,7 +29,7 @@ use crate::{
     streaming_asr,
 };
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadRequest {
     pub repo_id: String,
     pub filename: String,
@@ -50,7 +48,7 @@ fn default_download_engine() -> String {
     "llama.cpp".to_owned()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MlxDownloadRequest {
     pub repo_id: String,
     pub engine: String,
@@ -102,7 +100,7 @@ pub async fn download_gguf_with_progress(
     request: DownloadRequest,
     mut progress: ProgressCallback,
     job: Option<(Database, String)>,
-    cancel: Option<Arc<AtomicBool>>,
+    cancel: Option<Arc<StopFlag>>,
 ) -> anyhow::Result<DownloadResult> {
     validate_repo_id(&request.repo_id)?;
     validate_filename(&request.filename)?;
@@ -255,13 +253,16 @@ pub async fn download_gguf_with_progress(
     let mut last_emit = 0_u64;
     progress(ProgressEvent::download(written, total));
     while let Some(chunk) = stream.next().await {
-        if cancel
-            .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
-        {
+        if let Some(reason) = cancel.as_ref().and_then(|flag| flag.reason()) {
+            // Flush before letting go so a paused transfer resumes from every
+            // byte it actually received; only a cancel discards the partial.
+            let _ = file.flush().await;
             drop(file);
-            let _ = tokio::fs::remove_file(&partial).await;
-            anyhow::bail!("download cancelled");
+            if reason == StopReason::Cancel {
+                let _ = tokio::fs::remove_file(&partial).await;
+                anyhow::bail!("download cancelled");
+            }
+            anyhow::bail!("download paused");
         }
         let chunk = chunk.context("read download chunk")?;
         file.write_all(&chunk)
@@ -476,7 +477,7 @@ async fn download_file_to_with_opts(
     destination: &Path,
     progress: &mut ProgressCallback,
     job: Option<(&Database, &str)>,
-    cancel: Option<&Arc<AtomicBool>>,
+    cancel: Option<&Arc<StopFlag>>,
     expected_size: Option<u64>,
     snapshot: Option<SnapshotProgressCtx<'_>>,
 ) -> anyhow::Result<u64> {
@@ -609,10 +610,14 @@ async fn download_file_to_with_opts(
     let mut last_emit = 0_u64;
     emit_file_download_progress(progress, snapshot, written, total, job);
     while let Some(chunk) = stream.next().await {
-        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        if let Some(reason) = cancel.and_then(|flag| flag.reason()) {
+            let _ = file.flush().await;
             drop(file);
-            let _ = tokio::fs::remove_file(&partial).await;
-            anyhow::bail!("download cancelled");
+            if reason == StopReason::Cancel {
+                let _ = tokio::fs::remove_file(&partial).await;
+                anyhow::bail!("download cancelled");
+            }
+            anyhow::bail!("download paused");
         }
         let chunk = chunk.context("read download chunk")?;
         file.write_all(&chunk)
@@ -657,7 +662,7 @@ pub async fn download_mlx_snapshot_with_progress(
     request: MlxDownloadRequest,
     mut progress: ProgressCallback,
     job: Option<(Database, String)>,
-    cancel: Option<Arc<AtomicBool>>,
+    cancel: Option<Arc<StopFlag>>,
 ) -> anyhow::Result<DownloadResult> {
     validate_repo_id(&request.repo_id)?;
     anyhow::ensure!(
@@ -695,10 +700,7 @@ pub async fn download_mlx_snapshot_with_progress(
     });
     let mut total_bytes = 0_u64;
     for (index, file) in files.iter().enumerate() {
-        if cancel
-            .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
-        {
+        if cancel.as_ref().is_some_and(|flag| flag.should_stop()) {
             anyhow::bail!("download cancelled");
         }
         progress(ProgressEvent::phase(
@@ -770,7 +772,7 @@ pub async fn download_streaming_asr_snapshot_with_progress(
     request: MlxDownloadRequest,
     mut progress: ProgressCallback,
     job: Option<(Database, String)>,
-    cancel: Option<Arc<AtomicBool>>,
+    cancel: Option<Arc<StopFlag>>,
 ) -> anyhow::Result<DownloadResult> {
     validate_repo_id(&request.repo_id)?;
     anyhow::ensure!(
@@ -811,10 +813,7 @@ pub async fn download_streaming_asr_snapshot_with_progress(
     });
     let mut total_bytes = 0_u64;
     for (index, file) in files.iter().enumerate() {
-        if cancel
-            .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
-        {
+        if cancel.as_ref().is_some_and(|flag| flag.should_stop()) {
             anyhow::bail!("download cancelled");
         }
         progress(ProgressEvent::phase(
@@ -883,7 +882,7 @@ pub async fn install_sdcpp_bundle_with_progress(
     bundle: &crate::sdcpp_catalog::Bundle,
     mut progress: ProgressCallback,
     job: Option<(Database, String)>,
-    cancel: Option<Arc<AtomicBool>>,
+    cancel: Option<Arc<StopFlag>>,
 ) -> anyhow::Result<DownloadResult> {
     let dir = bundle.install_dir(data_dir)?;
     progress(ProgressEvent::phase(
@@ -938,10 +937,7 @@ pub async fn install_sdcpp_bundle_with_progress(
     let mut total_bytes = 0_u64;
     let count = bundle.components.len();
     for (index, component) in bundle.components.iter().enumerate() {
-        if cancel
-            .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
-        {
+        if cancel.as_ref().is_some_and(|flag| flag.should_stop()) {
             anyhow::bail!("install cancelled");
         }
         progress(ProgressEvent::phase(
@@ -1026,7 +1022,7 @@ pub async fn download_personaplex_snapshot_with_progress(
     request: MlxDownloadRequest,
     mut progress: ProgressCallback,
     job: Option<(Database, String)>,
-    cancel: Option<Arc<AtomicBool>>,
+    cancel: Option<Arc<StopFlag>>,
 ) -> anyhow::Result<DownloadResult> {
     validate_repo_id(&request.repo_id)?;
     anyhow::ensure!(
@@ -1071,10 +1067,7 @@ pub async fn download_personaplex_snapshot_with_progress(
     });
     let mut total_bytes = 0_u64;
     for (index, file) in files.iter().enumerate() {
-        if cancel
-            .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
-        {
+        if cancel.as_ref().is_some_and(|flag| flag.should_stop()) {
             anyhow::bail!("download cancelled");
         }
         progress(ProgressEvent::phase(

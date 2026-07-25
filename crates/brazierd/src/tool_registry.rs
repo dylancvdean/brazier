@@ -10,6 +10,48 @@ use crate::{harmony, mcp, tools::ToolInvocation};
 pub struct ToolContext<'a> {
     pub data_dir: &'a Path,
     pub http: &'a Client,
+    /// Image blobs already in this conversation, newest last. Generation tools
+    /// use these for image-to-video and image-to-image, so a user can attach a
+    /// photo and ask the model to animate it.
+    pub images: Vec<ConversationImage>,
+}
+
+/// An image the model can refer to when calling a generation tool.
+#[derive(Debug, Clone)]
+pub struct ConversationImage {
+    pub sha256: String,
+    pub mime_type: String,
+}
+
+/// Collect image attachments from a request's messages, oldest first.
+pub fn conversation_images(
+    request: &crate::types::ChatCompletionRequest,
+) -> Vec<ConversationImage> {
+    let mut images = Vec::new();
+    for message in &request.messages {
+        let serde_json::Value::Array(parts) = &message.content else {
+            continue;
+        };
+        for part in parts {
+            let Some(blob) = part.get("brazier_blob") else {
+                continue;
+            };
+            let mime = blob
+                .get("mime_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if !mime.starts_with("image/") {
+                continue;
+            }
+            if let Some(sha256) = blob.get("sha256").and_then(serde_json::Value::as_str) {
+                images.push(ConversationImage {
+                    sha256: sha256.to_owned(),
+                    mime_type: mime.to_owned(),
+                });
+            }
+        }
+    }
+    images
 }
 
 /// Merge bundled, request, and MCP tool definitions into one OpenAI-style array.
@@ -88,9 +130,10 @@ pub async fn execute(
 ) -> ToolInvocation {
     let logical = harmony::logical_tool_name(name);
     if crate::tools::is_builtin(&logical) {
-        return crate::tools::execute_with_data_dir(
+        return crate::tools::execute_with_context(
             ctx.http,
             Some(ctx.data_dir),
+            &ctx.images,
             call_id,
             &logical,
             arguments,
@@ -109,6 +152,7 @@ pub async fn execute(
         arguments: arguments.to_owned(),
         output: format!("Error: no server-side handler for tool `{name}`"),
         is_error: true,
+        media: Vec::new(),
     }
 }
 
@@ -128,6 +172,45 @@ pub fn combined_catalog(data_dir: &Path) -> Value {
         }
     }
     json!({ "data": entries })
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use crate::types::ChatCompletionRequest;
+
+    fn request_with(parts: serde_json::Value) -> ChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "messages": [{ "role": "user", "content": parts }]
+        }))
+        .expect("valid request")
+    }
+
+    #[test]
+    fn conversation_images_are_collected_in_order_and_filtered_by_type() {
+        let request = request_with(serde_json::json!([
+            { "type": "text", "text": "animate this" },
+            { "type": "brazier_blob", "brazier_blob": { "sha256": "aaa", "mime_type": "image/png" } },
+            { "type": "brazier_blob", "brazier_blob": { "sha256": "bbb", "mime_type": "audio/wav" } },
+            { "type": "brazier_blob", "brazier_blob": { "sha256": "ccc", "mime_type": "image/jpeg" } }
+        ]));
+        let images = conversation_images(&request);
+        assert_eq!(
+            images.iter().map(|i| i.sha256.as_str()).collect::<Vec<_>>(),
+            ["aaa", "ccc"],
+            "only images, oldest first"
+        );
+        // `latest` resolves to the most recent image, which is what a user
+        // means by "animate the photo I just sent".
+        assert_eq!(images.last().unwrap().sha256, "ccc");
+    }
+
+    #[test]
+    fn a_text_only_conversation_offers_no_images() {
+        let request = request_with(serde_json::json!([{ "type": "text", "text": "hello" }]));
+        assert!(conversation_images(&request).is_empty());
+    }
 }
 
 #[cfg(test)]

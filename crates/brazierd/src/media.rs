@@ -172,6 +172,97 @@ pub async fn prepare_messages(
     Ok(())
 }
 
+/// Model-ready content parts for media a tool just produced.
+///
+/// Used to hand a generated picture back to a vision model so it can judge or
+/// iterate on its own output. Video is sampled into frames, which is why it is
+/// opt-in: one clip becomes several images.
+pub async fn generated_media_parts(
+    data_dir: &Path,
+    sha256: &str,
+    mime: &str,
+) -> anyhow::Result<Vec<Value>> {
+    if mime.starts_with("image/") {
+        return Ok(vec![image_part_from_blob(data_dir, sha256, mime).await?]);
+    }
+    anyhow::ensure!(mime.starts_with("video/"), "unsupported generated media");
+    anyhow::ensure!(ffmpeg_available(), "{}", ffmpeg_missing_message());
+    let input = blob_to_temp_file(data_dir, sha256, extension_for_mime(mime)).await?;
+    let duration = probe_duration_seconds(&input).await.unwrap_or(1.0).max(0.1);
+    let frame_count = MAX_VIDEO_FRAMES.min(((duration / 2.0).ceil() as usize).max(1));
+    let frame_dir = data_dir
+        .join("tmp")
+        .join("media")
+        .join(format!("{sha256}-generated-frames"));
+    let frames = sample_frames(&input, &frame_dir, frame_count, duration).await?;
+    let mut parts = vec![json!({
+        "type": "text",
+        "text": format!(
+            "[Generated video: {frame_count} sampled frames from a {duration:.1}s clip.]"
+        )
+    })];
+    for path in frames {
+        let bytes = tokio::fs::read(&path).await.context("read frame")?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        parts.push(json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:image/jpeg;base64,{encoded}") }
+        }));
+    }
+    let _ = tokio::fs::remove_dir_all(&frame_dir).await;
+    Ok(parts)
+}
+
+/// Run ffmpeg to sample evenly spaced frames, returning them in order.
+async fn sample_frames(
+    input: &Path,
+    frame_dir: &Path,
+    frame_count: usize,
+    duration: f64,
+) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    tokio::fs::create_dir_all(frame_dir)
+        .await
+        .context("create frame directory")?;
+    let fps = frame_count as f64 / duration;
+    let pattern = frame_dir.join("frame-%03d.jpg");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            &input.display().to_string(),
+            "-vf",
+            &format!("fps={fps:.6},scale='min({FRAME_MAX_EDGE},iw)':-2"),
+            "-frames:v",
+            &frame_count.to_string(),
+            "-q:v",
+            "3",
+            &pattern.display().to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .context("run ffmpeg for frame sampling")?;
+    anyhow::ensure!(status.success(), "ffmpeg failed to sample video frames");
+    let mut entries = tokio::fs::read_dir(frame_dir)
+        .await
+        .context("read sampled frames")?;
+    let mut paths = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"))
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 async fn image_part_from_blob(data_dir: &Path, sha256: &str, mime: &str) -> anyhow::Result<Value> {
     let (bytes, stored_mime) = blob_store::read_blob(data_dir, sha256).await?;
     let mime = if stored_mime.starts_with("image/") {
@@ -400,7 +491,9 @@ async fn transcribe_blob(
         .unwrap_or(dummy_model.as_path());
     if !whisperkit::is_whisperkit_binary(binary) {
         anyhow::ensure!(
-            ctx.whisper_model.as_ref().is_some_and(|path| path.is_file()),
+            ctx.whisper_model
+                .as_ref()
+                .is_some_and(|path| path.is_file()),
             "{}",
             asr_missing_message()
         );
@@ -588,7 +681,9 @@ async fn extract_and_transcribe_audio(
         .unwrap_or(dummy_model.as_path());
     if !whisperkit::is_whisperkit_binary(binary) {
         anyhow::ensure!(
-            ctx.whisper_model.as_ref().is_some_and(|path| path.is_file()),
+            ctx.whisper_model
+                .as_ref()
+                .is_some_and(|path| path.is_file()),
             "{}",
             asr_missing_message()
         );

@@ -210,6 +210,30 @@ impl Runtime {
         *self.models_cache.lock().await = None;
     }
 
+    /// Capabilities for a model id, falling back to text-only when unknown.
+    pub async fn model_capabilities(&self, model_id: &str) -> ModelCapabilities {
+        self.cached_models()
+            .await
+            .ok()
+            .and_then(|models| {
+                models
+                    .into_iter()
+                    .find(|model| model.id == model_id)
+                    .map(|model| model.capabilities)
+            })
+            .unwrap_or_else(|| ModelCapabilities {
+                input_modalities: vec!["text".into()],
+                output_modalities: vec!["text".into()],
+                streaming: true,
+                tools: true,
+                reasoning: false,
+                max_context_length: None,
+                reasoning_modes: Vec::new(),
+                harmony: false,
+                audio_input: None,
+            })
+    }
+
     pub async fn cached_models(&self) -> anyhow::Result<Vec<ModelDescriptor>> {
         if let Some(models) = self.models_cache.lock().await.clone() {
             return Ok(models);
@@ -1468,9 +1492,11 @@ impl Engine for Runtime {
         );
         let mut invocations = Vec::new();
         let mut transcript = Vec::new();
+        let model_caps = self.model_capabilities(&request.model).await;
         let ctx = ToolContext {
             data_dir: &self.data_dir,
             http: &self.http,
+            images: tool_registry::conversation_images(&request),
         };
         let mut audio_fallback_attempted = false;
         for round in 0..MAX_TOOL_ROUNDS {
@@ -1515,6 +1541,8 @@ impl Engine for Runtime {
                 round_text,
                 &calls,
                 &ctx,
+                &model_caps,
+                &settings,
                 &mut invocations,
                 &mut transcript,
                 None,
@@ -1557,11 +1585,14 @@ enum AppendRoundOutcome {
     ChannelClosed,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn append_tool_round(
     messages: &mut Vec<OpenAiMessage>,
     round_text: String,
     calls: &[llama::AccumulatedToolCall],
     ctx: &ToolContext<'_>,
+    model_caps: &crate::types::ModelCapabilities,
+    settings: &RuntimeSettings,
     invocations: &mut Vec<tools::ToolInvocation>,
     transcript: &mut Vec<OpenAiMessage>,
     events: Option<&tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>>,
@@ -1598,6 +1629,23 @@ async fn append_tool_round(
         messages.push(tool_message.clone());
         transcript.push(tool_message.clone());
         invocations.push(invocation.clone());
+
+        // Hand generated media back to a model that can actually look at it,
+        // so it can judge or refine its own output.
+        if let Some(feedback) =
+            generated_media_message(ctx, model_caps, settings, &invocation).await
+        {
+            messages.push(feedback.clone());
+            transcript.push(feedback.clone());
+            if let Some(tx) = events
+                && tx
+                    .send(Ok(StreamEvent::TranscriptMessage(feedback)))
+                    .await
+                    .is_err()
+            {
+                return AppendRoundOutcome::ChannelClosed;
+            }
+        }
         if let Some(tx) = events {
             if tx.send(Ok(StreamEvent::Tool(invocation))).await.is_err() {
                 return AppendRoundOutcome::ChannelClosed;
@@ -1619,6 +1667,64 @@ async fn append_tool_round(
     AppendRoundOutcome::Continue
 }
 
+/// Build a user-role message carrying whatever a tool just generated, when the
+/// model can see it and the setting allows.
+///
+/// Returns `None` when the feature is off, the model has no vision, or the
+/// media cannot be prepared — a failure here should never break the round.
+async fn generated_media_message(
+    ctx: &ToolContext<'_>,
+    model_caps: &crate::types::ModelCapabilities,
+    settings: &RuntimeSettings,
+    invocation: &crate::tools::ToolInvocation,
+) -> Option<OpenAiMessage> {
+    if invocation.media.is_empty() || invocation.is_error {
+        return None;
+    }
+    if !model_caps
+        .input_modalities
+        .iter()
+        .any(|modality| modality == "image")
+    {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for media in &invocation.media {
+        let allowed = if media.mime_type.starts_with("video/") {
+            settings.show_generated_video_to_model
+        } else {
+            settings.show_generated_images_to_model
+        };
+        if !allowed {
+            continue;
+        }
+        match crate::media::generated_media_parts(ctx.data_dir, &media.sha256, &media.mime_type)
+            .await
+        {
+            Ok(media_parts) => parts.extend(media_parts),
+            Err(error) => {
+                tracing::debug!(%error, "could not show generated media to the model");
+            }
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.insert(
+        0,
+        serde_json::json!({
+            "type": "text",
+            "text": "Here is what you just generated, so you can check it against the request."
+        }),
+    );
+    Some(OpenAiMessage {
+        role: "user".to_owned(),
+        content: serde_json::Value::Array(parts),
+        tool_calls: None,
+        tool_call_id: None,
+    })
+}
+
 /// Streaming generation loop with server-side tool execution.
 async fn stream_tool_rounds(
     runtime: &Runtime,
@@ -1628,9 +1734,11 @@ async fn stream_tool_rounds(
     tools_active: bool,
     tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
 ) -> anyhow::Result<()> {
+    let model_caps = runtime.model_capabilities(&request.model).await;
     let ctx = ToolContext {
         data_dir: &runtime.data_dir,
         http: &runtime.http,
+        images: tool_registry::conversation_images(&request),
     };
     let mut audio_fallback_attempted = false;
     for round in 0..MAX_TOOL_ROUNDS {
@@ -1691,6 +1799,8 @@ async fn stream_tool_rounds(
             round_text,
             &calls,
             &ctx,
+            &model_caps,
+            &settings,
             &mut invocations,
             &mut transcript,
             Some(tx),

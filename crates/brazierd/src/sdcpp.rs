@@ -631,6 +631,18 @@ pub struct SdcppManifest {
     /// `.safetensors`/`.gguf` checkpoint, used with sd-cli's `-m` flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub single_file: Option<String>,
+    /// Whether this model can start from a supplied frame (`-i`), which is
+    /// what image-to-video and image-to-image need. Text-to-video models
+    /// ignore the flag or produce nonsense, so it is opt-in per model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supports_init_image: bool,
+}
+
+/// Whether a model accepts an init image, from its installed manifest.
+pub fn supports_init_image(data_dir: &Path, model_id: &str) -> bool {
+    resolve_manifest(data_dir, model_id)
+        .map(|(_, manifest)| manifest.supports_init_image)
+        .unwrap_or(false)
 }
 
 fn manifest_file_path(dir: &Path) -> PathBuf {
@@ -1245,6 +1257,7 @@ mod tests {
                 ("t5xxl".to_owned(), "t5xxl_fp16.safetensors".to_owned()),
             ]),
             single_file: None,
+            supports_init_image: false,
         };
         tokio::runtime::Runtime::new()
             .unwrap()
@@ -1416,6 +1429,7 @@ mod tests {
                     ("vae".to_owned(), "vae.safetensors".to_owned()),
                 ]),
                 single_file: None,
+                supports_init_image: false,
             })
             .unwrap(),
         )
@@ -1430,6 +1444,7 @@ mod tests {
                 modality: Modality::Video,
                 args: BTreeMap::new(),
                 single_file: Some("model.gguf".to_owned()),
+                supports_init_image: false,
             })
             .unwrap(),
         )

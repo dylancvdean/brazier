@@ -74,6 +74,8 @@ pub struct Variant {
     pub requires: Option<Vec<Requirement>>,
     #[serde(default)]
     pub defaults: Option<GenerationDefaults>,
+    #[serde(default)]
+    pub supports_init_image: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -86,6 +88,9 @@ pub struct Architecture {
     pub requires: Vec<Requirement>,
     #[serde(default)]
     pub defaults: GenerationDefaults,
+    /// Whether models of this architecture can start from a supplied frame.
+    #[serde(default)]
+    pub supports_init_image: bool,
     #[serde(default)]
     pub variants: Vec<Variant>,
 }
@@ -460,6 +465,10 @@ pub fn assemble(
 
     Proposal {
         bundle: Bundle {
+            supports_init_image: variant
+                .and_then(|variant| variant.supports_init_image)
+                .or_else(|| architecture.map(|arch| arch.supports_init_image))
+                .unwrap_or(false),
             id: bundle_id(repo_id, file_name),
             label,
             modality,
