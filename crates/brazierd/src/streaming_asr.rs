@@ -80,7 +80,9 @@ pub fn download_destination(
     filename: &str,
 ) -> anyhow::Result<PathBuf> {
     models_store::validate_repo_id(repo_id)?;
-    models_store::validate_filename(filename)?;
+    // A Nemotron snapshot is `config.json`, a tokenizer, and `.safetensors`;
+    // the GGUF filename rule rejected all of them and failed every download.
+    models_store::validate_relative_path(filename)?;
     Ok(models_root(data_dir).join(repo_id).join(filename))
 }
 
@@ -363,6 +365,39 @@ pub async fn transcribe_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every file a Nemotron snapshot is made of, none of them GGUF. Applying
+    /// the GGUF store's filename rule here failed the download on its first
+    /// file, so the whole engine could never be given a model.
+    #[test]
+    fn accepts_the_files_a_snapshot_is_made_of() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in [
+            "config.json",
+            "model.safetensors",
+            "tokenizer.json",
+            "preprocessor_config.json",
+            "nested/weights.safetensors",
+        ] {
+            assert!(
+                download_destination(dir.path(), "nvidia/nemotron-3.5-asr-streaming-0.6b", file)
+                    .is_ok(),
+                "{file} must be downloadable"
+            );
+        }
+    }
+
+    #[test]
+    fn still_refuses_paths_that_escape_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in ["../escape.safetensors", "/abs.safetensors", "a/../../b", ""] {
+            assert!(
+                download_destination(dir.path(), "nvidia/nemotron", file).is_err(),
+                "{file} must be refused"
+            );
+        }
+        assert!(download_destination(dir.path(), "../evil", "config.json").is_err());
+    }
 
     #[test]
     fn detects_nemotron_repo_names() {

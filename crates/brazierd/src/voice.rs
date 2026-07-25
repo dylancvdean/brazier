@@ -113,26 +113,8 @@ pub fn download_destination(
     filename: &str,
 ) -> anyhow::Result<PathBuf> {
     models_store::validate_repo_id(repo_id)?;
-    validate_relative_filename(filename)?;
+    models_store::validate_relative_path(filename)?;
     Ok(models_root(data_dir).join(repo_id).join(filename))
-}
-
-fn validate_relative_filename(filename: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !filename.is_empty() && filename.len() <= 260,
-        "invalid filename"
-    );
-    anyhow::ensure!(
-        !filename.starts_with('/') && !filename.contains('\\'),
-        "filename must be a relative path"
-    );
-    anyhow::ensure!(
-        !filename
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == ".."),
-        "filename must not contain empty or parent path segments"
-    );
-    Ok(())
 }
 
 /// Heuristic check that a directory holds a usable Moshi/PersonaPlex checkpoint.

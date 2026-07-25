@@ -306,7 +306,13 @@ pub fn mlx_download_destination(
     Ok(mlx_root(data_dir).join(repo_id).join(filename))
 }
 
-fn validate_relative_path(path: &str) -> anyhow::Result<()> {
+/// Path safety for a file inside a snapshot: relative, no traversal, no
+/// extension rule.
+///
+/// Snapshot stores (MLX, PersonaPlex, streaming ASR) keep configs, tokenizers,
+/// and `.safetensors`, so this is the check they need. [`validate_filename`] is
+/// the GGUF store's, and using it on a snapshot rejects every file in it.
+pub fn validate_relative_path(path: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !path.is_empty() && path.len() <= 260,
         "invalid relative path"
@@ -340,6 +346,13 @@ pub fn validate_repo_id(repo_id: &str) -> anyhow::Result<()> {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
             "invalid repository id segment"
+        );
+        // Dots are legal inside a name (`model.v2`), but a segment of nothing
+        // but dots is `.` or `..`, which walks out of the store when the id is
+        // joined to it. No Hugging Face owner or name looks like that.
+        anyhow::ensure!(
+            part.chars().any(|c| c != '.'),
+            "repository id segment must not be a path segment"
         );
     }
     Ok(())
@@ -1113,6 +1126,25 @@ mod tests {
         assert!(validate_filename("../x.gguf").is_err());
         assert!(validate_filename("ok/nested-q4_k_m.gguf").is_ok());
         assert!(validate_repo_id("../evil/name").is_err());
+        // Two segments passes the owner/name shape, and `.` matched the allowed
+        // character set, so these walked out of the store when joined to it.
+        assert!(validate_repo_id("../evil").is_err());
+        assert!(validate_repo_id("../..").is_err());
+        assert!(validate_repo_id("./x").is_err());
+        // Dots inside a name are ordinary and stay allowed.
+        assert!(validate_repo_id("owner/model.v2").is_ok());
+        assert!(validate_repo_id("mlx-community/nemotron-3.5-asr-streaming-0.6b").is_ok());
+    }
+
+    #[test]
+    fn snapshot_files_are_not_held_to_the_gguf_rule() {
+        // The GGUF store's filename rule and the snapshot stores' path rule are
+        // different checks; using the former on a snapshot rejects every file.
+        assert!(validate_filename("config.json").is_err());
+        assert!(validate_relative_path("config.json").is_ok());
+        assert!(validate_relative_path("model.safetensors").is_ok());
+        assert!(validate_relative_path("../escape").is_err());
+        assert!(validate_relative_path("/abs").is_err());
     }
 
     #[test]
