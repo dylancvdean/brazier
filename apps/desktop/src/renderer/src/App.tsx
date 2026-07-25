@@ -92,6 +92,9 @@ import brazierLogo from './assets/brazier-logo.png'
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 
+/** Engine id for the Nemotron streaming ASR worker. */
+const streamingAsrEngine = 'streaming-asr'
+
 function readEnabledTools(): string[] {
   try {
     const raw = localStorage.getItem(ENABLED_TOOLS_KEY)
@@ -576,6 +579,10 @@ export function App(): React.JSX.Element {
     summary: conversations.find((entry) => entry.id === conversationId)?.summary ?? null,
     chatModelId: selectedModel,
     voiceModelId: voiceModel,
+    // Utterances are submitted whole, which is what whisper is best at, so the
+    // daemon default is preferred and the Nemotron worker covers the case where
+    // streaming ASR is the interface that happens to be installed.
+    asrEngine: pipelineFeatures.asr ? undefined : streamingAsrEngine,
     persona,
     responder: voiceResponder,
     onMessage: (message) => {

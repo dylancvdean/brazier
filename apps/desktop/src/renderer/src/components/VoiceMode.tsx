@@ -135,10 +135,12 @@ export function VoiceMode(props: Props): React.JSX.Element {
       {props.realtimeAvailable && !props.asrAvailable && needsTranscripts ? (
         <p className="mode-empty">
           Connecting voice to a conversation needs transcription, which is separate from PersonaPlex:
-          the voice model reports only what <em>it</em> says, so what <em>you</em> say is transcribed
-          by Whisper. Build WhisperKit under Manage → Runtimes, or download a Whisper model from
-          Discover if you already built whisper.cpp. Until then, use <strong>Neither</strong>, which
-          talks to PersonaPlex directly and needs no transcript.
+          the voice model reports only what <em>it</em> says, so what <em>you</em> say has to be
+          transcribed. Any one of the ASR interfaces will do — build WhisperKit under Manage →
+          Runtimes, download a Whisper model from Discover if you already built whisper.cpp, or
+          download the Nemotron ASR Streaming snapshot if you already built streaming ASR. Until
+          then, use <strong>Neither</strong>, which talks to PersonaPlex directly and needs no
+          transcript.
         </p>
       ) : null}
 

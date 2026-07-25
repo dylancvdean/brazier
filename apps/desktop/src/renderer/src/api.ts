@@ -446,17 +446,28 @@ export function updateConversation(
   })
 }
 
-/** Transcribe one finished utterance through the daemon's ASR path. */
+/**
+ * Transcribe one finished utterance through the daemon's ASR path.
+ *
+ * `engine` picks between the installed interfaces: `streaming-asr` runs the
+ * Nemotron worker, and omitting it takes the daemon's default, which is
+ * whisper.cpp or WhisperKit. The utterance is already complete either way, so
+ * this asks for the collected text rather than an SSE stream.
+ */
 export async function transcribeAudio(
   wav: Uint8Array,
-  options: { signal?: AbortSignal } = {}
+  options: { signal?: AbortSignal; engine?: string } = {}
 ): Promise<string> {
   let binary = ''
   for (let index = 0; index < wav.length; index += 1) binary += String.fromCharCode(wav[index])
   const payload = await request<{ text?: string }>('/v1/audio/transcriptions', {
     method: 'POST',
     signal: options.signal,
-    body: JSON.stringify({ file_base64: btoa(binary), mime_type: 'audio/wav' })
+    body: JSON.stringify({
+      file_base64: btoa(binary),
+      mime_type: 'audio/wav',
+      ...(options.engine ? { engine: options.engine } : {})
+    })
   })
   return (payload.text ?? '').trim()
 }

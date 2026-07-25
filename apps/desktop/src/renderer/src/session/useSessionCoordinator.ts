@@ -30,6 +30,11 @@ export type UseSessionCoordinatorOptions = {
   chatModelId: string
   /** PersonaPlex model for the voice session. */
   voiceModelId: string
+  /**
+   * ASR interface for spoken turns: `streaming-asr` for the Nemotron worker,
+   * undefined for the daemon's whisper default.
+   */
+  asrEngine?: string
   persona: string
   /** Produces ordinary chat answers when no agent session is bound. */
   responder?: ChatResponder
@@ -74,6 +79,7 @@ export function useSessionCoordinator(
     const agent = new WorkerAgentAdapter(() => latest.current.chatModelId || undefined)
     const voice = new PersonaPlexVoiceAdapter({
       modelId: () => latest.current.voiceModelId,
+      asrEngine: () => latest.current.asrEngine,
       onInputLevel: setInputLevel,
       onOutputLevel: setOutputLevel
     })

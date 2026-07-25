@@ -35,6 +35,11 @@ import { renderVoicePrompt } from './voiceContext'
 export type PersonaPlexAdapterOptions = {
   /** PersonaPlex model to run; empty picks the daemon's default. */
   modelId?: () => string
+  /**
+   * Which ASR interface transcribes utterances: `streaming-asr` for the
+   * Nemotron worker, or undefined for the daemon's whisper default.
+   */
+  asrEngine?: () => string | undefined
   renderer?: SpeechRenderer
   /** Meters for the voice UI. */
   onInputLevel?: (level: number) => void
@@ -220,7 +225,9 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   }): Promise<void> {
     this.transcribing += 1
     try {
-      const text = await transcribeAudio(encodeWav(utterance.samples, utterance.sampleRate))
+      const text = await transcribeAudio(encodeWav(utterance.samples, utterance.sampleRate), {
+        engine: this.options.asrEngine?.()
+      })
       if (!text) return
       // Whatever leaked past the echo canceller is not a new question.
       if (isEchoOfSpokenText(text, this.lastSpokenText)) return
