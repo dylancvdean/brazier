@@ -159,12 +159,20 @@ function isHealthy(root, version) {
 }
 
 /**
- * Label the development Dock tile "Brazier" rather than "Electron".
+ * Name the development Electron bundle "Brazier".
  *
- * macOS reads that name from the running bundle's Info.plist, not from
+ * macOS reads the Dock label from the running bundle's Info.plist, not from
  * `app.setName`, and in development the running bundle is the prebuilt
- * Electron.app in node_modules. A packaged build gets its name from
- * electron-builder's `productName` and never comes through here.
+ * Electron.app in node_modules. Renaming it is the only lever there is.
+ *
+ * It does not reliably change the Dock label: LaunchServices caches names
+ * against a bundle identifier, and this one is still Electron's. The tile may
+ * keep saying Electron until that cache is rebuilt —
+ * `/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f <bundle>`
+ * — and rewriting the identifier to force it would give a development build a
+ * different identity for permissions and keychain entries, which is not worth
+ * a label. Packaged builds are unaffected: electron-builder writes
+ * `productName` into a bundle of its own.
  *
  * Best effort by design: the app runs fine under the wrong label, so a failure
  * to patch is not worth failing an install over.
