@@ -36,9 +36,13 @@ function harness(overrides: Partial<IntegrationConfig> = {}) {
   return { clock, chat, agent, voice, responder, coordinator, logs }
 }
 
-/** Attached, with a live voice session. The usual starting point. */
+/**
+ * Attached, with a live voice session pointed at the agent. Most of what
+ * follows is about agent-owned turns; the chat and neither destinations say so
+ * explicitly.
+ */
 async function live(overrides: Partial<IntegrationConfig> = {}) {
-  const context = harness(overrides)
+  const context = harness({ voiceSessionTarget: 'agent', ...overrides })
   await context.coordinator.attach('conv-1')
   await context.coordinator.startVoiceSession()
   return context
@@ -152,20 +156,16 @@ describe('basic flows', () => {
 })
 
 describe('what the voice session is connected to', () => {
-  it('routes to the agent when one is bound, and to chat when none is', async () => {
-    const { coordinator, agent, voice, chat } = await live({ voiceSessionTarget: 'both' })
+  it('sends spoken turns to the agent when that is the destination', async () => {
+    const { coordinator, agent, voice, chat } = await live({ voiceSessionTarget: 'agent' })
     speak(voice, 'utt-1', 'With a task bound.')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(agent.submitted).toHaveLength(1)
 
+    expect(agent.submitted).toHaveLength(1)
     agent.completeRun(agent.submitted[0].correlationId, 'Agent answered.')
     await new Promise((resolve) => setTimeout(resolve, 0))
-
-    agent.sessionId = null
-    speak(voice, 'utt-2', 'With none bound.')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(agent.submitted).toHaveLength(1)
-    expect(chat.assistantMessages().at(-1)?.source).toBe('assistant_chat')
+    expect(chat.assistantMessages().at(-1)?.source).toBe('assistant_agent')
+    expect(coordinator.snapshot().responses[0].owner).toBe('agent')
   })
 
   it('keeps spoken turns on the chat model even while a task is bound', async () => {
@@ -208,7 +208,7 @@ describe('what the voice session is connected to', () => {
     const base = { ...DEFAULT_INTEGRATION_CONFIG, voiceEnabled: true }
     expect(voice.modelAudioEnabled).toBe(true)
 
-    coordinator.setConfig({ ...base, voiceSessionTarget: 'both' })
+    coordinator.setConfig({ ...base, voiceSessionTarget: 'chat' })
     expect(voice.modelAudioEnabled).toBe(false)
 
     coordinator.setConfig({ ...base, voiceSessionTarget: 'neither' })
@@ -216,7 +216,7 @@ describe('what the voice session is connected to', () => {
   })
 
   it('leaves PersonaPlex audible when this host cannot speak answers', async () => {
-    const context = harness({ voiceSessionTarget: 'both' })
+    const context = harness({ voiceSessionTarget: 'chat' })
     context.voice.speakable = false
     await context.coordinator.attach('conv-1')
     await context.coordinator.startVoiceSession()

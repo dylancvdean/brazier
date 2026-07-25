@@ -148,12 +148,20 @@ it belongs to (`correlation_id`), and what became of it (`status`: `partial`,
 agent session its turns go to, plus the compact summary a voice session is
 seeded with.
 
-Ownership is explicit, never inferred from timing. The agent owns the answer
-whenever a session is bound to the conversation; chat owns it otherwise;
-PersonaPlex owns nothing. It may acknowledge, and it may speak an answer it was
-handed, but it never decides a tool result, a completion, or a fact. Its own
-generated text is treated as untrusted model output: shown in the voice pane,
-never stored as an answer, never parsed as a command.
+Ownership is explicit, never inferred from timing. A typed turn goes to the
+agent when a session is bound to the conversation and to chat otherwise; a
+spoken turn goes wherever Voice mode is pointed, and each destination there
+names exactly one place, so it is always answerable which model replied and
+where the next turn will land. PersonaPlex owns nothing. It may acknowledge,
+and it may speak an answer it was handed, but it never decides a tool result, a
+completion, or a fact. Its own generated text is treated as untrusted model
+output: shown in the voice pane, never stored as an answer, never parsed as a
+command.
+
+Voice is a workspace mode like Agent and Generate: it takes the whole surface,
+renders the shared conversation itself, and has no text box. Speech already has
+a chosen destination, so a second input alongside it would be a second,
+unlabelled one.
 
 Three cancellations stay separate, because they are different decisions:
 stopping the audio, dropping the current answer, and abandoning the agent task.

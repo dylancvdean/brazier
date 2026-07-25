@@ -1,15 +1,16 @@
 /**
- * What a live voice session is connected to.
+ * Where a live voice session sends what the user says.
  *
- * - `both` — spoken turns join the conversation and reach the agent when one is
- *   bound to it, falling back to the chat model when none is. The default.
- * - `agent` — always the agent; a spoken turn with no session bound is refused
- *   rather than quietly answered by the chat model.
- * - `chat` — always the chat model, even while an agent session is bound.
+ * - `chat` — the chat model; the turn joins the conversation. The default.
+ * - `agent` — the agent session bound to the conversation; a turn with none
+ *   bound is refused rather than quietly answered by the chat model.
  * - `neither` — nothing is recorded and nothing is invoked. PersonaPlex answers
  *   in its own voice, as it does with voice mode used on its own.
+ *
+ * Each names one destination on purpose. A setting that could route to either
+ * place left no way to tell which had answered, or to aim the next turn.
  */
-export type VoiceSessionTarget = 'both' | 'agent' | 'chat' | 'neither'
+export type VoiceSessionTarget = 'agent' | 'chat' | 'neither'
 
 /** Configuration for the chat / voice / agent integration. */
 export type IntegrationConfig = {
@@ -37,7 +38,7 @@ export type IntegrationConfig = {
 
 export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
   voiceEnabled: false,
-  voiceSessionTarget: 'both',
+  voiceSessionTarget: 'chat',
   speakVoiceOriginatedResponses: true,
   speakTextOriginatedResponses: false,
   showVoiceTranscripts: true,

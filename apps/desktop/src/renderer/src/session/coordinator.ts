@@ -397,16 +397,12 @@ export class SessionCoordinator {
    */
   private ownerFor(source: MessageSource): ResponseOwner | null {
     const bound = this.deps.agent.attachedSessionId() !== null
+    // A typed turn goes wherever the conversation is pointed; only speech has a
+    // destination the user chose. 'neither' never reaches here — those
+    // transcripts are dropped before submission.
     if (source !== 'user_voice') return bound ? 'agent' : 'chat'
-    switch (this.config.voiceSessionTarget) {
-      case 'chat':
-        return 'chat'
-      case 'agent':
-        return bound ? 'agent' : null
-      // 'neither' never reaches here; transcripts are dropped before submission.
-      default:
-        return bound ? 'agent' : 'chat'
-    }
+    if (this.config.voiceSessionTarget === 'agent') return bound ? 'agent' : null
+    return 'chat'
   }
 
   /** Where a turn's answer should go, given who asked and the configuration. */

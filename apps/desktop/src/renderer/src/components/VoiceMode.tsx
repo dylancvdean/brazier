@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  AudioLines,
   Bot,
   LoaderCircle,
   Mic,
@@ -9,7 +10,7 @@ import {
   Volume2,
   VolumeX
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { LocalModel } from '../api'
 import { modelDisplayName } from '../model-utils'
 import type { VoiceSessionTarget } from '../session/config'
@@ -39,22 +40,21 @@ function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
 
-/** What a live voice session can be wired to, and what each choice means. */
+/**
+ * Where a live voice session sends what you say. Each choice names one
+ * destination: a turn that could go to either place gives no way to tell which
+ * answered, and no way to aim the next one.
+ */
 const TARGETS: Array<[VoiceSessionTarget, string, string]> = [
   [
-    'both',
-    'Both',
-    'Spoken turns join this conversation and reach the agent when a task is bound to it, or the chat model when none is.'
+    'chat',
+    'Chat',
+    'Spoken turns go to the chat model and join this conversation.'
   ],
   [
     'agent',
     'Agent',
-    'Spoken turns always go to the bound agent session. With no task bound, a turn is refused rather than answered without the workspace and tools you expected.'
-  ],
-  [
-    'chat',
-    'Chat',
-    'Spoken turns always go to the chat model, even while an agent task is running.'
+    'Spoken turns go to the agent session bound to this conversation. With no task bound, a turn is refused rather than answered without the workspace and tools you expected.'
   ],
   [
     'neither',
@@ -68,6 +68,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
   const { snapshot, config } = session
   const [muted, setMuted] = useState(false)
   const [busy, setBusy] = useState(false)
+  const scrollAnchor = useRef<HTMLDivElement>(null)
 
   const needsTranscripts = config.voiceSessionTarget !== 'neither'
   const live = snapshot.voiceStatus === 'live'
@@ -76,6 +77,12 @@ export function VoiceMode(props: Props): React.JSX.Element {
   const task = snapshot.task
   const speaking = snapshot.speakingCorrelationId !== null
   const working = snapshot.activeCorrelationId !== null
+  const blocked =
+    !props.realtimeAvailable || !props.audioSupported || (needsTranscripts && !props.asrAvailable)
+
+  useEffect(() => {
+    scrollAnchor.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [snapshot.messages.length, snapshot.streamingText])
 
   async function guard(action: () => Promise<void>): Promise<void> {
     setBusy(true)
@@ -99,250 +106,269 @@ export function VoiceMode(props: Props): React.JSX.Element {
     ? 'Loading the voice model — first run takes a minute…'
     : live
       ? muted
-        ? 'Live · microphone muted'
+        ? 'Microphone muted'
         : speaking
-          ? 'Live · speaking'
+          ? 'Speaking'
           : working
-            ? 'Live · working on your request'
-            : 'Live · speak whenever you like'
+            ? 'Working on your request'
+            : 'Listening'
       : snapshot.voiceStatus === 'error'
-        ? `Voice mode stopped: ${snapshot.voiceError ?? 'unknown error'}`
+        ? `Stopped: ${snapshot.voiceError ?? 'unknown error'}`
         : 'Not connected'
 
   return (
-    <section className="voice-bar">
-      <header className="mode-panel-header">
-        <h2>Voice</h2>
-        <p>
-          Speech and typing share this conversation. What you say is transcribed into it, and the
-          agent stays in charge of tools, tasks, and results.
-        </p>
-      </header>
-
-      {!props.realtimeAvailable ? (
-        <p className="mode-empty">
-          Realtime voice needs a PersonaPlex runtime and a downloaded <code>personaplex:</code>{' '}
-          model. On Apple Silicon build PersonaPlex MLX from Manage → Runtimes (accept the
-          nvidia/personaplex-7b-v1 license and set an HF token); on Linux CUDA build PersonaPlex /
-          Moshi.
-        </p>
-      ) : null}
-      {props.realtimeAvailable && !props.audioSupported ? (
-        <p className="mode-empty">
-          This build has no WebCodecs Opus support, which realtime voice needs for audio in and out.
-        </p>
-      ) : null}
-      {props.realtimeAvailable && !props.asrAvailable && needsTranscripts ? (
-        <p className="mode-empty">
-          Connecting voice to a conversation needs transcription, which is separate from PersonaPlex:
-          the voice model reports only what <em>it</em> says, so what <em>you</em> say has to be
-          transcribed. Any one of the ASR interfaces will do — build WhisperKit under Manage →
-          Runtimes, download a Whisper model from Discover if you already built whisper.cpp, or
-          download the Nemotron ASR Streaming snapshot if you already built streaming ASR. Until
-          then, use <strong>Neither</strong>, which talks to PersonaPlex directly and needs no
-          transcript.
-        </p>
-      ) : null}
-
-      <div className="voice-controls">
-        <label>
-          Persona
-          <textarea
-            value={props.persona}
-            onChange={(event) => props.onPersonaChange(event.target.value)}
-            rows={2}
-            disabled={live || starting}
-            placeholder="Describe who the model should be…"
-          />
-        </label>
-
-        <div className="voice-actions">
-          {!live ? (
+    <section className="voice-mode">
+      <header className="voice-bar">
+        <div className={`voice-status ${live ? 'live' : ''}`}>
+          <span className="voice-status-dot" />
+          <span>{statusLabel}</span>
+        </div>
+        <div className="voice-meters" hidden={!live}>
+          <div className="voice-meter">
+            <div
+              className="voice-meter-fill"
+              style={{ width: `${Math.round(session.inputLevel * 100)}%` }}
+            />
+          </div>
+          <div className="voice-meter">
+            <div
+              className="voice-meter-fill model"
+              style={{ width: `${Math.round(session.outputLevel * 100)}%` }}
+            />
+          </div>
+        </div>
+        <div className="voice-bar-spacer" />
+        {props.modelId ? (
+          <span className="voice-status-model">
+            {modelDisplayName(props.modelId, selected).title}
+          </span>
+        ) : null}
+        {live ? (
+          <>
+            <button type="button" className={muted ? 'toggled' : ''} onClick={toggleMute}>
+              {muted ? <MicOff size={15} /> : <Mic size={15} />}
+              {muted ? 'Unmute' : 'Mute'}
+            </button>
+            {/* Three controls, because silencing the voice, dropping this
+                answer, and abandoning the task are different decisions. */}
             <button
               type="button"
-              className="primary"
-              disabled={
-                starting ||
-                !props.realtimeAvailable ||
-                !props.audioSupported ||
-                (needsTranscripts && !props.asrAvailable)
-              }
+              disabled={!speaking}
+              title="Stop the audio. The task keeps running."
+              onClick={() => void guard(() => session.stopSpeaking())}
+            >
+              <VolumeX size={15} /> Stop speaking
+            </button>
+            <button
+              type="button"
+              className="danger"
+              disabled={!working}
+              title="Cancel the task. Anything already answered stays in the conversation."
+              onClick={() => void guard(() => session.cancelAgentTask())}
+            >
+              <Square size={13} fill="currentColor" /> Cancel task
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void guard(() => session.endVoice())}
+            >
+              <PhoneOff size={15} /> End
+            </button>
+          </>
+        ) : null}
+      </header>
+
+      {live ? (
+        <div className="voice-conversation">
+          {snapshot.messages.length === 0 && !snapshot.streamingText ? (
+            <p className="voice-hint">
+              {config.voiceSessionTarget === 'neither'
+                ? 'Speak whenever you like. Nothing is recorded — this is PersonaPlex on its own.'
+                : 'Speak whenever you like. Pause when you are done and the turn is sent.'}
+            </p>
+          ) : (
+            snapshot.messages.map((message) => (
+              <article className={`voice-turn ${message.role} ${message.status}`} key={message.id}>
+                <div className="voice-turn-who">
+                  {message.role === 'user' ? (
+                    <>
+                      <Mic size={12} /> You
+                    </>
+                  ) : message.role === 'system' ? (
+                    'System'
+                  ) : (
+                    <>
+                      <Bot size={12} /> {message.source === 'assistant_agent' ? 'Agent' : 'Brazier'}
+                    </>
+                  )}
+                  {message.status !== 'final' && (
+                    <span className="turn-badge">{message.status}</span>
+                  )}
+                </div>
+                <p>{message.content}</p>
+              </article>
+            ))
+          )}
+          {snapshot.streamingText ? (
+            <article className="voice-turn assistant">
+              <div className="voice-turn-who">
+                <Bot size={12} /> Answering
+                <LoaderCircle className="spin" size={12} />
+              </div>
+              <p>{snapshot.streamingText}</p>
+            </article>
+          ) : null}
+          {snapshot.partialTranscript ? (
+            <article className="voice-turn user partial">
+              <div className="voice-turn-who">
+                <AudioLines size={12} /> Hearing
+              </div>
+              <p>{snapshot.partialTranscript}</p>
+            </article>
+          ) : null}
+          <div ref={scrollAnchor} />
+        </div>
+      ) : (
+        <div className="voice-setup">
+          <div className="voice-setup-inner">
+            <div className="voice-setup-mark">
+              <AudioLines size={26} />
+            </div>
+            <h2>Talk to it</h2>
+            <p className="mode-empty">
+              Full-duplex speech with PersonaPlex. Use headphones — the model hears your speakers.
+            </p>
+
+            {!props.realtimeAvailable ? (
+              <p className="mode-empty">
+                Realtime voice needs a PersonaPlex runtime and a downloaded{' '}
+                <code>personaplex:</code> model. On Apple Silicon build PersonaPlex MLX from Manage →
+                Runtimes (accept the nvidia/personaplex-7b-v1 license and set an HF token); on Linux
+                CUDA build PersonaPlex / Moshi.
+              </p>
+            ) : null}
+            {props.realtimeAvailable && !props.audioSupported ? (
+              <p className="mode-empty">
+                This build has no WebCodecs Opus support, which realtime voice needs for audio in
+                and out.
+              </p>
+            ) : null}
+            {props.realtimeAvailable && !props.asrAvailable && needsTranscripts ? (
+              <p className="mode-empty">
+                Sending what you say to a model needs transcription, which is separate from
+                PersonaPlex: the voice model reports only what <em>it</em> says. Any ASR interface
+                will do — build WhisperKit under Manage → Runtimes, download a Whisper model from
+                Discover if you already built whisper.cpp, or download the Nemotron ASR Streaming
+                snapshot if you already built streaming ASR. Until then, use{' '}
+                <strong>Neither</strong>, which talks to PersonaPlex directly and needs no
+                transcript.
+              </p>
+            ) : null}
+
+            <label className="voice-field">
+              <span className="section-label">Persona</span>
+              <textarea
+                value={props.persona}
+                onChange={(event) => props.onPersonaChange(event.target.value)}
+                rows={3}
+                placeholder="Describe who the model should be…"
+              />
+            </label>
+
+            <div className="voice-field">
+              <span className="section-label">Send what I say to</span>
+              <div className="voice-target-choices" role="radiogroup" aria-label="Send speech to">
+                {TARGETS.map(([value, label, detail]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={config.voiceSessionTarget === value}
+                    className={config.voiceSessionTarget === value ? 'active' : ''}
+                    title={detail}
+                    onClick={() => session.setConfig({ ...config, voiceSessionTarget: value })}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="voice-notice">
+                {TARGETS.find(([value]) => value === config.voiceSessionTarget)?.[2]}
+              </p>
+            </div>
+
+            {needsTranscripts && !session.canSpeak ? (
+              <p className="voice-notice">
+                <AlertTriangle size={13} /> This host has no speech synthesizer, so answers are
+                shown rather than spoken.
+              </p>
+            ) : null}
+
+            <div className="voice-options">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={config.allowVoiceBackchannels}
+                  onChange={(event) =>
+                    session.setConfig({ ...config, allowVoiceBackchannels: event.target.checked })
+                  }
+                />
+                Acknowledge while working (“let me check”)
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={config.interruptCancelsAgent}
+                  onChange={(event) =>
+                    session.setConfig({ ...config, interruptCancelsAgent: event.target.checked })
+                  }
+                />
+                Talking over the assistant also cancels the task
+              </label>
+            </div>
+
+            <button
+              type="button"
+              className="primary voice-start"
+              disabled={starting || blocked}
               onClick={() => void guard(() => session.startVoice())}
             >
               {starting ? <LoaderCircle className="spin" size={16} /> : <Mic size={16} />}
               Start conversation
             </button>
-          ) : (
-            <button type="button" className={muted ? 'toggled' : ''} onClick={toggleMute}>
-              {muted ? <MicOff size={16} /> : <Mic size={16} />}
-              {muted ? 'Unmute' : 'Mute'}
-            </button>
-          )}
-          {/* Three separate controls on purpose: silencing the voice, dropping
-              this answer, and abandoning the task are different decisions. */}
-          <button
-            type="button"
-            disabled={!speaking}
-            title="Stop the audio. The task keeps running."
-            onClick={() => void guard(() => session.stopSpeaking())}
-          >
-            <VolumeX size={16} /> Stop speaking
-          </button>
-          <button
-            type="button"
-            className="danger"
-            disabled={!working}
-            title="Cancel the agent task. Anything it already answered stays in the conversation."
-            onClick={() => void guard(() => session.cancelAgentTask())}
-          >
-            <Square size={14} fill="currentColor" /> Cancel task
-          </button>
-          {live ? (
-            <button
-              type="button"
-              className="danger"
-              disabled={starting}
-              title="Turn voice mode off. The conversation and any running task stay."
-              onClick={() => void guard(() => session.endVoice())}
-            >
-              <PhoneOff size={16} /> End voice
-            </button>
+          </div>
+        </div>
+      )}
+
+      {live && config.showVoiceTranscripts && snapshot.voiceModelText ? (
+        <details className="voice-model-text">
+          <summary>
+            <Bot size={12} /> What PersonaPlex said on its own
+          </summary>
+          <p>{snapshot.voiceModelText.slice(-600)}</p>
+          <small>
+            Not part of the conversation and not checked against anything. Only the turns above are
+            authoritative.
+          </small>
+        </details>
+      ) : null}
+
+      {live && task ? (
+        <div className="voice-task">
+          <strong>
+            {task.label} · {task.status}
+            {task.activeTool ? ` · ${task.activeTool}` : ''}
+          </strong>
+          {task.confirmedResults.length > 0 ? (
+            <ul>
+              {task.confirmedResults.slice(-3).map((result, index) => (
+                <li key={`${result}-${index}`}>{result}</li>
+              ))}
+            </ul>
           ) : null}
         </div>
-
-        <div className={`voice-status ${live ? 'live' : ''}`}>
-          <span className="voice-status-dot" />
-          {statusLabel}
-          {props.modelId ? (
-            <span className="voice-status-model">
-              {modelDisplayName(props.modelId, selected).title}
-            </span>
-          ) : null}
-        </div>
-
-        {live && !session.canSpeak && config.voiceSessionTarget !== 'neither' ? (
-          <p className="voice-notice">
-            <AlertTriangle size={13} /> This host has no speech synthesizer, so answers are shown
-            rather than spoken. PersonaPlex still replies in its own voice, but only what is written
-            in the conversation is authoritative.
-          </p>
-        ) : null}
-
-        {snapshot.queue.length > 0 ? (
-          <p className="voice-notice">
-            {snapshot.queue.length} turn{snapshot.queue.length === 1 ? '' : 's'} queued behind the
-            one running.
-          </p>
-        ) : null}
-
-        {task ? (
-          <div className="voice-task">
-            <strong>
-              {task.label} · {task.status}
-              {task.activeTool ? ` · ${task.activeTool}` : ''}
-            </strong>
-            {task.confirmedResults.length > 0 ? (
-              <ul>
-                {task.confirmedResults.slice(-3).map((result, index) => (
-                  <li key={`${result}-${index}`}>{result}</li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
-        ) : null}
-
-        <div className="voice-meters">
-          <div className="voice-meter-row">
-            <Mic size={13} />
-            <div className="voice-meter">
-              <div
-                className="voice-meter-fill"
-                style={{ width: `${Math.round(session.inputLevel * 100)}%` }}
-              />
-            </div>
-          </div>
-          <div className="voice-meter-row">
-            <Volume2 size={13} />
-            <div className="voice-meter">
-              <div
-                className="voice-meter-fill model"
-                style={{ width: `${Math.round(session.outputLevel * 100)}%` }}
-              />
-            </div>
-          </div>
-        </div>
-
-        <div className="voice-target">
-          <span className="section-label">Connected to</span>
-          <div className="voice-target-choices" role="radiogroup" aria-label="Connected session">
-            {TARGETS.map(([value, label, detail]) => (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={config.voiceSessionTarget === value}
-                className={config.voiceSessionTarget === value ? 'active' : ''}
-                title={detail}
-                onClick={() => session.setConfig({ ...config, voiceSessionTarget: value })}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <p className="voice-notice">
-            {TARGETS.find(([value]) => value === config.voiceSessionTarget)?.[2]}
-          </p>
-        </div>
-
-        <div className="voice-options">
-          <label>
-            <input
-              type="checkbox"
-              checked={config.speakTextOriginatedResponses}
-              onChange={(event) =>
-                session.setConfig({
-                  ...config,
-                  speakTextOriginatedResponses: event.target.checked
-                })
-              }
-            />
-            Speak answers to typed questions too
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={config.allowVoiceBackchannels}
-              onChange={(event) =>
-                session.setConfig({ ...config, allowVoiceBackchannels: event.target.checked })
-              }
-            />
-            Acknowledge while working (“let me check”)
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={config.interruptCancelsAgent}
-              onChange={(event) =>
-                session.setConfig({ ...config, interruptCancelsAgent: event.target.checked })
-              }
-            />
-            Talking over the assistant also cancels the task
-          </label>
-        </div>
-
-        {config.showVoiceTranscripts && snapshot.voiceModelText ? (
-          <details className="voice-model-text">
-            <summary>
-              <Bot size={12} /> What PersonaPlex said on its own
-            </summary>
-            <p>{snapshot.voiceModelText.slice(-600)}</p>
-            <small>
-              Not part of the conversation and not checked against anything. Only the messages above
-              are authoritative.
-            </small>
-          </details>
-        ) : null}
-      </div>
+      ) : null}
     </section>
   )
 }

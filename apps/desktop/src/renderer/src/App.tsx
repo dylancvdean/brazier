@@ -1358,9 +1358,7 @@ export function App(): React.JSX.Element {
           />
         ) : null}
 
-        {/* Voice shares this transcript rather than keeping its own: a spoken
-            turn and a typed one are the same conversation. */}
-        <div className="chat" hidden={appMode !== 'chat' && appMode !== 'voice'}>
+        <div className="chat" hidden={appMode !== 'chat'}>
           {modelLoadStatus && (modelPrepareState === 'loading' || (busy && !streamingText)) && (
             <div className="model-load-status">
               <LoaderCircle className="spin" size={18} />
@@ -1557,8 +1555,14 @@ export function App(): React.JSX.Element {
               ))}
             </div>
           )}
-          {/* One composer for every mode. What it sends is decided by `submit`. */}
-          <form className="composer" onSubmit={(event) => void submit(event)}>
+          {/* One composer, for the modes that take typed input. Voice owns its
+              whole screen and has no text box: with speech already aimed at a
+              destination, a second input would be a second, unlabelled one. */}
+          <form
+            className="composer"
+            hidden={appMode === 'voice'}
+            onSubmit={(event) => void submit(event)}
+          >
             <textarea
               aria-label={agentMode ? 'Agent task' : 'Message'}
               placeholder={
@@ -1692,7 +1696,7 @@ export function App(): React.JSX.Element {
               )}
             </div>
           </form>
-          <p className="composer-hint">
+          <p className="composer-hint" hidden={appMode === 'voice'}>
             {agentMode ? (
               'The agent edits files and runs commands in the workspace above. Each action is judged by its permission mode.'
             ) : (

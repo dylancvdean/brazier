@@ -3172,7 +3172,8 @@ a.inline-link {
 }
 
 .mode-toggle button,
-.voice-actions button,
+.voice-bar button,
+.voice-setup button,
 .generate-form button {
   display: inline-flex;
   align-items: center;
@@ -3182,7 +3183,8 @@ a.inline-link {
 /* Action buttons in the Voice and Generate panels share the chip language
    used by the Manage panel: neutral by default, accent for the primary
    action, warm red for the destructive one. */
-.voice-actions button,
+.voice-bar button,
+.voice-setup button,
 .generate-form button {
   justify-content: center;
   padding: 9px 14px;
@@ -3198,32 +3200,34 @@ a.inline-link {
     border-color 120ms ease;
 }
 
-.voice-actions button:hover:not(:disabled),
+.voice-bar button:hover:not(:disabled),
+.voice-setup button:hover:not(:disabled),
 .generate-form button:hover:not(:disabled) {
   border-color: #464646;
   filter: brightness(1.08);
 }
 
-.voice-actions button.primary,
+.voice-setup button.primary,
 .generate-form button.primary {
   border-color: #f67b29;
   color: #24150b;
   background: var(--accent);
 }
 
-.voice-actions button.toggled {
+.voice-bar button.toggled {
   border-color: #656565;
   color: var(--accent);
   background: var(--accent-dark);
 }
 
-.voice-actions button.danger {
+.voice-bar button.danger {
   border-color: #67393c;
   color: #e8adb1;
   background: #2c1a1b;
 }
 
-.voice-actions button:disabled,
+.voice-bar button:disabled,
+.voice-setup button:disabled,
 .generate-form button:disabled {
   opacity: 0.5;
   cursor: default;
@@ -3244,14 +3248,14 @@ a.inline-link {
 }
 
 .generate-form,
-.voice-controls {
+.voice-setup-inner {
   display: grid;
   gap: 12px;
   max-width: 720px;
 }
 
 .generate-form label,
-.voice-controls label {
+.voice-field {
   display: grid;
   gap: 6px;
   color: #b6b6b6;
@@ -3261,9 +3265,9 @@ a.inline-link {
 .generate-form textarea,
 .generate-form input,
 .generate-form select,
-.voice-controls textarea,
-.voice-controls select,
-.voice-controls input {
+.voice-field textarea,
+.voice-field select,
+.voice-field input {
   width: 100%;
   border: 1px solid #343434;
   border-radius: 8px;
@@ -3307,12 +3311,6 @@ a.inline-link {
   padding: 8px 10px;
   color: #8c8c8c;
   font-size: 11px;
-}
-
-.voice-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
 }
 
 /* Curated stable-diffusion.cpp bundles in Manage → Download models. */
@@ -3496,14 +3494,6 @@ a.inline-link {
   gap: 6px;
 }
 
-.voice-meter-row {
-  display: grid;
-  grid-template-columns: 16px 1fr;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-}
-
 .voice-meter {
   height: 8px;
   border-radius: 999px;
@@ -3519,23 +3509,6 @@ a.inline-link {
 
 .voice-meter-fill.model {
   background: linear-gradient(90deg, #4a6a7d, #8ac0d4);
-}
-
-.voice-transcript {
-  margin-top: 18px;
-  max-width: 720px;
-  padding: 14px;
-  border: 1px solid #343434;
-  border-radius: 12px;
-  background: #080808;
-  min-height: 140px;
-}
-
-.voice-transcript p {
-  margin: 0 0 8px;
-  color: #f78c44;
-  font-size: 13px;
-  line-height: 1.4;
 }
 
 button.danger {
@@ -4320,17 +4293,116 @@ label.span-2 {
 
 /* Voice as a bar over the shared transcript, not a separate workspace: the
    conversation below it is the same one Chat shows. */
+/* Voice owns the whole workspace when it is the selected mode, the way Agent
+   and Generate do: a control bar, then either the setup screen or the running
+   conversation. It never sits on top of the chat transcript. */
+.voice-mode {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .voice-bar {
-  flex: 0 0 auto;
-  max-height: 46vh;
-  overflow: auto;
-  padding: 18px 28px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px max(20px, calc((100% - 900px) / 2));
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
 
-.voice-bar .mode-panel-header p {
-  max-width: 720px;
+.voice-bar button {
+  padding: 6px 11px;
+  font-size: 11px;
+}
+
+.voice-bar-spacer {
+  flex: 1;
+}
+
+.voice-conversation {
+  flex: 1;
+  overflow-y: auto;
+  padding: 22px max(20px, calc((100% - 760px) / 2)) 28px;
+}
+
+.voice-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.voice-turn {
+  margin-bottom: 18px;
+}
+
+.voice-turn-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.voice-turn p {
+  margin: 5px 0 0;
+  color: #d6d6d6;
+  font-size: 15px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.voice-turn.user p {
+  color: #f8f8f8;
+}
+
+/* Not yet said in full, or withdrawn: visibly not the record. */
+.voice-turn.partial p,
+.voice-turn.cancelled p,
+.voice-turn.superseded p {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.voice-setup {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px max(20px, calc((100% - 640px) / 2)) 40px;
+}
+
+.voice-setup-inner h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.voice-setup-mark {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  place-items: center;
+  color: #24150b;
+  background: linear-gradient(145deg, #ff893b, #f67b29);
+  box-shadow: 0 6px 24px rgba(255, 146, 74, 0.12);
+}
+
+.voice-field {
+  display: grid;
+  gap: 6px;
+}
+
+.voice-start {
+  justify-self: start;
+  margin-top: 4px;
+}
+
+/* Two thin bars in the control strip: input above model output. */
+.voice-meters {
+  display: grid;
+  width: 96px;
+  gap: 3px;
 }
 
 .voice-notice {
@@ -4453,12 +4525,6 @@ label.span-2 {
 .turn-badge.failed {
   border-color: #5a3033;
   color: #e79a9a;
-}
-
-.voice-target {
-  display: grid;
-  gap: 6px;
-  max-width: 720px;
 }
 
 .voice-target-choices {

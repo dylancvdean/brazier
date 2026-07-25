@@ -240,7 +240,12 @@ describe('coordinator over the real agent adapter', () => {
       agent,
       voice,
       newId: sequentialIds(),
-      config: { ...DEFAULT_INTEGRATION_CONFIG, voiceEnabled: true, allowVoiceBackchannels: false }
+      config: {
+        ...DEFAULT_INTEGRATION_CONFIG,
+        voiceEnabled: true,
+        voiceSessionTarget: 'agent',
+        allowVoiceBackchannels: false
+      }
     })
     await coordinator.attach('conv-1')
     await coordinator.startVoiceSession()
