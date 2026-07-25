@@ -75,6 +75,13 @@ export type CoordinatorSnapshot = {
   /** What PersonaPlex said on its own. Shown in the voice pane, never stored. */
   voiceModelText: string
   speakingCorrelationId: string | null
+  /**
+   * The last thing the coordinator wanted to tell the user: agent status, or a
+   * failure that did not stop the session. It is in the snapshot as well as on
+   * the chat adapter because a host that shows no chat transcript would
+   * otherwise drop it, and a turn failing silently looks like nothing happened.
+   */
+  notice: string | null
 }
 
 export type CoordinatorDeps = {
@@ -122,6 +129,7 @@ export class SessionCoordinator {
   private voiceStatus: VoiceStatus = 'off'
   private voiceError: string | null = null
   private speakingCorrelationId: string | null = null
+  private notice: string | null = null
   private pendingRenewal: string | null = null
   private backchanneling = new Set<string>()
   private statusCued = new Set<string>()
@@ -234,8 +242,23 @@ export class SessionCoordinator {
       streamingText: this.streamingText,
       partialTranscript: this.partialTranscript,
       voiceModelText: this.voiceModelText,
-      speakingCorrelationId: this.speakingCorrelationId
+      speakingCorrelationId: this.speakingCorrelationId,
+      notice: this.notice
     }
+  }
+
+  /**
+   * Tell the user something, through the chat adapter and the snapshot both.
+   *
+   * Reporting only to the chat adapter meant that in Voice mode — which renders
+   * no chat transcript — a failed transcription, a refused turn, or an agent
+   * error produced no visible sign at all: the session sat there looking live
+   * while every utterance quietly went nowhere.
+   */
+  private report(status: string | null): void {
+    this.notice = status
+    this.chat.showStatus(status)
+    this.publish()
   }
 
   subscribe(listener: (snapshot: CoordinatorSnapshot) => void): () => void {
@@ -275,7 +298,7 @@ export class SessionCoordinator {
   }): Promise<string | null> {
     if (!this.conversationId) {
       // Nothing to write into. Say so rather than dropping what the user said.
-      this.chat.showStatus('No conversation is open, so that turn was not recorded.')
+      this.report('No conversation is open, so that turn was not recorded.')
       return null
     }
     const deliveryTargets = this.targetsFor(input.source)
@@ -290,7 +313,7 @@ export class SessionCoordinator {
 
     const owner = this.ownerFor(input.source)
     if (!owner) {
-      this.chat.showStatus(
+      this.report(
         'Voice is set to reach the agent, but no agent session is bound to this conversation. Start a task in Agent mode, or change what voice is connected to.'
       )
       await this.patchMessage(userMessage.id, { status: 'failed' })
@@ -450,7 +473,7 @@ export class SessionCoordinator {
             updatedAt: this.now()
           }
         }
-        this.chat.showStatus(event.status)
+        this.report(event.status)
         this.emit('AGENT_STATUS_UPDATED', event.correlationId, 'agent', { status: event.status })
         this.publish()
         return
@@ -564,7 +587,7 @@ export class SessionCoordinator {
     if (this.task?.correlationId === correlationId) {
       this.task = { ...this.task, status: 'completed', activeTool: undefined, updatedAt: this.now() }
     }
-    this.chat.showStatus(null)
+    this.report(null)
 
     if (this.shouldSpeak(response)) await this.requestSpeech(response, text)
     this.finishActive(correlationId)
@@ -577,14 +600,19 @@ export class SessionCoordinator {
       response.status = 'failed'
       response.cancellable = false
       if (response.userMessageId) {
-        void this.patchMessage(response.userMessageId, { metadata: { failed: true } })
+        // Marked on the turn itself, not only in metadata, so a transcript that
+        // shows no assistant reply still shows that the reply failed.
+        void this.patchMessage(response.userMessageId, {
+          status: 'failed',
+          metadata: { failed: true }
+        })
       }
     }
     if (this.task?.correlationId === correlationId) {
       this.task = { ...this.task, status: 'failed', activeTool: undefined, updatedAt: this.now() }
     }
     this.streamingText = ''
-    this.chat.showStatus(error)
+    this.report(error)
     this.emit('AGENT_FAILED', correlationId, 'agent', { error })
     this.diagnose('AGENT_FAILED', correlationId, 'agent', { errorCategory: 'agent_run_failed' })
     // Any pending success-oriented speech is stopped; the voice may state the
@@ -834,7 +862,7 @@ export class SessionCoordinator {
         }
       }
     }
-    this.chat.showStatus(`Voice mode: ${error}`)
+    this.report(`Voice mode: ${error}`)
     this.publish()
   }
 
@@ -875,7 +903,7 @@ export class SessionCoordinator {
       const response = this.responses.get(request.correlationId)
       if (response && request.kind === 'authoritative') response.spokenStatus = 'failed'
       // Speech failing never loses the answer: it is already in the chat.
-      this.chat.showStatus(`Could not speak that answer: ${errorText(cause)}`)
+      this.report(`Could not speak that answer: ${errorText(cause)}`)
       this.diagnose('VOICE_SESSION_ERROR', request.correlationId, 'voice', {
         errorCategory: 'speech_failed'
       })
@@ -1013,7 +1041,7 @@ export class SessionCoordinator {
     } catch (cause) {
       this.voiceStatus = 'error'
       this.voiceError = errorText(cause)
-      this.chat.showStatus(`Voice mode: ${this.voiceError}`)
+      this.report(`Voice mode: ${this.voiceError}`)
     }
     this.publish()
   }

@@ -205,6 +205,16 @@ export function VoiceMode(props: Props): React.JSX.Element {
         ) : null}
       </header>
 
+      {/* A live session that cannot transcribe, or whose turns are refused,
+          fails once per utterance and otherwise looks exactly like one that is
+          listening. Say so where the user is looking. */}
+      {live && (snapshot.notice || snapshot.voiceError) ? (
+        <p className="voice-live-notice">
+          <AlertTriangle size={13} />
+          <span>{snapshot.notice ?? snapshot.voiceError}</span>
+        </p>
+      ) : null}
+
       {live ? (
         <div className="voice-conversation">
           {snapshot.messages.length === 0 && !snapshot.streamingText ? (

@@ -561,6 +561,48 @@ describe('failure flows', () => {
     expect(chat.statuses).toContain('The agent worker is not running.')
   })
 
+  /**
+   * Voice mode renders no chat transcript, so a failure reported only to the
+   * chat adapter left a live session looking like it was listening while every
+   * utterance went nowhere.
+   */
+  it('puts every failure somewhere a voice-only screen can show it', async () => {
+    const { coordinator, agent, voice, chat } = await live()
+
+    voice.emit({
+      type: 'sessionError',
+      error: 'Could not transcribe what you said: no Whisper model.',
+      fatal: false
+    })
+    expect(coordinator.snapshot().notice).toContain('Could not transcribe')
+
+    speak(voice, 'utt-1', 'Then answer this.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    agent.emit({
+      type: 'runFailed',
+      correlationId: agent.submitted[0].correlationId,
+      error: 'The agent worker exited.'
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(coordinator.snapshot().notice).toBe('The agent worker exited.')
+    // The turn itself is marked, so a transcript with no reply still shows why.
+    expect(chat.messages.at(-1)?.status).toBe('failed')
+  })
+
+  it('clears the notice once a turn succeeds', async () => {
+    const { coordinator, agent, voice } = await live()
+    voice.emit({ type: 'sessionError', error: 'A passing glitch.', fatal: false })
+    expect(coordinator.snapshot().notice).not.toBeNull()
+
+    speak(voice, 'utt-1', 'Try again.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    agent.completeRun(agent.submitted[0].correlationId, 'Worked this time.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(coordinator.snapshot().notice).toBeNull()
+  })
+
   it('ignores a duplicate final transcript', async () => {
     const { coordinator, agent, voice } = await live()
     speak(voice, 'utt-1', 'Only once, please.')
