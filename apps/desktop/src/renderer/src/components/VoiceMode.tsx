@@ -11,10 +11,11 @@ import {
   VolumeX
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import type { LocalModel } from '../api'
+import type { BundledTool, LocalModel, RuntimeSettings } from '../api'
 import { modelDisplayName } from '../model-utils'
 import type { VoiceSessionTarget } from '../session/config'
 import type { SessionCoordinatorHandle } from '../session/useSessionCoordinator'
+import { VoiceSessionConfig } from './VoiceSessionConfig'
 
 type Props = {
   models: LocalModel[]
@@ -24,13 +25,23 @@ type Props = {
   /** Whether the browser can capture and encode audio at all. */
   audioSupported: boolean
   /**
-   * Whether the daemon can transcribe. PersonaPlex reports only its own speech,
-   * so without ASR a spoken turn never becomes text and nothing reaches the
-   * conversation — except with `neither`, which needs no transcript at all.
+   * Which ASR interfaces the daemon reports as usable. PersonaPlex reports only
+   * its own speech, so with none of them a spoken turn never becomes text and
+   * nothing reaches the conversation — except with `neither`, which needs no
+   * transcript at all.
    */
-  asrAvailable: boolean
+  asrAvailable: { batch: boolean; streaming: boolean }
   persona: string
   onPersonaChange: (persona: string) => void
+  /** Everything the session about to start is configured from. */
+  chatModelId: string
+  onChatModelChange: (modelId: string) => void
+  tools: BundledTool[]
+  enabledTools: string[]
+  onEnabledToolsChange: (names: string[]) => void
+  settings: RuntimeSettings | null
+  onSettingsSaved: (settings: RuntimeSettings) => void
+  onAgentSessionBound: (agentSessionId: string) => void
   /** The shared conversation. Voice turns land in it beside typed ones. */
   session: SessionCoordinatorHandle
   onError: (message: string | null) => void
@@ -71,6 +82,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
   const scrollAnchor = useRef<HTMLDivElement>(null)
 
   const needsTranscripts = config.voiceSessionTarget !== 'neither'
+  const anyAsr = props.asrAvailable.batch || props.asrAvailable.streaming
   const live = snapshot.voiceStatus === 'live'
   const starting = snapshot.voiceStatus === 'starting' || busy
   const selected = props.models.find((model) => model.id === props.modelId)
@@ -89,7 +101,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
     ? 'No PersonaPlex runtime or model — see below'
     : !props.audioSupported
       ? 'This build cannot capture audio — see below'
-      : needsTranscripts && !props.asrAvailable
+      : needsTranscripts && !anyAsr
         ? 'No transcription installed — see below'
         : ''
   const blocked = blockedReason !== ''
@@ -268,7 +280,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
                 and out.
               </p>
             ) : null}
-            {props.realtimeAvailable && !props.asrAvailable && needsTranscripts ? (
+            {props.realtimeAvailable && !anyAsr && needsTranscripts ? (
               <p className="mode-empty">
                 Sending what you say to a model needs transcription, which is separate from
                 PersonaPlex: the voice model reports only what <em>it</em> says. Any ASR interface
@@ -311,6 +323,26 @@ export function VoiceMode(props: Props): React.JSX.Element {
                 {TARGETS.find(([value]) => value === config.voiceSessionTarget)?.[2]}
               </p>
             </div>
+
+            <VoiceSessionConfig
+              target={config.voiceSessionTarget}
+              models={props.models}
+              chatModelId={props.chatModelId}
+              onChatModelChange={props.onChatModelChange}
+              tools={props.tools}
+              enabledTools={props.enabledTools}
+              onEnabledToolsChange={props.onEnabledToolsChange}
+              settings={props.settings}
+              onSettingsSaved={props.onSettingsSaved}
+              asrAvailable={props.asrAvailable}
+              asrPreference={config.asrPreference}
+              onAsrPreferenceChange={(asrPreference) =>
+                session.setConfig({ ...config, asrPreference })
+              }
+              agentSessionId={snapshot.agentSessionId}
+              onAgentSessionBound={props.onAgentSessionBound}
+              onError={props.onError}
+            />
 
             {needsTranscripts && !session.canSpeak ? (
               <p className="voice-notice">

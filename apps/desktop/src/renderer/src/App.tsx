@@ -92,9 +92,6 @@ import brazierLogo from './assets/brazier-logo.png'
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 
-/** Engine id for the Nemotron streaming ASR worker. */
-const streamingAsrEngine = 'streaming-asr'
-
 function readEnabledTools(): string[] {
   try {
     const raw = localStorage.getItem(ENABLED_TOOLS_KEY)
@@ -579,10 +576,10 @@ export function App(): React.JSX.Element {
     summary: conversations.find((entry) => entry.id === conversationId)?.summary ?? null,
     chatModelId: selectedModel,
     voiceModelId: voiceModel,
-    // Utterances are submitted whole, which is what whisper is best at, so the
-    // daemon default is preferred and the Nemotron worker covers the case where
-    // streaming ASR is the interface that happens to be installed.
-    asrEngine: pipelineFeatures.asr ? undefined : streamingAsrEngine,
+    asrAvailable: {
+      batch: Boolean(pipelineFeatures.asr),
+      streaming: Boolean(pipelineFeatures.streaming_asr)
+    },
     persona,
     responder: voiceResponder,
     onMessage: (message) => {
@@ -1337,7 +1334,20 @@ export function App(): React.JSX.Element {
             realtimeAvailable={realtimeVoiceAvailable}
             modelId={voiceModel}
             audioSupported={audioSupported}
-            asrAvailable={Boolean(pipelineFeatures.asr || pipelineFeatures.streaming_asr)}
+            asrAvailable={{
+              batch: Boolean(pipelineFeatures.asr),
+              streaming: Boolean(pipelineFeatures.streaming_asr)
+            }}
+            chatModelId={selectedModel}
+            onChatModelChange={selectModel}
+            tools={availableTools}
+            enabledTools={enabledTools}
+            onEnabledToolsChange={updateEnabledTools}
+            settings={runtime}
+            onSettingsSaved={setRuntime}
+            onAgentSessionBound={(agentSessionId) =>
+              void session.bindAgentSession(agentSessionId)
+            }
             persona={persona}
             onPersonaChange={(next) => {
               personaEdited.current = true

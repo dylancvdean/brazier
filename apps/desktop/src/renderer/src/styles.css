@@ -4563,3 +4563,108 @@ label.span-2 {
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* Session configuration on the Voice setup screen. Voice owns the whole
+   window, so these settings have nowhere else to be reached from. */
+.voice-config {
+  display: grid;
+  gap: 20px;
+}
+
+.voice-config-group {
+  display: grid;
+  gap: 8px;
+}
+
+.voice-config-group .section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.voice-choice-list {
+  display: grid;
+  gap: 4px;
+}
+
+.voice-choice-list button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--soft);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.voice-choice-list button.active {
+  border-color: #5a3a1f;
+  background: var(--accent-dark);
+  color: var(--accent);
+}
+
+.voice-choice-dot {
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.voice-tool-list {
+  display: grid;
+  max-height: 180px;
+  overflow-y: auto;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.voice-tool-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--soft);
+  font-size: 12px;
+}
+
+.voice-tool-list input {
+  width: auto;
+  margin: 0;
+}
+
+.voice-workspace {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+.voice-workspace strong {
+  display: block;
+  font-size: 12px;
+}
+
+.voice-workspace small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.voice-notice.warn svg {
+  color: #e79a9a;
+}

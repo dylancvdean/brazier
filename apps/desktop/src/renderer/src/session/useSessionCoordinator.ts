@@ -13,7 +13,12 @@ import { updateConversation } from '../api'
 import type { Message } from '../types'
 import { WorkerAgentAdapter } from './agentAdapter'
 import { DaemonChatAdapter, toConversationMessage } from './chatAdapter'
-import { readIntegrationConfig, writeIntegrationConfig, type IntegrationConfig } from './config'
+import {
+  readIntegrationConfig,
+  resolveAsrEngine,
+  writeIntegrationConfig,
+  type IntegrationConfig
+} from './config'
 import { SessionCoordinator, type CoordinatorSnapshot } from './coordinator'
 import { PersonaPlexVoiceAdapter } from './voiceAdapter'
 import type { ChatResponder } from './adapters'
@@ -30,11 +35,8 @@ export type UseSessionCoordinatorOptions = {
   chatModelId: string
   /** PersonaPlex model for the voice session. */
   voiceModelId: string
-  /**
-   * ASR interface for spoken turns: `streaming-asr` for the Nemotron worker,
-   * undefined for the daemon's whisper default.
-   */
-  asrEngine?: string
+  /** Which ASR interfaces the daemon reports as usable. */
+  asrAvailable: { batch: boolean; streaming: boolean }
   persona: string
   /** Produces ordinary chat answers when no agent session is bound. */
   responder?: ChatResponder
@@ -70,6 +72,10 @@ export function useSessionCoordinator(
   const [config, setConfigState] = useState<IntegrationConfig>(() => readIntegrationConfig())
   const [inputLevel, setInputLevel] = useState(0)
   const [outputLevel, setOutputLevel] = useState(0)
+  // The adapters are built once and read current values through refs, so the
+  // preference reaches transcription without rebuilding a live session.
+  const configRef = useRef(config)
+  configRef.current = config
 
   // Refs so the adapters read current values without being rebuilt.
   const latest = useRef(options)
@@ -79,7 +85,8 @@ export function useSessionCoordinator(
     const agent = new WorkerAgentAdapter(() => latest.current.chatModelId || undefined)
     const voice = new PersonaPlexVoiceAdapter({
       modelId: () => latest.current.voiceModelId,
-      asrEngine: () => latest.current.asrEngine,
+      asrEngine: () =>
+        resolveAsrEngine(configRef.current.asrPreference, latest.current.asrAvailable),
       onInputLevel: setInputLevel,
       onOutputLevel: setOutputLevel
     })

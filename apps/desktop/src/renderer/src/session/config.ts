@@ -12,10 +12,18 @@
  */
 export type VoiceSessionTarget = 'agent' | 'chat' | 'neither'
 
+/**
+ * Which ASR interface transcribes spoken turns. `auto` takes whichever is
+ * installed, preferring whisper because an utterance is submitted whole and
+ * that is what it is best at.
+ */
+export type AsrPreference = 'auto' | 'whisper.cpp' | 'streaming-asr'
+
 /** Configuration for the chat / voice / agent integration. */
 export type IntegrationConfig = {
   voiceEnabled: boolean
   voiceSessionTarget: VoiceSessionTarget
+  asrPreference: AsrPreference
   /** Speak the answer to a turn the user spoke. */
   speakVoiceOriginatedResponses: boolean
   /** Speak the answer to a turn the user typed. Off by default: the answer is
@@ -39,6 +47,7 @@ export type IntegrationConfig = {
 export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
   voiceEnabled: false,
   voiceSessionTarget: 'chat',
+  asrPreference: 'auto',
   speakVoiceOriginatedResponses: true,
   speakTextOriginatedResponses: false,
   showVoiceTranscripts: true,
@@ -49,6 +58,24 @@ export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
   interruptStopsSpeech: true,
   interruptCancelsAgent: false,
   spokenBrevityTargetChars: 480
+}
+
+/**
+ * The engine id to ask the daemon for, or undefined to take its default.
+ *
+ * `auto` prefers whisper, because an utterance is submitted whole and that is
+ * what it is best at, and falls back to the Nemotron worker when that is the
+ * interface installed. An explicit choice is honoured even when the capability
+ * report disagrees, so the resulting error names the real problem rather than
+ * silently transcribing with something the user did not pick.
+ */
+export function resolveAsrEngine(
+  preference: AsrPreference,
+  available: { batch: boolean; streaming: boolean }
+): string | undefined {
+  if (preference === 'whisper.cpp') return undefined
+  if (preference === 'streaming-asr') return 'streaming-asr'
+  return available.batch || !available.streaming ? undefined : 'streaming-asr'
 }
 
 const STORAGE_KEY = 'brazier.voiceIntegration'
