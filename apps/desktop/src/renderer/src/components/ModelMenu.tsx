@@ -60,10 +60,10 @@ export function ModelMenu({
                 }}
               >
                 <div className="model-menu-item-name">
-                  <strong>
-                    {meta.title}
+                  <div className="model-menu-item-title">
+                    <strong>{meta.title}</strong>
                     <CapabilityIcons flags={capabilityFlags(model, videoPipeline)} />
-                  </strong>
+                  </div>
                   <span>
                     {meta.subtitle}
                     {model.size_bytes != null ? ` · ${formatBytes(model.size_bytes)}` : ''}

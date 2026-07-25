@@ -1642,7 +1642,11 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                     onClick={() => void toggleDescription(model.id)}
                   >
                     <span className="model-name-text">{model.id.split('/').at(-1)}</span>
-                    <CapabilityIcons flags={hubCapabilityFlags(model.tags)} inferred />
+                    {discoverEngine !== 'whisper.cpp' &&
+                      discoverEngine !== 'streaming-asr' &&
+                      discoverEngine !== 'personaplex' && (
+                        <CapabilityIcons flags={hubCapabilityFlags(model.tags)} inferred />
+                      )}
                     {openDescription === model.id ? (
                       <ChevronDown size={13} />
                     ) : (

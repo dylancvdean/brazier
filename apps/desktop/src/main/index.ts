@@ -156,7 +156,7 @@ async function createWindow(): Promise<void> {
     minWidth: 880,
     minHeight: 620,
     show: false,
-    backgroundColor: '#10110f',
+    backgroundColor: '#000000',
     autoHideMenuBar: true,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     ...(process.platform === 'darwin'
