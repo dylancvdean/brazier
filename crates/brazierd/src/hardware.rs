@@ -21,9 +21,23 @@ pub struct HardwareInfo {
     pub logical_cpus: usize,
     pub memory_bytes: Option<u64>,
     pub gpu: Option<String>,
+    pub gpu_arch: Option<String>,
     pub targets: Vec<RuntimeTargetInfo>,
     pub recommended_target: RuntimeTarget,
 }
+
+/// gfx architectures compiled into the ROCm llama.cpp releases Brazier installs.
+///
+/// A GPU outside this list still enumerates as a ROCm device, so llama.cpp
+/// commits to the HIP backend and then dispatches a kernel that has no code
+/// object for the hardware. That wedges the HSA queue and the runtime aborts
+/// with "HW Exception ... GPU Hang" instead of failing cleanly, so ROCm must
+/// not be offered for those GPUs. AMD APUs (gfx90c, gfx902, gfx1010) are the
+/// common case: an AMD vendor ID alone says nothing about ROCm support.
+const ROCM_SUPPORTED_ARCHES: &[&str] = &[
+    "gfx908", "gfx90a", "gfx942", "gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1150", "gfx1151",
+    "gfx1200", "gfx1201",
+];
 
 fn command_exists(name: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
@@ -85,6 +99,53 @@ fn gpu_capabilities() -> (bool, bool, Option<String>) {
     (nvidia, amd, gpu_name)
 }
 
+/// Render a KFD `gfx_target_version` as a gfx architecture name.
+///
+/// The version packs `major * 10000 + minor * 100 + step`, where minor and step
+/// are single hex digits in the name: 90012 is gfx90c, 90010 is gfx90a.
+fn gfx_arch_name(version: u32) -> Option<String> {
+    if version == 0 {
+        return None;
+    }
+    let major = version / 10000;
+    let minor = (version / 100) % 100;
+    let step = version % 100;
+    (minor <= 0xf && step <= 0xf).then(|| format!("gfx{major}{minor:x}{step:x}"))
+}
+
+/// gfx architectures of every AMD GPU the kernel exposes through KFD topology.
+///
+/// The amdgpu driver publishes this without any ROCm userspace installed. The
+/// CPU node reports a zero version and is skipped.
+#[cfg(target_os = "linux")]
+fn amd_gfx_arches() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/kfd/kfd/topology/nodes") else {
+        return Vec::new();
+    };
+    let mut arches = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(properties) = std::fs::read_to_string(entry.path().join("properties")) else {
+            continue;
+        };
+        let arch = properties
+            .lines()
+            .find_map(|line| line.strip_prefix("gfx_target_version "))
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .and_then(gfx_arch_name);
+        if let Some(arch) = arch
+            && !arches.contains(&arch)
+        {
+            arches.push(arch);
+        }
+    }
+    arches
+}
+
+#[cfg(not(target_os = "linux"))]
+fn amd_gfx_arches() -> Vec<String> {
+    Vec::new()
+}
+
 fn memory_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -121,11 +182,19 @@ fn detect_uncached() -> HardwareInfo {
         || Path::new("/usr/lib64/libvulkan.so").exists()
         || (cfg!(target_os = "windows")
             && Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists());
+    let gfx_arches = amd_gfx_arches();
+    let rocm_supported = gfx_arches
+        .iter()
+        .any(|arch| ROCM_SUPPORTED_ARCHES.contains(&arch.as_str()));
+    // An architecture we read and did not recognise fails as a GPU hang, so hide
+    // ROCm entirely. An architecture we could not read stays selectable, because
+    // the read is the uncertain part, but it is never the recommendation.
+    let rocm_available = amd && (rocm_supported || gfx_arches.is_empty());
     let recommended_target = if metal {
         RuntimeTarget::Metal
     } else if nvidia {
         RuntimeTarget::Cuda
-    } else if amd {
+    } else if amd && rocm_supported {
         RuntimeTarget::Rocm
     } else if vulkan {
         RuntimeTarget::Vulkan
@@ -161,16 +230,24 @@ fn detect_uncached() -> HardwareInfo {
         ));
     }
     if cfg!(target_os = "linux") || amd {
+        let detail = if !amd {
+            "No AMD GPU or ROCm runtime detected".to_owned()
+        } else if rocm_supported {
+            "AMD GPU or ROCm tooling detected".to_owned()
+        } else if gfx_arches.is_empty() {
+            "AMD GPU detected but its architecture could not be read — prefer Vulkan".to_owned()
+        } else {
+            format!(
+                "{} is not built into the ROCm releases Brazier installs — use Vulkan",
+                gfx_arches.join(", ")
+            )
+        };
         targets.push(target(
             RuntimeTarget::Rocm,
             "AMD ROCm",
-            amd,
+            rocm_available,
             cfg!(all(target_os = "linux", target_arch = "x86_64")),
-            if amd {
-                "AMD GPU or ROCm tooling detected"
-            } else {
-                "No AMD GPU or ROCm runtime detected"
-            },
+            &detail,
         ));
     }
     if metal {
@@ -208,7 +285,42 @@ fn detect_uncached() -> HardwareInfo {
                 .or_else(|| amd.then(|| "AMD GPU".to_owned()))
                 .or_else(|| metal.then(|| "Apple GPU".to_owned()))
         }),
+        gpu_arch: (!gfx_arches.is_empty()).then(|| gfx_arches.join(", ")),
         targets,
         recommended_target,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_gfx_target_versions() {
+        assert_eq!(gfx_arch_name(90012).as_deref(), Some("gfx90c"));
+        assert_eq!(gfx_arch_name(90010).as_deref(), Some("gfx90a"));
+        assert_eq!(gfx_arch_name(90008).as_deref(), Some("gfx908"));
+        assert_eq!(gfx_arch_name(90402).as_deref(), Some("gfx942"));
+        assert_eq!(gfx_arch_name(100300).as_deref(), Some("gfx1030"));
+        assert_eq!(gfx_arch_name(110001).as_deref(), Some("gfx1101"));
+        assert_eq!(gfx_arch_name(120001).as_deref(), Some("gfx1201"));
+    }
+
+    #[test]
+    fn ignores_the_cpu_topology_node() {
+        assert_eq!(gfx_arch_name(0), None);
+    }
+
+    #[test]
+    fn apu_architectures_are_not_rocm_capable() {
+        // gfx90a (CDNA2) is supported and gfx90c (Renoir APU) is not, despite
+        // decoding from adjacent version numbers.
+        assert!(ROCM_SUPPORTED_ARCHES.contains(&"gfx90a"));
+        for apu in ["gfx90c", "gfx902", "gfx1010"] {
+            assert!(
+                !ROCM_SUPPORTED_ARCHES.contains(&apu),
+                "{apu} must not qualify"
+            );
+        }
     }
 }

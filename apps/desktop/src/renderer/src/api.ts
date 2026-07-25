@@ -129,6 +129,7 @@ export type HardwareInfo = {
   logical_cpus: number
   memory_bytes: number | null
   gpu: string | null
+  gpu_arch: string | null
   recommended_target: RuntimeTarget
   targets: Array<{
     id: RuntimeTarget

@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_restricts_builtin_tools() {
+    fn whitelist_restricts_builtin_tools() {
         let dir = tempdir().unwrap();
         let request = crate::types::ChatCompletionRequest {
             model: "gguf:test".into(),

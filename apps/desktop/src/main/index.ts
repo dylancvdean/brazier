@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 
@@ -65,14 +66,86 @@ function repositoryRoot(): string {
   return candidates.find((candidate) => existsSync(join(candidate, 'Cargo.toml'))) ?? process.cwd()
 }
 
+/**
+ * State owned by brazierd rather than by Electron.
+ *
+ * `userData` holds both, so a migration must move these entries individually.
+ * Moving the whole directory would take Chromium's Preferences, Cookies, and
+ * caches with it, and Electron is already using them by this point.
+ */
+const DAEMON_STATE = ['brazier.sqlite', 'runtime-settings.json', 'models', 'engines', 'downloads']
+
+/**
+ * Where brazierd keeps models, engines, downloads, and its database.
+ *
+ * This mirrors `default_data_dir` in crates/brazierd/src/main.rs so both entry
+ * points agree. Electron's `userData` is deliberately not used: on Linux it
+ * resolves under XDG_CONFIG_HOME, and this directory is data — it reaches tens
+ * of gigabytes once models are downloaded, which does not belong in a config
+ * directory. Honouring BRAZIER_DATA_DIR here also lets the desktop app run
+ * against a throwaway profile; passing --data-dir unconditionally used to mask
+ * the daemon's own reading of that variable.
+ */
+function dataDirectory(): string {
+  const override = process.env.BRAZIER_DATA_DIR
+  if (override) {
+    return override
+  }
+  if (process.platform === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA
+    return localAppData ? join(localAppData, 'Brazier') : app.getPath('userData')
+  }
+  if (process.platform === 'darwin') {
+    return join(homedir(), 'Library', 'Application Support', 'Brazier')
+  }
+  const xdgDataHome = process.env.XDG_DATA_HOME
+  return xdgDataHome ? join(xdgDataHome, 'brazier') : join(homedir(), '.local', 'share', 'brazier')
+}
+
+/**
+ * Move daemon state out of the pre-XDG location once, so existing installs keep
+ * their models and conversations instead of silently starting empty.
+ *
+ * Same-filesystem renames make this instant even for a multi-gigabyte models
+ * directory. Anything that fails to move is left where it is: a partial
+ * migration that still launches beats refusing to start.
+ */
+function migrateLegacyDataDirectory(target: string): void {
+  const legacy = app.getPath('userData')
+  if (legacy === target) {
+    return
+  }
+  const pending = DAEMON_STATE.filter(
+    (entry) => existsSync(join(legacy, entry)) && !existsSync(join(target, entry))
+  )
+  if (pending.length === 0) {
+    return
+  }
+  try {
+    mkdirSync(target, { recursive: true })
+  } catch (error) {
+    console.error('[brazier] could not create data directory', target, error)
+    return
+  }
+  for (const entry of pending) {
+    try {
+      renameSync(join(legacy, entry), join(target, entry))
+      console.log(`[brazier] migrated ${entry} to ${target}`)
+    } catch (error) {
+      console.error(`[brazier] could not migrate ${entry} from ${legacy}`, error)
+    }
+  }
+}
+
 function startDaemon(): Promise<Connection> {
-  const dataDirectory = app.getPath('userData')
+  const directory = dataDirectory()
+  migrateLegacyDataDirectory(directory)
   const command = app.isPackaged
     ? join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'brazierd.exe' : 'brazierd')
     : 'cargo'
   const args = app.isPackaged
-    ? ['--data-dir', dataDirectory]
-    : ['run', '-q', '-p', 'brazierd', '--', '--data-dir', dataDirectory]
+    ? ['--data-dir', directory]
+    : ['run', '-q', '-p', 'brazierd', '--', '--data-dir', directory]
   const child = spawn(command, args, {
     cwd: app.isPackaged ? undefined : repositoryRoot(),
     env: {
