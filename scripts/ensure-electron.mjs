@@ -158,12 +158,53 @@ function isHealthy(root, version) {
   }
 }
 
+/**
+ * Label the development Dock tile "Brazier" rather than "Electron".
+ *
+ * macOS reads that name from the running bundle's Info.plist, not from
+ * `app.setName`, and in development the running bundle is the prebuilt
+ * Electron.app in node_modules. A packaged build gets its name from
+ * electron-builder's `productName` and never comes through here.
+ *
+ * Best effort by design: the app runs fine under the wrong label, so a failure
+ * to patch is not worth failing an install over.
+ */
+function nameDarwinBundle(electronRoot) {
+  if (process.platform !== 'darwin') {
+    return
+  }
+  const plist = join(electronRoot, 'dist', 'Electron.app', 'Contents', 'Info.plist')
+  if (!existsSync(plist)) {
+    return
+  }
+  try {
+    // Editing in place would reach through a hardlink into the package
+    // manager's shared store and rename Electron for every other project on
+    // the machine. Electron's dist is extracted rather than linked today, so
+    // this is insurance rather than a live problem.
+    if (lstatSync(plist).nlink > 1) {
+      const contents = readFileSync(plist)
+      rmSync(plist)
+      writeFileSync(plist, contents)
+    }
+  } catch {
+    return
+  }
+  for (const key of ['CFBundleName', 'CFBundleDisplayName']) {
+    const set = spawnSync('/usr/libexec/PlistBuddy', ['-c', `Set :${key} Brazier`, plist])
+    if (set.status !== 0) {
+      spawnSync('/usr/libexec/PlistBuddy', ['-c', `Add :${key} string Brazier`, plist])
+    }
+  }
+}
+
 async function main() {
   const electronRoot = electronPackageRoot()
   if (!electronRoot) {
     console.warn('[ensure-electron] electron package not installed yet; skip')
     return
   }
+  nameDarwinBundle(electronRoot)
 
   const { version } = JSON.parse(readFileSync(join(electronRoot, 'package.json'), 'utf8'))
   if (isHealthy(electronRoot, version)) {

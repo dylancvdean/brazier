@@ -7,6 +7,20 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { AgentSupervisor, registerAgentIpc } from './agent'
 
 /**
+ * Where Electron kept per-app state before the rename below.
+ *
+ * `app.setName` moves `userData`, so this is read first: an install that
+ * predates the rename still has its models and conversations under the old
+ * name, and `migrateLegacyDataDirectory` needs to be able to find them.
+ */
+const LEGACY_USER_DATA = app.getPath('userData')
+
+// Names the process for menus, notifications, and crash reports. The Dock
+// label in development comes from the Electron bundle instead, which
+// `scripts/ensure-electron.mjs` renames.
+app.setName('Brazier')
+
+/**
  * Linux launch flags must run before app.ready.
  *
  * Observed failure mode on this host (KDE Wayland + tmpfs /dev/shm|/tmp with
@@ -111,7 +125,7 @@ function dataDirectory(): string {
  * migration that still launches beats refusing to start.
  */
 function migrateLegacyDataDirectory(target: string): void {
-  const legacy = app.getPath('userData')
+  const legacy = LEGACY_USER_DATA
   if (legacy === target) {
     return
   }
@@ -228,15 +242,20 @@ function attachContextMenu(window: BrowserWindow): void {
 /**
  * Application icon for the window, taskbar, and dock.
  *
- * electron-builder bakes `build/icon.png` into the packaged app's own icon, but
- * the running window needs a real file: on Linux and Windows the taskbar entry
- * otherwise shows Electron's default logo, including in development.
+ * electron-builder bakes these into the packaged app, but a running window
+ * needs a real file: on Linux and Windows the taskbar entry otherwise shows
+ * Electron's default logo, including in development.
+ *
+ * macOS gets the squircle cut, since the Dock draws every icon inside that
+ * shape and a full-bleed square reads as oversized beside its neighbours.
+ * Windows and Linux use the square artwork, which is their convention.
  */
 function iconPath(): string | undefined {
-  const candidate = app.isPackaged
-    ? join(process.resourcesPath, 'icon.png')
-    : join(repositoryRoot(), 'apps', 'desktop', 'build', 'icon.png')
-  return existsSync(candidate) ? candidate : undefined
+  const file = process.platform === 'darwin' ? 'icon-mac.png' : 'icon.png'
+  const candidates = app.isPackaged
+    ? [join(process.resourcesPath, file), join(process.resourcesPath, 'icon.png')]
+    : [join(repositoryRoot(), 'apps', 'desktop', 'build', file)]
+  return candidates.find((candidate) => existsSync(candidate))
 }
 
 async function createWindow(): Promise<void> {

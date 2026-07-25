@@ -78,6 +78,7 @@
       "category": "Utility"
     },
     "mac": {
+      "icon": "build/icon-mac.png",
       "target": [
         "dmg",
         "zip"
