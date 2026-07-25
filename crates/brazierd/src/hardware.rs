@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::runtime_settings::RuntimeTarget;
+use crate::{rocm, runtime_settings::RuntimeTarget};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeTargetInfo {
@@ -26,18 +26,15 @@ pub struct HardwareInfo {
     pub recommended_target: RuntimeTarget,
 }
 
-/// gfx architectures compiled into the ROCm llama.cpp releases Brazier installs.
-///
-/// A GPU outside this list still enumerates as a ROCm device, so llama.cpp
-/// commits to the HIP backend and then dispatches a kernel that has no code
-/// object for the hardware. That wedges the HSA queue and the runtime aborts
-/// with "HW Exception ... GPU Hang" instead of failing cleanly, so ROCm must
-/// not be offered for those GPUs. AMD APUs (gfx90c, gfx902, gfx1010) are the
-/// common case: an AMD vendor ID alone says nothing about ROCm support.
-const ROCM_SUPPORTED_ARCHES: &[&str] = &[
-    "gfx908", "gfx90a", "gfx942", "gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1150", "gfx1151",
-    "gfx1200", "gfx1201",
-];
+/// One AMD GPU as the kernel describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmdGpu {
+    pub arch: String,
+    /// No local VRAM: an APU sharing system memory. Used for wording only —
+    /// whether ROCm works is decided by the build, not by this. Some APUs are
+    /// covered by the ROCm builds and some discrete cards are not.
+    pub integrated: bool,
+}
 
 fn command_exists(name: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
@@ -103,6 +100,8 @@ fn gpu_capabilities() -> (bool, bool, Option<String>) {
 ///
 /// The version packs `major * 10000 + minor * 100 + step`, where minor and step
 /// are single hex digits in the name: 90012 is gfx90c, 90010 is gfx90a.
+// KFD is a Linux interface, but the decoding is worth testing on any host.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn gfx_arch_name(version: u32) -> Option<String> {
     if version == 0 {
         return None;
@@ -113,37 +112,52 @@ fn gfx_arch_name(version: u32) -> Option<String> {
     (minor <= 0xf && step <= 0xf).then(|| format!("gfx{major}{minor:x}{step:x}"))
 }
 
-/// gfx architectures of every AMD GPU the kernel exposes through KFD topology.
+/// Read one numeric field out of a KFD node's `properties` file.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn kfd_property(properties: &str, key: &str) -> Option<u64> {
+    properties
+        .lines()
+        .find_map(|line| line.strip_prefix(key))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// Every AMD GPU the kernel exposes through KFD topology.
 ///
 /// The amdgpu driver publishes this without any ROCm userspace installed. The
-/// CPU node reports a zero version and is skipped.
+/// CPU node reports a zero architecture version and is skipped.
 #[cfg(target_os = "linux")]
-fn amd_gfx_arches() -> Vec<String> {
+fn amd_gpus() -> Vec<AmdGpu> {
     let Ok(entries) = std::fs::read_dir("/sys/class/kfd/kfd/topology/nodes") else {
         return Vec::new();
     };
-    let mut arches = Vec::new();
+    let mut gpus: Vec<AmdGpu> = Vec::new();
     for entry in entries.flatten() {
         let Ok(properties) = std::fs::read_to_string(entry.path().join("properties")) else {
             continue;
         };
-        let arch = properties
-            .lines()
-            .find_map(|line| line.strip_prefix("gfx_target_version "))
-            .and_then(|value| value.trim().parse::<u32>().ok())
-            .and_then(gfx_arch_name);
-        if let Some(arch) = arch
-            && !arches.contains(&arch)
-        {
-            arches.push(arch);
+        let Some(arch) = kfd_property(&properties, "gfx_target_version ")
+            .and_then(|version| u32::try_from(version).ok())
+            .and_then(gfx_arch_name)
+        else {
+            continue;
+        };
+        if gpus.iter().any(|gpu| gpu.arch == arch) {
+            continue;
         }
+        let integrated = kfd_property(&properties, "local_mem_size ").unwrap_or(0) == 0;
+        gpus.push(AmdGpu { arch, integrated });
     }
-    arches
+    gpus
 }
 
 #[cfg(not(target_os = "linux"))]
-fn amd_gfx_arches() -> Vec<String> {
+fn amd_gpus() -> Vec<AmdGpu> {
     Vec::new()
+}
+
+/// gfx architectures of the AMD GPUs on this machine, for the ROCm check.
+pub fn amd_gfx_arches() -> Vec<String> {
+    amd_gpus().into_iter().map(|gpu| gpu.arch).collect()
 }
 
 fn memory_bytes() -> Option<u64> {
@@ -165,6 +179,90 @@ fn memory_bytes() -> Option<u64> {
     }
 }
 
+/// Where an installed managed ROCm llama.cpp build puts its binaries.
+fn rocm_install_bin(data_dir: &Path) -> std::path::PathBuf {
+    crate::llama::managed_engine_dir(data_dir)
+        .join(RuntimeTarget::Rocm.as_str())
+        .join("bin")
+}
+
+/// Check this machine's GPUs against an installed ROCm build, if there is one.
+///
+/// Detection runs before any data directory is known, so the path is resolved
+/// from the same default the daemon uses. A missing build simply reports
+/// `Unknown`, which is neither a pass nor a failure.
+pub fn rocm_support(gfx_arches: &[String]) -> rocm::Support {
+    let Some(data_dir) = default_data_dir() else {
+        return rocm::Support::Unknown;
+    };
+    rocm::support(
+        gfx_arches,
+        &rocm::install_arches(&rocm_install_bin(&data_dir)),
+    )
+}
+
+fn default_data_dir() -> Option<std::path::PathBuf> {
+    if let Some(value) = std::env::var_os("BRAZIER_DATA_DIR") {
+        return Some(std::path::PathBuf::from(value));
+    }
+    dirs_data_dir()
+}
+
+#[cfg(target_os = "linux")]
+fn dirs_data_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/share")))
+        .map(|base| base.join("brazier"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn dirs_data_dir() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// What to tell the user about the ROCm target.
+fn rocm_detail(amd: bool, gpus: &[AmdGpu], support: rocm::Support) -> String {
+    if !amd {
+        return "No AMD GPU or ROCm runtime detected".to_owned();
+    }
+    match support {
+        rocm::Support::Covered { arch } => {
+            format!("Verified: the installed ROCm build has device code for {arch}")
+        }
+        rocm::Support::Uncovered { build_arches, .. } => format!(
+            "The installed ROCm build covers {} and not this GPU — use Vulkan",
+            build_arches.join(", ")
+        ),
+        rocm::Support::Unknown => {
+            let integrated = gpus.iter().any(|gpu| gpu.integrated);
+            let named = if gpus.is_empty() {
+                "AMD GPU detected".to_owned()
+            } else {
+                format!(
+                    "AMD {} detected",
+                    gpus.iter()
+                        .map(|gpu| gpu.arch.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            // The APU caveat the recommendation cannot make for itself: the
+            // ROCm releases carry device code for discrete parts, and running
+            // an uncovered GPU hangs it rather than failing.
+            let caveat = if integrated {
+                "This looks like integrated graphics (an APU), which the ROCm builds usually do \
+                 not cover — Vulkan is the safe choice. Install ROCm to check for certain."
+            } else {
+                "Not for integrated graphics (APUs): the ROCm builds carry device code for a \
+                 limited set of architectures, and an uncovered GPU hangs rather than failing. \
+                 Brazier checks against the build when you install it."
+            };
+            format!("{named}. {caveat}")
+        }
+    }
+}
+
 use std::sync::OnceLock;
 
 static HARDWARE_CACHE: OnceLock<HardwareInfo> = OnceLock::new();
@@ -182,19 +280,19 @@ fn detect_uncached() -> HardwareInfo {
         || Path::new("/usr/lib64/libvulkan.so").exists()
         || (cfg!(target_os = "windows")
             && Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists());
-    let gfx_arches = amd_gfx_arches();
-    let rocm_supported = gfx_arches
-        .iter()
-        .any(|arch| ROCM_SUPPORTED_ARCHES.contains(&arch.as_str()));
-    // An architecture we read and did not recognise fails as a GPU hang, so hide
-    // ROCm entirely. An architecture we could not read stays selectable, because
-    // the read is the uncertain part, but it is never the recommendation.
-    let rocm_available = amd && (rocm_supported || gfx_arches.is_empty());
+    let gpus = amd_gpus();
+    let gfx_arches: Vec<String> = gpus.iter().map(|gpu| gpu.arch.clone()).collect();
+    // Verified only against an installed ROCm build, which is the only thing
+    // that knows which architectures it carries device code for. Until one is
+    // installed there is nothing to check, so ROCm is offered but not advised:
+    // Vulkan runs on every one of these GPUs, ROCm does not.
+    let rocm_verified = matches!(rocm_support(&gfx_arches), rocm::Support::Covered { .. });
+    let rocm_available = amd;
     let recommended_target = if metal {
         RuntimeTarget::Metal
     } else if nvidia {
         RuntimeTarget::Cuda
-    } else if amd && rocm_supported {
+    } else if amd && rocm_verified {
         RuntimeTarget::Rocm
     } else if vulkan {
         RuntimeTarget::Vulkan
@@ -230,18 +328,7 @@ fn detect_uncached() -> HardwareInfo {
         ));
     }
     if cfg!(target_os = "linux") || amd {
-        let detail = if !amd {
-            "No AMD GPU or ROCm runtime detected".to_owned()
-        } else if rocm_supported {
-            "AMD GPU or ROCm tooling detected".to_owned()
-        } else if gfx_arches.is_empty() {
-            "AMD GPU detected but its architecture could not be read — prefer Vulkan".to_owned()
-        } else {
-            format!(
-                "{} is not built into the ROCm releases Brazier installs — use Vulkan",
-                gfx_arches.join(", ")
-            )
-        };
+        let detail = rocm_detail(amd, &gpus, rocm_support(&gfx_arches));
         targets.push(target(
             RuntimeTarget::Rocm,
             "AMD ROCm",
@@ -312,15 +399,70 @@ mod tests {
     }
 
     #[test]
-    fn apu_architectures_are_not_rocm_capable() {
-        // gfx90a (CDNA2) is supported and gfx90c (Renoir APU) is not, despite
-        // decoding from adjacent version numbers.
-        assert!(ROCM_SUPPORTED_ARCHES.contains(&"gfx90a"));
-        for apu in ["gfx90c", "gfx902", "gfx1010"] {
-            assert!(
-                !ROCM_SUPPORTED_ARCHES.contains(&apu),
-                "{apu} must not qualify"
-            );
-        }
+    fn reads_a_kfd_node_as_the_kernel_writes_it() {
+        // A Renoir APU node: shares system memory, so no local VRAM.
+        let apu = "cpu_cores_count 0\nsimd_count 28\ngfx_target_version 90012\nlocal_mem_size 0\n";
+        assert_eq!(kfd_property(apu, "gfx_target_version "), Some(90012));
+        assert_eq!(kfd_property(apu, "local_mem_size "), Some(0));
+        assert_eq!(kfd_property(apu, "absent_key "), None);
+
+        let discrete = "gfx_target_version 110000\nlocal_mem_size 25753026560\n";
+        assert_eq!(kfd_property(discrete, "local_mem_size "), Some(25753026560));
+    }
+
+    /// The wording carries the APU caveat, but the verdict never comes from it:
+    /// some APUs are covered by the ROCm builds and some discrete cards are not,
+    /// so only the build itself decides.
+    #[test]
+    fn an_unverified_amd_gpu_is_offered_with_the_apu_caveat() {
+        let apu = [AmdGpu {
+            arch: "gfx90c".to_owned(),
+            integrated: true,
+        }];
+        let detail = rocm_detail(true, &apu, rocm::Support::Unknown);
+        assert!(detail.contains("gfx90c"), "{detail}");
+        assert!(detail.contains("APU"), "{detail}");
+        assert!(detail.contains("Vulkan"), "{detail}");
+
+        let discrete = [AmdGpu {
+            arch: "gfx1100".to_owned(),
+            integrated: false,
+        }];
+        let detail = rocm_detail(true, &discrete, rocm::Support::Unknown);
+        assert!(detail.contains("gfx1100"), "{detail}");
+        assert!(detail.contains("APUs"), "{detail}");
+    }
+
+    #[test]
+    fn a_verified_build_says_so_and_an_uncovered_one_points_at_vulkan() {
+        let gpus = [AmdGpu {
+            arch: "gfx1100".to_owned(),
+            integrated: false,
+        }];
+        let covered = rocm_detail(
+            true,
+            &gpus,
+            rocm::Support::Covered {
+                arch: "gfx1100".to_owned(),
+            },
+        );
+        assert!(covered.starts_with("Verified"), "{covered}");
+        assert!(covered.contains("gfx1100"), "{covered}");
+
+        let uncovered = rocm_detail(
+            true,
+            &gpus,
+            rocm::Support::Uncovered {
+                gpu_arches: vec!["gfx90c".to_owned()],
+                build_arches: vec!["gfx1030".to_owned(), "gfx1100".to_owned()],
+            },
+        );
+        assert!(uncovered.contains("gfx1030, gfx1100"), "{uncovered}");
+        assert!(uncovered.contains("Vulkan"), "{uncovered}");
+
+        assert_eq!(
+            rocm_detail(false, &[], rocm::Support::Unknown),
+            "No AMD GPU or ROCm runtime detected"
+        );
     }
 }

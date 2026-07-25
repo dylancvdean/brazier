@@ -4489,3 +4489,11 @@ label.span-2 {
   background: var(--accent-dark);
   color: var(--accent);
 }
+
+.target-detail {
+  max-width: 620px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}

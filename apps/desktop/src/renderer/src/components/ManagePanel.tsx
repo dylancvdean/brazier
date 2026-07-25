@@ -2368,6 +2368,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   }
 
   const targets = props.hardware?.targets ?? []
+  const selectedTargetDetail = targets.find(
+    (target) => target.id === props.settings?.target
+  )?.detail
   const runtimeList = runtimes ?? []
   const customRuntimes = runtimeList.filter((runtime) => runtime.kind !== 'managed')
   const tabEngines = RUNTIME_TAB_ENGINES[runtimeTab]
@@ -2423,6 +2426,10 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             </button>
           ))}
         </div>
+        {/* Beneath the grid rather than in a tooltip: the ROCm caveat about
+            integrated graphics is the difference between a working GPU and a
+            hung one, and nobody hovers a button they have already chosen. */}
+        {selectedTargetDetail && <p className="target-detail">{selectedTargetDetail}</p>}
       </div>
 
       <div className="mode-switch runtime-tabs" role="tablist" aria-label="Runtime type">

@@ -7,12 +7,14 @@ use tokio::sync::Mutex;
 
 use crate::{
     fork_hints::{self, ModelLoadError},
+    hardware,
     llama::{self, LlamaServer},
     media::{self, MediaContext},
     mlx::{self, MlxKind, MlxServer},
     model_bindings, models_store,
     progress::{ProgressCallback, ProgressEvent},
-    runtime_settings::{self, RuntimeSettings},
+    rocm,
+    runtime_settings::{self, RuntimeSettings, RuntimeTarget},
     runtimes, sdcpp, streaming_asr,
     tool_registry::{self, ToolContext},
     tools,
@@ -824,6 +826,21 @@ impl Runtime {
         }
     }
 
+    /// Refuse a ROCm build that has no device code for this machine's GPU.
+    ///
+    /// This is the point where the check can be made against the thing that
+    /// actually knows. Selecting an uncovered build does not fail cleanly later:
+    /// llama.cpp commits to the HIP backend, dispatches a kernel that has no code
+    /// object, and the GPU hangs.
+    fn verify_rocm_target(&self, binary: &std::path::Path) -> anyhow::Result<()> {
+        let bin_dir = binary.parent().unwrap_or(binary);
+        let support = rocm::support(&hardware::amd_gfx_arches(), &rocm::install_arches(bin_dir));
+        match support.rejection() {
+            Some(message) => Err(anyhow::anyhow!(message)),
+            None => Ok(()),
+        }
+    }
+
     /// Activate a runtime inventory entry into the slot its engine belongs to.
     ///
     /// The only dispatch point: an entry's engine decides which slot it fills,
@@ -835,6 +852,9 @@ impl Runtime {
         entry: &runtimes::RuntimeEntry,
     ) -> anyhow::Result<PathBuf> {
         let path = PathBuf::from(&entry.path);
+        if entry.target.as_deref() == Some(RuntimeTarget::Rocm.as_str()) {
+            self.verify_rocm_target(&path)?;
+        }
         match entry.engine.as_str() {
             runtimes::ENGINE => self.activate_binary(path).await,
             "mlx-lm" => self.activate_python(MlxKind::Lm, path).await,
@@ -1029,6 +1049,11 @@ impl Runtime {
         let path =
             llama::ensure_binary_with_progress(&self.http, &self.data_dir, target, force, progress)
                 .await?;
+        // Check the build that just landed rather than the machine's GPU list:
+        // an uncovered pairing hangs the GPU instead of erroring.
+        if target == RuntimeTarget::Rocm {
+            self.verify_rocm_target(&path)?;
+        }
         if target_override.is_none() {
             let mut guard = self.llama.lock().await;
             guard.binary = Some(path.clone());
@@ -1865,6 +1890,55 @@ mod tests {
             .to_string();
         assert!(error.contains("is not a llama-server binary"), "{error}");
         assert!(runtime.active_binary().await.is_none());
+    }
+
+    /// A machine with no AMD GPU has nothing to compare a ROCm build against, so
+    /// activation must proceed on its own merits. Getting this wrong would break
+    /// every non-AMD host; the architecture matching itself is tested in `rocm`.
+    #[tokio::test]
+    async fn a_rocm_build_is_not_refused_when_there_is_nothing_to_compare() {
+        let dir = tempdir().unwrap();
+        let bin = llama::managed_engine_dir(dir.path())
+            .join("rocm")
+            .join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let binary = bin.join("llama-server");
+        std::fs::write(&binary, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            bin.join("libggml-hip.so"),
+            b"....hipv4-amdgcn-amd-amdhsa--gfx1100....",
+        )
+        .unwrap();
+
+        let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
+        let entry = runtimes::RuntimeEntry {
+            id: "managed-rocm".into(),
+            engine: runtimes::ENGINE.into(),
+            kind: "managed".into(),
+            label: "llama.cpp · ROCm".into(),
+            target: Some("rocm".into()),
+            version: None,
+            repository: None,
+            path: binary.display().to_string(),
+            active: false,
+            deletable: true,
+        };
+
+        let result = runtime.activate_runtime_entry(&entry).await;
+        let gpus = hardware::amd_gfx_arches();
+        if gpus.iter().any(|arch| arch == "gfx1100") || gpus.is_empty() {
+            // Covered, or nothing to check: the ROCm gate must not be the thing
+            // that stops it. The stub still fails the llama-server smoke test.
+            let error = result
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            assert!(!error.contains("Vulkan"), "{error}");
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("gfx1100"), "{error}");
+            assert!(error.contains("Vulkan"), "{error}");
+        }
     }
 
     #[tokio::test]

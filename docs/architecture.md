@@ -98,6 +98,29 @@ from `/v1/chat/completions` modalities:
 
 Unsupported modalities fail in `brazierd` before inference.
 
+## Acceleration targets
+
+The target is picked from what the machine actually has, and one case is not a
+preference but a safety property. An AMD GPU outside a ROCm build's compiled
+architectures still enumerates as a ROCm device, so llama.cpp commits to the HIP
+backend and then dispatches a kernel with no code object for the hardware: the
+HSA queue wedges and the process aborts with a GPU hang rather than failing.
+
+The only thing that knows which architectures are covered is the build itself.
+HIP embeds device code as a fat binary whose bundles carry their target ids as
+plain strings, so `rocm.rs` reads them out of the installed files and compares
+against the architectures the kernel reports through KFD topology
+(`/sys/class/kfd`, published by amdgpu with no ROCm userspace installed). A
+mismatch is refused at install and activation, pointing at Vulkan. Nothing in
+this repository lists which GPUs ROCm supports, so nothing goes stale when AMD
+ships a new part or llama.cpp changes its release matrix.
+
+Before a ROCm build exists there is nothing authoritative to check, so AMD
+machines are recommended Vulkan — it runs on all of them, ROCm does not. ROCm
+stays selectable and says plainly that the builds do not generally cover
+integrated graphics. Whether a GPU is an APU is used only for that wording:
+some APUs are covered and some discrete cards are not, so it never decides.
+
 ## Engine builds
 
 Build recipes in `engine-recipes` are shipped and reviewed with Brazier. A user
