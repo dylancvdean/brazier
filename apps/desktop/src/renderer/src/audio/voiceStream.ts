@@ -27,6 +27,12 @@ export type VoiceStreamHandlers = {
   onOutputLevel?: (level: number) => void
   onState?: (state: VoiceStreamState) => void
   onError?: (message: string) => void
+  /**
+   * Captured microphone frames, before encoding. The shared-conversation mode
+   * transcribes these itself: the server's text frames are the model's own
+   * speech, not the user's.
+   */
+  onCaptureFrame?: (samples: Float32Array, sampleRate: number) => void
 }
 
 /** Whether this runtime can encode and decode Opus (WebCodecs + worklets). */
@@ -62,6 +68,7 @@ export class VoiceStream {
   private decodeTimestamp = 0
   private muted = false
   private stopped = false
+  private outputOpen = true
 
   constructor(handlers: VoiceStreamHandlers = {}) {
     this.handlers = handlers
@@ -184,6 +191,12 @@ export class VoiceStream {
     } finally {
       data.close()
     }
+    // Decoding continues while the gate is shut so the stream clock and the
+    // text frames stay intact; only the audio is dropped.
+    if (!this.outputOpen) {
+      this.handlers.onOutputLevel?.(0)
+      return
+    }
     this.handlers.onOutputLevel?.(Math.min(1, rms(samples) * 4))
     void this.pushPlayback(samples, sampleRate)
   }
@@ -243,6 +256,7 @@ export class VoiceStream {
 
   private encodeFrame(samples: Float32Array<ArrayBuffer>): void {
     this.handlers.onInputLevel?.(this.muted ? 0 : Math.min(1, rms(samples) * 4))
+    if (!this.muted) this.handlers.onCaptureFrame?.(samples, SAMPLE_RATE)
     if (this.muted || !this.encoder || this.encoder.state !== 'configured') return
     // Muting still advances the clock, so the model hears a gap rather than
     // a jump cut when the microphone comes back.
@@ -269,6 +283,22 @@ export class VoiceStream {
     chunk.copyTo(packet)
     const page = this.muxer.addPacket(packet, FRAME_SAMPLES)
     if (page) socket.send(withTag(TAG_AUDIO, page))
+  }
+
+  /**
+   * Open or shut the model's audio output.
+   *
+   * PersonaPlex is a speech-to-speech model: it answers on its own, and it
+   * cannot be told to hold a thought. When the agent owns a turn, its audio is
+   * shut off and the authoritative answer is spoken instead, so the user never
+   * hears two different replies to one question.
+   */
+  setOutputGate(open: boolean): void {
+    this.outputOpen = open
+    if (!open) {
+      this.playbackNode?.port.postMessage('flush')
+      this.handlers.onOutputLevel?.(0)
+    }
   }
 
   /** Stop sending microphone audio without dropping the session. */

@@ -143,6 +143,10 @@ mod tests {
             model: None,
             tool_calls: None,
             tool_call_id: None,
+            source: None,
+            correlation_id: None,
+            status: None,
+            metadata: None,
             created_at: String::new(),
         };
         let openai = messages_to_openai(&[message]);

@@ -27,8 +27,20 @@ pub struct Conversation {
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Agent session this conversation's turns are submitted to, when one is
+    /// bound. Text and voice share it rather than opening one each.
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
+    /// Compact summary a fresh voice session is seeded with.
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub summary_updated_at: Option<String>,
 }
 
+/// Which surface produced a message. Voice renderings of an agent answer are
+/// `assistant_voice` and share the answer's correlation id; they are never a
+/// second authoritative reply.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: String,
@@ -41,12 +53,32 @@ pub struct Message {
     pub tool_calls: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
     pub created_at: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateConversation {
     pub title: Option<String>,
+}
+
+/// Fields a conversation update may set. `None` leaves a field alone; clearing
+/// the agent binding is an explicit `Some(None)`.
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdateConversation {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default, with = "double_option")]
+    pub agent_session_id: Option<Option<String>>,
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +91,40 @@ pub struct CreateMessage {
     pub tool_calls: Option<Value>,
     #[serde(default)]
     pub tool_call_id: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
+/// In-place edit of a stored message. Used to finalize a streamed answer and to
+/// mark a turn cancelled, superseded, or failed.
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdateMessage {
+    #[serde(default)]
+    pub content: Option<Value>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
+/// `Option<Option<T>>` from JSON, so an explicit `null` is distinguishable from
+/// an absent key.
+mod double_option {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        Option::deserialize(deserializer).map(Some)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

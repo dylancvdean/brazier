@@ -4349,3 +4349,140 @@ label.span-2 {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* Voice as a bar over the shared transcript, not a separate workspace: the
+   conversation below it is the same one Chat shows. */
+.voice-bar {
+  flex: 0 0 auto;
+  max-height: 46vh;
+  overflow: auto;
+  padding: 18px 28px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.voice-bar .mode-panel-header p {
+  max-width: 720px;
+}
+
+.voice-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  max-width: 720px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.voice-notice svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: #d8a24a;
+}
+
+.voice-task {
+  max-width: 720px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-raised);
+}
+
+.voice-task strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.voice-task ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.voice-options {
+  display: grid;
+  gap: 6px;
+}
+
+.voice-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.voice-options input {
+  width: auto;
+  margin: 0;
+}
+
+/* PersonaPlex's own words. Collapsed and captioned, because they are untrusted
+   model output rather than part of the conversation. */
+.voice-model-text {
+  max-width: 720px;
+  padding: 8px 12px;
+  border: 1px dashed #343434;
+  border-radius: 10px;
+  background: #080808;
+}
+
+.voice-model-text summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.voice-model-text p {
+  margin: 8px 0 4px;
+  color: #8ac0d4;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.voice-model-text small {
+  color: #6a6a70;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.message-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.turn-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: lowercase;
+}
+
+.turn-badge.queued {
+  border-color: #4a4636;
+  color: #d8c68a;
+}
+
+.turn-badge.cancelled,
+.turn-badge.superseded {
+  border-color: #3a3a3a;
+  color: #8a8a8a;
+  text-decoration: line-through;
+}
+
+.turn-badge.failed {
+  border-color: #5a3033;
+  color: #e79a9a;
+}

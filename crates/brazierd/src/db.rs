@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     blob_store,
-    types::{Conversation, CreateMessage, Message, Role},
+    types::{Conversation, CreateMessage, Message, Role, UpdateConversation, UpdateMessage},
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -142,8 +142,25 @@ struct MessageRow {
     model: Option<String>,
     tool_calls_json: Option<String>,
     tool_call_id: Option<String>,
+    source: Option<String>,
+    correlation_id: Option<String>,
+    status: Option<String>,
+    metadata_json: Option<String>,
     created_at: String,
 }
+
+/// Columns every message read selects, in `MessageRow` order.
+const MESSAGE_COLUMNS: &str = "id, conversation_id, parent_id, role, content_json, model,
+     tool_calls_json, tool_call_id, source, correlation_id, status, metadata_json, created_at";
+
+/// Columns every conversation read selects, in `Conversation` field order.
+const CONVERSATION_COLUMNS: &str =
+    "id, title, created_at, updated_at, agent_session_id, summary, summary_updated_at";
+
+/// [`CONVERSATION_COLUMNS`] qualified for the search join, where `messages` is
+/// also in scope.
+const CONVERSATION_COLUMNS_QUALIFIED: &str = "c.id, c.title, c.created_at, c.updated_at,
+     c.agent_session_id, c.summary, c.summary_updated_at";
 
 #[derive(FromRow)]
 struct RunSnapshotRow {
@@ -206,6 +223,14 @@ impl TryFrom<MessageRow> for Message {
                 .map(serde_json::from_str)
                 .transpose()?,
             tool_call_id: row.tool_call_id,
+            source: row.source,
+            correlation_id: row.correlation_id,
+            status: row.status,
+            metadata: row
+                .metadata_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
             created_at: row.created_at,
         })
     }
@@ -604,6 +629,38 @@ impl Database {
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
+            version = 7;
+        }
+
+        if version < 8 {
+            // Shared-conversation integration: voice, chat, and the agent write
+            // into one message graph, so a message records which surface
+            // produced it, which turn it belongs to, and whether it is still
+            // the live answer. A conversation records the agent session it is
+            // bound to plus the compact summary the voice session is seeded
+            // with. Voice runtime state is deliberately not persisted.
+            let mut tx = self.pool.begin().await?;
+            for statement in [
+                "ALTER TABLE messages ADD COLUMN source TEXT",
+                "ALTER TABLE messages ADD COLUMN correlation_id TEXT",
+                "ALTER TABLE messages ADD COLUMN status TEXT",
+                "ALTER TABLE messages ADD COLUMN metadata_json TEXT",
+                "ALTER TABLE conversations ADD COLUMN agent_session_id TEXT",
+                "ALTER TABLE conversations ADD COLUMN summary TEXT",
+                "ALTER TABLE conversations ADD COLUMN summary_updated_at TEXT",
+            ] {
+                sqlx::query(statement).execute(&mut *tx).await?;
+            }
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS messages_correlation
+                 ON messages(conversation_id, correlation_id)",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO schema_migrations(version) VALUES (8)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
 
         Ok(())
@@ -621,23 +678,22 @@ impl Database {
         query: Option<&str>,
     ) -> anyhow::Result<Vec<Conversation>> {
         let Some(raw) = query.map(str::trim).filter(|value| !value.is_empty()) else {
-            return Ok(sqlx::query_as::<_, Conversation>(
-                r#"SELECT id, title, created_at, updated_at
-                   FROM conversations ORDER BY updated_at DESC"#,
-            )
+            return Ok(sqlx::query_as::<_, Conversation>(&format!(
+                "SELECT {CONVERSATION_COLUMNS} FROM conversations ORDER BY updated_at DESC"
+            ))
             .fetch_all(&self.pool)
             .await?);
         };
         let pattern = format!("%{}%", Self::escape_like(raw));
-        Ok(sqlx::query_as::<_, Conversation>(
-            r#"SELECT DISTINCT c.id, c.title, c.created_at, c.updated_at
+        Ok(sqlx::query_as::<_, Conversation>(&format!(
+            r#"SELECT DISTINCT {CONVERSATION_COLUMNS_QUALIFIED}
                FROM conversations c
                LEFT JOIN messages m ON m.conversation_id = c.id
                WHERE c.title LIKE ?1 ESCAPE '\'
                   OR m.content_json LIKE ?1 ESCAPE '\'
                ORDER BY c.updated_at DESC
-               LIMIT 80"#,
-        )
+               LIMIT 80"#
+        ))
         .bind(&pattern)
         .fetch_all(&self.pool)
         .await?)
@@ -653,22 +709,62 @@ impl Database {
         self.get_conversation(&id).await
     }
 
-    async fn get_conversation(&self, id: &str) -> anyhow::Result<Conversation> {
-        Ok(sqlx::query_as::<_, Conversation>(
-            r#"SELECT id, title, created_at, updated_at
-               FROM conversations WHERE id = ?"#,
-        )
+    pub async fn get_conversation(&self, id: &str) -> anyhow::Result<Conversation> {
+        Ok(sqlx::query_as::<_, Conversation>(&format!(
+            "SELECT {CONVERSATION_COLUMNS} FROM conversations WHERE id = ?"
+        ))
         .bind(id)
         .fetch_one(&self.pool)
         .await?)
     }
 
+    /// Apply a partial conversation update. Absent fields are left alone; an
+    /// explicit `agent_session_id: null` unbinds the agent session.
+    pub async fn update_conversation(
+        &self,
+        id: &str,
+        update: UpdateConversation,
+    ) -> anyhow::Result<Conversation> {
+        // Confirm the conversation exists so an unknown id is not a silent no-op.
+        self.get_conversation(id).await?;
+        if let Some(title) = update
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            sqlx::query("UPDATE conversations SET title = ? WHERE id = ?")
+                .bind(title)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        if let Some(agent_session_id) = update.agent_session_id {
+            sqlx::query("UPDATE conversations SET agent_session_id = ? WHERE id = ?")
+                .bind(&agent_session_id)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        if let Some(summary) = update.summary {
+            sqlx::query(
+                "UPDATE conversations
+                 SET summary = ?, summary_updated_at = datetime('now')
+                 WHERE id = ?",
+            )
+            .bind(&summary)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        }
+        self.get_conversation(id).await
+    }
+
     pub async fn list_messages(&self, conversation_id: &str) -> anyhow::Result<Vec<Message>> {
-        let rows = sqlx::query_as::<_, MessageRow>(
-            r#"SELECT id, conversation_id, parent_id, role, content_json, model,
-                      tool_calls_json, tool_call_id, created_at
-               FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid"#,
-        )
+        let rows = sqlx::query_as::<_, MessageRow>(&format!(
+            "SELECT {MESSAGE_COLUMNS}
+             FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid"
+        ))
         .bind(conversation_id)
         .fetch_all(&self.pool)
         .await?;
@@ -699,10 +795,16 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let metadata_json = message
+            .metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         sqlx::query(
             r#"INSERT INTO messages(id, conversation_id, parent_id, role, content_json, model,
-                                   tool_calls_json, tool_call_id)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?)"#,
+                                   tool_calls_json, tool_call_id, source, correlation_id,
+                                   status, metadata_json)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&id)
         .bind(conversation_id)
@@ -712,6 +814,10 @@ impl Database {
         .bind(&message.model)
         .bind(tool_calls_json)
         .bind(&message.tool_call_id)
+        .bind(&message.source)
+        .bind(&message.correlation_id)
+        .bind(&message.status)
+        .bind(metadata_json)
         .execute(&self.pool)
         .await?;
         sqlx::query("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?")
@@ -720,6 +826,49 @@ impl Database {
             .await?;
         self.index_message_blobs(&id, &message.content).await?;
         self.get_message(&id).await
+    }
+
+    /// Edit a stored message in place: finalize streamed content, or mark the
+    /// turn cancelled, superseded, or failed. The message is never deleted, so
+    /// cancelling spoken delivery cannot remove an answer from the chat.
+    pub async fn update_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        update: UpdateMessage,
+    ) -> anyhow::Result<Message> {
+        let owner: Option<String> =
+            sqlx::query_scalar("SELECT conversation_id FROM messages WHERE id = ?")
+                .bind(message_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        anyhow::ensure!(
+            owner.as_deref() == Some(conversation_id),
+            "message does not belong to this conversation"
+        );
+        if let Some(content) = update.content.as_ref() {
+            sqlx::query("UPDATE messages SET content_json = ? WHERE id = ?")
+                .bind(serde_json::to_string(content)?)
+                .bind(message_id)
+                .execute(&self.pool)
+                .await?;
+            self.index_message_blobs(message_id, content).await?;
+        }
+        if let Some(status) = update.status.as_deref() {
+            sqlx::query("UPDATE messages SET status = ? WHERE id = ?")
+                .bind(status)
+                .bind(message_id)
+                .execute(&self.pool)
+                .await?;
+        }
+        if let Some(metadata) = update.metadata.as_ref() {
+            sqlx::query("UPDATE messages SET metadata_json = ? WHERE id = ?")
+                .bind(serde_json::to_string(metadata)?)
+                .bind(message_id)
+                .execute(&self.pool)
+                .await?;
+        }
+        self.get_message(message_id).await
     }
 
     async fn index_message_blobs(&self, message_id: &str, content: &Value) -> anyhow::Result<()> {
@@ -821,11 +970,9 @@ impl Database {
     }
 
     async fn get_message(&self, id: &str) -> anyhow::Result<Message> {
-        let row = sqlx::query_as::<_, MessageRow>(
-            r#"SELECT id, conversation_id, parent_id, role, content_json, model,
-                      tool_calls_json, tool_call_id, created_at
-               FROM messages WHERE id = ?"#,
-        )
+        let row = sqlx::query_as::<_, MessageRow>(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?"
+        ))
         .bind(id)
         .fetch_one(&self.pool)
         .await?;
@@ -933,10 +1080,16 @@ impl Database {
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?;
+            let metadata_json = message
+                .metadata
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
             sqlx::query(
                 r#"INSERT INTO messages(id, conversation_id, parent_id, role, content_json, model,
-                                       tool_calls_json, tool_call_id, created_at)
-                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                                       tool_calls_json, tool_call_id, source, correlation_id,
+                                       status, metadata_json, created_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
             )
             .bind(new_id)
             .bind(&conversation.id)
@@ -946,6 +1099,12 @@ impl Database {
             .bind(&message.model)
             .bind(tool_calls_json)
             .bind(&message.tool_call_id)
+            .bind(&message.source)
+            // Correlation ids scope live work, not history: importing keeps the
+            // source and status labels but not another conversation's turn ids.
+            .bind(Option::<String>::None)
+            .bind(&message.status)
+            .bind(metadata_json)
             .bind(&message.created_at)
             .execute(&self.pool)
             .await?;
@@ -1172,44 +1331,224 @@ mod tests {
     use super::*;
     use crate::types::CreateMessage;
 
-    #[tokio::test]
-    async fn creates_a_branched_message_graph() {
+    fn message(parent_id: Option<&str>, role: Role, content: Value) -> CreateMessage {
+        CreateMessage {
+            parent_id: parent_id.map(str::to_owned),
+            role,
+            content,
+            model: None,
+            tool_calls: None,
+            tool_call_id: None,
+            source: None,
+            correlation_id: None,
+            status: None,
+            metadata: None,
+        }
+    }
+
+    async fn open() -> (tempfile::TempDir, Database) {
         let dir = tempdir().unwrap();
         let db = Database::open(&dir.path().join("test.sqlite"))
             .await
             .unwrap();
+        (dir, db)
+    }
+
+    #[tokio::test]
+    async fn creates_a_branched_message_graph() {
+        let (_dir, db) = open().await;
         let conversation = db.create_conversation("Test").await.unwrap();
         let root = db
-            .create_message(
-                &conversation.id,
-                CreateMessage {
-                    parent_id: None,
-                    role: Role::User,
-                    content: json!("Hello"),
-                    model: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                },
-            )
+            .create_message(&conversation.id, message(None, Role::User, json!("Hello")))
             .await
             .unwrap();
         for text in ["First", "Alternative"] {
-            db.create_message(
-                &conversation.id,
-                CreateMessage {
-                    parent_id: Some(root.id.clone()),
-                    role: Role::Assistant,
-                    content: json!(text),
-                    model: Some("gguf:acme/demo/model.gguf".into()),
-                    tool_calls: None,
-                    tool_call_id: None,
-                },
-            )
-            .await
-            .unwrap();
+            let mut reply = message(Some(&root.id), Role::Assistant, json!(text));
+            reply.model = Some("gguf:acme/demo/model.gguf".into());
+            db.create_message(&conversation.id, reply).await.unwrap();
         }
         let messages = db.list_messages(&conversation.id).await.unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[1].parent_id, messages[2].parent_id);
+    }
+
+    #[tokio::test]
+    async fn records_the_surface_and_turn_a_message_came_from() {
+        let (_dir, db) = open().await;
+        let conversation = db.create_conversation("Voice and text").await.unwrap();
+        let mut spoken = message(None, Role::User, json!("What broke the build?"));
+        spoken.source = Some("user_voice".into());
+        spoken.correlation_id = Some("turn-1".into());
+        spoken.status = Some("final".into());
+        spoken.metadata = Some(json!({ "utterance_id": "utt-7" }));
+        let stored = db.create_message(&conversation.id, spoken).await.unwrap();
+
+        assert_eq!(stored.source.as_deref(), Some("user_voice"));
+        assert_eq!(stored.correlation_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            stored
+                .metadata
+                .as_ref()
+                .and_then(|value| value.get("utterance_id")),
+            Some(&json!("utt-7"))
+        );
+
+        // The same turn's agent answer shares the correlation id, so the spoken
+        // rendering can be linked to it instead of stored as a second answer.
+        let mut answer = message(
+            Some(&stored.id),
+            Role::Assistant,
+            json!("A test timed out."),
+        );
+        answer.source = Some("assistant_agent".into());
+        answer.correlation_id = Some("turn-1".into());
+        answer.status = Some("final".into());
+        db.create_message(&conversation.id, answer).await.unwrap();
+
+        let messages = db.list_messages(&conversation.id).await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages
+                .iter()
+                .all(|entry| entry.correlation_id.as_deref() == Some("turn-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_messages_keep_null_integration_fields() {
+        let (_dir, db) = open().await;
+        let conversation = db.create_conversation("Text only").await.unwrap();
+        let stored = db
+            .create_message(&conversation.id, message(None, Role::User, json!("Hi")))
+            .await
+            .unwrap();
+        assert!(stored.source.is_none());
+        assert!(stored.correlation_id.is_none());
+        assert!(stored.status.is_none());
+        assert!(stored.metadata.is_none());
+        assert!(conversation.agent_session_id.is_none());
+        assert!(conversation.summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn updating_a_message_relabels_it_without_deleting_it() {
+        let (_dir, db) = open().await;
+        let conversation = db.create_conversation("Interrupted").await.unwrap();
+        let stored = db
+            .create_message(
+                &conversation.id,
+                message(None, Role::Assistant, json!("partial…")),
+            )
+            .await
+            .unwrap();
+        let updated = db
+            .update_message(
+                &conversation.id,
+                &stored.id,
+                UpdateMessage {
+                    content: Some(json!("The build passed.")),
+                    status: Some("final".into()),
+                    metadata: Some(json!({ "spoken": false })),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.content, json!("The build passed."));
+        assert_eq!(updated.status.as_deref(), Some("final"));
+        assert_eq!(db.list_messages(&conversation.id).await.unwrap().len(), 1);
+
+        // A message from another conversation is refused rather than moved.
+        let other = db.create_conversation("Other").await.unwrap();
+        assert!(
+            db.update_message(&other.id, &stored.id, UpdateMessage::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn conversations_bind_and_unbind_an_agent_session() {
+        let (_dir, db) = open().await;
+        let conversation = db.create_conversation("Shared").await.unwrap();
+        let bound = db
+            .update_conversation(
+                &conversation.id,
+                UpdateConversation {
+                    title: None,
+                    agent_session_id: Some(Some("agent-1".into())),
+                    summary: Some("Investigating a failing test.".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(bound.agent_session_id.as_deref(), Some("agent-1"));
+        assert_eq!(
+            bound.summary.as_deref(),
+            Some("Investigating a failing test.")
+        );
+        assert!(bound.summary_updated_at.is_some());
+
+        // An absent key leaves the binding alone; an explicit null clears it.
+        let retitled = db
+            .update_conversation(
+                &conversation.id,
+                UpdateConversation {
+                    title: Some("Renamed".into()),
+                    ..UpdateConversation::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(retitled.title, "Renamed");
+        assert_eq!(retitled.agent_session_id.as_deref(), Some("agent-1"));
+
+        let unbound = db
+            .update_conversation(
+                &conversation.id,
+                UpdateConversation {
+                    agent_session_id: Some(None),
+                    ..UpdateConversation::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(unbound.agent_session_id.is_none());
+        assert!(unbound.summary.is_some());
+
+        assert!(
+            db.update_conversation("missing", UpdateConversation::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_absent_agent_session_key_is_distinct_from_an_explicit_null() {
+        let absent: UpdateConversation = serde_json::from_value(json!({ "title": "T" })).unwrap();
+        assert!(absent.agent_session_id.is_none());
+        let cleared: UpdateConversation =
+            serde_json::from_value(json!({ "agent_session_id": null })).unwrap();
+        assert_eq!(cleared.agent_session_id, Some(None));
+    }
+
+    #[tokio::test]
+    async fn importing_keeps_source_labels_but_not_live_turn_ids() {
+        let (dir, db) = open().await;
+        let conversation = db.create_conversation("Exported").await.unwrap();
+        let mut spoken = message(None, Role::User, json!("Say that again"));
+        spoken.source = Some("user_voice".into());
+        spoken.correlation_id = Some("turn-9".into());
+        spoken.status = Some("final".into());
+        db.create_message(&conversation.id, spoken).await.unwrap();
+
+        let export = db
+            .export_conversation(dir.path(), &conversation.id)
+            .await
+            .unwrap();
+        let imported = db.import_conversation(dir.path(), export).await.unwrap();
+        let messages = db.list_messages(&imported.id).await.unwrap();
+        assert_eq!(messages[0].source.as_deref(), Some("user_voice"));
+        assert_eq!(messages[0].status.as_deref(), Some("final"));
+        assert!(messages[0].correlation_id.is_none());
     }
 }

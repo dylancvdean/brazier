@@ -1,153 +1,90 @@
-import { LoaderCircle, Mic, MicOff, PhoneOff, Volume2 } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  createVoiceSession,
-  endVoiceSession,
-  getVoiceSession,
-  type LocalModel,
-  type RuntimeSettings,
-  type VoiceSessionInfo
-} from '../api'
-import { VoiceStream, voiceStreamSupported } from '../audio/voiceStream'
+  AlertTriangle,
+  Bot,
+  LoaderCircle,
+  Mic,
+  MicOff,
+  PhoneOff,
+  Square,
+  Volume2,
+  VolumeX
+} from 'lucide-react'
+import { useState } from 'react'
+import type { LocalModel } from '../api'
 import { modelDisplayName } from '../model-utils'
+import type { SessionCoordinatorHandle } from '../session/useSessionCoordinator'
 
 type Props = {
   models: LocalModel[]
-  settings: RuntimeSettings | null
   realtimeAvailable: boolean
   /** Voice model chosen in the top bar; empty when none is installed. */
   modelId: string
+  /** Whether the browser can capture and encode audio at all. */
+  audioSupported: boolean
+  persona: string
+  onPersonaChange: (persona: string) => void
+  /** The shared conversation. Voice turns land in it beside typed ones. */
+  session: SessionCoordinatorHandle
   onError: (message: string | null) => void
 }
-
-type Phase = 'idle' | 'starting' | 'connecting' | 'live'
 
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
 
-export function VoiceMode(props: Props) {
-  const [persona, setPersona] = useState(
-    props.settings?.default_voice_persona ?? 'You are a helpful assistant.'
-  )
-  const personaEdited = useRef(false)
-  const [session, setSession] = useState<VoiceSessionInfo | null>(null)
-  const [phase, setPhase] = useState<Phase>('idle')
+export function VoiceMode(props: Props): React.JSX.Element {
+  const { session } = props
+  const { snapshot, config } = session
   const [muted, setMuted] = useState(false)
-  const [transcript, setTranscript] = useState('')
-  const [inputLevel, setInputLevel] = useState(0)
-  const [outputLevel, setOutputLevel] = useState(0)
-  const streamRef = useRef<VoiceStream | null>(null)
-  const onError = props.onError
+  const [busy, setBusy] = useState(false)
+
+  const live = snapshot.voiceStatus === 'live'
+  const starting = snapshot.voiceStatus === 'starting' || busy
   const selected = props.models.find((model) => model.id === props.modelId)
-  const supported = voiceStreamSupported()
+  const task = snapshot.task
+  const speaking = snapshot.speakingCorrelationId !== null
+  const working = snapshot.activeCorrelationId !== null
 
-  // Engine settings arrive after the first render; adopt the saved persona
-  // unless the field has already been typed in.
-  useEffect(() => {
-    const saved = props.settings?.default_voice_persona
-    if (saved && !personaEdited.current) setPersona(saved)
-  }, [props.settings?.default_voice_persona])
-
-  useEffect(() => {
-    void getVoiceSession()
-      .then((response) => setSession(response.session))
-      .catch(() => setSession(null))
-    return () => {
-      void streamRef.current?.stop()
-      streamRef.current = null
-    }
-  }, [])
-
-  const connectAudio = useCallback(
-    async (target: VoiceSessionInfo): Promise<void> => {
-      setPhase('connecting')
-      const stream = new VoiceStream({
-        onText: (text) => setTranscript((current) => current + text),
-        onInputLevel: setInputLevel,
-        onOutputLevel: setOutputLevel,
-        onError: (message) => onError(message),
-        onState: (state) => {
-          if (state === 'live') setPhase('live')
-          if (state === 'closed') {
-            setPhase((current) => (current === 'idle' ? current : 'idle'))
-            setInputLevel(0)
-            setOutputLevel(0)
-          }
-        }
-      })
-      streamRef.current = stream
-      try {
-        await stream.start(target.ws_url)
-        setMuted(false)
-      } catch (cause) {
-        await stream.stop()
-        streamRef.current = null
-        setPhase('idle')
-        throw cause
-      }
-    },
-    [onError]
-  )
-
-  async function startConversation(): Promise<void> {
-    setPhase('starting')
-    onError(null)
-    setTranscript('')
+  async function guard(action: () => Promise<void>): Promise<void> {
+    setBusy(true)
+    props.onError(null)
     try {
-      const created =
-        session ??
-        (await createVoiceSession({
-          model_id: props.modelId || undefined,
-          persona_text: persona.trim() || undefined
-        }))
-      setSession(created)
-      await connectAudio(created)
+      await action()
     } catch (cause) {
-      setPhase('idle')
-      onError(errorText(cause))
-    }
-  }
-
-  async function endConversation(): Promise<void> {
-    onError(null)
-    const active = session
-    await streamRef.current?.stop()
-    streamRef.current = null
-    setPhase('idle')
-    setSession(null)
-    if (!active) return
-    try {
-      await endVoiceSession(active.id)
-    } catch (cause) {
-      onError(errorText(cause))
+      props.onError(errorText(cause))
+    } finally {
+      setBusy(false)
     }
   }
 
   function toggleMute(): void {
     const next = !muted
     setMuted(next)
-    streamRef.current?.setMuted(next)
+    session.setMuted(next)
   }
 
-  const live = phase === 'live'
-  const busy = phase === 'starting' || phase === 'connecting'
-  const statusLabel =
-    phase === 'starting'
-      ? 'Loading the voice model — first run takes a minute…'
-      : phase === 'connecting'
-        ? 'Connecting audio…'
-        : live
-          ? muted
-            ? 'Live · microphone muted'
+  const statusLabel = starting
+    ? 'Loading the voice model — first run takes a minute…'
+    : live
+      ? muted
+        ? 'Live · microphone muted'
+        : speaking
+          ? 'Live · speaking'
+          : working
+            ? 'Live · working on your request'
             : 'Live · speak whenever you like'
-          : 'Not connected'
+      : snapshot.voiceStatus === 'error'
+        ? `Voice mode stopped: ${snapshot.voiceError ?? 'unknown error'}`
+        : 'Not connected'
 
   return (
-    <section className="mode-panel voice-mode">
+    <section className="voice-bar">
       <header className="mode-panel-header">
         <h2>Voice</h2>
-        <p>Full-duplex speech with PersonaPlex. Use headphones — the model hears your speakers.</p>
+        <p>
+          Speech and typing share this conversation. What you say is transcribed into it, and the
+          agent stays in charge of tools, tasks, and results.
+        </p>
       </header>
 
       {!props.realtimeAvailable ? (
@@ -158,7 +95,7 @@ export function VoiceMode(props: Props) {
           Moshi.
         </p>
       ) : null}
-      {props.realtimeAvailable && !supported ? (
+      {props.realtimeAvailable && !props.audioSupported ? (
         <p className="mode-empty">
           This build has no WebCodecs Opus support, which realtime voice needs for audio in and out.
         </p>
@@ -168,13 +105,10 @@ export function VoiceMode(props: Props) {
         <label>
           Persona
           <textarea
-            value={persona}
-            onChange={(event) => {
-              personaEdited.current = true
-              setPersona(event.target.value)
-            }}
-            rows={3}
-            disabled={live || busy}
+            value={props.persona}
+            onChange={(event) => props.onPersonaChange(event.target.value)}
+            rows={2}
+            disabled={live || starting}
             placeholder="Describe who the model should be…"
           />
         </label>
@@ -184,11 +118,11 @@ export function VoiceMode(props: Props) {
             <button
               type="button"
               className="primary"
-              disabled={busy || !props.realtimeAvailable || !supported}
-              onClick={() => void startConversation()}
+              disabled={starting || !props.realtimeAvailable || !props.audioSupported}
+              onClick={() => void guard(() => session.startVoice())}
             >
-              {busy ? <LoaderCircle className="spin" size={16} /> : <Mic size={16} />}
-              {session && phase === 'idle' ? 'Reconnect audio' : 'Start conversation'}
+              {starting ? <LoaderCircle className="spin" size={16} /> : <Mic size={16} />}
+              Start conversation
             </button>
           ) : (
             <button type="button" className={muted ? 'toggled' : ''} onClick={toggleMute}>
@@ -196,9 +130,34 @@ export function VoiceMode(props: Props) {
               {muted ? 'Unmute' : 'Mute'}
             </button>
           )}
-          {session || live ? (
-            <button type="button" className="danger" disabled={phase === 'starting'} onClick={() => void endConversation()}>
-              <PhoneOff size={16} /> End conversation
+          {/* Three separate controls on purpose: silencing the voice, dropping
+              this answer, and abandoning the task are different decisions. */}
+          <button
+            type="button"
+            disabled={!speaking}
+            title="Stop the audio. The task keeps running."
+            onClick={() => void guard(() => session.stopSpeaking())}
+          >
+            <VolumeX size={16} /> Stop speaking
+          </button>
+          <button
+            type="button"
+            className="danger"
+            disabled={!working}
+            title="Cancel the agent task. Anything it already answered stays in the conversation."
+            onClick={() => void guard(() => session.cancelAgentTask())}
+          >
+            <Square size={14} fill="currentColor" /> Cancel task
+          </button>
+          {live ? (
+            <button
+              type="button"
+              className="danger"
+              disabled={starting}
+              title="Turn voice mode off. The conversation and any running task stay."
+              onClick={() => void guard(() => session.endVoice())}
+            >
+              <PhoneOff size={16} /> End voice
             </button>
           ) : null}
         </div>
@@ -213,11 +172,45 @@ export function VoiceMode(props: Props) {
           ) : null}
         </div>
 
+        {live && !session.canSpeak ? (
+          <p className="voice-notice">
+            <AlertTriangle size={13} /> This host has no speech synthesizer, so answers are shown
+            rather than spoken. PersonaPlex still replies in its own voice, but only what is written
+            in the conversation is authoritative.
+          </p>
+        ) : null}
+
+        {snapshot.queue.length > 0 ? (
+          <p className="voice-notice">
+            {snapshot.queue.length} turn{snapshot.queue.length === 1 ? '' : 's'} queued behind the
+            one running.
+          </p>
+        ) : null}
+
+        {task ? (
+          <div className="voice-task">
+            <strong>
+              {task.label} · {task.status}
+              {task.activeTool ? ` · ${task.activeTool}` : ''}
+            </strong>
+            {task.confirmedResults.length > 0 ? (
+              <ul>
+                {task.confirmedResults.slice(-3).map((result, index) => (
+                  <li key={`${result}-${index}`}>{result}</li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="voice-meters">
           <div className="voice-meter-row">
             <Mic size={13} />
             <div className="voice-meter">
-              <div className="voice-meter-fill" style={{ width: `${Math.round(inputLevel * 100)}%` }} />
+              <div
+                className="voice-meter-fill"
+                style={{ width: `${Math.round(session.inputLevel * 100)}%` }}
+              />
             </div>
           </div>
           <div className="voice-meter-row">
@@ -225,21 +218,60 @@ export function VoiceMode(props: Props) {
             <div className="voice-meter">
               <div
                 className="voice-meter-fill model"
-                style={{ width: `${Math.round(outputLevel * 100)}%` }}
+                style={{ width: `${Math.round(session.outputLevel * 100)}%` }}
               />
             </div>
           </div>
         </div>
-      </div>
 
-      <div className="voice-transcript">
-        {transcript ? (
-          <p>{transcript}</p>
-        ) : (
-          <p className="mode-empty">
-            What the model says appears here as it speaks.
-          </p>
-        )}
+        <div className="voice-options">
+          <label>
+            <input
+              type="checkbox"
+              checked={config.speakTextOriginatedResponses}
+              onChange={(event) =>
+                session.setConfig({
+                  ...config,
+                  speakTextOriginatedResponses: event.target.checked
+                })
+              }
+            />
+            Speak answers to typed questions too
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={config.allowVoiceBackchannels}
+              onChange={(event) =>
+                session.setConfig({ ...config, allowVoiceBackchannels: event.target.checked })
+              }
+            />
+            Acknowledge while working (“let me check”)
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={config.interruptCancelsAgent}
+              onChange={(event) =>
+                session.setConfig({ ...config, interruptCancelsAgent: event.target.checked })
+              }
+            />
+            Talking over the assistant also cancels the task
+          </label>
+        </div>
+
+        {config.showVoiceTranscripts && snapshot.voiceModelText ? (
+          <details className="voice-model-text">
+            <summary>
+              <Bot size={12} /> What PersonaPlex said on its own
+            </summary>
+            <p>{snapshot.voiceModelText.slice(-600)}</p>
+            <small>
+              Not part of the conversation and not checked against anything. Only the messages above
+              are authoritative.
+            </small>
+          </details>
+        ) : null}
       </div>
     </section>
   )

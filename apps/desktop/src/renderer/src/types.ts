@@ -5,6 +5,11 @@ export type Conversation = {
   title: string
   created_at: string
   updated_at: string
+  /** Agent session this conversation's turns go to, when one is bound. */
+  agent_session_id?: string | null
+  /** Compact summary a fresh voice session is seeded with. */
+  summary?: string | null
+  summary_updated_at?: string | null
 }
 
 export type ContentPart =
@@ -26,6 +31,13 @@ export type Message = {
   model: string | null
   tool_calls?: unknown[] | null
   tool_call_id?: string | null
+  /** Which surface produced it: `user_voice`, `assistant_agent`, … */
+  source?: string | null
+  /** Ties a user turn to its authoritative answer and spoken rendering. */
+  correlation_id?: string | null
+  /** `partial`, `final`, `cancelled`, `superseded`, `failed`. */
+  status?: string | null
+  metadata?: Record<string, unknown> | null
   created_at: string
 }
 

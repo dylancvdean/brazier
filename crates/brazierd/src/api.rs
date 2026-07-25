@@ -112,8 +112,16 @@ pub fn router(state: AppState) -> Router {
             get(list_conversations).post(create_conversation),
         )
         .route(
+            "/api/v1/conversations/{id}",
+            get(get_conversation).patch(update_conversation),
+        )
+        .route(
             "/api/v1/conversations/{id}/messages",
             get(list_messages).post(create_message),
+        )
+        .route(
+            "/api/v1/conversations/{id}/messages/{message_id}",
+            axum::routing::patch(update_message),
         )
         .route(
             "/api/v1/conversations/{id}/export",
@@ -514,6 +522,33 @@ async fn create_conversation(
     Ok((StatusCode::CREATED, Json(json!(conversation))))
 }
 
+async fn get_conversation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let conversation = state
+        .db
+        .get_conversation(&id)
+        .await
+        .map_err(ApiError::not_found)?;
+    Ok(Json(json!(conversation)))
+}
+
+/// Bind the conversation to an agent session, retitle it, or store the compact
+/// summary a voice session is seeded with.
+async fn update_conversation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::types::UpdateConversation>,
+) -> ApiResult<Json<Value>> {
+    let conversation = state
+        .db
+        .update_conversation(&id, request)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(conversation)))
+}
+
 async fn list_messages(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -537,6 +572,21 @@ async fn create_message(
         .await
         .map_err(ApiError::bad_request)?;
     Ok((StatusCode::CREATED, Json(json!(message))))
+}
+
+/// Finalize a streamed message or relabel its status. Never deletes: a spoken
+/// answer that was interrupted is still an answer in the chat.
+async fn update_message(
+    State(state): State<AppState>,
+    Path((id, message_id)): Path<(String, String)>,
+    Json(request): Json<crate::types::UpdateMessage>,
+) -> ApiResult<Json<Value>> {
+    let message = state
+        .db
+        .update_message(&id, &message_id, request)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(message)))
 }
 
 async fn list_run_snapshots(
