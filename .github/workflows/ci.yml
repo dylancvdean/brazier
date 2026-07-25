@@ -37,6 +37,8 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @hearth/desktop check
-      - run: pnpm --filter @hearth/desktop test
-      - run: pnpm --filter @hearth/desktop build
+      # --fail-if-no-match so a package rename breaks CI instead of silently
+      # turning these steps into no-ops that still exit 0.
+      - run: pnpm --filter @brazier/desktop --fail-if-no-match check
+      - run: pnpm --filter @brazier/desktop --fail-if-no-match test
+      - run: pnpm --filter @brazier/desktop --fail-if-no-match build

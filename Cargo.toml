@@ -2,6 +2,14 @@
 members = ["crates/brazierd"]
 resolver = "2"
 
+[profile.dev]
+# `pnpm dev` spawns the daemon via `cargo run`, and the desktop UI stays blank
+# until it prints BRAZIER_READY, so every second of rebuild is a second of dead
+# startup. Full debuginfo costs ~40% of the incremental rebuild (6.6s -> 3.9s)
+# and grows the binary from 215MB to 85MB. Line tables keep panic backtraces
+# with file and line numbers; only debugger variable inspection is given up.
+debug = "line-tables-only"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
