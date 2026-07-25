@@ -63,8 +63,13 @@
       {
         "from": "../../LICENSE",
         "to": "LICENSE"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
       }
     ],
+    "icon": "build/icon.png",
     "linux": {
       "target": [
         "AppImage",

@@ -197,8 +197,21 @@ export class SessionCoordinator {
   }
 
   setConfig(config: IntegrationConfig): void {
+    const previous = this.config
     this.config = config
+    if (previous.voiceSessionTarget !== config.voiceSessionTarget) this.applyAudioOwnership()
     this.publish()
+  }
+
+  /**
+   * Decide whose voice the user hears. When the coordinator delivers answers,
+   * PersonaPlex's own audio is silenced so there are never two replies to one
+   * question; when connected to nothing, it is the only voice there is.
+   */
+  private applyAudioOwnership(): void {
+    const coordinatorSpeaks =
+      this.config.voiceSessionTarget !== 'neither' && this.deps.voice.canSpeak()
+    this.deps.voice.setModelAudioEnabled(!coordinatorSpeaks)
   }
 
   setPersona(persona: string): void {
@@ -275,7 +288,14 @@ export class SessionCoordinator {
     })
     this.recordMessage(userMessage)
 
-    const owner: ResponseOwner = this.deps.agent.attachedSessionId() ? 'agent' : 'chat'
+    const owner = this.ownerFor(input.source)
+    if (!owner) {
+      this.chat.showStatus(
+        'Voice is set to reach the agent, but no agent session is bound to this conversation. Start a task in Agent mode, or change what voice is connected to.'
+      )
+      await this.patchMessage(userMessage.id, { status: 'failed' })
+      return input.correlationId
+    }
     this.responses.set(input.correlationId, {
       correlationId: input.correlationId,
       owner,
@@ -367,6 +387,25 @@ export class SessionCoordinator {
     } catch (cause) {
       this.failResponse(input.correlationId, errorText(cause))
       this.publish()
+    }
+  }
+
+  /**
+   * Who owns the answer to this turn. Null when the turn asked for the agent and
+   * there is none — refused rather than quietly handed to the chat model, which
+   * would answer without the workspace, tools, or task state the user expected.
+   */
+  private ownerFor(source: MessageSource): ResponseOwner | null {
+    const bound = this.deps.agent.attachedSessionId() !== null
+    if (source !== 'user_voice') return bound ? 'agent' : 'chat'
+    switch (this.config.voiceSessionTarget) {
+      case 'chat':
+        return 'chat'
+      case 'agent':
+        return bound ? 'agent' : null
+      // 'neither' never reaches here; transcripts are dropped before submission.
+      default:
+        return bound ? 'agent' : 'chat'
     }
   }
 
@@ -696,6 +735,14 @@ export class SessionCoordinator {
       return
     }
 
+    // Connected to nothing: PersonaPlex is answering in its own voice and the
+    // conversation is not ours to write to. The transcript is still shown.
+    if (this.config.voiceSessionTarget === 'neither') {
+      this.partialTranscript = ''
+      this.publish()
+      return
+    }
+
     const intent = classifyUtterance(trimmed, { taskActive: this.activeCorrelationId !== null })
     if (isControlIntent(intent)) {
       await this.applyControl(intent, trimmed)
@@ -800,6 +847,7 @@ export class SessionCoordinator {
   private shouldSpeak(response: ResponseState): boolean {
     return (
       this.config.voiceEnabled &&
+      this.config.voiceSessionTarget !== 'neither' &&
       this.voiceSessionId !== null &&
       this.voiceStatus === 'live' &&
       response.deliveryTargets === 'both' &&
@@ -965,6 +1013,7 @@ export class SessionCoordinator {
       this.voiceSessionId = handle.id
       this.voiceStartedAt = handle.startedAt
       this.voiceStatus = 'live'
+      this.applyAudioOwnership()
     } catch (cause) {
       this.voiceStatus = 'error'
       this.voiceError = errorText(cause)

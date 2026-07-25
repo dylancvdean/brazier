@@ -151,6 +151,87 @@ describe('basic flows', () => {
   })
 })
 
+describe('what the voice session is connected to', () => {
+  it('routes to the agent when one is bound, and to chat when none is', async () => {
+    const { coordinator, agent, voice, chat } = await live({ voiceSessionTarget: 'both' })
+    speak(voice, 'utt-1', 'With a task bound.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(agent.submitted).toHaveLength(1)
+
+    agent.completeRun(agent.submitted[0].correlationId, 'Agent answered.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    agent.sessionId = null
+    speak(voice, 'utt-2', 'With none bound.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(agent.submitted).toHaveLength(1)
+    expect(chat.assistantMessages().at(-1)?.source).toBe('assistant_chat')
+  })
+
+  it('keeps spoken turns on the chat model even while a task is bound', async () => {
+    const { coordinator, agent, voice, chat } = await live({ voiceSessionTarget: 'chat' })
+    speak(voice, 'utt-1', 'Answer this yourself.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(agent.submitted).toHaveLength(0)
+    expect(chat.assistantMessages()[0].source).toBe('assistant_chat')
+    expect(coordinator.snapshot().responses[0].owner).toBe('chat')
+  })
+
+  it('refuses an agent-only turn rather than quietly answering from chat', async () => {
+    const { coordinator, agent, voice, chat } = await live({ voiceSessionTarget: 'agent' })
+    agent.sessionId = null
+    await coordinator.attach('conv-1')
+    speak(voice, 'utt-1', 'Run the tests.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // The turn is kept and marked, not answered by a model without the workspace.
+    expect(chat.assistantMessages()).toHaveLength(0)
+    expect(chat.messages.at(-1)?.status).toBe('failed')
+    expect(chat.statuses.some((status) => status?.includes('no agent session'))).toBe(true)
+  })
+
+  it('records and invokes nothing when connected to neither', async () => {
+    const { coordinator, agent, voice, chat } = await live({ voiceSessionTarget: 'neither' })
+    speak(voice, 'utt-1', 'Just talking.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(chat.messages).toHaveLength(0)
+    expect(agent.submitted).toHaveLength(0)
+    // PersonaPlex is the only voice there is, so its audio stays audible.
+    expect(voice.modelAudioEnabled).toBe(true)
+    expect(voice.spoken).toHaveLength(0)
+  })
+
+  it('silences PersonaPlex whenever the coordinator delivers answers', async () => {
+    const { coordinator, voice } = await live({ voiceSessionTarget: 'neither' })
+    const base = { ...DEFAULT_INTEGRATION_CONFIG, voiceEnabled: true }
+    expect(voice.modelAudioEnabled).toBe(true)
+
+    coordinator.setConfig({ ...base, voiceSessionTarget: 'both' })
+    expect(voice.modelAudioEnabled).toBe(false)
+
+    coordinator.setConfig({ ...base, voiceSessionTarget: 'neither' })
+    expect(voice.modelAudioEnabled).toBe(true)
+  })
+
+  it('leaves PersonaPlex audible when this host cannot speak answers', async () => {
+    const context = harness({ voiceSessionTarget: 'both' })
+    context.voice.speakable = false
+    await context.coordinator.attach('conv-1')
+    await context.coordinator.startVoiceSession()
+    expect(context.voice.modelAudioEnabled).toBe(true)
+  })
+
+  it('still routes typed turns to the agent when voice is chat-only', async () => {
+    const { coordinator, agent, voice } = await live({ voiceSessionTarget: 'chat' })
+    await coordinator.submitText('Typed, so the agent takes it.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(agent.submitted).toHaveLength(1)
+    void voice
+  })
+})
+
 describe('interruption flows', () => {
   it('stops audio on barge-in but lets the agent keep working', async () => {
     const { coordinator, agent, voice } = await live()

@@ -57,7 +57,7 @@ import {
   streamCompletion,
   uploadAttachmentBlob
 } from './api'
-import { AgentMode } from './components/AgentMode'
+import { AgentMode, type AgentComposerControls } from './components/AgentMode'
 import { DownloadTray } from './components/DownloadTray'
 import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
@@ -88,6 +88,7 @@ import {
   writeCachedRuntimes
 } from './inventoryCache'
 import type { Attachment, ContentPart, Conversation, Message, Role } from './types'
+import brazierLogo from './assets/brazier-logo.png'
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 
@@ -318,6 +319,9 @@ export function App(): React.JSX.Element {
   const [generateModality, setGenerateModality] = useState<'image' | 'video'>('image')
   const [persona, setPersona] = useState('You are a helpful assistant.')
   const personaEdited = useRef(false)
+  // Agent mode has no composer of its own; it publishes these so the one at the
+  // bottom of the window can drive it.
+  const [agentComposer, setAgentComposer] = useState<AgentComposerControls | null>(null)
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
@@ -585,6 +589,7 @@ export function App(): React.JSX.Element {
     onStatus: setModelLoadStatus,
     parentId: () => chainRef.current.at(-1)?.id ?? null
   })
+  const agentMode = appMode === 'agent'
   const voiceLive = session.snapshot.voiceStatus === 'live'
   const audioSupported = useMemo(() => voiceStreamSupported(), [])
   /** Whichever answer is streaming: the composer's own, or a coordinated turn. */
@@ -899,6 +904,15 @@ export function App(): React.JSX.Element {
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault()
     const text = draft.trim()
+    // Agent mode: the same box, pointed at the agent. Its own transcript and
+    // approval cards render above; only the input is shared.
+    if (appMode === 'agent') {
+      if (!text || !agentComposer || agentComposer.running) return
+      setDraft('')
+      setError(null)
+      await agentComposer.send(text)
+      return
+    }
     if ((!text && attachments.length === 0) || busy) return
     // With voice live, typing goes through the coordinator so both surfaces
     // share one conversation and one agent session. Attachments keep the
@@ -1063,7 +1077,7 @@ export function App(): React.JSX.Element {
     <main className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div className="brand">
-          <div className="brand-mark">B</div>
+          <img className="brand-mark" src={brazierLogo} alt="" width={32} height={32} />
           <div>
             <strong>Brazier</strong>
             <span>Local AI workspace</span>
@@ -1329,6 +1343,8 @@ export function App(): React.JSX.Element {
           <AgentMode
             modelId={selectedModel}
             models={localModels}
+            onComposerChange={setAgentComposer}
+            onSuggestPrompt={setDraft}
             onSessionBound={(agentSessionId) => void session.bindAgentSession(agentSessionId)}
             onError={setError}
           />
@@ -1533,26 +1549,24 @@ export function App(): React.JSX.Element {
               ))}
             </div>
           )}
-          {/* Agent mode brings its own composer; the chat one would duplicate it. */}
-          <form
-            className="composer"
-            hidden={appMode === 'agent'}
-            onSubmit={(event) => void submit(event)}
-          >
+          {/* One composer for every mode. What it sends is decided by `submit`. */}
+          <form className="composer" onSubmit={(event) => void submit(event)}>
             <textarea
-              aria-label="Message"
+              aria-label={agentMode ? 'Agent task' : 'Message'}
               placeholder={
-                !selectedModel
-                  ? 'Select a model to start chatting…'
-                  : modelPrepareState === 'loading'
-                    ? 'Loading model…'
-                    : modelPrepareState === 'error'
-                      ? 'Fix model load to chat…'
-                      : tipId
-                        ? 'Continue this branch…'
-                        : 'Message a local model…'
+                agentMode
+                  ? (agentComposer?.placeholder ?? 'Loading agent…')
+                  : !selectedModel
+                    ? 'Select a model to start chatting…'
+                    : modelPrepareState === 'loading'
+                      ? 'Loading model…'
+                      : modelPrepareState === 'error'
+                        ? 'Fix model load to chat…'
+                        : tipId
+                          ? 'Continue this branch…'
+                          : 'Message a local model…'
               }
-              rows={1}
+              rows={agentMode ? 2 : 1}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {
@@ -1577,7 +1591,9 @@ export function App(): React.JSX.Element {
                 hidden
                 onChange={(event) => void selectFiles(event)}
               />
-              <div className="tool-menu-anchor">
+              {/* Chat tools and attachments do not apply to the agent: its tool
+                  set and permissions are its own, and it takes no media. */}
+              <div className="tool-menu-anchor" hidden={agentMode}>
                 <button
                   className={toolsEnabled ? 'attach-button tools-on' : 'attach-button'}
                   type="button"
@@ -1620,6 +1636,7 @@ export function App(): React.JSX.Element {
               <button
                 className="attach-button"
                 type="button"
+                hidden={agentMode}
                 title={
                   canAttach
                     ? [
@@ -1635,12 +1652,19 @@ export function App(): React.JSX.Element {
               >
                 <Paperclip size={18} />
               </button>
-              {busy ? (
+              {(agentMode ? agentComposer?.running : busy) ? (
                 <button
                   className="send-button stop"
                   type="button"
-                  title="Stop generation"
-                  onClick={() => abortRef.current?.abort()}
+                  title={
+                    agentMode
+                      ? 'Stop the run, terminate its processes, and refuse pending approvals'
+                      : 'Stop generation'
+                  }
+                  onClick={() => {
+                    if (agentMode) void agentComposer?.stop()
+                    else abortRef.current?.abort()
+                  }}
                 >
                   <Square size={15} fill="currentColor" />
                 </button>
@@ -1648,23 +1672,33 @@ export function App(): React.JSX.Element {
                 <button
                   className="send-button"
                   type="submit"
-                  title="Send"
-                  disabled={(!draft.trim() && attachments.length === 0) || !canChat}
+                  title={agentMode ? 'Start the task' : 'Send'}
+                  disabled={
+                    agentMode
+                      ? !draft.trim() || !agentComposer || agentComposer.blockedReason !== ''
+                      : (!draft.trim() && attachments.length === 0) || !canChat
+                  }
                 >
                   <Send size={17} />
                 </button>
               )}
             </div>
           </form>
-          <p className="composer-hint" hidden={appMode === 'agent'}>
-            Local models can be inaccurate. Verify important information.
-            {toolsEnabled && canUseTools ? ' Tools are enabled (bundled + MCP).' : ''}
-            {toolsEnabled && canUseTools && runtime && !runtime.jinja
-              ? ' Enable Jinja templates in Engine configuration for reliable tool calling.'
-              : ''}
-            {selectedCapabilities?.harmony
-              ? ' This model uses OpenAI Harmony (gpt-oss); reasoning is routed automatically.'
-              : ''}
+          <p className="composer-hint">
+            {agentMode ? (
+              'The agent edits files and runs commands in the workspace above. Each action is judged by its permission mode.'
+            ) : (
+              <>
+                Local models can be inaccurate. Verify important information.
+                {toolsEnabled && canUseTools ? ' Tools are enabled (bundled + MCP).' : ''}
+                {toolsEnabled && canUseTools && runtime && !runtime.jinja
+                  ? ' Enable Jinja templates in Engine configuration for reliable tool calling.'
+                  : ''}
+                {selectedCapabilities?.harmony
+                  ? ' This model uses OpenAI Harmony (gpt-oss); reasoning is routed automatically.'
+                  : ''}
+              </>
+            )}
           </p>
         </div>
       </section>

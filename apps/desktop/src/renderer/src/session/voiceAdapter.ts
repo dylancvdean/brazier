@@ -47,6 +47,8 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   private transcribing = 0
   /** Most recent spoken text, so the microphone cannot hear it back in. */
   private lastSpokenText: string | null = null
+  /** Whether PersonaPlex's own voice is audible. See `setModelAudioEnabled`. */
+  private modelAudioEnabled = true
 
   constructor(private readonly options: PersonaPlexAdapterOptions = {}) {
     this.renderer = options.renderer ?? new PlatformSpeechRenderer()
@@ -104,8 +106,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       await endVoiceSession(session.id).catch(() => undefined)
       throw cause
     }
-    // Suppress the model's own audio when we can speak answers exactly.
-    stream.setOutputGate(!this.canSpeak())
+    stream.setOutputGate(this.modelAudioEnabled)
     this.stream = stream
     this.sessionId = session.id
     return { id: session.id, startedAt: Date.now() }
@@ -141,6 +142,16 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         this.publish({ type: 'sessionError', error, fatal: false })
       }
     })
+  }
+
+  setModelAudioEnabled(enabled: boolean): void {
+    this.modelAudioEnabled = enabled
+    this.stream?.setOutputGate(enabled)
+    if (!enabled) return
+    // Handing the voice back to PersonaPlex means stopping ours mid-sentence
+    // rather than letting the two overlap.
+    this.renderer.stop()
+    this.speaking = null
   }
 
   async stopSpeaking(correlationId?: string): Promise<void> {

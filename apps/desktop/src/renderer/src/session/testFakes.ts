@@ -140,6 +140,8 @@ export class FakeVoice implements VoiceAdapter {
   sessions: string[] = []
   ended = 0
   speakable = true
+  /** Whether PersonaPlex's own audio is audible. */
+  modelAudioEnabled = true
   /** Set to reject the next `speak`. */
   failSpeak: string | null = null
   /** Set to reject the next `startSession`. */
@@ -178,6 +180,10 @@ export class FakeVoice implements VoiceAdapter {
 
   async stopSpeaking(correlationId?: string): Promise<void> {
     this.stopped.push(correlationId)
+  }
+
+  setModelAudioEnabled(enabled: boolean): void {
+    this.modelAudioEnabled = enabled
   }
 
   async endSession(): Promise<void> {

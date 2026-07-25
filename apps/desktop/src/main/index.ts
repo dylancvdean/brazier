@@ -225,7 +225,22 @@ function attachContextMenu(window: BrowserWindow): void {
   })
 }
 
+/**
+ * Application icon for the window, taskbar, and dock.
+ *
+ * electron-builder bakes `build/icon.png` into the packaged app's own icon, but
+ * the running window needs a real file: on Linux and Windows the taskbar entry
+ * otherwise shows Electron's default logo, including in development.
+ */
+function iconPath(): string | undefined {
+  const candidate = app.isPackaged
+    ? join(process.resourcesPath, 'icon.png')
+    : join(repositoryRoot(), 'apps', 'desktop', 'build', 'icon.png')
+  return existsSync(candidate) ? candidate : undefined
+}
+
 async function createWindow(): Promise<void> {
+  const icon = iconPath()
   const window = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -234,6 +249,7 @@ async function createWindow(): Promise<void> {
     show: false,
     backgroundColor: '#000000',
     autoHideMenuBar: true,
+    ...(icon ? { icon } : {}),
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     ...(process.platform === 'darwin'
       ? { trafficLightPosition: { x: 15, y: 20 } }
@@ -319,6 +335,12 @@ function forceWelcomeRequested(): boolean {
 app.whenReady().then(async () => {
   // No File/Edit/View application menu — the app is a self-contained shell.
   Menu.setApplicationMenu(null)
+  // A packaged macOS app takes its dock icon from the bundle; an unpackaged one
+  // shows Electron's unless it is set here.
+  if (process.platform === 'darwin' && !app.isPackaged) {
+    const icon = iconPath()
+    if (icon) app.dock?.setIcon(icon)
+  }
   connection = startDaemon()
   ipcMain.handle('brazier:connection', () => connection)
   ipcMain.handle('brazier:flags', () => ({

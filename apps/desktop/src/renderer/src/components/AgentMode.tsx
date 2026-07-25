@@ -46,10 +46,28 @@ import {
 import type { LocalModel } from '../api'
 import { modelDisplayName } from '../model-utils'
 
+/**
+ * What the shared composer needs to drive a run. Agent mode has no input of its
+ * own: the one composer at the bottom of the window serves every mode, so this
+ * is how the agent's submit, stop, and readiness reach it.
+ */
+export type AgentComposerControls = {
+  send: (text: string) => Promise<void>
+  stop: () => Promise<void>
+  running: boolean
+  /** Empty when a run can start; otherwise why it cannot. */
+  blockedReason: string
+  placeholder: string
+}
+
 type Props = {
   /** Chat model chosen in the top bar; the agent uses the same picker. */
   modelId: string
   models: LocalModel[]
+  /** Publish the controls upward; called with null when Agent mode unmounts. */
+  onComposerChange?: (controls: AgentComposerControls | null) => void
+  /** Put a suggested task into the shared composer for the user to edit. */
+  onSuggestPrompt?: (text: string) => void
   /**
    * Bind the selected agent session to the open conversation, so voice and text
    * turns in that conversation reach this session instead of opening their own.
@@ -336,7 +354,6 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [timeline, setTimeline] = useState<TimelineEntry[]>([])
   const [approvals, setApprovals] = useState<AgentApproval[]>([])
   const [grants, setGrants] = useState<string[]>([])
-  const [draft, setDraft] = useState('')
   const [streaming, setStreaming] = useState('')
   const [reasoning, setReasoning] = useState('')
   const [running, setRunning] = useState(false)
@@ -582,8 +599,8 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }
 
-  async function send(): Promise<void> {
-    const text = draft.trim()
+  async function send(input: string): Promise<void> {
+    const text = input.trim()
     if (!text || running) return
     onError(null)
     if (!props.modelId) {
@@ -618,7 +635,6 @@ export function AgentMode(props: Props): React.JSX.Element {
         ...current,
         { role: 'user', text, timestamp: new Date().toISOString() }
       ])
-      setDraft('')
       setRunning(true)
       await window.brazier.agent.run(active.id, { text })
     } catch (cause) {
@@ -698,6 +714,32 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   const sandbox = capabilities?.sandbox
   const executeTools = tools.filter((tool) => tool.executes).length
+
+  // Keep the shared composer in step with what the agent can currently do. The
+  // callbacks are re-published on every relevant change rather than held in a
+  // ref, so the composer never sends against stale session or model state.
+  const { onComposerChange } = props
+  const blockedReason = !props.modelId
+    ? 'Choose a model in the top bar…'
+    : !workspace
+      ? 'Choose a workspace folder…'
+      : ''
+  useEffect(() => {
+    onComposerChange?.({
+      send,
+      stop,
+      running,
+      blockedReason,
+      placeholder: blockedReason
+        ? blockedReason
+        : running
+          ? 'The agent is working. Stop it to send something else…'
+          : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`
+    })
+    return () => onComposerChange?.(null)
+    // `send` and `stop` close over session state, so they are re-created each
+    // render; the primitives below are what actually decide a new publication.
+  }, [onComposerChange, running, blockedReason, modelLabel, workspace, session?.id, props.modelId])
 
   return (
     <div className="agent-mode">
@@ -806,13 +848,13 @@ export function AgentMode(props: Props): React.JSX.Element {
               programs, and each needs your approval unless you change the mode above.
             </p>
             <div className="agent-suggestions">
-              <button type="button" onClick={() => setDraft('Summarize this repository: layout, build commands, and test entry points.')}>
+              <button type="button" onClick={() => props.onSuggestPrompt?.('Summarize this repository: layout, build commands, and test entry points.')}>
                 Explore the repository
               </button>
-              <button type="button" onClick={() => setDraft('Run the test suite and report what fails.')}>
+              <button type="button" onClick={() => props.onSuggestPrompt?.('Run the test suite and report what fails.')}>
                 Run the tests
               </button>
-              <button type="button" onClick={() => setDraft('Show me the uncommitted changes and explain them.')}>
+              <button type="button" onClick={() => props.onSuggestPrompt?.('Show me the uncommitted changes and explain them.')}>
                 Review my changes
               </button>
             </div>
@@ -913,50 +955,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         <div ref={scrollAnchor} />
       </div>
 
-      <div className="agent-composer">
-        <textarea
-          aria-label="Agent task"
-          rows={2}
-          value={draft}
-          placeholder={
-            !props.modelId
-              ? 'Choose a model in the top bar…'
-              : !workspace
-                ? 'Choose a workspace folder…'
-                : running
-                  ? 'The agent is working. Stop it to send something else…'
-                  : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`
-          }
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault()
-              void send()
-            }
-          }}
-        />
-        <div className="agent-composer-actions">
-          {running ? (
-            <button
-              type="button"
-              className="send-button stop"
-              title="Stop the run, terminate its processes, and refuse pending approvals"
-              onClick={() => void stop()}
-            >
-              <Square size={15} fill="currentColor" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="send-button"
-              disabled={!draft.trim()}
-              onClick={() => void send()}
-            >
-              Start
-            </button>
-          )}
-        </div>
-      </div>
+      {/* No composer here: the window has one, at the bottom, for every mode. */}
 
       {artifact && (
         <div className="agent-artifact-overlay" role="dialog">

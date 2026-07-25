@@ -99,7 +99,6 @@ code {
   padding: 0 6px 16px;
 }
 
-.brand-mark,
 .welcome-mark {
   display: grid;
   place-items: center;
@@ -108,11 +107,14 @@ code {
   box-shadow: 0 6px 24px rgba(255, 146, 74, 0.12);
 }
 
+/* The logo carries its own dark ground, so it sits on the sidebar without a
+   tile behind it — only the corner radius and the ember glow. */
 .brand-mark {
   width: 32px;
   height: 32px;
   border-radius: 9px;
-  font-weight: 800;
+  object-fit: cover;
+  box-shadow: 0 6px 24px rgba(255, 146, 74, 0.12);
 }
 
 .brand strong,
@@ -4265,40 +4267,6 @@ label.span-2 {
   font-size: 10px;
 }
 
-.agent-composer {
-  display: flex;
-  align-items: flex-end;
-  gap: 10px;
-  padding: 14px max(20px, calc((100% - 900px) / 2));
-  border-top: 1px solid var(--line);
-  background: var(--panel);
-}
-
-.agent-composer textarea {
-  flex: 1;
-  max-height: 180px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: #08080a;
-  color: #ededef;
-  font-size: 13px;
-  line-height: 1.55;
-  resize: vertical;
-}
-
-.agent-composer textarea:focus {
-  border-color: #33241a;
-  outline: none;
-}
-
-.agent-composer-actions .send-button {
-  padding: 9px 16px;
-  border-radius: 10px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
 .agent-artifact-overlay {
   position: fixed;
   z-index: 60;
@@ -4485,4 +4453,39 @@ label.span-2 {
 .turn-badge.failed {
   border-color: #5a3033;
   color: #e79a9a;
+}
+
+.voice-target {
+  display: grid;
+  gap: 6px;
+  max-width: 720px;
+}
+
+.voice-target-choices {
+  display: inline-flex;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--panel-raised);
+}
+
+.voice-target-choices button {
+  padding: 5px 12px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.voice-target-choices button:hover {
+  color: var(--soft);
+}
+
+.voice-target-choices button.active {
+  background: var(--accent-dark);
+  color: var(--accent);
 }

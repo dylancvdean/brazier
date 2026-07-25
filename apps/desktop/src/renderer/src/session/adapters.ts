@@ -116,6 +116,15 @@ export interface VoiceAdapter {
   speak(request: SpeechRequest): Promise<void>
   /** Stop audio for one turn, or all audio when no id is given. */
   stopSpeaking(correlationId?: string): Promise<void>
+  /**
+   * Let PersonaPlex's own voice be heard, or silence it.
+   *
+   * It is a speech-to-speech model: it answers on its own and cannot be told to
+   * wait. Its audio is silenced whenever the coordinator is delivering answers,
+   * so one question never produces two spoken replies, and allowed through when
+   * the session is connected to nothing and PersonaPlex is the whole product.
+   */
+  setModelAudioEnabled(enabled: boolean): void
   endSession(): Promise<void>
   /** Whether spoken delivery can actually be produced on this host. */
   canSpeak(): boolean

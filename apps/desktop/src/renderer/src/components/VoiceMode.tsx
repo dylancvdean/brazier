@@ -12,6 +12,7 @@ import {
 import { useState } from 'react'
 import type { LocalModel } from '../api'
 import { modelDisplayName } from '../model-utils'
+import type { VoiceSessionTarget } from '../session/config'
 import type { SessionCoordinatorHandle } from '../session/useSessionCoordinator'
 
 type Props = {
@@ -31,6 +32,30 @@ type Props = {
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
+
+/** What a live voice session can be wired to, and what each choice means. */
+const TARGETS: Array<[VoiceSessionTarget, string, string]> = [
+  [
+    'both',
+    'Both',
+    'Spoken turns join this conversation and reach the agent when a task is bound to it, or the chat model when none is.'
+  ],
+  [
+    'agent',
+    'Agent',
+    'Spoken turns always go to the bound agent session. With no task bound, a turn is refused rather than answered without the workspace and tools you expected.'
+  ],
+  [
+    'chat',
+    'Chat',
+    'Spoken turns always go to the chat model, even while an agent task is running.'
+  ],
+  [
+    'neither',
+    'Neither',
+    'Nothing is recorded and nothing is invoked. PersonaPlex answers in its own voice, as it does with voice mode used on its own.'
+  ]
+]
 
 export function VoiceMode(props: Props): React.JSX.Element {
   const { session } = props
@@ -172,7 +197,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
           ) : null}
         </div>
 
-        {live && !session.canSpeak ? (
+        {live && !session.canSpeak && config.voiceSessionTarget !== 'neither' ? (
           <p className="voice-notice">
             <AlertTriangle size={13} /> This host has no speech synthesizer, so answers are shown
             rather than spoken. PersonaPlex still replies in its own voice, but only what is written
@@ -222,6 +247,28 @@ export function VoiceMode(props: Props): React.JSX.Element {
               />
             </div>
           </div>
+        </div>
+
+        <div className="voice-target">
+          <span className="section-label">Connected to</span>
+          <div className="voice-target-choices" role="radiogroup" aria-label="Connected session">
+            {TARGETS.map(([value, label, detail]) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={config.voiceSessionTarget === value}
+                className={config.voiceSessionTarget === value ? 'active' : ''}
+                title={detail}
+                onClick={() => session.setConfig({ ...config, voiceSessionTarget: value })}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="voice-notice">
+            {TARGETS.find(([value]) => value === config.voiceSessionTarget)?.[2]}
+          </p>
         </div>
 
         <div className="voice-options">
