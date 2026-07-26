@@ -21,6 +21,15 @@ const SUMMARY_TIMEOUT_MS = 30_000
 /** Characters of transcript handed to the model. Enough for a long session. */
 const TRANSCRIPT_LIMIT = 24_000
 
+/**
+ * Characters of narrative kept.
+ *
+ * The instruction asks for at most eight sentences, and an instruction is not a
+ * guarantee. A model that answers with an essay would trade one context problem
+ * for another, so the prose is cut at a sentence boundary near this length.
+ */
+const PROSE_LIMIT = 2_000
+
 export type SummaryRequest = {
   /** OpenAI-compatible base URL, e.g. `http://127.0.0.1:1710/v1`. */
   baseUrl: string
@@ -82,7 +91,7 @@ export async function requestModelSummary(request: SummaryRequest): Promise<stri
     }
     const content = payload.choices?.[0]?.message?.content
     if (typeof content !== 'string') return null
-    const text = content.trim()
+    const text = clipProse(content.trim())
     return text.length > 0 ? text : null
   } catch {
     // Aborted, unreachable, or unparseable: all the same outcome here.
@@ -118,6 +127,17 @@ export function renderTranscript(
     return text.length > 0 ? `${message.role}: ${text}` : ''
   })
   return lines.filter((line) => line.length > 0).join('\n')
+}
+
+/** Cut over-long prose at the last sentence that fits. */
+export function clipProse(text: string): string {
+  if (text.length <= PROSE_LIMIT) return text
+  const head = text.slice(0, PROSE_LIMIT)
+  const lastStop = Math.max(head.lastIndexOf('. '), head.lastIndexOf('.\n'))
+  // Only cut at a sentence if one ends late enough to leave a usable summary;
+  // otherwise take the characters and mark the cut.
+  if (lastStop > PROSE_LIMIT / 2) return head.slice(0, lastStop + 1)
+  return `${head.trimEnd()}…`
 }
 
 function clip(text: string): string {

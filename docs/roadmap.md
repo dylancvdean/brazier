@@ -201,7 +201,8 @@ what is left is mostly the difference between working and trustworthy.
   Every failure of the request (unreachable, slow, empty, malformed) falls back
   to the digest alone, because compaction usually runs when the context is
   already full and that is the worst moment to fail. Which half produced a
-  summary is recorded on the session.
+  summary is recorded on the session, and the narrative is cut at a sentence
+  boundary if a model answers an eight-sentence instruction with an essay.
 - Optional MCP tools inside agent sessions, reusing the existing MCP client
   behind the same policy broker.
 

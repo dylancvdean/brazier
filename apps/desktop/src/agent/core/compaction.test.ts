@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { mergeSummary, renderTranscript, requestModelSummary } from './compaction'
+import { clipProse, mergeSummary, renderTranscript, requestModelSummary } from './compaction'
 
 const base = {
   baseUrl: 'http://127.0.0.1:1710/v1',
@@ -57,6 +57,25 @@ describe('requestModelSummary', () => {
         })
     ) as unknown as typeof fetch
     expect(await requestModelSummary({ ...base, fetchImpl: hangs, timeoutMs: 5 })).toBeNull()
+  })
+})
+
+describe('clipProse', () => {
+  it('leaves an ordinary summary alone', () => {
+    expect(clipProse('Two sentences. That is all.')).toBe('Two sentences. That is all.')
+  })
+
+  /** The instruction asks for eight sentences; nothing enforced it. */
+  it('cuts an essay at a sentence boundary', () => {
+    const essay = 'A sentence about the work. '.repeat(200)
+    const clipped = clipProse(essay)
+    expect(clipped.length).toBeLessThan(essay.length)
+    expect(clipped.endsWith('.')).toBe(true)
+  })
+
+  it('marks a cut it could not make cleanly', () => {
+    const unbroken = 'x'.repeat(5000)
+    expect(clipProse(unbroken).endsWith('…')).toBe(true)
   })
 })
 
