@@ -6,6 +6,7 @@ import {
   Mic,
   MicOff,
   PhoneOff,
+  ShieldAlert,
   Square,
   Timer,
   Volume2,
@@ -139,15 +140,18 @@ export function VoiceMode(props: Props): React.JSX.Element {
 
   /**
    * Shown wherever the agent destination is in force. Speech reaching an agent
-   * means a misheard word can edit files and run commands, and the pieces that
-   * make it safe to say that casually — a reliable transcript, a confirmation
-   * step — are not built yet.
+   * means a misheard word can edit files and run commands. A call the permission
+   * broker holds is now read back and needs a spoken yes, which is the piece
+   * that was missing — but the broker only holds what its mode says to hold, and
+   * the transcript is still the least reliable input in the application.
    */
   const agentWarning = (
     <p className="voice-danger">
       <AlertTriangle size={14} />
       <span>
-        Voice control for agents is extremely experimental. Please don't use it on anything you care
+        Voice control for agents is extremely experimental. Anything the permission broker holds is
+        read back to you and needs a spoken yes — but only what its mode holds, so a session set to
+        skip permissions acts on what it thought it heard. Please don't use it on anything you care
         about, and even then only if you know what you're doing.
       </span>
     </p>
@@ -256,6 +260,41 @@ export function VoiceMode(props: Props): React.JSX.Element {
       ) : null}
 
       {live && config.voiceSessionTarget === 'agent' ? agentWarning : null}
+
+      {/* A held call is otherwise only visible in the agent panel, which the
+          person talking is very likely not looking at. Buttons as well as
+          words: a spoken yes is the convenience, not the only way through. */}
+      {live && snapshot.pendingApproval ? (
+        <div
+          className={`voice-approval ${snapshot.pendingApproval.environment === 'host' ? 'host' : ''}`}
+        >
+          <ShieldAlert size={16} />
+          <div className="voice-approval-body">
+            <strong>{snapshot.pendingApproval.summary}</strong>
+            <span>
+              {snapshot.pendingApproval.tool} · {snapshot.pendingApproval.risk} ·{' '}
+              {snapshot.pendingApproval.environment === 'host'
+                ? 'on your machine, outside the sandbox'
+                : 'in the sandbox'}
+              {snapshot.pendingApproval.spoken ? ' · read out to you' : ''}
+            </span>
+            <span className="voice-approval-hint">
+              Say <strong>yes</strong> to allow it or <strong>no</strong> to stop. Anything else
+              leaves it held.
+            </span>
+          </div>
+          <button type="button" onClick={() => void guard(() => session.resolveApproval('deny'))}>
+            Refuse
+          </button>
+          <button
+            type="button"
+            className="danger"
+            onClick={() => void guard(() => session.resolveApproval('approve'))}
+          >
+            Allow once
+          </button>
+        </div>
+      ) : null}
 
       {live ? (
         <div className="voice-conversation">

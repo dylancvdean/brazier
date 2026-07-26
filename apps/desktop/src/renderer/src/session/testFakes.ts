@@ -83,6 +83,10 @@ export class FakeAgent implements AgentAdapter {
   cancelled: string[] = []
   /** Set to reject the next `submitTurn`. */
   failSubmit: string | null = null
+  /** Approval decisions the coordinator passed on. */
+  decisions: Array<{ approvalId: string; decision: 'approve' | 'deny'; note?: string }> = []
+  /** Set to reject the next `decideApproval`. */
+  failDecision: string | null = null
   private readonly listeners = new Set<(event: AgentAdapterEvent) => void>()
   private status = new Map<string, AgentRunStatusReport>()
 
@@ -110,6 +114,19 @@ export class FakeAgent implements AgentAdapter {
   async cancelRun(correlationId: string): Promise<void> {
     this.cancelled.push(correlationId)
     this.status.set(correlationId, { correlationId, status: 'cancelled' })
+  }
+
+  async decideApproval(
+    approvalId: string,
+    decision: 'approve' | 'deny',
+    note?: string
+  ): Promise<void> {
+    if (this.failDecision) {
+      const message = this.failDecision
+      this.failDecision = null
+      throw new Error(message)
+    }
+    this.decisions.push({ approvalId, decision, note })
   }
 
   getStatus(correlationId: string): AgentRunStatusReport | null {

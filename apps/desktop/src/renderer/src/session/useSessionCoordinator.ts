@@ -62,6 +62,8 @@ export type SessionCoordinatorHandle = {
   stopSpeaking: () => Promise<void>
   cancelResponse: () => Promise<void>
   cancelAgentTask: () => Promise<void>
+  /** Answer a held tool call from the UI, rather than by speaking. */
+  resolveApproval: (decision: 'approve' | 'deny') => Promise<void>
   /** Bind an agent session so voice and text turns share it. */
   bindAgentSession: (agentSessionId: string | null) => Promise<void>
 }
@@ -209,6 +211,12 @@ export function useSessionCoordinator(
     cancelAgentTask: useCallback(async () => {
       await coordinator.cancelAgentTask()
     }, [coordinator]),
+    resolveApproval: useCallback(
+      async (decision: 'approve' | 'deny') => {
+        await coordinator.resolveApproval(decision)
+      },
+      [coordinator]
+    ),
     bindAgentSession: useCallback(
       async (agentSessionId: string | null) => {
         await adapters.agent.bindSession(agentSessionId)

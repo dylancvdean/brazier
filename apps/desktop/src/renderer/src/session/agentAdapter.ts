@@ -9,7 +9,7 @@
  * voice turns reach the same session and the binding survives a restart.
  */
 
-import { fetchAgentSession, updateAgentSession } from '../agentApi'
+import { decideAgentApproval, fetchAgentSession, updateAgentSession } from '../agentApi'
 import { getConversation, updateConversation } from '../api'
 import type { AgentEvent } from '../../../agent/core/types'
 import type { WorkerMessage } from '../../../agent/core/protocol'
@@ -111,6 +111,22 @@ export class WorkerAgentAdapter implements AgentAdapter {
       )
   }
 
+  async decideApproval(
+    approvalId: string,
+    decision: 'approve' | 'deny',
+    note?: string
+  ): Promise<void> {
+    // One-shot on purpose: a decision made by voice covers the call that was
+    // read out, never the rest of the session. Session scope is a deliberate
+    // choice made where the arguments are on screen.
+    await decideAgentApproval(approvalId, decision, 'once', note)
+    this.publish({
+      type: 'approvalResolved',
+      correlationId: this.activeCorrelationId ?? '',
+      approvalId
+    })
+  }
+
   async cancelRun(correlationId: string): Promise<void> {
     if (!this.sessionId) return
     if (this.activeCorrelationId && this.activeCorrelationId !== correlationId) return
@@ -179,6 +195,15 @@ export class WorkerAgentAdapter implements AgentAdapter {
           type: 'statusUpdated',
           correlationId,
           status: `Waiting for your approval: ${event.approval.summary}`
+        })
+        this.publish({
+          type: 'approvalRequired',
+          correlationId,
+          approvalId: event.approval.id,
+          tool: event.approval.tool,
+          summary: event.approval.summary,
+          risk: event.approval.risk,
+          environment: event.approval.environment
         })
         return
       case 'tool-started':

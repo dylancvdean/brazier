@@ -121,6 +121,11 @@ export type SessionEventType =
   | 'RESPONSE_CANCEL_REQUESTED'
   | 'SESSION_SUMMARY_UPDATED'
   | 'VOICE_SESSION_RENEWED'
+  /** A tool call is held until someone allows it. */
+  | 'APPROVAL_REQUIRED'
+  | 'APPROVAL_DECIDED'
+  /** Something was said in answer, and it was not a yes or a no. */
+  | 'APPROVAL_UNCLEAR'
 
 export type EventSource = 'chat' | 'voice' | 'agent' | 'coordinator'
 
@@ -196,4 +201,13 @@ export type SessionMetrics = {
   agentTasksCancelledByInterruption: number
   /** Voice output discarded for having no authoritative backing. */
   voiceClaimsRejected: number
+  /** Held tool calls allowed by a spoken yes. */
+  approvalsSpokenApproved: number
+  /** Held tool calls refused by a spoken no. */
+  approvalsSpokenDenied: number
+  /**
+   * Answers to a held call that were neither. Worth counting on its own: a
+   * confirmation nobody can give in words is a design problem, not a user error.
+   */
+  approvalsUnclear: number
 }

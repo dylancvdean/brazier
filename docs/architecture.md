@@ -191,6 +191,14 @@ application. The permission layer still judges every call, which is what stops
 this being dangerous rather than merely unwise, but nothing yet confirms a
 spoken instruction before it becomes one.
 
+A tool call the permission broker holds during a spoken turn is read back before
+it runs — what it will do and whether it is inside the sandbox — and the next
+utterance answers it. Only an unmistakable yes allows it; anything qualified
+leaves the call held, because the request came from a microphone and a
+recogniser, and mishearing a refusal as consent runs a command that cannot be
+taken back. Decisions are one-shot, recorded in the conversation, and equally
+available as buttons.
+
 Three cancellations stay separate, because they are different decisions:
 stopping the audio, dropping the current answer, and abandoning the agent task.
 Talking over the assistant does the first only — a long task survives a

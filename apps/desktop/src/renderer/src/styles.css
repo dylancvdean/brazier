@@ -4880,3 +4880,49 @@ label.span-2 {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
+
+/* A held tool call, in the voice pane. The agent panel has the full card with
+   arguments and scope; this is the version for someone who is talking and not
+   looking at it, and it says how to answer in words. */
+.voice-approval {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 12px max(20px, calc((100% - 900px) / 2));
+  border-bottom: 1px solid #3a2f20;
+  background: #191307;
+  color: #e6d3ae;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.voice-approval.host {
+  border-bottom-color: #4a2a2a;
+  background: #1c1010;
+  color: #edc9c9;
+}
+
+.voice-approval > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.voice-approval-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.voice-approval-body span {
+  color: var(--muted);
+}
+
+.voice-approval-hint strong {
+  color: inherit;
+}
+
+.voice-approval button {
+  flex: 0 0 auto;
+}

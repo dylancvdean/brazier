@@ -75,6 +75,23 @@ export type AgentAdapterEvent =
       outcome: string
     }
   | { type: 'toolFailed'; correlationId: string; toolCallId: string; tool: string; error: string }
+  /**
+   * The permission broker is holding a call until someone allows it.
+   *
+   * Normalized out of the agent's approval record because the coordinator has to
+   * read it out loud: the summary is what gets spoken, the risk and environment
+   * decide how firmly, and nothing else travels.
+   */
+  | {
+      type: 'approvalRequired'
+      correlationId: string
+      approvalId: string
+      tool: string
+      summary: string
+      risk: string
+      environment: 'sandbox' | 'host'
+    }
+  | { type: 'approvalResolved'; correlationId: string; approvalId: string }
   | { type: 'runFailed'; correlationId: string; error: string }
   | { type: 'runCancelled'; correlationId: string }
 
@@ -85,6 +102,12 @@ export interface AgentAdapter {
   attachedSessionId(): string | null
   submitTurn(request: AgentTurnRequest): Promise<void>
   cancelRun(correlationId: string): Promise<void>
+  /**
+   * Answer a held call. The coordinator only ever passes on a decision someone
+   * made — it never decides on their behalf, and there is no timeout that turns
+   * silence into consent.
+   */
+  decideApproval(approvalId: string, decision: 'approve' | 'deny', note?: string): Promise<void>
   getStatus(correlationId: string): AgentRunStatusReport | null
   subscribe(listener: (event: AgentAdapterEvent) => void): () => void
 }

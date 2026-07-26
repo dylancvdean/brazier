@@ -126,12 +126,18 @@ what is left is mostly the difference between working and trustworthy.
   `adaptive: false` restores the fixed floor exactly. What is still owed is
   measurement against recorded rooms: fall and rise rates, the flatness
   threshold, and the speech-to-noise bar are reasoned about, not fitted.
-- **Spoken confirmation before destructive agent actions.** Nothing reads an
-  instruction back before it becomes one. The permission broker still judges
-  every call, which is what keeps voice-driven agents unwise rather than
-  dangerous, but it judges a call derived from the least reliable input in the
-  application. This is the gap between the experimental warning in Voice mode
-  and something that could lose it.
+- **Spoken confirmation before destructive agent actions.** *Held calls are read
+  back and answered in words; the warning stays.* A call the permission broker
+  holds is now spoken aloud — what it will do, and whether it is inside the
+  sandbox — and the next thing said answers it: an unmistakable yes allows it,
+  a no refuses it, and anything else leaves it held and says so, because a
+  qualified answer is not consent and the transcript comes from a microphone, an
+  energy gate, and a recogniser. Decisions are one-shot and written into the
+  conversation, and the voice pane shows the held call with buttons, since
+  speech should be the convenient path and not the only one. What this does not
+  do is cover a session set to skip permissions: nothing is held there, so
+  nothing is read back. Removing the warning would also need the transcript
+  itself to be trustworthy, which is the VAD and latency work above.
 - **Handing PersonaPlex the answer to speak.** Its audio is gated off today and
   the platform synthesizer speaks instead, because the persona is a process
   launch flag and the socket carries audio only — so the voice identity is lost
