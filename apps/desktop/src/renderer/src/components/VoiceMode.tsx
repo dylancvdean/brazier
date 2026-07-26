@@ -156,18 +156,27 @@ export function VoiceMode(props: Props): React.JSX.Element {
           <span className="voice-status-dot" />
           <span>{statusLabel}</span>
         </div>
+        {/* Labelled, because two bare bars stacked together gave no way to tell
+            the microphone from the model — and "the meter moves" then says
+            nothing about whether anything is being heard. */}
         <div className="voice-meters" hidden={!live}>
-          <div className="voice-meter">
-            <div
-              className="voice-meter-fill"
-              style={{ width: `${Math.round(session.inputLevel * 100)}%` }}
-            />
+          <div className="voice-meter-row" title="What the microphone is picking up">
+            <Mic size={12} />
+            <div className="voice-meter">
+              <div
+                className="voice-meter-fill"
+                style={{ width: `${Math.round(session.inputLevel * 100)}%` }}
+              />
+            </div>
           </div>
-          <div className="voice-meter">
-            <div
-              className="voice-meter-fill model"
-              style={{ width: `${Math.round(session.outputLevel * 100)}%` }}
-            />
+          <div className="voice-meter-row" title="What the model is playing back">
+            <Volume2 size={12} />
+            <div className="voice-meter">
+              <div
+                className="voice-meter-fill model"
+                style={{ width: `${Math.round(session.outputLevel * 100)}%` }}
+              />
+            </div>
           </div>
         </div>
         <div className="voice-bar-spacer" />

@@ -35,6 +35,9 @@ import { renderVoicePrompt } from './voiceContext'
 /** How often the capture level is reported, in milliseconds. */
 const CAPTURE_REPORT_MS = 500
 
+/** How long to wait for the first microphone frame before reporting silence. */
+const CAPTURE_GRACE_MS = 2000
+
 export type PersonaPlexAdapterOptions = {
   /** PersonaPlex model to run; empty picks the daemon's default. */
   modelId?: () => string
@@ -124,6 +127,16 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     stream.setOutputGate(this.modelAudioEnabled)
     this.stream = stream
     this.sessionId = session.id
+    // A capture path that produces nothing is silent by nature, so ask it what
+    // state it is in rather than waiting for a symptom that never comes.
+    setTimeout(() => {
+      if (this.stream !== stream || this.captureFrames > 0) return
+      this.publish({
+        type: 'sessionError',
+        error: `No microphone audio after ${CAPTURE_GRACE_MS / 1000}s — ${stream.inputStatus()}`,
+        fatal: false
+      })
+    }, CAPTURE_GRACE_MS)
     return { id: session.id, startedAt: Date.now() }
   }
 

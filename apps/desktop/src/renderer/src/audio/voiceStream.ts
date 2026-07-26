@@ -320,6 +320,25 @@ export class VoiceStream {
     }
   }
 
+  /**
+   * State of the capture path, for when no frames are arriving.
+   *
+   * Each of these fails silently and they need different fixes: a context that
+   * is not running renders nothing, a missing track means `getUserMedia` gave
+   * us no audio, and a muted or ended track means the device stopped.
+   */
+  inputStatus(): string {
+    const context = this.captureCtx
+    const tracks = this.media?.getAudioTracks() ?? []
+    const track = tracks[0]
+    return [
+      `context ${context ? context.state : 'absent'}`,
+      `${tracks.length} audio track(s)`,
+      track ? `track ${track.readyState}${track.muted ? ', muted' : ''}` : 'no track',
+      `encoder ${this.encoder ? this.encoder.state : 'absent'}`
+    ].join(', ')
+  }
+
   /** Stop sending microphone audio without dropping the session. */
   setMuted(muted: boolean): void {
     this.muted = muted
