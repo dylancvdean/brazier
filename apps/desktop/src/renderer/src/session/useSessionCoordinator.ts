@@ -110,6 +110,14 @@ export function useSessionCoordinator(
       },
       persistSummary: (conversationId, summary) => {
         void updateConversation(conversationId, { summary }).catch(() => undefined)
+      },
+      // The console is the channel that does not depend on a UI condition being
+      // right or a component being mounted. Voice has too many steps that end
+      // in silence to leave the banner as the only place a failure appears.
+      log: (record) => {
+        const line = `[voice] ${record.eventType} ${record.correlationId}`
+        if (record.errorCategory) console.warn(line, record)
+        else console.debug(line, record)
       }
     })
     return { adapters: { agent, voice }, coordinator: instance }

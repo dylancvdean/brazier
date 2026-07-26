@@ -130,12 +130,17 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     // A capture path that produces nothing is silent by nature, so ask it what
     // state it is in rather than waiting for a symptom that never comes.
     setTimeout(() => {
-      if (this.stream !== stream || this.captureFrames > 0) return
-      this.publish({
-        type: 'sessionError',
-        error: `No microphone audio after ${CAPTURE_GRACE_MS / 1000}s — ${stream.inputStatus()}`,
-        fatal: false
-      })
+      if (this.stream !== stream) return
+      const status = stream.inputStatus()
+      // Logged either way: a working capture path is worth confirming, and the
+      // console does not depend on the banner's conditions being right.
+      if (this.captureFrames > 0) {
+        console.debug(`[voice] capture running: ${this.captureFrames} frames, ${status}`)
+        return
+      }
+      const error = `No microphone audio after ${CAPTURE_GRACE_MS / 1000}s — ${status}`
+      console.warn(`[voice] ${error}`)
+      this.publish({ type: 'sessionError', error, fatal: false })
     }, CAPTURE_GRACE_MS)
     return { id: session.id, startedAt: Date.now() }
   }
@@ -281,6 +286,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       this.publish({ type: 'userTranscriptFinal', utteranceId: utterance.id, text })
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
+      console.warn(`[voice] transcription failed: ${message}`)
       this.options.onTranscriptionError?.(message)
       // Recoverable: the session stays up and the next utterance may work.
       this.publish({
