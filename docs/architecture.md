@@ -99,6 +99,14 @@ collapse them into a single Audio badge meaning.
    `/api/v1/voice/sessions` — not file-attach chat. Apple Silicon Moshi/MLX
    is a planned follow-on.
 
+**Remote servers.** A configured OpenAI-compatible endpoint is a fourth source
+of chat models beside llama.cpp, MLX, and the local catalogue. Connections are
+explicit — base URL, optional key, on/off — and their models appear as
+`remote:{connection}/{model}`, so a conversation records where its answers came
+from. Nothing is discovered on the network, requests carry the model name the
+remote uses rather than Brazier's id, and keys live in `remote/connections.json`
+with restricted permissions and are never returned by the API.
+
 **Vision** attachments hydrate to `image_url` data URLs when the chat model
 advertises `image`. **Video** uses system ffmpeg to sample frames into that
 vision path, optionally with batch ASR on the soundtrack.

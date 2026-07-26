@@ -32,7 +32,7 @@ use crate::{
     engine::{Engine, StreamEvent},
     fork_hints::{self, ModelLoadError, RuntimeForkHint},
     hf::{self, SearchQuery},
-    hf_auth, llama, mcp, media, model_bindings, models_store,
+    hf_auth, llama, mcp, media, model_bindings, models_store, remote,
     progress::ProgressEvent,
     runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry, toolchain_hints,
     types::{
@@ -164,6 +164,18 @@ pub fn router(state: AppState) -> Router {
             get(huggingface_token_status)
                 .put(set_huggingface_token)
                 .delete(clear_huggingface_token),
+        )
+        .route(
+            "/api/v1/remote/connections",
+            get(list_remote_connections).put(save_remote_connection),
+        )
+        .route(
+            "/api/v1/remote/connections/{id}",
+            delete(delete_remote_connection),
+        )
+        .route(
+            "/api/v1/remote/connections/{id}/test",
+            post(test_remote_connection),
         )
         .route("/api/v1/huggingface/models", get(search_hugging_face))
         .route(
@@ -732,6 +744,84 @@ async fn clear_huggingface_token(State(state): State<AppState>) -> ApiResult<Jso
     Ok(Json(
         json!({ "configured": hf_auth::token_configured(&state.data_dir) }),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteConnectionRequest {
+    id: String,
+    #[serde(default)]
+    label: String,
+    base_url: String,
+    /// Omitted keeps whatever key is stored; an empty string clears it.
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+async fn list_remote_connections(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let connections: Vec<remote::PublicConnection> = remote::load(&state.data_dir)
+        .iter()
+        .map(remote::PublicConnection::from)
+        .collect();
+    Ok(Json(json!({ "object": "list", "data": connections })))
+}
+
+async fn save_remote_connection(
+    State(state): State<AppState>,
+    Json(request): Json<RemoteConnectionRequest>,
+) -> ApiResult<Json<Value>> {
+    remote::upsert(
+        &state.data_dir,
+        remote::StoredConnection {
+            id: request.id,
+            label: request.label,
+            base_url: request.base_url,
+            api_key: request.api_key,
+            enabled: request.enabled,
+        },
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
+    // The model list now has different contents; nothing else knows that.
+    state.invalidate_models_cache().await;
+    list_remote_connections(State(state)).await
+}
+
+async fn delete_remote_connection(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    remote::remove(&state.data_dir, &id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    state.invalidate_models_cache().await;
+    list_remote_connections(State(state)).await
+}
+
+/// Contact a configured server and report what it says it can serve.
+///
+/// Separate from saving on purpose: a connection that cannot be reached is
+/// still worth keeping — the machine may be off — so failing to reach it is a
+/// report, not a refusal to store it.
+async fn test_remote_connection(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let connection = remote::find(&state.data_dir, &id)
+        .ok_or_else(|| ApiError::bad_request(format!("no remote connection `{id}`")))?;
+    match remote::fetch_model_names(&state.http, &connection).await {
+        Ok(models) => Ok(Json(json!({ "reachable": true, "models": models }))),
+        Err(error) => Ok(Json(json!({
+            "reachable": false,
+            "error": error.to_string(),
+            "models": [],
+        }))),
+    }
 }
 
 async fn search_hugging_face(

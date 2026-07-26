@@ -29,6 +29,7 @@ pub mod model_bindings;
 pub mod model_library;
 pub mod models_store;
 pub mod progress;
+pub mod remote;
 pub mod rocm;
 pub mod runtime_settings;
 pub mod runtimes;

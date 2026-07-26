@@ -1057,12 +1057,17 @@ pub async fn probe_server(client: &reqwest::Client, base_url: &str) -> serde_jso
 pub async fn chat_once(
     client: &reqwest::Client,
     base_url: &str,
+    api_key: Option<&str>,
     body: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    let response = client
+    let mut request = client
         .post(format!("{base_url}/v1/chat/completions"))
         .json(body)
-        .timeout(Duration::from_secs(300))
+        .timeout(Duration::from_secs(300));
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = request
         .send()
         .await
         .context("llama-server chat request")?;
@@ -1080,12 +1085,17 @@ pub async fn chat_once(
 pub async fn open_chat_stream(
     client: &reqwest::Client,
     base_url: &str,
+    api_key: Option<&str>,
     body: &serde_json::Value,
 ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<StreamChunk>>> {
-    let response = client
+    let mut request = client
         .post(format!("{base_url}/v1/chat/completions"))
         .json(body)
-        .timeout(Duration::from_secs(600))
+        .timeout(Duration::from_secs(600));
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = request
         .send()
         .await
         .context("llama-server stream request")?;

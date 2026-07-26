@@ -4926,3 +4926,11 @@ label.span-2 {
 .voice-approval button {
   flex: 0 0 auto;
 }
+
+/* Remote models come from a server this machine does not control, which is
+   worth seeing at a glance in a list of local ones. */
+.engine-badge.remote {
+  border-color: #2f4a52;
+  background: #10201f;
+  color: #8fd0cd;
+}

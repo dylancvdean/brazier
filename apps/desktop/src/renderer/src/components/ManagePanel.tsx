@@ -6,6 +6,7 @@ import {
   Cpu,
   Download,
   FolderOpen,
+  Globe,
   Hammer,
   HardDrive,
   LoaderCircle,
@@ -31,6 +32,7 @@ import {
   deleteModel,
   createMcpServer,
   deleteMcpServer,
+  deleteRemoteConnection,
   deleteRuntime,
   ensureLlamaEngine,
   ensureSdcppEngine,
@@ -51,6 +53,10 @@ import {
   clearHuggingFaceToken,
   huggingFaceTokenStatus,
   listDownloadJobs,
+  listRemoteConnections,
+  saveRemoteConnection,
+  testRemoteConnection,
+  type RemoteConnection,
   type DownloadJob,
   type HardwareInfo,
   type ManagedLlamaTargetStatus,
@@ -187,7 +193,7 @@ function defaultDiscoverEngine(hardware: HardwareInfo | null): DiscoverEngine {
   return 'llama.cpp'
 }
 
-export type ManageSection = 'library' | 'discover' | 'runtimes' | 'engine' | 'mcp'
+export type ManageSection = 'library' | 'discover' | 'runtimes' | 'engine' | 'mcp' | 'remote'
 
 type ManagePanelProps = {
   section: ManageSection
@@ -213,6 +219,7 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'discover', label: 'Download models', icon: <Download size={15} /> },
   { id: 'runtimes', label: 'Runtimes', icon: <Cpu size={15} /> },
   { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
+  { id: 'remote', label: 'Remote servers', icon: <Globe size={15} /> },
   { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> }
 ]
 
@@ -393,6 +400,7 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
             {props.section === 'discover' && <DiscoverSection {...props} onError={setError} />}
             {props.section === 'runtimes' && <RuntimesSection {...props} onError={setError} />}
             {props.section === 'mcp' && <McpSection {...props} onError={setError} />}
+            {props.section === 'remote' && <RemoteSection {...props} onError={setError} />}
             {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
           </div>
         </div>
@@ -3286,6 +3294,232 @@ function EngineSection(props: SectionProps): React.JSX.Element {
           {saving ? <LoaderCircle className="spin" size={15} /> : 'Apply & restart'}
         </button>
       </div>
+    </section>
+  )
+}
+
+/**
+ * Servers someone else is running, speaking the same OpenAI-compatible protocol
+ * the local engines do.
+ *
+ * Kept deliberately plain: a URL, a label, an optional key. Nothing is
+ * discovered on the network — a local application that scans for open ports is
+ * doing something its user did not ask for — and a connection is contacted only
+ * when it is saved, tested, or listed.
+ */
+function RemoteSection(props: SectionProps): React.JSX.Element {
+  const [connections, setConnections] = useState<RemoteConnection[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState<string | null>(null)
+  const [results, setResults] = useState<
+    Record<string, { reachable: boolean; models: string[]; error?: string }>
+  >({})
+  const [draft, setDraft] = useState({ id: '', label: '', base_url: '', api_key: '' })
+
+  async function reload(): Promise<void> {
+    setLoading(true)
+    props.onError(null)
+    try {
+      setConnections(await listRemoteConnections())
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void reload()
+  }, [])
+
+  async function addConnection(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    if (!draft.id.trim() || !draft.base_url.trim()) return
+    setSaving(true)
+    props.onError(null)
+    try {
+      const next = await saveRemoteConnection({
+        id: draft.id.trim(),
+        label: draft.label.trim() || draft.id.trim(),
+        base_url: draft.base_url.trim(),
+        // Sent only when typed: an empty field means "leave it alone", which is
+        // what editing an existing connection needs.
+        ...(draft.api_key.trim() ? { api_key: draft.api_key.trim() } : {}),
+        enabled: true
+      })
+      setConnections(next)
+      setDraft({ id: '', label: '', base_url: '', api_key: '' })
+      // The model list has different contents now.
+      void props.refreshModels()
+      await test(draft.id.trim())
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function toggleEnabled(connection: RemoteConnection): Promise<void> {
+    props.onError(null)
+    try {
+      setConnections(
+        await saveRemoteConnection({
+          id: connection.id,
+          label: connection.label,
+          base_url: connection.base_url,
+          enabled: !connection.enabled
+        })
+      )
+      void props.refreshModels()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function remove(id: string): Promise<void> {
+    props.onError(null)
+    try {
+      setConnections(await deleteRemoteConnection(id))
+      void props.refreshModels()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function test(id: string): Promise<void> {
+    setTesting(id)
+    try {
+      const result = await testRemoteConnection(id)
+      setResults((current) => ({ ...current, [id]: result }))
+    } catch (cause) {
+      setResults((current) => ({
+        ...current,
+        [id]: { reachable: false, models: [], error: errorText(cause) }
+      }))
+    } finally {
+      setTesting(null)
+    }
+  }
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>Remote servers</h2>
+        <p>
+          Talk to an OpenAI-compatible server you already run — vLLM, llama-server, or anything
+          else speaking the same protocol. Its models appear in the model list, marked with the
+          connection they came from, so a conversation records where its answers were produced.
+        </p>
+      </header>
+
+      {loading ? (
+        <div className="manage-placeholder">
+          <LoaderCircle className="spin" size={16} />
+          Loading…
+        </div>
+      ) : (
+        <>
+          <div className="runtime-list">
+            {connections.length === 0 ? (
+              <p className="model-help">No remote servers configured.</p>
+            ) : (
+              connections.map((connection) => {
+                const result = results[connection.id]
+                return (
+                  <article className="runtime-card" key={connection.id}>
+                    <div className="runtime-card-info">
+                      <strong>{connection.label}</strong>
+                      <span>{connection.base_url}</span>
+                      <span>
+                        {connection.has_api_key ? 'API key stored' : 'No API key'}
+                        {result
+                          ? result.reachable
+                            ? ` · ${result.models.length} model${
+                                result.models.length === 1 ? '' : 's'
+                              }`
+                            : ` · unreachable: ${result.error ?? 'no reason given'}`
+                          : ''}
+                      </span>
+                    </div>
+                    <div className="library-card-actions">
+                      <label className="chip-button subtle" title="Use this server">
+                        <input
+                          type="checkbox"
+                          checked={connection.enabled}
+                          onChange={() => void toggleEnabled(connection)}
+                        />
+                        Enabled
+                      </label>
+                      <button
+                        className="chip-button"
+                        disabled={testing === connection.id}
+                        onClick={() => void test(connection.id)}
+                      >
+                        {testing === connection.id ? (
+                          <LoaderCircle className="spin" size={13} />
+                        ) : (
+                          'Test'
+                        )}
+                      </button>
+                      <button
+                        className="chip-button danger"
+                        onClick={() => void remove(connection.id)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </article>
+                )
+              })
+            )}
+          </div>
+
+          <form className="settings-group" onSubmit={(event) => void addConnection(event)}>
+            <div className="section-label">Add a server</div>
+            <label className="setting-row">
+              <span>Name</span>
+              <input
+                value={draft.id}
+                onChange={(event) => setDraft({ ...draft, id: event.target.value })}
+                placeholder="workstation"
+              />
+            </label>
+            <label className="setting-row">
+              <span>Label</span>
+              <input
+                value={draft.label}
+                onChange={(event) => setDraft({ ...draft, label: event.target.value })}
+                placeholder="Workstation (vLLM)"
+              />
+            </label>
+            <label className="setting-row">
+              <span>Base URL</span>
+              <input
+                value={draft.base_url}
+                onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}
+                placeholder="http://10.0.0.4:8000"
+              />
+            </label>
+            <label className="setting-row">
+              <span>API key</span>
+              <input
+                type="password"
+                value={draft.api_key}
+                onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}
+                placeholder="Optional"
+              />
+            </label>
+            <p className="model-help">
+              Requests leave this machine. A server reached over plain HTTP carries your
+              conversation in the clear, which is fine on a network you trust and not otherwise.
+            </p>
+            <button className="primary" type="submit" disabled={saving}>
+              {saving ? <LoaderCircle className="spin" size={14} /> : 'Add server'}
+            </button>
+          </form>
+        </>
+      )}
     </section>
   )
 }

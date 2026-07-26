@@ -1388,6 +1388,55 @@ export type McpServer = {
   tools: BundledTool[]
 }
 
+/**
+ * An OpenAI-compatible server someone else is running.
+ *
+ * `has_api_key` rather than the key: the daemon never sends one back, so the UI
+ * can say a key is set without ever holding it.
+ */
+export type RemoteConnection = {
+  id: string
+  label: string
+  base_url: string
+  enabled: boolean
+  has_api_key: boolean
+}
+
+export async function listRemoteConnections(): Promise<RemoteConnection[]> {
+  return (await request<{ data: RemoteConnection[] }>('/api/v1/remote/connections')).data
+}
+
+export async function saveRemoteConnection(connection: {
+  id: string
+  label: string
+  base_url: string
+  /** Omit to keep the stored key; empty string clears it. */
+  api_key?: string
+  enabled: boolean
+}): Promise<RemoteConnection[]> {
+  return (
+    await request<{ data: RemoteConnection[] }>('/api/v1/remote/connections', {
+      method: 'PUT',
+      body: JSON.stringify(connection)
+    })
+  ).data
+}
+
+export async function deleteRemoteConnection(id: string): Promise<RemoteConnection[]> {
+  return (
+    await request<{ data: RemoteConnection[] }>(
+      `/api/v1/remote/connections/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    )
+  ).data
+}
+
+export async function testRemoteConnection(
+  id: string
+): Promise<{ reachable: boolean; models: string[]; error?: string }> {
+  return request(`/api/v1/remote/connections/${encodeURIComponent(id)}/test`, { method: 'POST' })
+}
+
 export async function listTools(): Promise<BundledTool[]> {
   return (await request<{ data: BundledTool[] }>('/api/v1/tools')).data
 }

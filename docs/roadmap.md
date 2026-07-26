@@ -153,11 +153,20 @@ what is left is mostly the difference between working and trustworthy.
 
 - Detect and install user-scoped toolchains; guide users through platform SDKs
   and drivers without silent elevation.
-- Add Linux vLLM, remote OpenAI-compatible connections, engine diagnostics, and
+- **Remote OpenAI-compatible connections** are in: named connections (base URL,
+  optional key, on/off), their models listed as `remote:{connection}/{model}`
+  beside local ones, chat and tool rounds routed to them with the model name the
+  server itself uses, and keys stored with restricted file permissions and never
+  returned by the API. A server that is asleep contributes nothing to the model
+  list rather than emptying it. Not attempted: probing what a remote can
+  actually do — capabilities are advertised as plain text in, text out, since
+  the protocol says nothing and claiming vision would fail at the server.
+- Add Linux vLLM (buildable today, not yet servable), engine diagnostics, and
   hardware-specific compatibility tests.
 - Optional mlx-whisper and bundled ffmpeg for stronger offline media prep.
-- Moshi MLX (Apple Silicon) flavor for realtime voice; interruption UX polish;
-  Nemotron VoiceChat if open self-host packaging lands.
+- Interruption UX polish; Nemotron VoiceChat if open self-host packaging lands.
+  (Moshi MLX for Apple Silicon shipped: the `personaplex-mlx` recipe, the
+  `local_web` backend, and activation are in place.)
 - Broader generation families beyond sd.cpp (e.g. Diffusers for Hunyuan/CogVideoX)
   if needed.
 

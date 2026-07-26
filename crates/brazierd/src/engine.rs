@@ -13,7 +13,7 @@ use crate::{
     mlx::{self, MlxKind, MlxServer},
     model_bindings, models_store,
     progress::{ProgressCallback, ProgressEvent},
-    rocm,
+    remote, rocm,
     runtime_settings::{self, RuntimeSettings, RuntimeTarget},
     runtimes, sdcpp, streaming_asr,
     tool_registry::{self, ToolContext},
@@ -95,10 +95,34 @@ pub struct VoiceState {
     pub sessions: voice::SessionManager,
 }
 
+#[derive(Debug)]
 enum ActiveBackend {
     Llama(String),
     Mlx(String),
+    /// A server someone else is running. Nothing is started or loaded here —
+    /// the model is already up, or the request fails and says so.
+    Remote {
+        base_url: String,
+        api_key: Option<String>,
+        /// The name the remote knows this model by, which is not our model id.
+        model: String,
+    },
 }
+
+/// Where a prepared request is sent, and what it authenticates with.
+struct Endpoint {
+    base_url: String,
+    api_key: Option<String>,
+    /// What to call the model in the request body.
+    ///
+    /// A local server holds one model and answers to `local` whatever it is
+    /// called; a remote server holds several and needs its own name for the one
+    /// being asked, which is not the id Brazier stores.
+    model_alias: String,
+}
+
+/// What a locally launched server calls whichever model it has loaded.
+const LOCAL_MODEL_ALIAS: &str = "local";
 
 /// Fraction of total RAM treated as usable for model residency in `auto`
 /// memory arbitration. The remainder absorbs the OS, other apps, and runtime
@@ -252,10 +276,14 @@ impl Runtime {
             .map(PathBuf::from)
             .collect();
         let data_dir = self.data_dir.clone();
-        let models = tokio::task::spawn_blocking(move || {
+        let mut models = tokio::task::spawn_blocking(move || {
             models_store::list_local_models(&data_dir, &extra_paths)
         })
         .await??;
+        // Remote listings are network calls, so they ride the same cache as the
+        // local scan: one round of requests per invalidation, not per page load.
+        // A server that is asleep contributes nothing and costs nothing else.
+        models.extend(remote::list_models(&self.http, &self.data_dir).await);
         *self.models_cache.lock().await = Some(models.clone());
         Ok(models)
     }
@@ -1224,6 +1252,25 @@ impl Runtime {
                 model.to_owned(),
             ));
         }
+        if let Some((connection_id, remote_model)) = remote::parse_model_id(model) {
+            let connection = remote::find(&self.data_dir, &connection_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no remote connection `{connection_id}` — it may have been removed since this conversation last used it"
+                )
+            })?;
+            anyhow::ensure!(
+                connection.enabled,
+                "the remote connection `{connection_id}` is switched off"
+            );
+            return Ok((
+                ActiveBackend::Remote {
+                    base_url: connection.base_url,
+                    api_key: connection.api_key,
+                    model: remote_model,
+                },
+                model.to_owned(),
+            ));
+        }
         if MlxKind::from_model_id(model).is_some() {
             if model.starts_with("mlx-ext:") || model.starts_with("mlx-vlm-ext:") {
                 let model_path =
@@ -1238,7 +1285,7 @@ impl Runtime {
             return Ok((ActiveBackend::Mlx(model.to_owned()), model.to_owned()));
         }
         anyhow::bail!(
-            "unknown model `{model}`; download a GGUF (`gguf:…`) or MLX (`mlx:…`) model first"
+            "unknown model `{model}`; download a GGUF (`gguf:…`) or MLX (`mlx:…`) model, or add a remote connection"
         );
     }
 
@@ -1262,6 +1309,11 @@ impl Runtime {
         let extra = self.extra_library_paths().await;
         let (backend, model_id) = self.resolve_model(&request.model, &extra)?;
         match &backend {
+            // Nothing to start: the server is someone else's, already running or
+            // not, and the request will say which.
+            ActiveBackend::Remote { base_url, .. } => {
+                emit(&load_tx, "server", &format!("Using {base_url}…")).await;
+            }
             ActiveBackend::Llama(model_path) => {
                 emit(&load_tx, "server", "Starting llama.cpp server…").await;
                 emit(&load_tx, "load", "Loading GGUF weights into memory…").await;
@@ -1430,22 +1482,40 @@ impl Runtime {
         Ok(converted > 0)
     }
 
-    async fn backend_base_url(&self, backend: &ActiveBackend) -> anyhow::Result<String> {
+    /// Where to send the request, and what to authenticate with.
+    async fn backend_endpoint(&self, backend: &ActiveBackend) -> anyhow::Result<Endpoint> {
         match backend {
             ActiveBackend::Llama(_) => {
                 let guard = self.llama.lock().await;
                 let Some(server) = guard.server.as_ref() else {
                     anyhow::bail!("llama-server is not running");
                 };
-                Ok(server.base_url.clone())
+                Ok(Endpoint {
+                    base_url: server.base_url.clone(),
+                    api_key: None,
+                    model_alias: LOCAL_MODEL_ALIAS.to_owned(),
+                })
             }
             ActiveBackend::Mlx(_) => {
                 let guard = self.mlx.lock().await;
                 let Some(server) = guard.server.as_ref() else {
                     anyhow::bail!("MLX server is not running");
                 };
-                Ok(server.base_url.clone())
+                Ok(Endpoint {
+                    base_url: server.base_url.clone(),
+                    api_key: None,
+                    model_alias: LOCAL_MODEL_ALIAS.to_owned(),
+                })
             }
+            ActiveBackend::Remote {
+                base_url,
+                api_key,
+                model,
+            } => Ok(Endpoint {
+                base_url: base_url.clone(),
+                api_key: api_key.clone(),
+                model_alias: model.clone(),
+            }),
         }
     }
 
@@ -1486,8 +1556,8 @@ impl Runtime {
                     return;
                 }
             };
-            let base_url = match runtime.backend_base_url(&backend).await {
-                Ok(url) => url,
+            let endpoint = match runtime.backend_endpoint(&backend).await {
+                Ok(endpoint) => endpoint,
                 Err(error) => {
                     let _ = tx.send(Err(error)).await;
                     return;
@@ -1499,7 +1569,7 @@ impl Runtime {
                 crate::harmony::is_harmony_model(&request.model),
             );
             if let Err(error) =
-                stream_tool_rounds(&runtime, &base_url, request, settings, tools_active, &tx).await
+                stream_tool_rounds(&runtime, &endpoint, request, settings, tools_active, &tx).await
             {
                 let _ = tx.send(Err(error)).await;
             }
@@ -1571,7 +1641,7 @@ impl Engine for Runtime {
 
     async fn generate(&self, request: &ChatCompletionRequest) -> anyhow::Result<Generation> {
         let (backend, settings, mut request) = self.prepare_generation(request, None).await?;
-        let base_url = self.backend_base_url(&backend).await?;
+        let endpoint = self.backend_endpoint(&backend).await?;
         let tools_active = tool_registry::tools_enabled(
             &self.data_dir,
             &request,
@@ -1588,11 +1658,19 @@ impl Engine for Runtime {
         let mut audio_fallback_attempted = false;
         for round in 0..MAX_TOOL_ROUNDS {
             let last_round = round + 1 == MAX_TOOL_ROUNDS;
-            let mut body = llama::translate_chat_request(&request, &settings, "local", false);
+            let mut body =
+                llama::translate_chat_request(&request, &settings, &endpoint.model_alias, false);
             if last_round && let Some(object) = body.as_object_mut() {
                 object.remove("tools");
             }
-            let response = match llama::chat_once(&self.http, &base_url, &body).await {
+            let response = match llama::chat_once(
+                &self.http,
+                &endpoint.base_url,
+                endpoint.api_key.as_deref(),
+                &body,
+            )
+            .await
+            {
                 Ok(response) => response,
                 Err(error) => {
                     if !audio_fallback_attempted
@@ -1815,7 +1893,7 @@ async fn generated_media_message(
 /// Streaming generation loop with server-side tool execution.
 async fn stream_tool_rounds(
     runtime: &Runtime,
-    base_url: &str,
+    endpoint: &Endpoint,
     mut request: ChatCompletionRequest,
     settings: RuntimeSettings,
     tools_active: bool,
@@ -1830,11 +1908,19 @@ async fn stream_tool_rounds(
     let mut audio_fallback_attempted = false;
     for round in 0..MAX_TOOL_ROUNDS {
         let last_round = round + 1 == MAX_TOOL_ROUNDS;
-        let mut body = llama::translate_chat_request(&request, &settings, "local", true);
+        let mut body =
+            llama::translate_chat_request(&request, &settings, &endpoint.model_alias, true);
         if last_round && let Some(object) = body.as_object_mut() {
             object.remove("tools");
         }
-        let mut chunks = match llama::open_chat_stream(&runtime.http, base_url, &body).await {
+        let mut chunks = match llama::open_chat_stream(
+            &runtime.http,
+            &endpoint.base_url,
+            endpoint.api_key.as_deref(),
+            &body,
+        )
+        .await
+        {
             Ok(chunks) => chunks,
             Err(error) => {
                 if !audio_fallback_attempted
@@ -2000,6 +2086,64 @@ mod tests {
             assert!(error.contains("gfx1100"), "{error}");
             assert!(error.contains("Vulkan"), "{error}");
         }
+    }
+
+    /// A remote model must reach the configured server, under the name that
+    /// server knows it by — not the id Brazier stores it under.
+    #[tokio::test]
+    async fn a_remote_model_routes_to_its_connection() {
+        let dir = tempdir().unwrap();
+        remote::upsert(
+            dir.path(),
+            remote::StoredConnection {
+                id: "work".into(),
+                label: "Workstation".into(),
+                base_url: "http://10.0.0.4:8000".into(),
+                api_key: Some("sk-test".into()),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
+        let (backend, model_id) = runtime
+            .resolve_model("remote:work/qwen3-8b", &[])
+            .expect("a configured remote must resolve");
+        assert_eq!(model_id, "remote:work/qwen3-8b");
+        let endpoint = runtime.backend_endpoint(&backend).await.unwrap();
+        assert_eq!(endpoint.base_url, "http://10.0.0.4:8000");
+        assert_eq!(endpoint.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(endpoint.model_alias, "qwen3-8b");
+    }
+
+    #[tokio::test]
+    async fn a_remote_that_is_gone_or_off_says_which() {
+        let dir = tempdir().unwrap();
+        let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
+        // A conversation can outlive the connection it was held over.
+        let error = runtime
+            .resolve_model("remote:work/qwen3-8b", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no remote connection `work`"), "{error}");
+
+        remote::upsert(
+            dir.path(),
+            remote::StoredConnection {
+                id: "work".into(),
+                label: "Workstation".into(),
+                base_url: "http://10.0.0.4:8000".into(),
+                api_key: None,
+                enabled: false,
+            },
+        )
+        .await
+        .unwrap();
+        let error = runtime
+            .resolve_model("remote:work/qwen3-8b", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("switched off"), "{error}");
     }
 
     #[tokio::test]
