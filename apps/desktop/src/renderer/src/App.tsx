@@ -370,6 +370,30 @@ export function App(): React.JSX.Element {
     writeEnabledTools(next)
   }, [])
 
+  /**
+   * Re-read what the host can do. Building a runtime or downloading a model
+   * changes these while the window is open, and a stale answer decides which
+   * transcription engine a spoken turn is sent to — or hides voice mode behind
+   * a requirement that has already been met.
+   */
+  const refreshCapabilities = useCallback(async (): Promise<void> => {
+    try {
+      const payload = await fetchCapabilities()
+      const audio = payload.features.audio_interfaces
+      setPipelineFeatures({
+        asr: Boolean(payload.features.asr ?? audio?.batch_asr?.available),
+        video_preprocess: Boolean(payload.features.video_preprocess),
+        whisper_cpp_engine: Boolean(payload.features.whisper_cpp_engine),
+        native_model_audio: Boolean(audio?.native_model_audio?.available),
+        streaming_asr: Boolean(audio?.streaming_asr?.available),
+        realtime_voice: Boolean(audio?.realtime_voice?.available)
+      })
+      setRealtimeVoiceAvailable(Boolean(audio?.realtime_voice?.available))
+    } catch {
+      // Keep the last known answer; the picker still shows what it had.
+    }
+  }, [])
+
   async function refreshTools(): Promise<void> {
     try {
       const tools = await listTools()
@@ -425,20 +449,7 @@ export function App(): React.JSX.Element {
         setModelLoadStatus(null)
         void prefetchRuntimes()
         void fetchModelBindings().then(setModelBindings).catch(() => {})
-        void fetchCapabilities()
-          .then((payload) => {
-            const audio = payload.features.audio_interfaces
-            setPipelineFeatures({
-              asr: Boolean(payload.features.asr ?? audio?.batch_asr?.available),
-              video_preprocess: Boolean(payload.features.video_preprocess),
-              whisper_cpp_engine: Boolean(payload.features.whisper_cpp_engine),
-              native_model_audio: Boolean(audio?.native_model_audio?.available),
-              streaming_asr: Boolean(audio?.streaming_asr?.available),
-              realtime_voice: Boolean(audio?.realtime_voice?.available)
-            })
-            setRealtimeVoiceAvailable(Boolean(audio?.realtime_voice?.available))
-          })
-          .catch(() => {})
+        void refreshCapabilities()
       })
       .catch((cause: unknown) => {
         if ((cause as Error).name === 'AbortError') return
@@ -750,20 +761,7 @@ export function App(): React.JSX.Element {
     void refreshRuntime().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
-    void fetchCapabilities()
-      .then((payload) => {
-        const audio = payload.features.audio_interfaces
-        setPipelineFeatures({
-          asr: Boolean(payload.features.asr ?? audio?.batch_asr?.available),
-          video_preprocess: Boolean(payload.features.video_preprocess),
-          whisper_cpp_engine: Boolean(payload.features.whisper_cpp_engine),
-          native_model_audio: Boolean(audio?.native_model_audio?.available),
-          streaming_asr: Boolean(audio?.streaming_asr?.available),
-          realtime_voice: Boolean(audio?.realtime_voice?.available)
-        })
-        setRealtimeVoiceAvailable(Boolean(audio?.realtime_voice?.available))
-      })
-      .catch(() => {})
+    void refreshCapabilities()
   }, [])
 
   useEffect(() => {
@@ -814,6 +812,13 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     scrollAnchor.current?.scrollIntoView({ behavior: 'smooth' })
   }, [chain.length, liveText])
+
+  // Entering Voice mode is exactly when a runtime or model installed since
+  // launch would otherwise still look missing.
+  useEffect(() => {
+    if (appMode !== 'voice') return
+    void refreshCapabilities()
+  }, [appMode, refreshCapabilities])
 
   // Voice writes into a conversation, so there has to be one before the user can
   // start speaking.
@@ -1344,7 +1349,13 @@ export function App(): React.JSX.Element {
             enabledTools={enabledTools}
             onEnabledToolsChange={updateEnabledTools}
             settings={runtime}
-            onSettingsSaved={setRuntime}
+            onSettingsSaved={(saved) => {
+              setRuntime(saved)
+              // Choosing a Whisper or Nemotron model can be what makes
+              // transcription available at all.
+              void refreshCapabilities()
+            }}
+            onRuntimeActivated={() => void refreshCapabilities()}
             onAgentSessionBound={(agentSessionId) =>
               void session.bindAgentSession(agentSessionId)
             }

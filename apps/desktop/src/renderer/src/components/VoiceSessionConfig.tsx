@@ -31,7 +31,7 @@ import {
   type AgentSessionSummary
 } from '../agentApi'
 import type { AgentPermissionMode } from '../../../agent/core/types'
-import type { AsrPreference, VoiceSessionTarget } from '../session/config'
+import { resolveAsrEngine, type AsrPreference, type VoiceSessionTarget } from '../session/config'
 import { modelDisplayName } from '../model-utils'
 
 type Props = {
@@ -49,6 +49,8 @@ type Props = {
   asrAvailable: { batch: boolean; streaming: boolean }
   asrPreference: AsrPreference
   onAsrPreferenceChange: (preference: AsrPreference) => void
+  /** Re-read host capabilities after activating a runtime. */
+  onRuntimeActivated?: () => void
   /** Agent session bound to this conversation, when there is one. */
   agentSessionId: string | null
   onAgentSessionBound: (agentSessionId: string) => void
@@ -200,6 +202,9 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
     setPending((current) => ({ ...current, permissionMode: mode }))
   }
 
+  // Resolved by the same function the session uses, so what is shown is what
+  // will happen rather than a second opinion about it.
+  const resolved = resolveAsrEngine(props.asrPreference, props.asrAvailable)
   const workspace = agentSession?.workspace_path ?? pending.workspacePath
   const permissionMode: AgentPermissionMode =
     agentSession?.permission_mode ?? pending.permissionMode
@@ -227,6 +232,7 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
                   void guard(async () => {
                     await activateRuntime(entry.id)
                     await refreshRuntimes()
+                    props.onRuntimeActivated?.()
                   })
                 }
               >
@@ -309,6 +315,13 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
               </select>
             </label>
           ) : null}
+          <p className="voice-notice">
+            {resolved === undefined && !props.asrAvailable.batch
+              ? 'Nothing chosen would transcribe: this would go to Whisper, which is not installed.'
+              : `A spoken turn will be transcribed by ${
+                  resolved === 'streaming-asr' ? 'Nemotron streaming' : 'Whisper'
+                }.`}
+          </p>
           {!props.asrAvailable.batch && !props.asrAvailable.streaming ? (
             <p className="voice-notice">
               <AlertTriangle size={13} /> Nothing installed to transcribe with. Build WhisperKit

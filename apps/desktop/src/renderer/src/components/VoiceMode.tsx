@@ -42,6 +42,7 @@ type Props = {
   onEnabledToolsChange: (names: string[]) => void
   settings: RuntimeSettings | null
   onSettingsSaved: (settings: RuntimeSettings) => void
+  onRuntimeActivated?: () => void
   onAgentSessionBound: (agentSessionId: string) => void
   /** The shared conversation. Voice turns land in it beside typed ones. */
   session: SessionCoordinatorHandle
@@ -375,6 +376,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
               onEnabledToolsChange={props.onEnabledToolsChange}
               settings={props.settings}
               onSettingsSaved={props.onSettingsSaved}
+              onRuntimeActivated={props.onRuntimeActivated}
               asrAvailable={props.asrAvailable}
               asrPreference={config.asrPreference}
               onAsrPreferenceChange={(asrPreference) =>
