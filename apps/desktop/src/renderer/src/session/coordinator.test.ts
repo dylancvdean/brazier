@@ -33,7 +33,10 @@ function harness(overrides: Partial<IntegrationConfig> = {}) {
     log: (record) => logs.push(`${record.eventType}:${record.correlationId}`),
     config: { ...DEFAULT_INTEGRATION_CONFIG, voiceEnabled: true, ...overrides }
   })
-  return { clock, chat, agent, voice, responder, coordinator, logs }
+  // Adapters are connected explicitly, the way the React binding does from an
+  // effect. Subscribing in the constructor is what let a remount detach it.
+  const disconnect = coordinator.connect()
+  return { clock, chat, agent, voice, responder, coordinator, logs, disconnect }
 }
 
 /**
@@ -152,6 +155,46 @@ describe('basic flows', () => {
     expect(context.agent.submitted).toHaveLength(0)
     expect(context.chat.assistantMessages()[0].source).toBe('assistant_chat')
     expect(context.coordinator.snapshot().responses[0].owner).toBe('chat')
+  })
+})
+
+describe('adapter connection', () => {
+  /**
+   * The bug this exists for: subscriptions were made in the constructor and torn
+   * down from a React effect's cleanup. StrictMode runs setup, cleanup, setup on
+   * mount, so the coordinator ended up alive and detached — the microphone ran,
+   * the adapter logged frames, and every event went nowhere. No error, no
+   * transcript, no reply.
+   */
+  it('survives the disconnect and reconnect a remount performs', async () => {
+    const context = harness({ voiceSessionTarget: 'agent' })
+    await context.coordinator.attach('conv-1')
+
+    // What StrictMode does on mount.
+    context.disconnect()
+    context.coordinator.connect()
+
+    await context.coordinator.startVoiceSession()
+    speak(context.voice, 'utt-1', 'Still listening?')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(context.agent.submitted).toHaveLength(1)
+    expect(context.chat.messages.map((message) => message.source)).toEqual(['user_voice'])
+  })
+
+  it('hears nothing at all once disconnected', async () => {
+    const context = harness({ voiceSessionTarget: 'agent' })
+    await context.coordinator.attach('conv-1')
+    await context.coordinator.startVoiceSession()
+    context.disconnect()
+
+    speak(context.voice, 'utt-1', 'Anyone there?')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // Detached is detached — which is why it has to be re-established, not
+    // assumed to have been done once in the constructor.
+    expect(context.agent.submitted).toHaveLength(0)
+    expect(context.chat.messages).toHaveLength(0)
   })
 })
 

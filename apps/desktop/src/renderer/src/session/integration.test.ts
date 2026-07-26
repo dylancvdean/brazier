@@ -247,6 +247,7 @@ describe('coordinator over the real agent adapter', () => {
         allowVoiceBackchannels: false
       }
     })
+    coordinator.connect()
     await coordinator.attach('conv-1')
     await coordinator.startVoiceSession()
     return { bridge, chat, voice, agent, coordinator }

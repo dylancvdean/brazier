@@ -85,6 +85,14 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   }
 
   private publish(event: VoiceAdapterEvent): void {
+    // An adapter nobody is listening to behaves exactly like one that is
+    // working: the microphone runs, the logs here appear, and every event is
+    // dropped on the floor. Worth saying out loud rather than inferring from
+    // which downstream lines are missing.
+    if (this.listeners.size === 0) {
+      console.warn(`[voice] adapter published ${event.type} with no listener attached`)
+      return
+    }
     for (const listener of [...this.listeners]) listener(event)
   }
 

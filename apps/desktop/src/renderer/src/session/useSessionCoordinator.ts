@@ -134,15 +134,17 @@ export function useSessionCoordinator(
     }
   }, [coordinator])
 
+  // Attach and detach together, so a remount reconnects rather than leaving the
+  // coordinator alive and deaf. StrictMode performs exactly that cycle on mount.
+  useEffect(() => coordinator.connect(), [coordinator])
+
   useEffect(
     () => () => {
       // Voice is a renderer resource and goes with the component. The agent run
       // does not: it lives in the worker process.
       void coordinator.endVoiceSession()
-      coordinator.dispose()
-      adapters.agent.dispose()
     },
-    [coordinator, adapters]
+    [coordinator]
   )
 
   // Rebind whenever the conversation changes, adopting its agent session.

@@ -112,12 +112,23 @@ export type CoordinatorDeps = {
   log?: (record: DiagnosticRecord) => void
 }
 
+/**
+ * How many coordinators this page has built.
+ *
+ * One is expected. More means a remount left an earlier one alive, holding the
+ * audio graph and the adapter subscriptions while a newer one renders — which
+ * looks like a working session that ignores everything.
+ */
+let instances = 0
+
 /** Immediate acknowledgments. None of them claims anything happened. */
 const BACKCHANNELS = ['Let me check.', "I'm looking at that now.", 'One moment.']
 
 export class SessionCoordinator {
   readonly events = new SessionEventLog()
 
+  /** Identifies this instance in the log; see `instances`. */
+  readonly id: string
   private readonly deps: CoordinatorDeps
   private readonly now: () => number
   private readonly newId: (prefix: string) => string
@@ -151,7 +162,6 @@ export class SessionCoordinator {
   private interruptRequestedAt: number | null = null
 
   private readonly listeners = new Set<(snapshot: CoordinatorSnapshot) => void>()
-  private readonly unsubscribes: Array<() => void> = []
   private readonly metricsState: SessionMetrics = {
     transcriptToAgentStartMs: [],
     responseToSpeechStartMs: [],
@@ -177,12 +187,33 @@ export class SessionCoordinator {
       })
     this.config = deps.config ?? DEFAULT_INTEGRATION_CONFIG
     this.persona = deps.persona ?? 'You are a helpful assistant.'
-    this.unsubscribes.push(deps.agent.subscribe((event) => this.onAgentEvent(event)))
-    this.unsubscribes.push(deps.voice.subscribe((event) => this.onVoiceEvent(event)))
+    instances += 1
+    this.id = `coord-${instances}`
+    console.debug(`[voice] ${this.id} constructed`)
+  }
+
+  /**
+   * Subscribe to the adapters, returning a function that detaches again.
+   *
+   * Subscribing in the constructor while detaching from a React effect's
+   * cleanup is asymmetric, and StrictMode exists to expose exactly that: its
+   * mount/unmount/mount cycle detached the coordinator and nothing re-attached
+   * it, so the microphone kept running and every event it produced went to
+   * nobody. Connecting is something that can be undone and redone.
+   */
+  connect(): () => void {
+    const unsubscribes = [
+      this.deps.agent.subscribe((event) => this.onAgentEvent(event)),
+      this.deps.voice.subscribe((event) => this.onVoiceEvent(event))
+    ]
+    console.debug(`[voice] ${this.id} connected to its adapters`)
+    return () => {
+      console.debug(`[voice] ${this.id} disconnected from its adapters`)
+      for (const unsubscribe of unsubscribes) unsubscribe()
+    }
   }
 
   dispose(): void {
-    for (const unsubscribe of this.unsubscribes) unsubscribe()
     this.listeners.clear()
   }
 
@@ -701,7 +732,7 @@ export class SessionCoordinator {
       case 'captureLevel': {
         this.capture = { frames: event.frames, peak: event.peak, status: event.status }
         console.debug(
-          `[voice] coordinator sees ${event.frames} frames, peak ${event.peak.toFixed(3)}`
+          `[voice] ${this.id} sees ${event.frames} frames, peak ${event.peak.toFixed(3)}`
         )
         this.publish()
         return

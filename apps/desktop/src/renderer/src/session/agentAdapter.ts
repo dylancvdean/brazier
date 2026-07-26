@@ -36,20 +36,16 @@ export class WorkerAgentAdapter implements AgentAdapter {
   private activeCorrelationId: string | null = null
   private readonly statuses = new Map<string, AgentRunStatusReport>()
   private readonly listeners = new Set<(event: AgentAdapterEvent) => void>()
-  private readonly unsubscribe: () => void
+  /** Attached while anyone is listening; see `subscribe`. */
+  private bridge: (() => void) | undefined
   /** Text accumulated for the current run, to synthesize a final if needed. */
   private streamed = ''
 
-  constructor(private readonly model?: () => string | undefined) {
-    this.unsubscribe = window.brazier.agent.onMessage((message: WorkerMessage) => {
-      if (message.type !== 'event') return
-      if (message.sessionId !== this.sessionId) return
-      this.onWorkerEvent(message.event)
-    })
-  }
+  constructor(private readonly model?: () => string | undefined) {}
 
   dispose(): void {
-    this.unsubscribe()
+    this.bridge?.()
+    this.bridge = undefined
     this.listeners.clear()
   }
 
@@ -125,9 +121,26 @@ export class WorkerAgentAdapter implements AgentAdapter {
     return this.statuses.get(correlationId) ?? null
   }
 
+  /**
+   * The worker bridge is attached while there is someone to hand events to, so
+   * subscribing and unsubscribing stay symmetric. Attaching in the constructor
+   * and detaching on dispose did not: one React remount left the adapter
+   * permanently deaf to the worker.
+   */
   subscribe(listener: (event: AgentAdapterEvent) => void): () => void {
     this.listeners.add(listener)
-    return () => this.listeners.delete(listener)
+    this.bridge ??= window.brazier.agent.onMessage((message: WorkerMessage) => {
+      if (message.type !== 'event') return
+      if (message.sessionId !== this.sessionId) return
+      this.onWorkerEvent(message.event)
+    })
+    return () => {
+      this.listeners.delete(listener)
+      if (this.listeners.size === 0) {
+        this.bridge?.()
+        this.bridge = undefined
+      }
+    }
   }
 
   private publish(event: AgentAdapterEvent): void {
