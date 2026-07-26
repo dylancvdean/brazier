@@ -166,6 +166,8 @@ export type ToolchainTool = {
   label: string
   available: boolean
   required_for: string
+  /** Where the tool was found, which is not always where it was expected. */
+  path?: string | null
   install_hint: string | null
 }
 

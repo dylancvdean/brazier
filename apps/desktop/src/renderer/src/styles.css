@@ -4934,3 +4934,43 @@ label.span-2 {
   background: #10201f;
   color: #8fd0cd;
 }
+
+/* What the machine has of what a source build needs, with the command to fix
+   what it does not. Shown beside the build form rather than in a preflight
+   dialog: it is a fact about the machine, not a step to click through. */
+.toolchain-checklist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 8px 0 4px;
+  font-size: 11px;
+}
+
+.toolchain-tool {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.toolchain-tool.ok .toolchain-tool-name {
+  color: #8fd0a3;
+}
+
+.toolchain-tool.missing .toolchain-tool-name {
+  color: #e7bdbd;
+}
+
+.toolchain-tool-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.toolchain-tool-detail {
+  overflow: hidden;
+  max-width: 320px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono, ui-monospace, monospace);
+}

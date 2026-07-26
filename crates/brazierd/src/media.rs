@@ -47,14 +47,31 @@ pub fn detect_pipeline_features(
 }
 
 pub fn ffmpeg_available() -> bool {
-    command_on_path("ffmpeg") && command_on_path("ffprobe")
+    ffmpeg_binary().is_some() && ffprobe_binary().is_some()
 }
 
-fn command_on_path(name: &str) -> bool {
-    let Ok(path_env) = std::env::var("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_env).any(|dir| dir.join(name).is_file())
+/// ffmpeg, wherever it actually is.
+///
+/// Not `ffmpeg_command()`: a desktop application does not inherit the
+/// shell's `PATH`, so a Homebrew or user-scoped install is invisible to the
+/// process even though the user installed it exactly as told. The resolver
+/// searches `PATH` first and the usual user-scoped locations after, and what it
+/// finds is what gets run — detecting a binary the invocation cannot reach is
+/// worse than not detecting it.
+fn ffmpeg_binary() -> Option<PathBuf> {
+    crate::toolchain_hints::resolve_command("ffmpeg")
+}
+
+fn ffprobe_binary() -> Option<PathBuf> {
+    crate::toolchain_hints::resolve_command("ffprobe")
+}
+
+fn ffmpeg_command() -> Command {
+    Command::new(ffmpeg_binary().unwrap_or_else(|| PathBuf::from("ffmpeg")))
+}
+
+fn ffprobe_command() -> Command {
+    Command::new(ffprobe_binary().unwrap_or_else(|| PathBuf::from("ffprobe")))
 }
 
 pub fn ffmpeg_missing_message() -> &'static str {
@@ -226,7 +243,7 @@ async fn sample_frames(
         .context("create frame directory")?;
     let fps = frame_count as f64 / duration;
     let pattern = frame_dir.join("frame-%03d.jpg");
-    let status = Command::new("ffmpeg")
+    let status = ffmpeg_command()
         .args([
             "-y",
             "-i",
@@ -471,7 +488,7 @@ async fn ensure_wav(input: &Path) -> anyhow::Result<PathBuf> {
     }
     anyhow::ensure!(ffmpeg_available(), "{}", ffmpeg_missing_message());
     let output = input.with_extension("16k.wav");
-    let status = Command::new("ffmpeg")
+    let status = ffmpeg_command()
         .args([
             "-y",
             "-i",
@@ -571,7 +588,7 @@ async fn prepare_video(
 
     let fps = frame_count as f64 / duration;
     let pattern = frame_dir.join("frame-%03d.jpg");
-    let status = Command::new("ffmpeg")
+    let status = ffmpeg_command()
         .args([
             "-y",
             "-i",
@@ -674,7 +691,7 @@ async fn extract_and_transcribe_audio(
     name: &str,
 ) -> anyhow::Result<String> {
     let audio = video.with_extension("track.wav");
-    let status = Command::new("ffmpeg")
+    let status = ffmpeg_command()
         .args([
             "-y",
             "-i",
@@ -733,7 +750,7 @@ async fn extract_and_transcribe_audio(
 }
 
 async fn probe_duration_seconds(path: &Path) -> anyhow::Result<f64> {
-    let output = Command::new("ffprobe")
+    let output = ffprobe_command()
         .args([
             "-v",
             "error",

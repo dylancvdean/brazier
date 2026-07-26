@@ -1,6 +1,6 @@
 //! OS/distro-specific install commands for build prerequisites.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::runtime_settings::RuntimeTarget;
 
@@ -395,6 +395,9 @@ pub fn toolchain_status() -> serde_json::Value {
                 "label": label,
                 "available": available,
                 "required_for": summary,
+                // Which copy was found, so "installed" can be checked against
+                // the one the user thinks they installed.
+                "path": resolve_command(id).map(|path| path.display().to_string()),
                 "install_hint": if available {
                     serde_json::Value::Null
                 } else {
@@ -624,18 +627,124 @@ pub fn missing_cmake_or_vs_generator(log_lower: &str) -> bool {
 }
 
 fn command_on_path(name: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|directory| {
-            let candidate = directory.join(name);
-            candidate.is_file()
-                || (cfg!(windows) && directory.join(format!("{name}.exe")).is_file())
-        })
-    })
+    resolve_command(name).is_some()
+}
+
+/// Where tools live when they are not on the inherited `PATH`.
+///
+/// A desktop application does not get the shell's environment. Launched from
+/// Finder, macOS hands it `/usr/bin:/bin:/usr/sbin:/sbin`, so Homebrew's cmake
+/// in `/opt/homebrew/bin` is invisible and Brazier reports a toolchain missing
+/// on a machine that has had it for years — then prints an install command for
+/// something already installed. The same applies to `~/.local/bin` and
+/// `~/.cargo/bin` on Linux, which is where user-scoped installs go precisely so
+/// that nothing needs elevation.
+///
+/// These are searched after `PATH`, so a deliberate environment still wins.
+fn user_scoped_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    if let Some(home) = &home {
+        directories.push(home.join(".local/bin"));
+        directories.push(home.join(".cargo/bin"));
+        directories.push(home.join("bin"));
+    }
+    if cfg!(target_os = "macos") {
+        directories.push(PathBuf::from("/opt/homebrew/bin"));
+        directories.push(PathBuf::from("/usr/local/bin"));
+        directories.push(PathBuf::from("/opt/local/bin"));
+        if let Some(home) = &home {
+            directories.push(home.join("homebrew/bin"));
+        }
+    }
+    if cfg!(target_os = "linux") {
+        directories.push(PathBuf::from("/usr/local/bin"));
+        directories.push(PathBuf::from("/var/lib/flatpak/exports/bin"));
+        if let Some(home) = &home {
+            directories.push(home.join(".local/share/flatpak/exports/bin"));
+            directories.push(home.join(".linuxbrew/bin"));
+            directories.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin"));
+        }
+    }
+    if cfg!(windows)
+        && let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    {
+        directories.push(local.join("Microsoft/WindowsApps"));
+        directories.push(local.join("Programs"));
+    }
+    directories
+}
+
+/// The full path of a tool, searching `PATH` and then the user-scoped places.
+///
+/// Returned rather than a boolean so callers can *run* what was found: knowing
+/// ffmpeg exists in `/opt/homebrew/bin` is no use to a `Command::new("ffmpeg")`
+/// that will search the same empty `PATH` and fail.
+pub fn resolve_command(name: &str) -> Option<PathBuf> {
+    let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    directories.extend(user_scoped_directories());
+    find_command_in(&directories, name)
+}
+
+/// The first directory holding an executable called `name`.
+fn find_command_in(directories: &[PathBuf], name: &str) -> Option<PathBuf> {
+    for directory in directories {
+        let candidate = directory.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if cfg!(windows) {
+            for extension in ["exe", "cmd", "bat"] {
+                let candidate = directory.join(format!("{name}.{extension}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure this prevents: a desktop application launched from Finder
+    /// gets `/usr/bin:/bin:/usr/sbin:/sbin`, reports Homebrew's tools missing,
+    /// and offers to install what is already there.
+    #[test]
+    fn finds_a_tool_outside_the_inherited_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_bin = dir.path().join("homebrew/bin");
+        std::fs::create_dir_all(&user_bin).unwrap();
+        let tool = user_bin.join("cmake");
+        std::fs::write(&tool, b"#!/bin/sh\n").unwrap();
+
+        let empty = dir.path().join("usr/bin");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(find_command_in(&[empty.clone()], "cmake"), None);
+        assert_eq!(find_command_in(&[empty, user_bin], "cmake"), Some(tool));
+    }
+
+    /// `PATH` is searched first, so an environment set on purpose still decides.
+    #[test]
+    fn prefers_what_the_environment_points_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("git"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(second.join("git"), b"#!/bin/sh\n").unwrap();
+        assert_eq!(
+            find_command_in(&[first.clone(), second], "git"),
+            Some(first.join("git"))
+        );
+    }
 
     #[test]
     fn toolchain_status_lists_core_tools() {

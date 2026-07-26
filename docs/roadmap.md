@@ -151,8 +151,16 @@ what is left is mostly the difference between working and trustworthy.
 
 ## Engine workshop
 
-- Detect and install user-scoped toolchains; guide users through platform SDKs
-  and drivers without silent elevation.
+- **Toolchain detection** now looks where user-scoped installs actually go —
+  `~/.local/bin`, `~/.cargo/bin`, Homebrew, Linuxbrew, Flatpak exports, Windows
+  Apps — instead of only the `PATH` a windowed application inherits, which on
+  macOS is four system directories and nothing else. What it finds is what gets
+  run: ffmpeg is invoked at its resolved path rather than by name. The Runtimes
+  build form lists each prerequisite with where it was found or the install
+  command for the detected package manager; nothing is installed or elevated on
+  the user's behalf. Still open: installing a user-scoped toolchain from inside
+  the application, and guiding through GPU SDKs and drivers beyond the
+  per-target hints that already exist.
 - **Remote OpenAI-compatible connections** are in: named connections (base URL,
   optional key, on/off), their models listed as `remote:{connection}/{model}`
   beside local ones, chat and tool rounds routed to them with the model name the

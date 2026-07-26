@@ -52,6 +52,8 @@ import {
   saveSdcppBundle,
   clearHuggingFaceToken,
   huggingFaceTokenStatus,
+  fetchToolchainStatus,
+  type ToolchainTool,
   listDownloadJobs,
   listRemoteConnections,
   saveRemoteConnection,
@@ -1976,6 +1978,15 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const [installingTarget, setInstallingTarget] = useState<RuntimeTarget | null>(null)
   const [installProgress, setInstallProgress] = useState<JobProgressState | null>(null)
   const [savingTarget, setSavingTarget] = useState(false)
+  // What this machine has of what a build needs. Read once per visit: it
+  // changes when someone installs something, not while they look at it.
+  const [toolchainTools, setToolchainTools] = useState<ToolchainTool[]>([])
+
+  useEffect(() => {
+    void fetchToolchainStatus()
+      .then((status) => setToolchainTools(status.tools))
+      .catch(() => setToolchainTools([]))
+  }, [])
 
   // Build-from-source form.
   const [buildOpen, setBuildOpen] = useState(false)
@@ -2820,7 +2831,12 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                   <input value={revision} onChange={(event) => setRevision(event.target.value)} />
                 </label>
               )}
-              {!isPythonBuild && !isSwiftBuild && (
+              {/* The prose above says what a build needs; this says what this
+                machine has, with the command to fix it. A build that fails
+                twenty minutes in because cmake is missing is a worse way to
+                learn it, and nothing here elevates or installs on its own. */}
+            <ToolchainChecklist tools={toolchainTools} />
+            {!isPythonBuild && !isSwiftBuild && (
                 <label>
                   <span>Target</span>
                   <select
@@ -3521,6 +3537,37 @@ function RemoteSection(props: SectionProps): React.JSX.Element {
         </>
       )}
     </section>
+  )
+}
+
+/**
+ * What this machine has of what a source build needs.
+ *
+ * Install commands are shown, never run: elevation belongs to the user's own
+ * shell, where they can see what it is about to do.
+ */
+function ToolchainChecklist({ tools }: { tools: ToolchainTool[] }): React.JSX.Element | null {
+  if (tools.length === 0) return null
+  return (
+    <div className="toolchain-checklist">
+      {tools.map((tool) => (
+        <div className={`toolchain-tool ${tool.available ? 'ok' : 'missing'}`} key={tool.id}>
+          <span className="toolchain-tool-name">
+            {tool.available ? <Check size={13} /> : <ShieldAlert size={13} />}
+            {tool.label}
+          </span>
+          {tool.available ? (
+            <span className="toolchain-tool-detail" title={tool.required_for}>
+              {tool.path ?? 'found'}
+            </span>
+          ) : (
+            <code className="toolchain-tool-detail" title={tool.required_for}>
+              {tool.install_hint ?? 'not found'}
+            </code>
+          )}
+        </div>
+      ))}
+    </div>
   )
 }
 
