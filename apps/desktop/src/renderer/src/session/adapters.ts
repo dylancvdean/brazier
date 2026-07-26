@@ -108,7 +108,16 @@ export type VoiceAdapterEvent =
    * all, and frames too quiet to count as speech — and they are not otherwise
    * distinguishable from outside.
    */
-  | { type: 'captureLevel'; frames: number; peak: number; status: string }
+  | {
+      type: 'captureLevel'
+      frames: number
+      peak: number
+      status: string
+      /** The level a frame currently has to clear, which moves with the room. */
+      gate: number
+      /** What the room is estimated to sound like when nobody is talking. */
+      noiseFloor: number
+    }
   /** A finished utterance is being transcribed. */
   | { type: 'transcriptionStarted'; utteranceId: string }
   /**

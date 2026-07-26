@@ -277,7 +277,11 @@ export function VoiceMode(props: Props): React.JSX.Element {
                     }.`
                   : `Microphone: ${snapshot.capture.frames} frames, loudest recent ${snapshot.capture.peak.toFixed(
                       3
-                    )} — speech has to clear ${SPEECH_THRESHOLD}. ${snapshot.capture.status}`}
+                    )} — speech has to clear ${(
+                      snapshot.capture.gate || SPEECH_THRESHOLD
+                    ).toFixed(3)}, the room reads ${snapshot.capture.noiseFloor.toFixed(4)}. ${
+                      snapshot.capture.status
+                    }`}
               </p>
             </>
           ) : (

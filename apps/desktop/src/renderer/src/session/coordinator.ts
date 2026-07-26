@@ -88,7 +88,7 @@ export type CoordinatorSnapshot = {
    * graph is not running; frames with a peak under the gate means the room or
    * the gain is too quiet.
    */
-  capture: { frames: number; peak: number; status: string }
+  capture: { frames: number; peak: number; status: string; gate: number; noiseFloor: number }
   /**
    * What transcription is costing, per interface that has served an utterance
    * this session. Which one should transcribe a spoken turn is an open
@@ -187,7 +187,13 @@ export class SessionCoordinator {
   private speakingCorrelationId: string | null = null
   private notice: string | null = null
   private hearing: CoordinatorSnapshot['hearing'] = 'idle'
-  private capture: CoordinatorSnapshot['capture'] = { frames: 0, peak: 0, status: '' }
+  private capture: CoordinatorSnapshot['capture'] = {
+    frames: 0,
+    peak: 0,
+    status: '',
+    gate: 0,
+    noiseFloor: 0
+  }
   /** Per-engine transcription totals; see `CoordinatorSnapshot.transcription`. */
   private readonly transcription = new Map<
     string,
@@ -785,7 +791,13 @@ export class SessionCoordinator {
         return
       }
       case 'captureLevel': {
-        this.capture = { frames: event.frames, peak: event.peak, status: event.status }
+        this.capture = {
+          frames: event.frames,
+          peak: event.peak,
+          status: event.status,
+          gate: event.gate,
+          noiseFloor: event.noiseFloor
+        }
         console.debug(
           `[voice] ${this.id} sees ${event.frames} frames, peak ${event.peak.toFixed(3)}`
         )

@@ -112,11 +112,20 @@ what is left is mostly the difference between working and trustworthy.
   it cost. Still open: continuous feeding of the streaming endpoint, which needs
   a session protocol in the Python worker rather than a file per request, and
   would give word-incremental partials and let the close window itself shrink.
-- **Voice activity detection that adapts to the room.** The gate is a fixed RMS
-  floor chosen to suit a quiet microphone. A noise-floor tracker was written and
-  backed out: it only learned from frames below the gate, so steady noise above
-  it was heard as speech forever. Tuning that needs real audio rather than
-  synthesised frames.
+- **Voice activity detection that adapts to the room.** *Structure in place;
+  the constants still want real rooms.* The gate now sits above a tracked noise
+  floor instead of at a fixed level. The earlier attempt failed by learning only
+  from frames below the gate — the audio a fan never produces — so this learns
+  from every frame and decides by shape instead: the estimate falls freely and
+  rises only while the last second looks flat, because room noise is steady and
+  speech is not. It is bounded below by the level quiet rooms already worked at
+  and above by where ordinary speech lives, so a very noisy room becomes
+  unreliable rather than deaf. An utterance that opened before the room was
+  learned is re-judged against it at close rather than sent to be transcribed.
+  The gate and the room's level are shown live in the voice pane, and
+  `adaptive: false` restores the fixed floor exactly. What is still owed is
+  measurement against recorded rooms: fall and rise rates, the flatness
+  threshold, and the speech-to-noise bar are reasoned about, not fitted.
 - **Spoken confirmation before destructive agent actions.** Nothing reads an
   instruction back before it becomes one. The permission broker still judges
   every call, which is what keeps voice-driven agents unwise rather than

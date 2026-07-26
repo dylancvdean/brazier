@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { UtteranceSegmenter, encodeWav, padTrailingSilence } from './utterance'
+import {
+  SPEECH_THRESHOLD,
+  UtteranceSegmenter,
+  encodeWav,
+  padTrailingSilence
+} from './utterance'
 
 const SAMPLE_RATE = 24000
 const FRAME = 480
@@ -170,6 +175,63 @@ describe('UtteranceSegmenter', () => {
     // Flushing twice must not emit the same audio again.
     segmenter.flush()
     expect(utterances).toHaveLength(1)
+  })
+})
+
+describe('a room that is not quiet', () => {
+  /**
+   * The complaint this is for: a fan, a street, or an air conditioner sits above
+   * a gate chosen for a quiet microphone, so the gate opens and never closes and
+   * the session transcribes the room. The earlier attempt at this learned only
+   * from frames below the gate, which is exactly the audio a fan never produces.
+   */
+  it('stops hearing steady noise as speech', () => {
+    const utterances: unknown[] = []
+    const discarded: string[] = []
+    const segmenter = new UtteranceSegmenter({
+      onUtterance: (value) => utterances.push(value),
+      onDiscarded: (_id, reason) => discarded.push(reason)
+    })
+
+    // Ten seconds of fan, well above the fixed gate.
+    feed(segmenter, 0.02, 500)
+    expect(utterances).toHaveLength(0)
+    expect(discarded.length).toBeGreaterThan(0)
+    expect(segmenter.currentGate()).toBeGreaterThan(0.02)
+  })
+
+  it('still hears someone talking over it', () => {
+    const utterances: unknown[] = []
+    const segmenter = new UtteranceSegmenter({ onUtterance: (value) => utterances.push(value) })
+    feed(segmenter, 0.02, 500) // learn the room
+    feed(segmenter, 0.4, 25) // someone speaks over the fan
+    feed(segmenter, 0.02, 40) // and stops
+    expect(utterances).toHaveLength(1)
+  })
+
+  it('leaves a quiet room exactly as it was', () => {
+    const segmenter = new UtteranceSegmenter({})
+    feed(segmenter, 0.0004, 300)
+    expect(segmenter.currentGate()).toBeCloseTo(SPEECH_THRESHOLD, 4)
+  })
+
+  it('does not raise the bar on a long answer to a long question', () => {
+    const utterances: unknown[] = []
+    const segmenter = new UtteranceSegmenter({ onUtterance: (value) => utterances.push(value) })
+    // Fifteen seconds of speech with the ordinary gaps in it.
+    for (let round = 0; round < 30; round += 1) {
+      feed(segmenter, 0.3, 20)
+      feed(segmenter, 0.0005, 5)
+    }
+    feed(segmenter, 0.0005, 40)
+    expect(segmenter.currentGate()).toBeCloseTo(SPEECH_THRESHOLD, 4)
+    expect(utterances).toHaveLength(1)
+  })
+
+  it('can be switched back to the fixed gate', () => {
+    const segmenter = new UtteranceSegmenter({}, { adaptive: false })
+    feed(segmenter, 0.02, 500)
+    expect(segmenter.currentGate()).toBe(SPEECH_THRESHOLD)
   })
 })
 

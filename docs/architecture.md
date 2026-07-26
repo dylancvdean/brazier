@@ -207,6 +207,15 @@ adapter supplies them:
   window instead of after it. If the speaker carries on, the early transcript is
   shown as a partial and discarded; if they were done, it *is* the final one,
   byte-identical audio, and the turn starts without a second wait.
+
+  The gate that decides what counts as speech tracks the room rather than
+  sitting at a fixed level: the floor estimate falls freely and rises only while
+  the last second of audio looks flat, since room noise is steady and speech is
+  not. It is bounded below by the level a quiet room already worked at and above
+  by where ordinary speech lives, so a noisy room degrades to unreliable rather
+  than deaf. What the gate and the room currently read is shown in the voice
+  pane, because a session that has stopped hearing you should be able to say
+  why.
 - **Speaking specific text.** PersonaPlex takes its persona as a launch flag and
   accepts audio only, so an authoritative answer is spoken verbatim through the
   platform synthesizer. Since PersonaPlex answers on its own and cannot be told

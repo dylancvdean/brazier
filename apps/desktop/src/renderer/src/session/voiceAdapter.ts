@@ -26,6 +26,7 @@ import {
 } from '../api'
 import { VoiceStream, voiceStreamSupported } from '../audio/voiceStream'
 import {
+  SPEECH_THRESHOLD,
   UtteranceSegmenter,
   encodeWav,
   frameRms,
@@ -339,7 +340,9 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         type: 'captureLevel',
         frames: this.captureFrames,
         peak: this.capturePeak,
-        status: stream.inputStatus()
+        status: stream.inputStatus(),
+        gate: this.segmenter?.currentGate() ?? SPEECH_THRESHOLD,
+        noiseFloor: this.segmenter?.noiseLevel() ?? 0
       })
       // Peak is per window, so a loud moment cannot mask a later silence.
       this.capturePeak = 0

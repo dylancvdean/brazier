@@ -12,9 +12,19 @@
  * is in frames so the behaviour is testable without audio hardware.
  */
 
+import { NoiseFloorTracker } from './noiseFloor'
+
 export type UtteranceSegmenterOptions = {
-  /** RMS above which a frame counts as speech. */
+  /**
+   * RMS above which a frame counts as speech, in a quiet room. The gate never
+   * goes below this and rises above it as the room gets noisier.
+   */
   threshold?: number
+  /**
+   * Track the room and raise the gate above it. Off restores the fixed floor,
+   * which is what every parameter here was tuned against.
+   */
+  adaptive?: boolean
   /** Consecutive speech frames before an utterance opens. */
   framesToOpen?: number
   /**
@@ -45,6 +55,13 @@ export type UtteranceSegmenterOptions = {
   framesBetweenPauses?: number
   /** Utterances with less voiced audio than this are noise, not turns. */
   minimumFrames?: number
+  /**
+   * Utterances whose voiced audio does not average this many times the noise
+   * floor are the room, not a turn. Applied at close, so an utterance the gate
+   * opened before the room was learned is still thrown away rather than
+   * transcribed.
+   */
+  minimumSpeechToNoise?: number
   /** Hard cap so a stuck-open gate cannot grow without bound. */
   maximumFrames?: number
 }
@@ -95,6 +112,7 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   // some working setups entirely, and a gate that never opens produces no
   // utterance, no transcript, and no error — the session simply ignores you.
   threshold: SPEECH_THRESHOLD,
+  adaptive: true,
   // At 20 ms per frame: 60 ms to open, 700 ms of silence to close, 200 ms of
   // voiced audio to count as a turn, 30 s cap.
   framesToOpen: 3,
@@ -111,6 +129,10 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   // queue a transcription per gap.
   framesBetweenPauses: 12,
   minimumFrames: 10,
+  // Two: half the margin the gate itself demands. The gate decides whether to
+  // start listening, which should be eager; this decides whether what was heard
+  // was ever speech, and the audio is in hand by then.
+  minimumSpeechToNoise: 2,
   maximumFrames: 1500
 }
 
@@ -139,6 +161,9 @@ export class UtteranceSegmenter {
   private open = false
   private sustained = false
   private guarded = false
+  private readonly noiseFloor = new NoiseFloorTracker()
+  /** Sum of the voiced frames' levels, for the speech-to-noise test at close. */
+  private voicedLevelSum = 0
   /** Voiced-frame count at the last pause offered, so gaps are not re-offered. */
   private pausedAtVoicedFrames: number | null = null
   private currentId: string | null = null
@@ -160,13 +185,35 @@ export class UtteranceSegmenter {
     this.guarded = guarded
   }
 
+  /**
+   * The level a frame currently has to clear, so the UI can say what it is.
+   *
+   * Worth showing rather than the constant: in a noisy room the number people
+   * are being measured against is not the one in the source.
+   */
+  currentGate(): number {
+    const base = this.options.adaptive
+      ? this.noiseFloor.gate(this.options.threshold)
+      : this.options.threshold
+    return this.guarded ? base * this.options.guardedFactor : base
+  }
+
+  /** The room's estimated level, or the fixed floor when not adapting. */
+  noiseLevel(): number {
+    return this.options.adaptive ? this.noiseFloor.level : 0
+  }
+
   /** Feed one captured frame. */
   push(samples: Float32Array, sampleRate: number): void {
     this.sampleRate = sampleRate
-    const gate = this.guarded
-      ? this.options.threshold * this.options.guardedFactor
-      : this.options.threshold
-    const loud = rms(samples) >= gate
+    const level = rms(samples)
+    // The assistant's own voice through the speakers is not the room, so it
+    // must not teach the tracker what the room sounds like.
+    if (this.options.adaptive && !this.guarded) this.noiseFloor.push(level)
+    const gate = this.currentGate()
+    const loud = level >= gate
+
+    if (this.open && loud) this.voicedLevelSum += level
 
     if (!this.open) {
       this.speechRun = loud ? this.speechRun + 1 : 0
@@ -177,6 +224,9 @@ export class UtteranceSegmenter {
         this.open = true
         this.silenceRun = 0
         this.voicedFrames = this.speechRun
+        // The frames that opened it were all above the gate; this frame's level
+        // stands in for them, which is close enough for a ratio test.
+        this.voicedLevelSum = level * this.speechRun
         this.counter += 1
         this.currentId = `utt-${this.counter}-${Date.now().toString(36)}`
         this.handlers.onSpeechStart?.(this.currentId)
@@ -251,6 +301,7 @@ export class UtteranceSegmenter {
   private close(): void {
     const id = this.currentId
     const voiced = this.voicedFrames
+    const voicedLevel = this.voicedLevelSum
     const frames = this.keptFrames()
     this.reset()
     if (!id) return
@@ -260,6 +311,20 @@ export class UtteranceSegmenter {
         `only ${voiced} voiced frames, needs ${this.options.minimumFrames}`
       )
       return
+    }
+    // Steady noise opens the gate until the tracker has caught up with it. By
+    // the time it closes the room is known, so ask again whether this was ever
+    // speech rather than sending a fan to be transcribed.
+    if (this.options.adaptive && voiced > 0) {
+      const mean = voicedLevel / voiced
+      const floor = this.noiseFloor.level
+      if (mean < floor * this.options.minimumSpeechToNoise) {
+        this.handlers.onDiscarded?.(
+          id,
+          `averaged ${mean.toFixed(4)} against a room at ${floor.toFixed(4)}`
+        )
+        return
+      }
     }
     this.handlers.onUtterance?.({
       id,
@@ -274,6 +339,7 @@ export class UtteranceSegmenter {
     this.speechRun = 0
     this.silenceRun = 0
     this.voicedFrames = 0
+    this.voicedLevelSum = 0
     this.open = false
     this.sustained = false
     this.currentId = null
