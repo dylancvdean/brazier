@@ -211,6 +211,15 @@ what is left is mostly the difference between working and trustworthy.
 - Add the permission broker, optional browser automation, WASI code runtimes,
   and optional OCI execution (safe built-in tools and bounded web retrieval
   are implemented).
-- Add API-key management, configurable external binding and CORS, redacted
-  support bundles, SBOMs, signed updates, notarization, and release packaging.
+- **Configurable CORS** is in: `--allowed-origin` (repeatable, or
+  comma-separated in `BRAZIER_ALLOWED_ORIGINS`) names extra browser origins
+  beside the packaged UI and the dev server, validated at startup so a typo
+  fails at the command line rather than at the first request. A wildcard is
+  refused outright — this daemon holds a machine's conversations and can execute
+  tools, so widening it stays deliberate and visible in the launch command.
+  External binding already exists (`--host`, with keyless non-loopback access
+  requiring `--allow-insecure-remote`).
+- Add API-key management (rotation and per-client keys; today there is one key,
+  generated at startup or supplied), redacted support bundles, SBOMs, signed
+  updates, notarization, and release packaging.
 - Complete public naming review before stable application identifiers ship.

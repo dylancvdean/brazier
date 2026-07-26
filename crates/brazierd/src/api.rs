@@ -1,5 +1,6 @@
 use std::{convert::Infallible, path::PathBuf, time::Duration};
 
+use anyhow::Context as _;
 use async_stream::stream;
 use axum::http::header;
 use axum::{
@@ -129,7 +130,57 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Origins the browser UI is served from during development.
+///
+/// `null` is the origin of a `file://` page, which is what the packaged
+/// renderer is; the two localhost ports are `electron-vite dev`.
+const DEFAULT_ORIGINS: [&str; 3] = ["null", "http://localhost:5173", "http://127.0.0.1:5173"];
+
+/// Turn configured origin strings into header values, refusing what cannot work.
+///
+/// A wildcard is refused rather than translated: this daemon holds a machine's
+/// conversations and can execute tools, and "any page may call it" is not a
+/// thing to enable by typing `*` into a flag. Named origins are the only way to
+/// widen it, so widening is always deliberate and always visible in the launch
+/// command.
+pub fn parse_origins(origins: &[String]) -> anyhow::Result<Vec<HeaderValue>> {
+    let mut values = Vec::new();
+    for origin in DEFAULT_ORIGINS.iter().map(|origin| (*origin).to_owned()).chain(
+        origins
+            .iter()
+            .flat_map(|value| value.split(','))
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+    ) {
+        anyhow::ensure!(
+            origin != "*",
+            "a wildcard CORS origin is not accepted; name the origins that may call this daemon"
+        );
+        if origin != "null" {
+            anyhow::ensure!(
+                origin.starts_with("http://") || origin.starts_with("https://"),
+                "`{origin}` is not an origin: it must start with http:// or https://"
+            );
+            anyhow::ensure!(
+                !origin.ends_with('/') && origin.matches('/').count() == 2,
+                "`{origin}` is not an origin: it must have no path or trailing slash"
+            );
+        }
+        let value = HeaderValue::from_str(&origin)
+            .with_context(|| format!("`{origin}` cannot be sent as a header"))?;
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    Ok(values)
+}
+
 pub fn router(state: AppState) -> Router {
+    router_with_origins(state, parse_origins(&[]).expect("built-in origins are valid"))
+}
+
+/// The router, with the set of browser origins allowed to call it.
+pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router {
     let protected = Router::new()
         .route("/api/v1/capabilities", get(capabilities))
         .route(
@@ -359,11 +410,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
         .layer(
             CorsLayer::new()
-                .allow_origin([
-                    HeaderValue::from_static("null"),
-                    HeaderValue::from_static("http://localhost:5173"),
-                    HeaderValue::from_static("http://127.0.0.1:5173"),
-                ])
+                .allow_origin(origins)
                 .allow_headers(Any)
                 .allow_methods(Any),
         )
@@ -3802,6 +3849,48 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::Mutex;
     use tower::ServiceExt;
+
+    #[test]
+    fn allows_the_ui_and_whatever_else_was_named() {
+        let origins = parse_origins(&["https://studio.example.com".into()]).unwrap();
+        let rendered: Vec<&str> = origins
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        // The packaged renderer is a file:// page, whose origin is `null`.
+        assert!(rendered.contains(&"null"));
+        assert!(rendered.contains(&"http://localhost:5173"));
+        assert!(rendered.contains(&"https://studio.example.com"));
+
+        // Comma-separated, for the environment variable form.
+        let from_env = parse_origins(&["http://a.example:8080, http://b.example".into()]).unwrap();
+        assert_eq!(from_env.len(), DEFAULT_ORIGINS.len() + 2);
+        // Naming an origin twice does not repeat it in the header.
+        assert_eq!(
+            parse_origins(&["null".into(), "http://localhost:5173".into()])
+                .unwrap()
+                .len(),
+            DEFAULT_ORIGINS.len()
+        );
+    }
+
+    /// The daemon holds a machine's conversations and can execute tools. "Any
+    /// page may call it" is not something a typo should be able to turn on.
+    #[test]
+    fn refuses_a_wildcard_and_things_that_are_not_origins() {
+        for bad in [
+            "*",
+            "example.com",
+            "https://example.com/",
+            "https://example.com/path",
+            "ftp://example.com",
+        ] {
+            assert!(
+                parse_origins(&[bad.to_owned()]).is_err(),
+                "{bad} must be refused"
+            );
+        }
+    }
 
     #[test]
     fn converts_responses_string_input() {
