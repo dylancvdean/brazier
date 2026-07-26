@@ -193,8 +193,15 @@ what is left is mostly the difference between working and trustworthy.
   `isolated: false` and command execution is treated as host execution.
 - Live output streaming for `shell_run` (long commands currently report at
   completion; `shell_start` plus `shell_output` covers the interactive case).
-- Model-generated compaction summaries; V1 builds the digest deterministically
-  from the transcript and the tool ledger.
+- **Model-generated compaction summaries** are in, alongside the deterministic
+  digest rather than instead of it: the session's own model writes what was
+  attempted and why an approach was abandoned, and the machine-built facts —
+  files changed, commands run, unresolved failures — are appended verbatim
+  underneath, so a model that forgets a file cannot erase it from the session.
+  Every failure of the request (unreachable, slow, empty, malformed) falls back
+  to the digest alone, because compaction usually runs when the context is
+  already full and that is the worst moment to fail. Which half produced a
+  summary is recorded on the session.
 - Optional MCP tools inside agent sessions, reusing the existing MCP client
   behind the same policy broker.
 

@@ -167,6 +167,13 @@ export type AgentCompactionState = {
   compactedAt: string
   removedMessages: number
   summary: string
+  /**
+   * Where the narrative half came from. `deterministic` means the model was not
+   * asked or did not answer, and the summary is the machine-built digest alone —
+   * worth recording, because the two read very differently and a session that
+   * silently lost its reasoning should be explicable afterwards.
+   */
+  summarySource?: 'model' | 'deterministic'
 }
 
 /** Canonical session state. The application owns this, not the runtime. */
