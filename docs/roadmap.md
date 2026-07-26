@@ -62,9 +62,16 @@
   as untrusted output, and stopping speech, dropping an answer, and cancelling a
   task stay three separate controls. Voice supplies the two things the Moshi
   protocol lacks: user transcripts, by segmenting the microphone and
-  transcribing each utterance, and spoken answers, rendered verbatim through the
-  platform synthesizer with the model's own audio gated off so one question
-  never gets two replies. The streaming ASR worker keeps its model loaded
+  transcribing each utterance, plus an experimental result handoff. PersonaPlex
+  is the only audible voice; the background answer remains in chat while a
+  selectable strategy leaves the stream alone or reconnects/restarts it with a
+  result prompt and optionally replays the exact triggering utterance. The
+  background submission itself is selectable: Auto uses a local no-model
+  classifier to leave lightweight conversation with PersonaPlex, Always keeps
+  the original behavior, and Explicit requires a work cue. Short speech boost
+  accepts Silero-confirmed 100 ms bursts, pads both sides for ASR, and retries
+  an empty short result with the other recognizer when available. The streaming
+  ASR worker keeps its model loaded
   between utterances (3.1 s to 0.18 s a turn).
 - **Agent mode** — interactive coding and system agent as a fourth workspace
   mode. Pi (`@earendil-works/pi-*`, MIT) is the first runtime, installed as a
@@ -112,42 +119,42 @@ what is left is mostly the difference between working and trustworthy.
   it cost. Still open: continuous feeding of the streaming endpoint, which needs
   a session protocol in the Python worker rather than a file per request, and
   would give word-incremental partials and let the close window itself shrink.
-- **Voice activity detection that adapts to the room.** *Structure in place;
-  the constants still want real rooms.* The gate now sits above a tracked noise
-  floor instead of at a fixed level. The earlier attempt failed by learning only
-  from frames below the gate — the audio a fan never produces — so this learns
-  from every frame and decides by shape instead: the estimate falls freely and
-  rises only while the last second looks flat, because room noise is steady and
-  speech is not. It is bounded below by the level quiet rooms already worked at
-  and above by where ordinary speech lives, so a very noisy room becomes
-  unreliable rather than deaf. An utterance that opened before the room was
-  learned is re-judged against it at close rather than sent to be transcribed.
-  The gate and the room's level are shown live in the voice pane, and
-  `adaptive: false` restores the fixed floor exactly. What is still owed is
-  measurement against recorded rooms: fall and rise rates, the flatness
-  threshold, and the speech-to-noise bar are reasoned about, not fitted.
-- **Spoken confirmation before destructive agent actions.** *Held calls are read
-  back and answered in words; the warning stays.* A call the permission broker
-  holds is now spoken aloud — what it will do, and whether it is inside the
-  sandbox — and the next thing said answers it: an unmistakable yes allows it,
-  a no refuses it, and anything else leaves it held and says so, because a
+- **Model-based voice activity detection.** *Silero VAD v5 is bundled and in the
+  live capture path.* The small ONNX model makes the normal speech/no-speech
+  decision from the microphone frames already going to PersonaPlex, so a fan,
+  keyboard, knock, or background audio does not take the assistant's turn just
+  because it is loud. Inference is serialized and its 16 kHz / 512-sample
+  windows are mapped back onto the original 24 kHz capture frames without
+  opening a second microphone graph. The former adaptive energy detector stays
+  as a visible meter, as extra echo protection while the assistant speaks, and
+  as a recoverable fallback if WebAssembly or the model cannot initialize.
+  Still owed: a checked-in room/noise corpus and false-interruption measurements
+  across the microphones supported for release.
+- **Spoken confirmation before destructive agent actions.** *Held calls are
+  shown and can be answered in words; the warning stays.* A call the permission
+  broker holds is shown prominently — what it will do, and whether it is inside
+  the sandbox — and the next thing said answers it: an unmistakable yes allows
+  it, a no refuses it, and anything else leaves it held, because a
   qualified answer is not consent and the transcript comes from a microphone, an
   energy gate, and a recogniser. Decisions are one-shot and written into the
   conversation, and the voice pane shows the held call with buttons, since
   speech should be the convenient path and not the only one. What this does not
-  do is cover a session set to skip permissions: nothing is held there, so
-  nothing is read back. Removing the warning would also need the transcript
+  do is cover a session set to skip permissions: nothing is held there.
+  Removing the warning would also need the transcript
   itself to be trustworthy, which is the VAD and latency work above.
-- **Handing PersonaPlex the answer to speak.** *Still open; the voice is at
-  least chosen now.* Its audio is gated off and the platform synthesizer speaks
-  instead, because the persona is a process launch flag and the socket carries
-  audio only — so the voice identity is lost for exactly the sentences that
-  matter. The synthesizer's voice and speaking rate are now picked, previewed,
-  and remembered rather than being whatever the operating system defaulted to,
-  which narrows the gap without closing it. Constrained rendering still needs a
-  client-to-server text frame in the runtime, which means owning a patch to the
-  recipe rather than consuming it, and testing it needs the upstream tree and a
-  GPU — neither is guesswork worth committing blind.
+- **PersonaPlex result-handoff experiments.** *Ready for hardware-backed
+  comparison.* Platform TTS is gone, so PersonaPlex never competes with a second
+  voice. A dropdown compares continuous conversation against same-process
+  reconnects with direct or service-style result prompts, with and without
+  realtime replay of the correlated utterance, plus a full process restart as a
+  control. The upstream servers accept a new prompt when a WebSocket connection
+  begins but do not support mutating the prompt of an active generation. Trial
+  reports should identify the selected strategy, whether PersonaPlex first
+  acknowledged or answered independently, restart/reconnect delay, and how
+  faithfully it used the checked result. Hardware tuning should use the new
+  background-routing, pre-handoff mute timing, and short-speech controls
+  independently; current trial feedback favors the full process restart over
+  same-process reconnects.
 
 ## Engine workshop
 

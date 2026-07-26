@@ -10,6 +10,7 @@
 import captureWorkletUrl from './captureWorklet.js?url'
 import { OggOpusDemuxer, OggOpusMuxer } from './oggOpus'
 import playbackWorkletUrl from './playbackWorklet.js?url'
+import { resampleFrame } from './sileroVad'
 
 const TAG_HANDSHAKE = 0x00
 const TAG_AUDIO = 0x01
@@ -279,6 +280,48 @@ export class VoiceStream {
     if (this.muted || !this.encoder || this.encoder.state !== 'configured') return
     // Muting still advances the clock, so the model hears a gap rather than
     // a jump cut when the microphone comes back.
+    const data = new AudioData({
+      format: 'f32-planar',
+      sampleRate: SAMPLE_RATE,
+      numberOfFrames: samples.length,
+      numberOfChannels: 1,
+      timestamp: this.timestamp,
+      data: samples
+    })
+    this.timestamp += Math.round((samples.length * 1_000_000) / SAMPLE_RATE)
+    try {
+      this.encoder.encode(data)
+    } finally {
+      data.close()
+    }
+  }
+
+  /**
+   * Feed recorded microphone audio into a fresh PersonaPlex stream.
+   *
+   * Frames are paced at capture speed instead of dumped into the socket in one
+   * burst. PersonaPlex is a realtime model and its text/audio alignment depends
+   * on that clock. This path deliberately does not report capture callbacks, so
+   * replay cannot create a duplicate user turn in the coordinator.
+   */
+  async replayAudio(
+    samples: Float32Array,
+    sampleRate: number,
+    shouldContinue: () => boolean = () => true
+  ): Promise<void> {
+    const audio = resampleFrame(samples, sampleRate, SAMPLE_RATE)
+    for (let offset = 0; offset < audio.length; offset += FRAME_SAMPLES) {
+      if (this.stopped || !shouldContinue()) return
+      const frame = new Float32Array(FRAME_SAMPLES)
+      frame.set(audio.subarray(offset, Math.min(audio.length, offset + FRAME_SAMPLES)))
+      this.encodeReplayFrame(frame)
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 20))
+    }
+    await this.encoder?.flush().catch(() => undefined)
+  }
+
+  private encodeReplayFrame(samples: Float32Array<ArrayBuffer>): void {
+    if (!this.encoder || this.encoder.state !== 'configured') return
     const data = new AudioData({
       format: 'f32-planar',
       sampleRate: SAMPLE_RATE,

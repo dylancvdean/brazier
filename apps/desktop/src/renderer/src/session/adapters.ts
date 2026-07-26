@@ -12,9 +12,12 @@ import type {
   MessagePatch,
   MessageSource,
   NewMessage,
-  SpeechRequest,
   VoiceContext
 } from './types'
+import type {
+  PersonaPlexHandoffRequest,
+  PersonaPlexHandoffStrategy
+} from './personaplexHandoff'
 
 // --- Chat -------------------------------------------------------------------
 
@@ -140,6 +143,10 @@ export type VoiceAdapterEvent =
       gate: number
       /** What the room is estimated to sound like when nobody is talking. */
       noiseFloor: number
+      /** Which detector is deciding whether captured audio is speech. */
+      vad: 'silero-v5' | 'energy-fallback'
+      /** Most recent model probability, absent while using RMS fallback. */
+      speechProbability: number | null
     }
   /** A finished utterance is being transcribed. */
   | { type: 'transcriptionStarted'; utteranceId: string }
@@ -187,20 +194,25 @@ export type VoiceAdapterEvent =
 export interface VoiceAdapter {
   startSession(context: VoiceContext): Promise<VoiceSessionHandle>
   updateContext(context: VoiceContext): Promise<void>
-  speak(request: SpeechRequest): Promise<void>
+  /**
+   * Experimentally feed one background result back to PersonaPlex. A returned
+   * handle means the strategy replaced the daemon session/process.
+   */
+  handoffResult(
+    request: PersonaPlexHandoffRequest,
+    strategy: PersonaPlexHandoffStrategy
+  ): Promise<VoiceSessionHandle | null>
   /** Stop audio for one turn, or all audio when no id is given. */
   stopSpeaking(correlationId?: string): Promise<void>
   /**
    * Let PersonaPlex's own voice be heard, or silence it.
    *
-   * It is a speech-to-speech model: it answers on its own and cannot be told to
-   * wait. Its audio is silenced whenever the coordinator is delivering answers,
-   * so one question never produces two spoken replies, and allowed through when
-   * the session is connected to nothing and PersonaPlex is the whole product.
+   * Normally always enabled because PersonaPlex is the only audible voice. An
+   * explicit stop closes the gate until the next sustained user utterance.
    */
   setModelAudioEnabled(enabled: boolean): void
   endSession(): Promise<void>
-  /** Whether spoken delivery can actually be produced on this host. */
+  /** Whether realtime PersonaPlex audio can run on this host. */
   canSpeak(): boolean
   subscribe(listener: (event: VoiceAdapterEvent) => void): () => void
 }

@@ -30,28 +30,53 @@ Four mismatches shaped the implementation.
    socket are the *model's* inner monologue — what PersonaPlex is saying — not
    what the user said. The plan's `userTranscriptFinal` event has no source in
    the existing stack. Resolved by tapping the capture worklet inside
-   `VoiceStream`, segmenting utterances with an energy/silence detector, and
-   transcribing each finished utterance through the ASR endpoint the repo
-   already exposes. Partials come from transcribing at a pause before the
+   `VoiceStream`, segmenting utterances with bundled Silero VAD plus a
+   recoverable energy fallback, and transcribing each finished utterance through
+   the ASR endpoint the repo already exposes. Partials come from transcribing at a pause before the
    utterance has closed, so they are per-pause rather than word-incremental; the
    coordinator refuses to invoke the agent from partials, and the one taken at
    the pause that turns out to end the turn is promoted to the final transcript
    because it covers exactly the same audio.
 
-2. **PersonaPlex cannot be told what to say.** The persona is a process launch
-   flag (`--text-prompt`); the wire protocol accepts audio only. Constrained
-   rendering mode as described is not available at runtime, and there is no TTS
-   engine in the repo either. The `speak()` side of the voice adapter is
-   therefore a pluggable renderer: the platform speech synthesizer when the
-   host provides one, and otherwise a text-only delivery that still reports
-   `VOICE_RESPONSE_*` so the coordinator, UI, and tests behave identically.
-   Nothing claims speech happened when it did not.
+2. **PersonaPlex has per-connection prompts, not live prompt mutation.** The
+   binary socket accepts client audio only, but both supported servers read
+   `text_prompt` from the WebSocket URL when a connection starts. Reconnecting
+   therefore keeps the loaded model process while resetting streaming state
+   with a different prompt. It cannot mutate the active generation state.
 
-3. **Renewal restarts a process, not a stream.** A PersonaPlex "session" is a
-   spawned Python server, and `SessionManager` allows exactly one. Renewal is
-   end-session → create-session, which costs model load time. The coordinator
-   keeps renewal at safe conversational boundaries and never ties it to agent
-   state, which is what the plan actually requires.
+   Platform TTS was removed: PersonaPlex is the only audible voice and the
+   background answer remains authoritative in chat. Voice setup exposes five
+   experiments: leave the stream continuous; reconnect with a direct result and
+   replay the triggering utterance; reconnect with a service-role `Information:`
+   prompt and replay; perform the same service-role experiment after a full
+   process restart; or reconnect with service information but no replay as a
+   control. Replay uses the exact utterance associated with the background turn,
+   is paced in realtime, and bypasses capture callbacks so it cannot submit a
+   duplicate turn.
+
+   Transcription and background routing are independently selectable. Short
+   speech boost lowers the accepted Silero-confirmed floor from 200 ms to
+   100 ms, places silence before and after the clip, and retries an empty short
+   result on the other ASR interface when both are installed. The background
+   selector compares the original Always behavior with an entirely local Auto
+   heuristic and an Explicit-only mode. Auto leaves short social and
+   conversational turns with PersonaPlex, but still routes files, tools,
+   workspace work, current facts, and active-task follow-ups.
+
+   A second timing selector controls the old PersonaPlex stream while that
+   background path runs. **Let PersonaPlex respond** is the natural control.
+   **Mute when background work is detected** uses speculative pause transcripts
+   as an early, reversible audio-only decision and confirms it on the final
+   transcript. **Mute while every turn is routed** closes the output gate at
+   sustained speech, before transcription, then reopens it for local / empty
+   turns or only after the old stream has stopped and its replacement is ready.
+
+3. **Renewal and reconnection have different costs.** A daemon voice session is
+   a spawned Python server, and `SessionManager` allows exactly one. Ordinary
+   experiment reconnects replace only the browser stream and keep that server
+   loaded. Duration/context renewal and the explicit full-restart experiment use
+   end-session → create-session and pay model load time. Neither path touches
+   agent state.
 
 4. **Agent sessions are not conversations.** `agent_sessions` has a workspace,
    permission mode, and its own transcript; it is deliberately separate from the
@@ -98,9 +123,9 @@ Modified:
 - [x] **Phase 1 — shared conversation plumbing.** Normalized message model,
       correlation IDs, source attribution, one submission path for voice and
       text, conversation ↔ agent-session association.
-- [x] **Phase 2 — agent-to-voice delivery.** Authoritative-response handoff,
-      speech requests correlated to the authoritative message, completion and
-      failure events, no duplicate assistant message.
+- [x] **Phase 2 — agent-to-voice delivery.** Authoritative responses are stored
+      once in chat and can drive a selected PersonaPlex reconnect/replay
+      experiment without creating a duplicate assistant message.
 - [x] **Phase 3 — interruptions and cancellation.** Separate
       `cancel_voice_output` / `cancel_current_response` / `cancel_agent_task`,
       utterance classification, queued follow-ups, superseded responses,
@@ -110,3 +135,17 @@ Modified:
       session untouched.
 - [x] **Phase 5 — hardening.** Event deduplication, error-state handling,
       structured diagnostics, configuration controls, integration tests.
+- [x] **Phase 6 — PersonaPlex experiment harness and neural VAD.** PersonaPlex
+      is the only audible voice; selectable continuous, reconnect, replay, and
+      full-restart strategies compare prompt/data handoffs. Bundled Silero VAD
+      v5 runs on the existing capture stream with an energy fallback.
+- [x] **Phase 7 — local fast path and short-speech recovery.** Auto / Always /
+      Explicit background routing can keep lightweight turns entirely inside
+      PersonaPlex without adding another classifier model. Short speech boost
+      accepts Silero-confirmed 100 ms turns, conditions their ASR audio, and
+      retries an empty result on an alternate installed recognizer.
+- [x] **Phase 8 — pre-handoff output timing.** Selectable natural,
+      route-detected mute, and immediate mute modes compare response leakage
+      against local-turn latency. Only reconnect/restart experiments engage the
+      gate, and the checked-result replacement reopens it after the old stream
+      has stopped.

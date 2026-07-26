@@ -2,7 +2,7 @@
  * Reading a spoken answer as yes, no, or neither.
  *
  * This decides whether an agent is allowed to delete a directory on the
- * strength of a microphone, an energy gate, and a speech recogniser. Every
+ * strength of a microphone, a speech detector, and a recogniser. Every
  * layer of that stack makes mistakes, so the rule is that only an unmistakable
  * answer counts: a short, clean affirmative and nothing else in it. Everything
  * ambiguous is `unclear`, which is not a decision and never becomes one — the

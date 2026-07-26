@@ -16,7 +16,12 @@ import { useEffect, useRef, useState } from 'react'
 import type { BundledTool, LocalModel, RuntimeSettings } from '../api'
 import { SPEECH_THRESHOLD } from '../audio/utterance'
 import { modelDisplayName } from '../model-utils'
+import { VOICE_BACKGROUND_ROUTING_OPTIONS } from '../session/backgroundRouting'
 import type { VoiceSessionTarget } from '../session/config'
+import {
+  PERSONAPLEX_HANDOFF_OPTIONS,
+  PERSONAPLEX_PRE_HANDOFF_OPTIONS
+} from '../session/personaplexHandoff'
 import type { SessionCoordinatorHandle } from '../session/useSessionCoordinator'
 import { VoiceSessionConfig } from './VoiceSessionConfig'
 
@@ -141,8 +146,8 @@ export function VoiceMode(props: Props): React.JSX.Element {
   /**
    * Shown wherever the agent destination is in force. Speech reaching an agent
    * means a misheard word can edit files and run commands. A call the permission
-   * broker holds is now read back and needs a spoken yes, which is the piece
-   * that was missing — but the broker only holds what its mode says to hold, and
+   * broker holds needs a spoken yes or a click — but the broker only holds what
+   * its mode says to hold, and
    * the transcript is still the least reliable input in the application.
    */
   const agentWarning = (
@@ -150,7 +155,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
       <AlertTriangle size={14} />
       <span>
         Voice control for agents is extremely experimental. Anything the permission broker holds is
-        read back to you and needs a spoken yes — but only what its mode holds, so a session set to
+        shown here and needs a spoken yes — but only what its mode holds, so a session set to
         skip permissions acts on what it thought it heard. Please don't use it on anything you care
         about, and even then only if you know what you're doing.
       </span>
@@ -223,8 +228,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
                 answer, and abandoning the task are different decisions. */}
             <button
               type="button"
-              disabled={!speaking}
-              title="Stop the audio. The task keeps running."
+              title="Silence PersonaPlex until you start speaking again. The task keeps running."
               onClick={() => void guard(() => session.stopSpeaking())}
             >
               <VolumeX size={15} /> Stop speaking
@@ -303,7 +307,11 @@ export function VoiceMode(props: Props): React.JSX.Element {
               <p className="voice-hint">
                 {config.voiceSessionTarget === 'neither'
                   ? 'Speak whenever you like. Nothing is recorded — this is PersonaPlex on its own.'
-                  : 'Speak whenever you like. Pause when you are done and the turn is sent.'}
+                  : config.voiceBackgroundRouting === 'always'
+                    ? 'Speak whenever you like. Pause when you are done and the turn is sent to the background.'
+                    : config.voiceBackgroundRouting === 'auto'
+                      ? 'Speak whenever you like. Lightweight turns stay with PersonaPlex; work and checked facts go to the background.'
+                      : 'Speak whenever you like. PersonaPlex handles the turn unless you explicitly ask for background work.'}
               </p>
               {/* Until the first turn lands, say what the microphone is
                   actually delivering. "Nothing happened" has two causes that
@@ -314,13 +322,19 @@ export function VoiceMode(props: Props): React.JSX.Element {
                   ? `No audio is reaching the microphone tap yet${
                       snapshot.capture.status ? ` — ${snapshot.capture.status}` : ''
                     }.`
-                  : `Microphone: ${snapshot.capture.frames} frames, loudest recent ${snapshot.capture.peak.toFixed(
-                      3
-                    )} — speech has to clear ${(
-                      snapshot.capture.gate || SPEECH_THRESHOLD
-                    ).toFixed(3)}, the room reads ${snapshot.capture.noiseFloor.toFixed(4)}. ${
-                      snapshot.capture.status
-                    }`}
+                  : snapshot.capture.vad === 'silero-v5'
+                    ? `Microphone: ${snapshot.capture.frames} frames, Silero speech probability ${(
+                        snapshot.capture.speechProbability ?? 0
+                      ).toFixed(2)}, loudest recent ${snapshot.capture.peak.toFixed(3)}. ${
+                        snapshot.capture.status
+                      }`
+                    : `Microphone: ${snapshot.capture.frames} frames, loudest recent ${snapshot.capture.peak.toFixed(
+                        3
+                      )} — fallback speech has to clear ${(
+                        snapshot.capture.gate || SPEECH_THRESHOLD
+                      ).toFixed(3)}, the room reads ${snapshot.capture.noiseFloor.toFixed(4)}. ${
+                        snapshot.capture.status
+                      }`}
               </p>
             </>
           ) : (
@@ -452,34 +466,101 @@ export function VoiceMode(props: Props): React.JSX.Element {
               onAsrPreferenceChange={(asrPreference) =>
                 session.setConfig({ ...config, asrPreference })
               }
-              spokenVoiceUri={config.spokenVoiceUri}
-              onSpokenVoiceChange={(spokenVoiceUri) =>
-                session.setConfig({ ...config, spokenVoiceUri })
-              }
-              spokenRate={config.spokenRate}
-              onSpokenRateChange={(spokenRate) => session.setConfig({ ...config, spokenRate })}
               agentSessionId={snapshot.agentSessionId}
               onAgentSessionBound={props.onAgentSessionBound}
               onError={props.onError}
             />
 
-            {needsTranscripts && !session.canSpeak ? (
-              <p className="voice-notice">
-                <AlertTriangle size={13} /> This host has no speech synthesizer, so answers are
-                shown rather than spoken.
-              </p>
-            ) : null}
-
             <div className="voice-options">
+              <label className="voice-field">
+                <span>Send transcript to background</span>
+                <select
+                  value={config.voiceBackgroundRouting}
+                  disabled={config.voiceSessionTarget === 'neither'}
+                  onChange={(event) =>
+                    session.setConfig({
+                      ...config,
+                      voiceBackgroundRouting: event.target
+                        .value as typeof config.voiceBackgroundRouting
+                    })
+                  }
+                >
+                  {VOICE_BACKGROUND_ROUTING_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <small>
+                  {
+                    VOICE_BACKGROUND_ROUTING_OPTIONS.find(
+                      (option) => option.value === config.voiceBackgroundRouting
+                    )?.detail
+                  }
+                </small>
+              </label>
+              <label className="voice-field">
+                <span>Background result → PersonaPlex experiment</span>
+                <select
+                  value={config.personaplexHandoffStrategy}
+                  onChange={(event) =>
+                    session.setConfig({
+                      ...config,
+                      personaplexHandoffStrategy: event.target
+                        .value as typeof config.personaplexHandoffStrategy
+                    })
+                  }
+                >
+                  {PERSONAPLEX_HANDOFF_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <small>
+                  {
+                    PERSONAPLEX_HANDOFF_OPTIONS.find(
+                      (option) => option.value === config.personaplexHandoffStrategy
+                    )?.detail
+                  }
+                </small>
+              </label>
+              <label className="voice-field">
+                <span>PersonaPlex before background handoff</span>
+                <select
+                  value={config.personaplexPreHandoffMode}
+                  disabled={config.personaplexHandoffStrategy === 'continuous'}
+                  onChange={(event) =>
+                    session.setConfig({
+                      ...config,
+                      personaplexPreHandoffMode: event.target
+                        .value as typeof config.personaplexPreHandoffMode
+                    })
+                  }
+                >
+                  {PERSONAPLEX_PRE_HANDOFF_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <small>
+                  {config.personaplexHandoffStrategy === 'continuous'
+                    ? 'No reconnect or restart is selected, so there is no fresh handoff to wait for.'
+                    : PERSONAPLEX_PRE_HANDOFF_OPTIONS.find(
+                        (option) => option.value === config.personaplexPreHandoffMode
+                      )?.detail}
+                </small>
+              </label>
               <label>
                 <input
                   type="checkbox"
-                  checked={config.allowVoiceBackchannels}
+                  checked={config.shortSpeechBoost}
                   onChange={(event) =>
-                    session.setConfig({ ...config, allowVoiceBackchannels: event.target.checked })
+                    session.setConfig({ ...config, shortSpeechBoost: event.target.checked })
                   }
                 />
-                Acknowledge while working (“let me check”)
+                Short speech boost (100 ms floor, ASR padding, alternate retry)
               </label>
               <label>
                 <input

@@ -33,7 +33,7 @@ export type Message = {
   tool_call_id?: string | null
   /** Which surface produced it: `user_voice`, `assistant_agent`, … */
   source?: string | null
-  /** Ties a user turn to its authoritative answer and spoken rendering. */
+  /** Ties a user turn to its authoritative answer and any voice experiment. */
   correlation_id?: string | null
   /** `partial`, `final`, `cancelled`, `superseded`, `failed`. */
   status?: string | null

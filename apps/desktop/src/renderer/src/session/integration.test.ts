@@ -244,7 +244,7 @@ describe('coordinator over the real agent adapter', () => {
         ...DEFAULT_INTEGRATION_CONFIG,
         voiceEnabled: true,
         voiceSessionTarget: 'agent',
-        allowVoiceBackchannels: false
+        voiceBackgroundRouting: 'always'
       }
     })
     coordinator.connect()
@@ -287,7 +287,7 @@ describe('coordinator over the real agent adapter', () => {
     expect(chat.assistantMessages()).toHaveLength(1)
     expect(chat.assistantMessages()[0].content).toBe('oggOpus failed.')
     expect(chat.assistantMessages()[0].source).toBe('assistant_agent')
-    expect(voice.authoritative()).toHaveLength(1)
+    expect(voice.spoken).toHaveLength(0)
     expect(coordinator.metrics().duplicateEventsIgnored).toBe(1)
   })
 

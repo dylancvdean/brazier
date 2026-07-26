@@ -59,7 +59,11 @@ describe('buildVoiceContext', () => {
     expect(context.conversationSummary.length).toBeLessThanOrEqual(
       config.voiceContextSummaryLimitChars
     )
-    expect(context.behavioralRules).toEqual([...VOICE_BEHAVIORAL_RULES])
+    expect(context.behavioralRules[0]).toContain('only audible voice')
+    expect(context.behavioralRules[0]).toContain('Lightweight turns')
+    expect(context.behavioralRules).toEqual(
+      expect.arrayContaining([...VOICE_BEHAVIORAL_RULES])
+    )
   })
 
   it('omits withdrawn turns and the voice’s own renderings', () => {
@@ -134,6 +138,36 @@ describe('renderVoicePrompt', () => {
     expect(prompt).not.toContain('Active task')
     expect(prompt).not.toContain('Recent turns')
     expect(prompt).toContain('Rules:')
+  })
+
+  it('makes PersonaPlex the only audible voice for integrated turns', () => {
+    const prompt = renderVoicePrompt(
+      buildVoiceContext({
+        personaInstructions: 'Warm and direct.',
+        conversationSummary: '',
+        messages: [],
+        task: null,
+        config
+      })
+    )
+
+    expect(prompt).toContain('only audible voice')
+    expect(prompt).toContain('Lightweight turns may stay entirely with you')
+    expect(prompt).toContain('need files, tools, or checked facts')
+  })
+
+  it('does not constrain PersonaPlex to handoffs when used on its own', () => {
+    const prompt = renderVoicePrompt(
+      buildVoiceContext({
+        personaInstructions: 'Warm and direct.',
+        conversationSummary: '',
+        messages: [],
+        task: null,
+        config: { ...config, voiceSessionTarget: 'neither' }
+      })
+    )
+
+    expect(prompt).not.toContain('only audible voice')
   })
 })
 

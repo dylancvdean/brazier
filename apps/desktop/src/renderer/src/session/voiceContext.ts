@@ -45,7 +45,14 @@ export type VoiceContextInput = {
   /** What the voice should do right now. Empty when it is just listening. */
   responseDirective?: string
   currentStatus?: string
-  config: Pick<IntegrationConfig, 'voiceContextRecentTurnLimit' | 'voiceContextSummaryLimitChars'>
+  config: Pick<
+    IntegrationConfig,
+    | 'voiceContextRecentTurnLimit'
+    | 'voiceContextSummaryLimitChars'
+    | 'voiceSessionTarget'
+    | 'voiceBackgroundRouting'
+    | 'personaplexHandoffStrategy'
+  >
 }
 
 /** Per-turn budget, so one long paste cannot crowd out the rest. */
@@ -64,9 +71,25 @@ export function buildVoiceContext(input: VoiceContextInput): VoiceContext {
       content: clamp(message.content, RECENT_TURN_LIMIT_CHARS)
     }))
 
+  const behavioralRules = [...VOICE_BEHAVIORAL_RULES]
+  if (input.config.voiceSessionTarget !== 'neither') {
+    if (input.config.voiceBackgroundRouting !== 'always') {
+      behavioralRules.unshift(
+        'You are the only audible voice and the immediate conversational assistant. Lightweight turns may stay entirely with you; answer those naturally and never imply that background work is running.',
+        'For requests that need files, tools, or checked facts, briefly say you are checking rather than inventing an outcome. A fresh prompt may later give you confirmed information to explain.'
+      )
+    } else {
+      behavioralRules.unshift(
+        input.config.personaplexHandoffStrategy === 'continuous'
+          ? 'You are the only audible voice. Answer the user naturally yourself. A background assistant independently puts a checked answer on screen; never claim you saw its work.'
+          : 'You are the only audible voice. For requests that need files, tools, or checked facts, briefly say you are checking rather than inventing an outcome. A fresh prompt may later give you confirmed information to explain.'
+      )
+    }
+  }
+
   return {
     personaInstructions: input.personaInstructions.trim(),
-    behavioralRules: [...VOICE_BEHAVIORAL_RULES],
+    behavioralRules,
     conversationSummary: clamp(
       input.conversationSummary,
       input.config.voiceContextSummaryLimitChars

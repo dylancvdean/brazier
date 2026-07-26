@@ -7,9 +7,9 @@ inventory is generated per release from `pnpm-lock.yaml` and `Cargo.lock`; this
 file covers the components that carry attribution requirements or that execute as
 part of the product.
 
-Model weights are not covered here. Hugging Face repositories carry their own
-licenses, which the application surfaces and requires acknowledging before a
-download.
+User-downloaded model weights are not covered here. Hugging Face repositories
+carry their own licenses, which the application surfaces and requires
+acknowledging before a download. The bundled Silero VAD model is listed below.
 
 ## Agent runtime
 
@@ -65,6 +65,19 @@ packaged build; `electron-builder` includes it.
 **React**, **React DOM** — MIT
 **lucide-react** — ISC
 **Inter** (`@fontsource-variable/inter`) — SIL Open Font License 1.1
+
+**Silero VAD v5** — MIT model and implementation
+Source: https://github.com/snakers4/silero-vad
+
+**VAD for Javascript** (`@ricky0123/vad-web`) — ISC
+Source: https://github.com/ricky0123/vad
+
+**ONNX Runtime Web** — MIT
+Source: https://github.com/microsoft/onnxruntime
+
+These components run the bundled speech detector locally in the renderer.
+Captured microphone audio does not leave the machine for voice activity
+detection.
 
 ## Daemon
 

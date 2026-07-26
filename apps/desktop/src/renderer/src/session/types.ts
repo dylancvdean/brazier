@@ -33,7 +33,7 @@ export type ConversationMessage = {
   source: MessageSource
   content: string
   createdAt: string
-  /** Ties a user turn, its authoritative answer, and its spoken rendering. */
+  /** Ties a user turn, its authoritative answer, and any voice experiment. */
   correlationId?: string
   status: MessageStatus
   metadata?: Record<string, unknown>
@@ -78,6 +78,10 @@ export type ResponseState = {
   spokenStatus: SpokenStatus
   /** Voice-originated turns are the ones spoken back by default. */
   originSource: MessageSource
+  /** Exact submitted request, used to build experimental PersonaPlex prompts. */
+  userText: string
+  /** Voice capture that produced this turn, so replay cannot select a later one. */
+  utteranceId?: string
   userMessageId?: string
   createdAt: number
   startedAt?: number
@@ -161,7 +165,7 @@ export type SpeechRequest = {
   correlationId: string
   /** Verbatim authoritative text. The adapter must not alter its facts. */
   text: string
-  kind: 'authoritative' | 'backchannel' | 'status' | 'error'
+  kind: 'authoritative' | 'status' | 'error'
   /** Soft target so a long answer is spoken as a summary-then-detail. */
   brevityTargetChars?: number
   pronunciationHints?: Array<{ written: string; spoken: string }>

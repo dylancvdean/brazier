@@ -24,6 +24,10 @@ import type {
   SpeechRequest,
   VoiceContext
 } from './types'
+import type {
+  PersonaPlexHandoffRequest,
+  PersonaPlexHandoffStrategy
+} from './personaplexHandoff'
 
 export class FakeChat implements ChatAdapter {
   messages: ConversationMessage[] = []
@@ -152,6 +156,10 @@ export class FakeAgent implements AgentAdapter {
 
 export class FakeVoice implements VoiceAdapter {
   spoken: SpeechRequest[] = []
+  handoffs: Array<{
+    request: PersonaPlexHandoffRequest
+    strategy: PersonaPlexHandoffStrategy
+  }> = []
   stopped: Array<string | undefined> = []
   contexts: VoiceContext[] = []
   sessions: string[] = []
@@ -183,6 +191,17 @@ export class FakeVoice implements VoiceAdapter {
 
   async updateContext(context: VoiceContext): Promise<void> {
     this.contexts.push(context)
+  }
+
+  async handoffResult(
+    request: PersonaPlexHandoffRequest,
+    strategy: PersonaPlexHandoffStrategy
+  ): Promise<VoiceSessionHandle | null> {
+    this.handoffs.push({ request, strategy })
+    // The production adapter stops the old stream before reopening output on
+    // the replacement that receives the checked result.
+    if (strategy !== 'continuous') this.modelAudioEnabled = true
+    return null
   }
 
   async speak(request: SpeechRequest): Promise<void> {

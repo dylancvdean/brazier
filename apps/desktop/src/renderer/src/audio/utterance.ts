@@ -3,13 +3,13 @@
  *
  * PersonaPlex sends back its own speech as text, never the user's, so the
  * shared-conversation mode has to produce the user transcript itself. This
- * splits the captured microphone stream into utterances on energy and silence
- * and hands each finished one to the caller, which transcribes it through the
- * daemon's ASR endpoint.
+ * splits the captured microphone stream into utterances on speech probability
+ * and silence and hands each finished one to the caller, which transcribes it
+ * through the daemon's ASR endpoint.
  *
- * Deliberately simple: a fixed threshold with hold-in and hold-out counters.
- * The goal is turn boundaries, not voice activity research, and every parameter
- * is in frames so the behaviour is testable without audio hardware.
+ * Silero VAD is the normal speech decision. RMS remains as a fallback when the
+ * small ONNX model cannot load, as a meter, and as an echo guard while the
+ * assistant is speaking. Hold-in and hold-out counters still own turn shape.
  */
 
 import { NoiseFloorTracker } from './noiseFloor'
@@ -25,6 +25,8 @@ export type UtteranceSegmenterOptions = {
    * which is what every parameter here was tuned against.
    */
   adaptive?: boolean
+  /** Silero probability at or above which a frame counts as speech. */
+  neuralSpeechThreshold?: number
   /** Consecutive speech frames before an utterance opens. */
   framesToOpen?: number
   /**
@@ -55,6 +57,8 @@ export type UtteranceSegmenterOptions = {
   framesBetweenPauses?: number
   /** Utterances with less voiced audio than this are noise, not turns. */
   minimumFrames?: number
+  /** Lower floor allowed when the bundled neural VAD confirms the speech. */
+  minimumNeuralFrames?: number
   /**
    * Utterances whose voiced audio does not average this many times the noise
    * floor are the room, not a turn. Applied at close, so an utterance the gate
@@ -113,8 +117,11 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   // utterance, no transcript, and no error — the session simply ignores you.
   threshold: SPEECH_THRESHOLD,
   adaptive: true,
+  neuralSpeechThreshold: 0.5,
   // At 20 ms per frame: 60 ms to open, 700 ms of silence to close, 200 ms of
-  // voiced audio to count as a turn, 30 s cap.
+  // energy-only audio or 100 ms of Silero-confirmed audio to count as a turn,
+  // 30 s cap. The lower neural floor is enough for "yes", "no", and other
+  // clipped commands without making the noise fallback equally permissive.
   framesToOpen: 3,
   // 300 ms of voiced audio: long enough that a knock or a breath does not stop
   // the assistant mid-sentence, short enough to feel immediate when interrupting
@@ -129,6 +136,7 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   // queue a transcription per gap.
   framesBetweenPauses: 12,
   minimumFrames: 10,
+  minimumNeuralFrames: 5,
   // Two: half the margin the gate itself demands. The gate decides whether to
   // start listening, which should be eager; this decides whether what was heard
   // was ever speech, and the audio is in hand by then.
@@ -161,6 +169,8 @@ export class UtteranceSegmenter {
   private open = false
   private sustained = false
   private guarded = false
+  /** Whether this utterance has decisions from Silero rather than RMS alone. */
+  private neuralFrames = 0
   private readonly noiseFloor = new NoiseFloorTracker()
   /** Sum of the voiced frames' levels, for the speech-to-noise test at close. */
   private voicedLevelSum = 0
@@ -203,15 +213,28 @@ export class UtteranceSegmenter {
     return this.options.adaptive ? this.noiseFloor.level : 0
   }
 
-  /** Feed one captured frame. */
-  push(samples: Float32Array, sampleRate: number): void {
+  /**
+   * Feed one captured frame.
+   *
+   * `speechProbability` comes from Silero. It is optional only so voice remains
+   * usable if WebAssembly or the bundled model cannot initialize.
+   */
+  push(samples: Float32Array, sampleRate: number, speechProbability?: number): void {
     this.sampleRate = sampleRate
     const level = rms(samples)
     // The assistant's own voice through the speakers is not the room, so it
     // must not teach the tracker what the room sounds like.
     if (this.options.adaptive && !this.guarded) this.noiseFloor.push(level)
     const gate = this.currentGate()
-    const loud = level >= gate
+    const neural = speechProbability !== undefined
+    if (neural) this.neuralFrames += 1
+    // Neural VAD rejects non-speech noise in the normal case. While our own
+    // speech is playing, retain the raised energy gate as a second condition:
+    // VAD identifies the speaker audio as speech too, but should not let echo
+    // interrupt the sentence it came from.
+    const loud = neural
+      ? speechProbability >= this.options.neuralSpeechThreshold && (!this.guarded || level >= gate)
+      : level >= gate
 
     if (this.open && loud) this.voicedLevelSum += level
 
@@ -258,7 +281,10 @@ export class UtteranceSegmenter {
    */
   private offerPause(): void {
     if (!this.currentId || !this.handlers.onPause) return
-    if (this.voicedFrames < this.options.minimumFrames) return
+    const minimum = this.neuralFrames > 0
+      ? this.options.minimumNeuralFrames
+      : this.options.minimumFrames
+    if (this.voicedFrames < minimum) return
     if (
       this.pausedAtVoicedFrames !== null &&
       this.voicedFrames - this.pausedAtVoicedFrames < this.options.framesBetweenPauses
@@ -302,20 +328,22 @@ export class UtteranceSegmenter {
     const id = this.currentId
     const voiced = this.voicedFrames
     const voicedLevel = this.voicedLevelSum
+    const neural = this.neuralFrames > 0
     const frames = this.keptFrames()
     this.reset()
     if (!id) return
-    if (voiced < this.options.minimumFrames) {
+    const minimum = neural ? this.options.minimumNeuralFrames : this.options.minimumFrames
+    if (voiced < minimum) {
       this.handlers.onDiscarded?.(
         id,
-        `only ${voiced} voiced frames, needs ${this.options.minimumFrames}`
+        `only ${voiced} voiced frames, needs ${minimum}`
       )
       return
     }
     // Steady noise opens the gate until the tracker has caught up with it. By
     // the time it closes the room is known, so ask again whether this was ever
     // speech rather than sending a fan to be transcribed.
-    if (this.options.adaptive && voiced > 0) {
+    if (!neural && this.options.adaptive && voiced > 0) {
       const mean = voicedLevel / voiced
       const floor = this.noiseFloor.level
       if (mean < floor * this.options.minimumSpeechToNoise) {
@@ -340,6 +368,7 @@ export class UtteranceSegmenter {
     this.silenceRun = 0
     this.voicedFrames = 0
     this.voicedLevelSum = 0
+    this.neuralFrames = 0
     this.open = false
     this.sustained = false
     this.currentId = null
@@ -356,6 +385,7 @@ export class UtteranceSegmenter {
  * enough and 800 ms is, so this leaves margin.
  */
 const FLUSH_SILENCE_MS = 1000
+const LEADING_SILENCE_MS = 250
 
 /** Append silence, so the tail of an utterance is not left undecoded. */
 export function padTrailingSilence(
@@ -365,6 +395,27 @@ export function padTrailingSilence(
 ): Float32Array {
   const padded = new Float32Array(samples.length + Math.round((sampleRate * milliseconds) / 1000))
   padded.set(samples)
+  return padded
+}
+
+/**
+ * Give a short utterance clean decoder context on both sides.
+ *
+ * The capture pre-roll is opportunistic and can begin at the first speech
+ * frame. A little deterministic leading silence prevents a one-syllable word
+ * from sitting on the WAV boundary, while the existing trailing pad flushes a
+ * streaming decoder's final token.
+ */
+export function padSpeechForAsr(
+  samples: Float32Array,
+  sampleRate: number,
+  leadingMilliseconds = LEADING_SILENCE_MS,
+  trailingMilliseconds = FLUSH_SILENCE_MS
+): Float32Array {
+  const leading = Math.round((sampleRate * leadingMilliseconds) / 1000)
+  const trailing = Math.round((sampleRate * trailingMilliseconds) / 1000)
+  const padded = new Float32Array(leading + samples.length + trailing)
+  padded.set(samples, leading)
   return padded
 }
 

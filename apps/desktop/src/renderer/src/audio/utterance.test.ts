@@ -4,6 +4,7 @@ import {
   SPEECH_THRESHOLD,
   UtteranceSegmenter,
   encodeWav,
+  padSpeechForAsr,
   padTrailingSilence
 } from './utterance'
 
@@ -20,6 +21,17 @@ function frame(amplitude: number): Float32Array {
 
 function feed(segmenter: UtteranceSegmenter, amplitude: number, count: number): void {
   for (let index = 0; index < count; index += 1) segmenter.push(frame(amplitude), SAMPLE_RATE)
+}
+
+function feedNeural(
+  segmenter: UtteranceSegmenter,
+  amplitude: number,
+  speechProbability: number,
+  count: number
+): void {
+  for (let index = 0; index < count; index += 1) {
+    segmenter.push(frame(amplitude), SAMPLE_RATE, speechProbability)
+  }
 }
 
 describe('UtteranceSegmenter', () => {
@@ -81,6 +93,27 @@ describe('UtteranceSegmenter', () => {
     const utterances: unknown[] = []
     const segmenter = new UtteranceSegmenter({ onUtterance: (value) => utterances.push(value) })
     feed(segmenter, 0.6, 4)
+    feed(segmenter, 0.001, 40)
+    expect(utterances).toHaveLength(0)
+  })
+
+  it('keeps a 100 ms spoken burst for short commands', () => {
+    const utterances: Array<{ voicedFrames: number }> = []
+    const segmenter = new UtteranceSegmenter({
+      onUtterance: (value) => utterances.push(value)
+    })
+    feedNeural(segmenter, 0.2, 0.95, 5)
+    feedNeural(segmenter, 0.001, 0.01, 40)
+    expect(utterances).toHaveLength(1)
+    expect(utterances[0].voicedFrames).toBe(5)
+  })
+
+  it('keeps the 200 ms floor when the neural model is unavailable', () => {
+    const utterances: unknown[] = []
+    const segmenter = new UtteranceSegmenter({
+      onUtterance: (value) => utterances.push(value)
+    })
+    feed(segmenter, 0.2, 5)
     feed(segmenter, 0.001, 40)
     expect(utterances).toHaveLength(0)
   })
@@ -175,6 +208,37 @@ describe('UtteranceSegmenter', () => {
     // Flushing twice must not emit the same audio again.
     segmenter.flush()
     expect(utterances).toHaveLength(1)
+  })
+})
+
+describe('model-based speech decisions', () => {
+  it('ignores loud background noise that Silero says is not speech', () => {
+    const started: string[] = []
+    const segmenter = new UtteranceSegmenter({ onSpeechStart: (id) => started.push(id) })
+
+    feedNeural(segmenter, 0.5, 0.03, 100)
+    expect(started).toHaveLength(0)
+  })
+
+  it('hears quiet speech without requiring it to clear the RMS gate', () => {
+    const utterances: unknown[] = []
+    const segmenter = new UtteranceSegmenter({ onUtterance: (value) => utterances.push(value) })
+
+    feedNeural(segmenter, 0.001, 0.9, 25)
+    feedNeural(segmenter, 0.001, 0.01, 40)
+    expect(utterances).toHaveLength(1)
+  })
+
+  it('keeps the guarded energy check so speaker echo cannot barge in', () => {
+    const sustained: string[] = []
+    const segmenter = new UtteranceSegmenter({ onSustainedSpeech: (id) => sustained.push(id) })
+    segmenter.setGuarded(true)
+
+    feedNeural(segmenter, 0.01, 0.95, 40)
+    expect(sustained).toHaveLength(0)
+
+    feedNeural(segmenter, 0.5, 0.95, 20)
+    expect(sustained).toHaveLength(1)
   })
 })
 
@@ -277,6 +341,18 @@ describe('padTrailingSilence', () => {
     // 300 ms was not enough against the real worker and 800 ms was.
     const padded = padTrailingSilence(new Float32Array(10), 16000)
     expect(padded.length - 10).toBeGreaterThanOrEqual(16000 * 0.8)
+  })
+})
+
+describe('padSpeechForAsr', () => {
+  it('moves a short word away from the WAV boundary and still flushes its tail', () => {
+    const speech = new Float32Array([0.4, -0.4])
+    const padded = padSpeechForAsr(speech, 1000, 250, 800)
+    expect(padded).toHaveLength(1052)
+    expect(padded[249]).toBe(0)
+    expect(padded[250]).toBeCloseTo(0.4)
+    expect(padded[251]).toBeCloseTo(-0.4)
+    expect(padded[252]).toBe(0)
   })
 })
 

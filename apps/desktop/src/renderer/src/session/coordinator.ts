@@ -25,6 +25,7 @@ import type {
   VoiceAdapter,
   VoiceAdapterEvent
 } from './adapters'
+import { shouldRouteVoiceToBackground } from './backgroundRouting'
 import { DEFAULT_INTEGRATION_CONFIG, type IntegrationConfig } from './config'
 import { classifyConfirmation } from './confirmation'
 import { SessionEventLog } from './eventLog'
@@ -41,7 +42,6 @@ import type {
   SessionEvent,
   SessionEventType,
   SessionMetrics,
-  SpeechRequest,
   TaskState,
   VoiceContext
 } from './types'
@@ -89,7 +89,15 @@ export type CoordinatorSnapshot = {
    * graph is not running; frames with a peak under the gate means the room or
    * the gain is too quiet.
    */
-  capture: { frames: number; peak: number; status: string; gate: number; noiseFloor: number }
+  capture: {
+    frames: number
+    peak: number
+    status: string
+    gate: number
+    noiseFloor: number
+    vad: 'silero-v5' | 'energy-fallback'
+    speechProbability: number | null
+  }
   /**
    * What transcription is costing, per interface that has served an utterance
    * this session. Which one should transcribe a spoken turn is an open
@@ -175,9 +183,6 @@ export type CoordinatorDeps = {
  */
 let instances = 0
 
-/** Immediate acknowledgments. None of them claims anything happened. */
-const BACKCHANNELS = ['Let me check.', "I'm looking at that now.", 'One moment.']
-
 export class SessionCoordinator {
   readonly events = new SessionEventLog()
 
@@ -214,7 +219,9 @@ export class SessionCoordinator {
     peak: 0,
     status: '',
     gate: 0,
-    noiseFloor: 0
+    noiseFloor: 0,
+    vad: 'energy-fallback',
+    speechProbability: null
   }
   /** Per-engine transcription totals; see `CoordinatorSnapshot.transcription`. */
   private readonly transcription = new Map<
@@ -230,8 +237,8 @@ export class SessionCoordinator {
   >()
   private pendingApproval: PendingApproval | null = null
   private pendingRenewal: string | null = null
-  private backchanneling = new Set<string>()
-  private statusCued = new Set<string>()
+  /** The old PersonaPlex stream is silent while an authoritative turn runs. */
+  private personaPlexHeldForRouting = false
   private interruptRequestedAt: number | null = null
 
   private readonly listeners = new Set<(snapshot: CoordinatorSnapshot) => void>()
@@ -330,19 +337,57 @@ export class SessionCoordinator {
   setConfig(config: IntegrationConfig): void {
     const previous = this.config
     this.config = config
-    if (previous.voiceSessionTarget !== config.voiceSessionTarget) this.applyAudioOwnership()
+    const voicePromptChanged =
+      (previous.voiceSessionTarget === 'neither') !== (config.voiceSessionTarget === 'neither') ||
+      previous.voiceBackgroundRouting !== config.voiceBackgroundRouting ||
+      previous.personaplexHandoffStrategy !== config.personaplexHandoffStrategy
+    if (voicePromptChanged) {
+      // These settings are launch-prompt rules as well as audio gates.
+      // PersonaPlex cannot update a live prompt, so apply the new role at the
+      // next safe boundary instead of leaving prompt and gate in disagreement.
+      if (this.voiceSessionId) {
+        this.applyAudioOwnership(false)
+        this.track(this.requestRenewal('voice handoff settings changed'), 'Refreshing voice role')
+      } else {
+        this.applyAudioOwnership()
+      }
+    } else if (previous.voiceSessionTarget !== config.voiceSessionTarget) {
+      this.applyAudioOwnership()
+    }
     this.publish()
   }
 
   /**
-   * Decide whose voice the user hears. When the coordinator delivers answers,
-   * PersonaPlex's own audio is silenced so there are never two replies to one
-   * question; when connected to nothing, it is the only voice there is.
+   * PersonaPlex is the only audible voice. Background chat and agent responses
+   * are always text; selected experiments may reconnect PersonaPlex with their
+   * result, but never substitute a platform synthesizer.
    */
-  private applyAudioOwnership(): void {
-    const coordinatorSpeaks =
-      this.config.voiceSessionTarget !== 'neither' && this.deps.voice.canSpeak()
-    this.deps.voice.setModelAudioEnabled(!coordinatorSpeaks)
+  private applyAudioOwnership(_handoffsReady = true): void {
+    this.personaPlexHeldForRouting = false
+    this.deps.voice.setModelAudioEnabled(true)
+  }
+
+  /** Muting is useful only when a fresh stream will eventually replace this one. */
+  private preHandoffMuteEnabled(): boolean {
+    return (
+      this.config.voiceSessionTarget !== 'neither' &&
+      this.config.personaplexHandoffStrategy !== 'continuous' &&
+      this.config.personaplexPreHandoffMode !== 'respond'
+    )
+  }
+
+  private holdPersonaPlexForRouting(): void {
+    if (!this.preHandoffMuteEnabled()) return
+    this.personaPlexHeldForRouting = true
+    // Always reapply: the adapter intentionally reopens audio when a new
+    // sustained utterance starts, including one that arrives while held.
+    this.deps.voice.setModelAudioEnabled(false)
+  }
+
+  private releasePersonaPlexRoutingHold(): void {
+    if (!this.personaPlexHeldForRouting) return
+    this.personaPlexHeldForRouting = false
+    this.deps.voice.setModelAudioEnabled(true)
   }
 
   setPersona(persona: string): void {
@@ -446,6 +491,7 @@ export class SessionCoordinator {
     correlationId: string
     text: string
     source: MessageSource
+    utteranceId?: string
     supersedes?: string
   }): Promise<string | null> {
     if (!this.conversationId) {
@@ -479,6 +525,8 @@ export class SessionCoordinator {
       cancellable: true,
       spokenStatus: 'none',
       originSource: input.source,
+      userText: input.text,
+      utteranceId: input.utteranceId,
       userMessageId: userMessage.id,
       createdAt: this.now()
     })
@@ -580,14 +628,9 @@ export class SessionCoordinator {
     return 'chat'
   }
 
-  /** Where a turn's answer should go, given who asked and the configuration. */
-  private targetsFor(source: MessageSource): DeliveryTarget {
-    const voiceLive = this.config.voiceEnabled && this.voiceSessionId !== null
-    if (!voiceLive) return 'text'
-    if (source === 'user_voice') {
-      return this.config.speakVoiceOriginatedResponses ? 'both' : 'text'
-    }
-    return this.config.speakTextOriginatedResponses ? 'both' : 'text'
+  /** Background answers are authoritative in chat; PersonaPlex owns all audio. */
+  private targetsFor(_source: MessageSource): DeliveryTarget {
+    return 'text'
   }
 
   // --- Agent events ---------------------------------------------------------
@@ -613,7 +656,6 @@ export class SessionCoordinator {
           updatedAt: this.now()
         }
         this.emit('AGENT_STARTED', event.correlationId, 'agent', {})
-        this.track(this.acknowledge(event.correlationId), 'Acknowledgement')
         this.publish()
         return
       }
@@ -685,10 +727,6 @@ export class SessionCoordinator {
           this.task = { ...this.task, activeTool: event.tool, updatedAt: this.now() }
         }
         this.emit('TOOL_STARTED', event.correlationId, 'agent', { tool: event.tool })
-        this.track(
-          this.cueStatus(event.correlationId, `Still working — running ${event.tool}.`),
-          'Status cue'
-        )
         this.publish()
         return
       }
@@ -732,7 +770,6 @@ export class SessionCoordinator {
         if (this.task?.correlationId === event.correlationId) {
           this.task = { ...this.task, status: 'cancelled', updatedAt: this.now() }
         }
-        void this.stopSpeechFor(event.correlationId)
         this.finishActive(event.correlationId)
         this.publish()
         return
@@ -742,11 +779,7 @@ export class SessionCoordinator {
     }
   }
 
-  /**
-   * Store the authoritative answer once, show it, and only then ask for spoken
-   * delivery. The spoken rendering shares this message's correlation id instead
-   * of becoming a second assistant message.
-   */
+  /** Store the authoritative answer once, then run the selected voice experiment. */
   private async deliverFinal(correlationId: string, text: string): Promise<void> {
     const response = this.responses.get(correlationId)
     if (!response) return
@@ -770,9 +803,49 @@ export class SessionCoordinator {
     }
     this.report(null)
 
-    if (this.shouldSpeak(response)) await this.requestSpeech(response, text)
+    if (
+      response.originSource === 'user_voice' &&
+      this.voiceSessionId &&
+      this.voiceStatus === 'live'
+    ) {
+      await this.handoffBackgroundResult(response, text)
+    }
     this.finishActive(correlationId)
     this.publish()
+  }
+
+  private async handoffBackgroundResult(response: ResponseState, text: string): Promise<void> {
+    const strategy = this.config.personaplexHandoffStrategy
+    if (strategy === 'continuous') return
+    this.report(`PersonaPlex experiment: ${strategy}`)
+    try {
+      const replacement = await this.deps.voice.handoffResult(
+        {
+          correlationId: response.correlationId,
+          utteranceId: response.utteranceId,
+          userText: response.userText,
+          resultText: text,
+          context: this.buildContext(text)
+        },
+        strategy
+      )
+      if (replacement) {
+        this.voiceSessionId = replacement.id
+        this.voiceStartedAt = replacement.startedAt
+        this.metricsState.voiceSessionRenewals += 1
+      }
+      // `handoffResult` stops the old stream before it reopens output on the
+      // replacement, so clearing this flag cannot leak the independent answer.
+      this.personaPlexHeldForRouting = false
+      this.report(null)
+    } catch (cause) {
+      this.releasePersonaPlexRoutingHold()
+      const error = errorText(cause)
+      this.report(`PersonaPlex handoff failed; the answer remains in chat: ${error}`)
+      this.diagnose('VOICE_SESSION_ERROR', response.correlationId, 'voice', {
+        errorCategory: 'personaplex_handoff_failed'
+      })
+    }
   }
 
   private failResponse(correlationId: string, error: string): void {
@@ -793,20 +866,10 @@ export class SessionCoordinator {
       this.task = { ...this.task, status: 'failed', activeTool: undefined, updatedAt: this.now() }
     }
     this.streamingText = ''
+    this.releasePersonaPlexRoutingHold()
     this.report(error)
     this.emit('AGENT_FAILED', correlationId, 'agent', { error })
     this.diagnose('AGENT_FAILED', correlationId, 'agent', { errorCategory: 'agent_run_failed' })
-    // Any pending success-oriented speech is stopped; the voice may state the
-    // failure briefly, but it never invents a fallback answer.
-    void this.stopSpeechFor(correlationId)
-    const response2 = this.responses.get(correlationId)
-    if (response2 && this.shouldSpeak(response2)) {
-      void this.speakRequest({
-        correlationId,
-        text: 'That run failed. The error is on screen.',
-        kind: 'error'
-      })
-    }
     this.finishActive(correlationId)
   }
 
@@ -839,6 +902,9 @@ export class SessionCoordinator {
     switch (event.type) {
       case 'userSpeechStarted': {
         this.hearing = 'speaking'
+        if (this.config.personaplexPreHandoffMode === 'mute-on-speech') {
+          this.holdPersonaPlexForRouting()
+        }
         this.publish()
         this.track(this.onBargeIn(), 'Interrupting speech')
         return
@@ -849,7 +915,9 @@ export class SessionCoordinator {
           peak: event.peak,
           status: event.status,
           gate: event.gate,
-          noiseFloor: event.noiseFloor
+          noiseFloor: event.noiseFloor,
+          vad: event.vad,
+          speechProbability: event.speechProbability
         }
         console.debug(
           `[voice] ${this.id} sees ${event.frames} frames, peak ${event.peak.toFixed(3)}`
@@ -894,13 +962,28 @@ export class SessionCoordinator {
         // Every other step reports itself; without this one an utterance that
         // transcribed to nothing is indistinguishable from one never heard.
         this.hearing = 'idle'
-        this.report('That came back with no words in it. Try speaking a little longer.')
+        this.releasePersonaPlexRoutingHold()
+        this.report(
+          this.config.shortSpeechBoost
+            ? 'That came back with no words even after short-speech recovery. Try it once more or switch ASR engines.'
+            : 'That came back with no words. Enable Short speech boost or try speaking a little longer.'
+        )
         return
       }
       case 'userTranscriptPartial': {
         // Partials are display and barge-in only: they are unstable, and acting
         // on them would run the agent on a half-heard request.
         this.partialTranscript = event.text
+        if (
+          this.config.personaplexPreHandoffMode === 'mute-on-route' &&
+          shouldRouteVoiceToBackground(event.text, this.config.voiceBackgroundRouting, {
+            taskActive: this.activeCorrelationId !== null
+          })
+        ) {
+          // Display remains speculative and never starts work. Muting is safe
+          // and reversible: the final transcript reopens local turns.
+          this.holdPersonaPlexForRouting()
+        }
         this.emit('USER_VOICE_PARTIAL', this.activeCorrelationId ?? 'none', 'voice', {
           text: event.text
         })
@@ -926,7 +1009,6 @@ export class SessionCoordinator {
         if (this.speakingCorrelationId === event.correlationId) this.speakingCorrelationId = null
         const response = this.responses.get(event.correlationId)
         if (response && response.spokenStatus !== 'interrupted') response.spokenStatus = 'completed'
-        this.backchanneling.delete(event.correlationId)
         this.emit('VOICE_RESPONSE_COMPLETED', event.correlationId, 'voice', {})
         this.track(this.runPendingRenewal(), 'Renewing the voice session')
         this.publish()
@@ -949,6 +1031,9 @@ export class SessionCoordinator {
         return
       }
       case 'sessionError': {
+        if (!event.fatal && this.hearing === 'transcribing') {
+          this.releasePersonaPlexRoutingHold()
+        }
         this.onVoiceSessionError(event.error, event.fatal)
         return
       }
@@ -961,17 +1046,8 @@ export class SessionCoordinator {
     }
   }
 
-  /**
-   * The user talked over the assistant. Stop the audio; leave the task running.
-   * Cancelling here would throw away work the user never asked to abandon.
-   */
+  /** PersonaPlex handles duplex interruption; only the opt-in task cancel remains. */
   private async onBargeIn(): Promise<void> {
-    const speaking = this.speakingCorrelationId
-    if (!speaking || !this.config.interruptStopsSpeech) return
-    this.interruptRequestedAt = this.now()
-    await this.deps.voice.stopSpeaking(speaking).catch(() => undefined)
-    const response = this.responses.get(speaking)
-    if (response) response.spokenStatus = 'interrupted'
     if (this.config.interruptCancelsAgent && this.activeCorrelationId) {
       this.metricsState.agentTasksCancelledByInterruption += 1
       await this.cancelAgentTask(this.activeCorrelationId)
@@ -983,7 +1059,10 @@ export class SessionCoordinator {
     const trimmed = text.trim()
     this.hearing = 'idle'
     this.partialTranscript = ''
-    if (!trimmed) return
+    if (!trimmed) {
+      this.releasePersonaPlexRoutingHold()
+      return
+    }
     // A held tool call takes the next thing said. Anything else would submit a
     // new request to an agent that is stopped mid-action, and would leave the
     // question that was just asked out loud unanswered.
@@ -1008,6 +1087,7 @@ export class SessionCoordinator {
     // Connected to nothing: PersonaPlex is answering in its own voice and the
     // conversation is not ours to write to. The transcript is still shown.
     if (this.config.voiceSessionTarget === 'neither') {
+      this.releasePersonaPlexRoutingHold()
       this.partialTranscript = ''
       this.publish()
       return
@@ -1017,6 +1097,7 @@ export class SessionCoordinator {
     // assistant abandons what it was saying to report that it understood
     // nothing, which is a worse outcome than having ignored the sound.
     if (isTooThinToSubmit(trimmed)) {
+      this.releasePersonaPlexRoutingHold()
       this.report(`Ignored “${trimmed}” — too little to act on.`)
       this.publish()
       return
@@ -1029,6 +1110,27 @@ export class SessionCoordinator {
       return
     }
 
+    const routesToBackground = shouldRouteVoiceToBackground(
+      trimmed,
+      this.config.voiceBackgroundRouting,
+      { taskActive: this.activeCorrelationId !== null }
+    )
+    if (!routesToBackground) {
+      this.releasePersonaPlexRoutingHold()
+      // PersonaPlex already heard this turn and is answering it. Do not record a
+      // dangling user message with no authoritative assistant message; make the
+      // local decision observable in the transient status instead.
+      this.report(`PersonaPlex-only: “${trimmed}” — background model not called.`)
+      this.publish()
+      return
+    }
+    // Immediate mode normally closed the gate at sustained speech, but a very
+    // short routed command may never cross that bar. The final classifier is
+    // the fallback for both muting modes.
+    if (this.config.personaplexPreHandoffMode !== 'respond') {
+      this.holdPersonaPlexForRouting()
+    }
+
     const correlationId = this.newId('turn')
     this.turnStartedAt.set(correlationId, this.now())
     if (intent === 'correction') await this.supersedeQueued(correlationId)
@@ -1036,43 +1138,20 @@ export class SessionCoordinator {
       correlationId,
       text: trimmed,
       source: 'user_voice',
+      utteranceId,
       supersedes: intent === 'correction' ? (this.activeCorrelationId ?? undefined) : undefined
     })
   }
 
   // --- Approvals ------------------------------------------------------------
 
-  /**
-   * Read back what the agent wants to do, before it does it.
-   *
-   * The permission broker already judges every call, which is what keeps a
-   * voice-driven agent unwise rather than dangerous. What it cannot judge is
-   * that the request it is acting on came from a microphone, an energy gate, and
-   * a speech recogniser. So a held call is spoken aloud and the person is asked
-   * in words, rather than being expected to notice a card in a panel they are
-   * not looking at.
-   */
+  /** Surface a held call without introducing a second synthesized voice. */
   private async askForApproval(): Promise<void> {
     const pending = this.pendingApproval
     if (!pending) return
     const response = this.responses.get(pending.correlationId)
-    // Only for turns that came from speech. A typed request is answered where it
-    // was made, and speaking over it would interrupt reading.
     if (!response || response.originSource !== 'user_voice') return
-    if (!this.shouldSpeak(response)) {
-      this.report(`Waiting for you to allow: ${pending.summary}`)
-      return
-    }
-    // Audio still playing would talk over the question.
-    await this.deps.voice.stopSpeaking().catch(() => undefined)
-    this.pendingApproval = { ...pending, spoken: true }
-    const where = pending.environment === 'host' ? 'on your machine, outside the sandbox' : ''
-    await this.speakRequest({
-      correlationId: pending.correlationId,
-      text: `Before I do this${where ? ` ${where}` : ''}: ${pending.summary}. Say yes to allow it, or no to stop.`,
-      kind: 'status',
-      brevityTargetChars: 240
-    })
+    this.report(`Waiting for you to allow: ${pending.summary}`)
   }
 
   /**
@@ -1090,17 +1169,7 @@ export class SessionCoordinator {
       this.metricsState.approvalsUnclear += 1
       this.emit('APPROVAL_UNCLEAR', pending.correlationId, 'voice', { text })
       const message = `That was not a yes or a no, so nothing has run. ${pending.summary}. Say yes to allow it, or no to stop.`
-      const response = this.responses.get(pending.correlationId)
-      if (response && this.shouldSpeak(response)) {
-        await this.speakRequest({
-          correlationId: pending.correlationId,
-          text: message,
-          kind: 'status',
-          brevityTargetChars: 240
-        })
-      } else {
-        this.report(message)
-      }
+      this.report(message)
       return
     }
     const decision = verdict === 'affirmative' ? 'approve' : 'deny'
@@ -1239,82 +1308,6 @@ export class SessionCoordinator {
     this.publish()
   }
 
-  // --- Speech ---------------------------------------------------------------
-
-  private shouldSpeak(response: ResponseState): boolean {
-    return (
-      this.config.voiceEnabled &&
-      this.config.voiceSessionTarget !== 'neither' &&
-      this.voiceSessionId !== null &&
-      this.voiceStatus === 'live' &&
-      response.deliveryTargets === 'both' &&
-      this.deps.voice.canSpeak()
-    )
-  }
-
-  private async requestSpeech(response: ResponseState, text: string): Promise<void> {
-    // A "let me check" still playing would collide with the real answer.
-    if (this.backchanneling.delete(response.correlationId)) {
-      await this.deps.voice.stopSpeaking(response.correlationId).catch(() => undefined)
-    }
-    response.spokenStatus = 'requested'
-    this.emit('VOICE_RESPONSE_REQUESTED', response.correlationId, 'coordinator', {
-      messageId: response.authoritativeMessageId
-    })
-    await this.speakRequest({
-      correlationId: response.correlationId,
-      text,
-      kind: 'authoritative',
-      brevityTargetChars: this.config.spokenBrevityTargetChars
-    })
-  }
-
-  private async speakRequest(request: SpeechRequest): Promise<void> {
-    try {
-      await this.deps.voice.speak(request)
-    } catch (cause) {
-      const response = this.responses.get(request.correlationId)
-      if (response && request.kind === 'authoritative') response.spokenStatus = 'failed'
-      // Speech failing never loses the answer: it is already in the chat.
-      this.report(`Could not speak that answer: ${errorText(cause)}`)
-      this.diagnose('VOICE_SESSION_ERROR', request.correlationId, 'voice', {
-        errorCategory: 'speech_failed'
-      })
-      this.publish()
-    }
-  }
-
-  /** Immediate acknowledgment while the agent works. Not an answer. */
-  private async acknowledge(correlationId: string): Promise<void> {
-    const response = this.responses.get(correlationId)
-    if (!response || !this.config.allowVoiceBackchannels) return
-    if (response.originSource !== 'user_voice' || !this.shouldSpeak(response)) return
-    this.backchanneling.add(correlationId)
-    await this.speakRequest({
-      correlationId,
-      text: BACKCHANNELS[Math.floor(Math.random() * BACKCHANNELS.length)],
-      kind: 'backchannel',
-      brevityTargetChars: 40
-    })
-  }
-
-  /** One short, structured progress cue per turn, at most. */
-  private async cueStatus(correlationId: string, cue: string): Promise<void> {
-    const response = this.responses.get(correlationId)
-    if (!response || !this.config.allowVoiceBackchannels) return
-    if (response.originSource !== 'user_voice' || !this.shouldSpeak(response)) return
-    if (this.statusCued.has(correlationId)) return
-    this.statusCued.add(correlationId)
-    await this.speakRequest({ correlationId, text: cue, kind: 'status', brevityTargetChars: 60 })
-  }
-
-  private async stopSpeechFor(correlationId: string): Promise<void> {
-    this.backchanneling.delete(correlationId)
-    if (this.speakingCorrelationId !== correlationId && this.speakingCorrelationId !== null) return
-    await this.deps.voice.stopSpeaking(correlationId).catch(() => undefined)
-    if (this.speakingCorrelationId === correlationId) this.speakingCorrelationId = null
-  }
-
   // --- Cancellation ---------------------------------------------------------
   //
   // Three separate controls. Muting the voice must not end a task, and ending a
@@ -1327,7 +1320,6 @@ export class SessionCoordinator {
     if (speaking) {
       const response = this.responses.get(speaking)
       if (response) response.spokenStatus = 'interrupted'
-      this.backchanneling.delete(speaking)
       this.emit('VOICE_RESPONSE_INTERRUPTED', speaking, 'coordinator', { requested: true })
     }
     this.speakingCorrelationId = null
@@ -1358,7 +1350,6 @@ export class SessionCoordinator {
         await this.patchMessage(response.userMessageId, { metadata: { cancelled: true } })
       }
     }
-    await this.stopSpeechFor(target)
     if (response?.owner === 'agent') await this.deps.agent.cancelRun(target).catch(() => undefined)
     else this.deps.responder?.cancel(target)
     this.streamingText = ''
@@ -1381,7 +1372,6 @@ export class SessionCoordinator {
       return false
     }
     this.emit('RESPONSE_CANCEL_REQUESTED', target, 'coordinator', { scope: 'agent_task' })
-    await this.stopSpeechFor(target)
     await this.deps.agent.cancelRun(target).catch(() => undefined)
     const response = this.responses.get(target)
     if (response && response.status !== 'delivered') {
@@ -1403,6 +1393,7 @@ export class SessionCoordinator {
   async startVoiceSession(): Promise<void> {
     if (this.voiceSessionId) return
     this.voiceStatus = 'starting'
+    this.personaPlexHeldForRouting = false
     this.voiceError = null
     this.publish()
     try {
@@ -1423,6 +1414,7 @@ export class SessionCoordinator {
     if (!this.voiceSessionId) return
     await this.deps.voice.endSession().catch(() => undefined)
     this.voiceSessionId = null
+    this.personaPlexHeldForRouting = false
     this.voiceStatus = 'off'
     this.speakingCorrelationId = null
     this.publish()
@@ -1479,6 +1471,7 @@ export class SessionCoordinator {
       this.voiceSessionId = handle.id
       this.voiceStartedAt = handle.startedAt
       this.voiceStatus = 'live'
+      this.applyAudioOwnership()
       this.metricsState.voiceSessionRenewals += 1
       this.emit('VOICE_SESSION_RENEWED', this.activeCorrelationId ?? 'none', 'coordinator', {
         reason,

@@ -181,8 +181,7 @@ agent when a session is bound to the conversation and to chat otherwise; a
 spoken turn goes wherever Voice mode is pointed, and each destination there
 names exactly one place, so it is always answerable which model replied and
 where the next turn will land. PersonaPlex owns nothing. It may acknowledge,
-and it may speak an answer it was handed, but it never decides a tool result, a
-completion, or a fact. Its own generated text is treated as untrusted model
+but it never decides a tool result, a completion, or a fact. Its own generated text is treated as untrusted model
 output: shown in the voice pane, never stored as an answer, never parsed as a
 command.
 
@@ -193,15 +192,15 @@ unlabelled one.
 
 Pointing speech at the agent is marked experimental in the interface, and the
 warning is not decoration. A misheard word reaches a subsystem that edits files
-and runs commands, and the transcript is produced by segmenting a microphone on
-energy — so the words the agent acts on are the least reliable input in the
-application. The permission layer still judges every call, which is what stops
-this being dangerous rather than merely unwise, but nothing yet confirms a
-spoken instruction before it becomes one.
+and runs commands, and the transcript still passes through both speech detection
+and recognition. Silero VAD is materially more selective than a loudness gate,
+but the words the agent acts on remain the least reliable input in the
+application. The permission layer still judges every call, and held calls
+receive the explicit confirmation described below.
 
-A tool call the permission broker holds during a spoken turn is read back before
-it runs — what it will do and whether it is inside the sandbox — and the next
-utterance answers it. Only an unmistakable yes allows it; anything qualified
+A tool call the permission broker holds during a spoken turn is shown before it
+runs — what it will do and whether it is inside the sandbox — and the next
+utterance may answer it. Only an unmistakable yes allows it; anything qualified
 leaves the call held, because the request came from a microphone and a
 recogniser, and mishearing a refusal as consent runs a command that cannot be
 taken back. Decisions are one-shot, recorded in the conversation, and equally
@@ -224,20 +223,37 @@ adapter supplies them:
   shown as a partial and discarded; if they were done, it *is* the final one,
   byte-identical audio, and the turn starts without a second wait.
 
-  The gate that decides what counts as speech tracks the room rather than
-  sitting at a fixed level: the floor estimate falls freely and rises only while
-  the last second of audio looks flat, since room noise is steady and speech is
-  not. It is bounded below by the level a quiet room already worked at and above
-  by where ordinary speech lives, so a noisy room degrades to unreliable rather
-  than deaf. What the gate and the room currently read is shown in the voice
-  pane, because a session that has stopped hearing you should be able to say
-  why.
-- **Speaking specific text.** PersonaPlex takes its persona as a launch flag and
-  accepts audio only, so an authoritative answer is spoken verbatim through the
-  platform synthesizer. Since PersonaPlex answers on its own and cannot be told
-  to wait, its audio is gated off while that path is in use, so the user never
-  hears two different answers to one question. Where no synthesizer exists,
-  answers are shown and not spoken, and nothing claims otherwise.
+  Bundled Silero VAD v5 normally decides what is speech. Its stateful 16 kHz
+  windows are aligned back to the original capture frames and run locally
+  through ONNX Runtime Web. The earlier adaptive energy gate remains as an echo
+  guard and as a recoverable fallback when model initialization fails. The
+  active detector and its current reading are shown in the voice pane, because a
+  session that has stopped hearing you should be able to say why. With short
+  speech boost enabled, a Silero-confirmed 100 ms burst is retained rather than
+  discarded, ASR receives deterministic leading and trailing silence, and an
+  empty clip is tried once on the other installed recognizer. Standard mode
+  keeps the former 200 ms / trailing-only behavior as an A/B control.
+- **Routing without another router model.** PersonaPlex has already heard every
+  utterance. A local lexical gate decides whether the transcript also needs the
+  selected chat or agent model: Always preserves the original behavior, Auto
+  keeps short conversational turns with PersonaPlex while routing workspace,
+  tool, current-fact, and active-task language, and Explicit requires a concrete
+  work cue. Skipped turns invoke and record nothing; the voice pane reports the
+  decision so the classifier can be tuned from real sessions.
+- **Experimentally handing back a result.** PersonaPlex is the only audible
+  voice; platform TTS is not used. Both supported servers accept `text_prompt`
+  when a WebSocket connection begins, although neither can mutate the prompt of
+  an active generation. The adapter can therefore leave the current stream
+  continuous, reconnect to the same loaded process with direct or service-style
+  result information, optionally replay the exact correlated utterance at
+  realtime pace, or restart the process as a comparison. The background answer
+  remains authoritative in chat regardless of what PersonaPlex says. A separate
+  pre-handoff timing control can leave the old stream audible, mute it when a
+  speculative or final transcript routes to background work, or mute it as soon
+  as sustained speech begins. A local or empty final transcript reopens the old
+  stream; a background turn remains silent until the adapter has stopped it and
+  opened the replacement, preventing the unchecked answer from leaking during
+  the restart.
 
 Voice-session renewal (duration, context size, a runtime restart) replaces the
 PersonaPlex process at a safe conversational boundary and re-seeds it from the

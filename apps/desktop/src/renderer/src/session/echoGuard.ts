@@ -1,11 +1,11 @@
 /**
  * Guard against the assistant hearing itself.
  *
- * Spoken answers come out of the speakers, and the microphone is still open for
- * barge-in. The browser's echo canceller removes most of it, but anything that
- * leaks through would be transcribed, submitted as a new turn, answered, and
- * spoken again — a loop that runs until the user pulls the plug. So a transcript
- * that is mostly words we just said is discarded rather than submitted.
+ * PersonaPlex audio comes out of the speakers while the microphone stays open
+ * for full-duplex conversation. The browser's echo canceller removes most of
+ * it, but anything that leaks through would be transcribed and submitted as a
+ * new background turn. A transcript that is mostly the model text we just
+ * received is therefore discarded rather than submitted.
  *
  * The comparison is deliberately one-directional: a short fragment of our own
  * speech is echo, while a long utterance that merely quotes it is the user

@@ -31,7 +31,14 @@ function harness(overrides: Partial<IntegrationConfig> = {}) {
     now: clock.now,
     newId: sequentialIds(),
     log: (record) => logs.push(`${record.eventType}:${record.correlationId}`),
-    config: { ...DEFAULT_INTEGRATION_CONFIG, voiceEnabled: true, ...overrides }
+    config: {
+      ...DEFAULT_INTEGRATION_CONFIG,
+      voiceEnabled: true,
+      // Most coordinator tests specify the destination, not the new local
+      // classifier. Keep their original "every transcript submits" premise.
+      voiceBackgroundRouting: 'always',
+      ...overrides
+    }
   })
   // Adapters are connected explicitly, the way the React binding does from an
   // effect. Subscribing in the constructor is what let a remount detach it.
@@ -67,23 +74,22 @@ describe('basic flows', () => {
     agent.completeRun(correlationId, 'The voice adapter test is failing.')
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    // The transcript and the answer are both in the shared conversation, and the
-    // answer appears exactly once even though it was also spoken.
+    // The transcript and authoritative answer are both in the shared
+    // conversation. PersonaPlex is the only audio source.
     expect(chat.messages.map((message) => message.source)).toEqual([
       'user_voice',
       'assistant_agent'
     ])
     expect(chat.assistantMessages()).toHaveLength(1)
-    expect(voice.authoritative().map((request) => request.text)).toEqual([
-      'The voice adapter test is failing.'
-    ])
-    // The spoken rendering is linked to the stored answer, not stored again.
-    expect(voice.authoritative()[0].correlationId).toBe(correlationId)
+    expect(voice.spoken).toHaveLength(0)
+    expect(voice.handoffs).toHaveLength(0)
     expect(chat.assistantMessages()[0].correlationId).toBe(correlationId)
   })
 
-  it('speaks tool-backed results only after the agent supplies them', async () => {
-    const { coordinator, agent, voice } = await live()
+  it('hands a tool-backed result to the selected PersonaPlex experiment', async () => {
+    const { coordinator, agent, voice } = await live({
+      personaplexHandoffStrategy: 'reconnect-service-replay'
+    })
     speak(voice, 'utt-1', 'Run the tests and tell me what broke.')
     await Promise.resolve()
     const correlationId = agent.submitted[0].correlationId
@@ -91,9 +97,7 @@ describe('basic flows', () => {
     agent.emit({ type: 'runStarted', correlationId })
     agent.emit({ type: 'toolStarted', correlationId, toolCallId: 'c1', tool: 'shell' })
     await Promise.resolve()
-    // Nothing factual has been spoken yet: only an acknowledgment and a cue.
-    expect(voice.authoritative()).toHaveLength(0)
-    expect(voice.spoken.every((request) => request.kind !== 'authoritative')).toBe(true)
+    expect(voice.handoffs).toHaveLength(0)
 
     agent.emit({
       type: 'toolCompleted',
@@ -103,11 +107,21 @@ describe('basic flows', () => {
       outcome: '1 test failed'
     })
     expect(coordinator.snapshot().task?.confirmedResults).toEqual(['1 test failed'])
-    expect(voice.authoritative()).toHaveLength(0)
+    expect(voice.handoffs).toHaveLength(0)
 
     agent.emit({ type: 'responseFinal', correlationId, text: 'One test failed: oggOpus.' })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(voice.authoritative()[0].text).toBe('One test failed: oggOpus.')
+    expect(voice.spoken).toHaveLength(0)
+    expect(voice.handoffs).toHaveLength(1)
+    expect(voice.handoffs[0]).toMatchObject({
+      strategy: 'reconnect-service-replay',
+      request: {
+        correlationId,
+        utteranceId: 'utt-1',
+        userText: 'Run the tests and tell me what broke.',
+        resultText: 'One test failed: oggOpus.'
+      }
+    })
   })
 
   it('routes typed input to the same agent session without speaking it', async () => {
@@ -125,12 +139,13 @@ describe('basic flows', () => {
     expect(chat.assistantMessages()).toHaveLength(1)
   })
 
-  it('speaks text-originated answers when that is switched on', async () => {
-    const { coordinator, agent, voice } = await live({ speakTextOriginatedResponses: true })
+  it('never sends typed answers to platform TTS', async () => {
+    const { coordinator, agent, voice } = await live()
     await coordinator.submitText('Summarize the diff.')
     agent.completeRun(agent.submitted[0].correlationId, 'Three files changed.')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(voice.authoritative()).toHaveLength(1)
+    expect(voice.spoken).toHaveLength(0)
+    expect(voice.handoffs).toHaveLength(0)
   })
 
   it('uses one agent session for voice and text in the same conversation', async () => {
@@ -199,6 +214,47 @@ describe('adapter connection', () => {
 })
 
 describe('what the voice session is connected to', () => {
+  it('leaves lightweight auto-routed turns with PersonaPlex', async () => {
+    const { coordinator, agent, voice, chat } = await live({
+      voiceBackgroundRouting: 'auto'
+    })
+    speak(voice, 'utt-1', 'How are you?')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(agent.submitted).toHaveLength(0)
+    expect(chat.messages).toHaveLength(0)
+    expect(coordinator.snapshot().notice).toContain('background model not called')
+  })
+
+  it('still sends work cues through the background in auto mode', async () => {
+    const { agent, voice, chat } = await live({
+      voiceBackgroundRouting: 'auto'
+    })
+    speak(voice, 'utt-1', 'Run the tests')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(agent.submitted).toHaveLength(1)
+    expect(chat.messages.map((message) => message.source)).toEqual(['user_voice'])
+  })
+
+  it('only sends explicit work cues in explicit mode', async () => {
+    const { agent, voice, chat } = await live({
+      voiceBackgroundRouting: 'explicit'
+    })
+    speak(
+      voice,
+      'utt-1',
+      'Could you explain why that approach would be safer than the alternative?'
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(agent.submitted).toHaveLength(0)
+    expect(chat.messages).toHaveLength(0)
+
+    speak(voice, 'utt-2', 'Check the repository')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(agent.submitted).toHaveLength(1)
+  })
+
   it('sends spoken turns to the agent when that is the destination', async () => {
     const { coordinator, agent, voice, chat } = await live({ voiceSessionTarget: 'agent' })
     speak(voice, 'utt-1', 'With a task bound.')
@@ -246,13 +302,15 @@ describe('what the voice session is connected to', () => {
     expect(voice.spoken).toHaveLength(0)
   })
 
-  it('silences PersonaPlex whenever the coordinator delivers answers', async () => {
+  it('keeps PersonaPlex as the only audible voice for every destination', async () => {
     const { coordinator, voice } = await live({ voiceSessionTarget: 'neither' })
     const base = { ...DEFAULT_INTEGRATION_CONFIG, voiceEnabled: true }
     expect(voice.modelAudioEnabled).toBe(true)
 
     coordinator.setConfig({ ...base, voiceSessionTarget: 'chat' })
-    expect(voice.modelAudioEnabled).toBe(false)
+    expect(voice.modelAudioEnabled).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(voice.spoken).toHaveLength(0)
 
     coordinator.setConfig({ ...base, voiceSessionTarget: 'neither' })
     expect(voice.modelAudioEnabled).toBe(true)
@@ -275,8 +333,87 @@ describe('what the voice session is connected to', () => {
   })
 })
 
+describe('PersonaPlex before a background handoff', () => {
+  const restart = {
+    personaplexHandoffStrategy: 'restart-service-replay' as const,
+    voiceBackgroundRouting: 'auto' as const
+  }
+
+  it('can leave the old stream audible as the control', async () => {
+    const { voice } = await live({
+      ...restart,
+      personaplexPreHandoffMode: 'respond'
+    })
+    voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-1' })
+    voice.emit({ type: 'userTranscriptPartial', utteranceId: 'utt-1', text: 'Run the tests' })
+    expect(voice.modelAudioEnabled).toBe(true)
+  })
+
+  it('mutes a speculative transcript that looks background-bound', async () => {
+    const { voice } = await live({
+      ...restart,
+      personaplexPreHandoffMode: 'mute-on-route'
+    })
+    voice.emit({ type: 'userTranscriptPartial', utteranceId: 'utt-1', text: 'Run the tests' })
+    expect(voice.modelAudioEnabled).toBe(false)
+  })
+
+  it('reopens a speculative mute when the final turn stays local', async () => {
+    const { agent, voice } = await live({
+      ...restart,
+      personaplexPreHandoffMode: 'mute-on-route'
+    })
+    voice.emit({ type: 'userTranscriptPartial', utteranceId: 'utt-1', text: 'Check the thing' })
+    expect(voice.modelAudioEnabled).toBe(false)
+
+    speak(voice, 'utt-1', 'How are you?')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(agent.submitted).toHaveLength(0)
+    expect(voice.modelAudioEnabled).toBe(true)
+  })
+
+  it('can mute before transcription and reopen on the fresh handoff', async () => {
+    const { agent, voice } = await live({
+      ...restart,
+      personaplexPreHandoffMode: 'mute-on-speech'
+    })
+    voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-1' })
+    expect(voice.modelAudioEnabled).toBe(false)
+
+    speak(voice, 'utt-1', 'Run the tests')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(voice.modelAudioEnabled).toBe(false)
+
+    agent.completeRun(agent.submitted[0].correlationId, 'All tests passed.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(voice.handoffs).toHaveLength(1)
+    expect(voice.modelAudioEnabled).toBe(true)
+  })
+
+  it('does not mute when no replacement handoff is selected', async () => {
+    const { voice } = await live({
+      personaplexHandoffStrategy: 'continuous',
+      personaplexPreHandoffMode: 'mute-on-speech'
+    })
+    voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-1' })
+    expect(voice.modelAudioEnabled).toBe(true)
+  })
+
+  it('reopens an immediate mute when transcription returns no words', async () => {
+    const { voice } = await live({
+      ...restart,
+      personaplexPreHandoffMode: 'mute-on-speech'
+    })
+    voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-1' })
+    expect(voice.modelAudioEnabled).toBe(false)
+
+    voice.emit({ type: 'transcriptionEmpty', utteranceId: 'utt-1' })
+    expect(voice.modelAudioEnabled).toBe(true)
+  })
+})
+
 describe('interruption flows', () => {
-  it('stops audio on barge-in but lets the agent keep working', async () => {
+  it('lets PersonaPlex handle barge-in natively while the agent keeps working', async () => {
     const { coordinator, agent, voice } = await live()
     speak(voice, 'utt-1', 'Explain the sandbox.')
     await Promise.resolve()
@@ -287,7 +424,7 @@ describe('interruption flows', () => {
     voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-2' })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(voice.stopped).toContain(correlationId)
+    expect(voice.stopped).toHaveLength(0)
     expect(agent.cancelled).toHaveLength(0)
     expect(coordinator.metrics().agentTasksCancelledByInterruption).toBe(0)
     // The answer stays in the chat even though its delivery was cut short.
@@ -360,7 +497,7 @@ describe('interruption flows', () => {
     const first = agent.submitted[0].correlationId
     agent.completeRun(first, 'Every call is judged by agent_policy.')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(coordinator.snapshot().speakingCorrelationId).toBe(first)
+    expect(coordinator.snapshot().speakingCorrelationId).toBeNull()
 
     await coordinator.submitText('And the approvals?')
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -401,7 +538,7 @@ describe('interruption flows', () => {
 
     // Muting the voice must not end anything else.
     await coordinator.cancelVoiceOutput()
-    expect(voice.stopped).toContain(correlationId)
+    expect(voice.stopped).toContain(undefined)
     expect(agent.cancelled).toHaveLength(0)
     // Cancelling delivery after the answer was stored keeps it in the chat.
     expect(chat.assistantMessages()).toHaveLength(1)
@@ -447,6 +584,22 @@ describe('queueing', () => {
 })
 
 describe('session flows', () => {
+  it('renews at a safe boundary when the PersonaPlex experiment prompt changes', async () => {
+    const { coordinator, voice } = await live()
+    expect(voice.contexts[0].behavioralRules.join(' ')).toContain('background assistant')
+
+    coordinator.setConfig({
+      ...DEFAULT_INTEGRATION_CONFIG,
+      voiceEnabled: true,
+      voiceSessionTarget: 'agent',
+      personaplexHandoffStrategy: 'reconnect-service-replay'
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(voice.sessions).toHaveLength(2)
+    expect(voice.contexts.at(-1)?.behavioralRules.join(' ')).toContain('fresh prompt')
+  })
+
   it('renews the voice session at its limit without restarting the agent', async () => {
     const { coordinator, agent, voice, clock } = await live()
     speak(voice, 'utt-1', 'Remember this task.')
@@ -562,7 +715,7 @@ describe('failure flows', () => {
     expect(coordinator.events.eventsOfType('TOOL_FAILED')).toHaveLength(1)
   })
 
-  it('speaks a grounded error when the run fails and invents no answer', async () => {
+  it('shows a run failure without synthesizing a second voice', async () => {
     const { coordinator, agent, voice, chat } = await live()
     speak(voice, 'utt-1', 'Do the thing.')
     await Promise.resolve()
@@ -573,14 +726,13 @@ describe('failure flows', () => {
 
     expect(chat.assistantMessages()).toHaveLength(0)
     expect(voice.authoritative()).toHaveLength(0)
-    const spokenErrors = voice.spoken.filter((request) => request.kind === 'error')
-    expect(spokenErrors).toHaveLength(1)
-    expect(spokenErrors[0].text).not.toContain('The model engine crashed')
+    expect(voice.spoken).toHaveLength(0)
+    expect(coordinator.snapshot().notice).toContain('The model engine crashed')
     expect(coordinator.snapshot().responses[0].status).toBe('failed')
   })
 
-  it('keeps the answer in the chat when speech generation fails', async () => {
-    const { coordinator, agent, voice, chat } = await live({ allowVoiceBackchannels: false })
+  it('keeps the answer in chat and never calls the legacy speech renderer', async () => {
+    const { coordinator, agent, voice, chat } = await live()
     speak(voice, 'utt-1', 'Anything.')
     await Promise.resolve()
     const correlationId = agent.submitted[0].correlationId
@@ -589,8 +741,8 @@ describe('failure flows', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(chat.assistantMessages()[0].content).toBe('Here is the answer.')
-    expect(coordinator.snapshot().responses[0].spokenStatus).toBe('failed')
-    expect(chat.statuses.some((status) => status?.includes('Could not speak'))).toBe(true)
+    expect(coordinator.snapshot().responses[0].spokenStatus).toBe('none')
+    expect(voice.spoken).toHaveLength(0)
   })
 
   it('surfaces a failed submission instead of hanging the turn', async () => {
@@ -674,7 +826,9 @@ describe('failure flows', () => {
   })
 
   it('ignores a duplicate final agent response', async () => {
-    const { coordinator, agent, voice, chat } = await live()
+    const { coordinator, agent, voice, chat } = await live({
+      personaplexHandoffStrategy: 'reconnect-direct-replay'
+    })
     speak(voice, 'utt-1', 'Answer me.')
     await Promise.resolve()
     const correlationId = agent.submitted[0].correlationId
@@ -684,7 +838,7 @@ describe('failure flows', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(chat.assistantMessages()).toHaveLength(1)
-    expect(voice.authoritative()).toHaveLength(1)
+    expect(voice.handoffs).toHaveLength(1)
   })
 
   it('treats a partial transcript as display only', async () => {
@@ -758,12 +912,10 @@ describe('spoken confirmation', () => {
     return { ...context, correlationId }
   }
 
-  it('reads the action back before it happens', async () => {
+  it('shows the action before it happens without platform TTS', async () => {
     const { coordinator, voice } = await holdACall()
-    const asked = voice.spoken.at(-1)
-    expect(asked?.text).toContain('Run rm -rf build')
-    expect(asked?.text).toContain('outside the sandbox')
-    expect(asked?.text.toLowerCase()).toContain('say yes')
+    expect(voice.spoken).toHaveLength(0)
+    expect(coordinator.snapshot().notice).toContain('Run rm -rf build')
     expect(coordinator.snapshot().pendingApproval?.approvalId).toBe('apv-1')
   })
 
@@ -791,7 +943,7 @@ describe('spoken confirmation', () => {
 
   /**
    * The point of the whole feature: the transcript comes from a microphone, an
-   * energy gate, and a recogniser, so anything short of a clean yes has to leave
+   * speech detector, and a recogniser, so anything short of a clean yes has to leave
    * the call held rather than guess which way the sentence was leaning.
    */
   it('treats a qualified answer as no answer at all', async () => {
@@ -801,7 +953,7 @@ describe('spoken confirmation', () => {
 
     expect(agent.decisions).toHaveLength(0)
     expect(coordinator.snapshot().pendingApproval?.approvalId).toBe('apv-1')
-    expect(voice.spoken.at(-1)?.text).toContain('not a yes or a no')
+    expect(coordinator.snapshot().notice).toContain('not a yes or a no')
     expect(coordinator.metrics().approvalsUnclear).toBe(1)
   })
 
@@ -866,14 +1018,14 @@ describe('observability', () => {
 
     agent.emit({ type: 'responseFinal', correlationId, text: 'About a second.' })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(coordinator.metrics().responseToSpeechStartMs).toEqual([0])
+    expect(coordinator.metrics().responseToSpeechStartMs).toEqual([])
 
     clock.advance(30)
     voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-2' })
     await new Promise((resolve) => setTimeout(resolve, 0))
     clock.advance(15)
     voice.emit({ type: 'speechInterrupted', correlationId })
-    expect(coordinator.metrics().interruptToSpeechStopMs).toEqual([15])
+    expect(coordinator.metrics().interruptToSpeechStopMs).toEqual([])
   })
 
   /**

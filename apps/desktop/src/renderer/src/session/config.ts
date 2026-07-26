@@ -10,7 +10,11 @@
  * Each names one destination on purpose. A setting that could route to either
  * place left no way to tell which had answered, or to aim the next turn.
  */
-import { DEFAULT_SPEECH_RATE } from './speechRenderer'
+import type {
+  PersonaPlexHandoffStrategy,
+  PersonaPlexPreHandoffMode
+} from './personaplexHandoff'
+import type { VoiceBackgroundRouting } from './backgroundRouting'
 
 export type VoiceSessionTarget = 'agent' | 'chat' | 'neither'
 
@@ -25,14 +29,22 @@ export type AsrPreference = 'auto' | 'whisper.cpp' | 'streaming-asr'
 export type IntegrationConfig = {
   voiceEnabled: boolean
   voiceSessionTarget: VoiceSessionTarget
+  /**
+   * Whether a voice transcript also wakes the chat / agent model. PersonaPlex
+   * has already heard every turn and remains the immediate conversational path.
+   */
+  voiceBackgroundRouting: VoiceBackgroundRouting
   asrPreference: AsrPreference
-  /** Speak the answer to a turn the user spoke. */
-  speakVoiceOriginatedResponses: boolean
-  /** Speak the answer to a turn the user typed. Off by default: the answer is
-   *  already on screen, and speaking it interrupts reading. */
-  speakTextOriginatedResponses: boolean
+  /** Accept very short speech and condition it for ASR, with an alternate-engine retry. */
+  shortSpeechBoost: boolean
   showVoiceTranscripts: boolean
-  allowVoiceBackchannels: boolean
+  /**
+   * Experimental path used to give a completed background result back to
+   * PersonaPlex. `continuous` never changes the running voice session.
+   */
+  personaplexHandoffStrategy: PersonaPlexHandoffStrategy
+  /** What the old PersonaPlex stream may say while a background turn runs. */
+  personaplexPreHandoffMode: PersonaPlexPreHandoffMode
   /** Renew the PersonaPlex session after this long. */
   voiceSessionMaxDurationMs: number
   voiceContextRecentTurnLimit: number
@@ -42,36 +54,22 @@ export type IntegrationConfig = {
   /** Speaking over PersonaPlex does **not** cancel the agent. Only an explicit
    *  request does, so a long task survives a barge-in. */
   interruptCancelsAgent: boolean
-  /** Soft brevity target handed to the speech renderer. */
-  spokenBrevityTargetChars: number
-  /**
-   * Which platform voice speaks authoritative answers, by `voiceURI`. Empty
-   * takes the host default.
-   *
-   * Not the persona's voice — PersonaPlex cannot be handed a sentence to say —
-   * but a chosen one rather than whatever the operating system defaults to.
-   */
-  spokenVoiceUri: string
-  /** Speaking rate for that voice, where 1 is the platform's normal pace. */
-  spokenRate: number
 }
 
 export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
   voiceEnabled: false,
   voiceSessionTarget: 'chat',
+  voiceBackgroundRouting: 'auto',
   asrPreference: 'auto',
-  speakVoiceOriginatedResponses: true,
-  speakTextOriginatedResponses: false,
+  shortSpeechBoost: true,
   showVoiceTranscripts: true,
-  allowVoiceBackchannels: true,
+  personaplexHandoffStrategy: 'continuous',
+  personaplexPreHandoffMode: 'mute-on-route',
   voiceSessionMaxDurationMs: 20 * 60 * 1000,
   voiceContextRecentTurnLimit: 6,
   voiceContextSummaryLimitChars: 1200,
   interruptStopsSpeech: true,
-  interruptCancelsAgent: false,
-  spokenBrevityTargetChars: 480,
-  spokenVoiceUri: '',
-  spokenRate: DEFAULT_SPEECH_RATE
+  interruptCancelsAgent: false
 }
 
 /**
