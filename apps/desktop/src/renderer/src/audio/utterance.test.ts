@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { UtteranceSegmenter, encodeWav } from './utterance'
+import { UtteranceSegmenter, encodeWav, padTrailingSilence } from './utterance'
 
 const SAMPLE_RATE = 24000
 const FRAME = 480
@@ -125,5 +125,25 @@ describe('encodeWav', () => {
     // Full-scale samples clamp instead of wrapping.
     expect(view.getInt16(44 + 6, true)).toBe(32767)
     expect(view.getInt16(44 + 8, true)).toBe(-32767)
+  })
+})
+
+describe('padTrailingSilence', () => {
+  it('appends silence so a streaming decoder can flush the tail', () => {
+    const speech = new Float32Array([0.4, -0.4, 0.4])
+    const padded = padTrailingSilence(speech, 24000, 500)
+    expect(padded.length).toBe(3 + 12000)
+    // Compared with tolerance: these are float32, so 0.4 is not exactly 0.4.
+    expect(padded[0]).toBeCloseTo(0.4)
+    expect(padded[1]).toBeCloseTo(-0.4)
+    expect(padded[2]).toBeCloseTo(0.4)
+    expect(padded[3]).toBe(0)
+    expect(padded[padded.length - 1]).toBe(0)
+  })
+
+  it('defaults to enough silence for the measured worker', () => {
+    // 300 ms was not enough against the real worker and 800 ms was.
+    const padded = padTrailingSilence(new Float32Array(10), 16000)
+    expect(padded.length - 10).toBeGreaterThanOrEqual(16000 * 0.8)
   })
 })

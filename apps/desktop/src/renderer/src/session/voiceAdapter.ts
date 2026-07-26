@@ -25,7 +25,12 @@ import {
   type VoiceSessionInfo
 } from '../api'
 import { VoiceStream, voiceStreamSupported } from '../audio/voiceStream'
-import { UtteranceSegmenter, encodeWav, frameRms } from '../audio/utterance'
+import {
+  UtteranceSegmenter,
+  encodeWav,
+  frameRms,
+  padTrailingSilence
+} from '../audio/utterance'
 import type { VoiceAdapter, VoiceAdapterEvent, VoiceSessionHandle } from './adapters'
 import { isEchoOfSpokenText } from './echoGuard'
 import { PlatformSpeechRenderer, type SpeechRenderer } from './speechRenderer'
@@ -317,7 +322,9 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     this.transcribing += 1
     this.publish({ type: 'transcriptionStarted', utteranceId: utterance.id })
     try {
-      const text = await transcribeAudio(encodeWav(utterance.samples, utterance.sampleRate), {
+      // Padded so the decoder flushes its last words rather than dropping them.
+      const audio = padTrailingSilence(utterance.samples, utterance.sampleRate)
+      const text = await transcribeAudio(encodeWav(audio, utterance.sampleRate), {
         engine: this.options.asrEngine?.()
       })
       // Whatever leaked past the echo canceller is not a new question, and is

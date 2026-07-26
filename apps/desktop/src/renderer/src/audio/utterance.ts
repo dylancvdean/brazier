@@ -156,6 +156,27 @@ export class UtteranceSegmenter {
   }
 }
 
+/**
+ * Trailing silence a streaming decoder needs to emit its last words.
+ *
+ * Nemotron consumes lookahead frames before committing a token, so audio that
+ * ends the moment speech does never flushes the tail: "which test is failing"
+ * comes back as "which test". Measured against the worker — 300 ms is not
+ * enough and 800 ms is, so this leaves margin.
+ */
+const FLUSH_SILENCE_MS = 1000
+
+/** Append silence, so the tail of an utterance is not left undecoded. */
+export function padTrailingSilence(
+  samples: Float32Array,
+  sampleRate: number,
+  milliseconds = FLUSH_SILENCE_MS
+): Float32Array {
+  const padded = new Float32Array(samples.length + Math.round((sampleRate * milliseconds) / 1000))
+  padded.set(samples)
+  return padded
+}
+
 /** Wrap mono float samples as a 16-bit PCM WAV, which the ASR path accepts. */
 export function encodeWav(samples: Float32Array, sampleRate: number): Uint8Array {
   const bytes = new Uint8Array(44 + samples.length * 2)
