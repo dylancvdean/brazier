@@ -91,14 +91,34 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     if (!voiceStreamSupported()) {
       throw new Error('This build lacks the WebCodecs Opus support realtime voice needs.')
     }
+    // A second start would otherwise leave the first graph capturing: both feed
+    // the same segmenter and the same counters, while only the newer one is
+    // reachable to stop. Two sockets to one PersonaPlex process, and a UI whose
+    // session is not the one holding the microphone.
+    if (this.stream) {
+      console.warn('[voice] replacing a capture graph that was still running')
+      await this.endSession()
+    }
+
     // The bounded context becomes the launch persona: it is the only runtime
     // guidance PersonaPlex accepts.
     const persona = renderVoicePrompt(context)
     const session = await this.openSession(persona)
 
+    // Logged at each boundary: an utterance that opens and is then discarded for
+    // being too short looks the same from outside as speech never detected.
     this.segmenter = new UtteranceSegmenter({
-      onSpeechStart: (utteranceId) => this.publish({ type: 'userSpeechStarted', utteranceId }),
-      onUtterance: (utterance) => void this.transcribe(utterance)
+      onSpeechStart: (utteranceId) => {
+        console.debug(`[voice] speech detected (${utteranceId})`)
+        this.publish({ type: 'userSpeechStarted', utteranceId })
+      },
+      onUtterance: (utterance) => {
+        const seconds = (utterance.samples.length / utterance.sampleRate).toFixed(2)
+        console.debug(`[voice] utterance ${utterance.id} closed, ${seconds}s — transcribing`)
+        void this.transcribe(utterance)
+      },
+      onDiscarded: (utteranceId, reason) =>
+        console.debug(`[voice] utterance ${utteranceId} discarded: ${reason}`)
     })
 
     const stream = new VoiceStream({

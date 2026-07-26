@@ -30,6 +30,11 @@ export type UtteranceSegmenterHandlers = {
   onSpeechStart?: (utteranceId: string) => void
   /** A finished utterance, as mono PCM at `sampleRate`. */
   onUtterance?: (utterance: { id: string; samples: Float32Array; sampleRate: number }) => void
+  /**
+   * An utterance opened and was then thrown away. Reported because it is
+   * otherwise indistinguishable from speech never having been detected.
+   */
+  onDiscarded?: (utteranceId: string, reason: string) => void
 }
 
 /** The level speech has to clear, exposed so the UI can say what it is. */
@@ -123,7 +128,14 @@ export class UtteranceSegmenter {
     const trailing = Math.max(0, this.silenceRun - TRAILING_SILENCE_FRAMES)
     const frames = this.frames.slice(0, Math.max(0, this.frames.length - trailing))
     this.reset()
-    if (!id || voiced < this.options.minimumFrames) return
+    if (!id) return
+    if (voiced < this.options.minimumFrames) {
+      this.handlers.onDiscarded?.(
+        id,
+        `only ${voiced} voiced frames, needs ${this.options.minimumFrames}`
+      )
+      return
+    }
     const total = frames.reduce((sum, frame) => sum + frame.length, 0)
     const samples = new Float32Array(total)
     let offset = 0
