@@ -20,6 +20,7 @@ import {
   type IntegrationConfig
 } from './config'
 import { SessionCoordinator, type CoordinatorSnapshot } from './coordinator'
+import { PlatformSpeechRenderer } from './speechRenderer'
 import { PersonaPlexVoiceAdapter } from './voiceAdapter'
 import type { ChatResponder } from './adapters'
 
@@ -89,6 +90,10 @@ export function useSessionCoordinator(
       modelId: () => latest.current.voiceModelId,
       asrEngine: () =>
         resolveAsrEngine(configRef.current.asrPreference, latest.current.asrAvailable),
+      renderer: new PlatformSpeechRenderer({
+        rate: () => configRef.current.spokenRate,
+        voice: () => configRef.current.spokenVoiceUri || undefined
+      }),
       onInputLevel: setInputLevel,
       onOutputLevel: setOutputLevel
     })

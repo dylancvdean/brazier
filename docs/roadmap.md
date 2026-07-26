@@ -138,12 +138,16 @@ what is left is mostly the difference between working and trustworthy.
   do is cover a session set to skip permissions: nothing is held there, so
   nothing is read back. Removing the warning would also need the transcript
   itself to be trustworthy, which is the VAD and latency work above.
-- **Handing PersonaPlex the answer to speak.** Its audio is gated off today and
-  the platform synthesizer speaks instead, because the persona is a process
-  launch flag and the socket carries audio only — so the voice identity is lost
-  for exactly the sentences that matter. Constrained rendering needs a text
-  frame in the runtime, which means owning a patch to the recipe rather than
-  consuming it.
+- **Handing PersonaPlex the answer to speak.** *Still open; the voice is at
+  least chosen now.* Its audio is gated off and the platform synthesizer speaks
+  instead, because the persona is a process launch flag and the socket carries
+  audio only — so the voice identity is lost for exactly the sentences that
+  matter. The synthesizer's voice and speaking rate are now picked, previewed,
+  and remembered rather than being whatever the operating system defaulted to,
+  which narrows the gap without closing it. Constrained rendering still needs a
+  client-to-server text frame in the runtime, which means owning a patch to the
+  recipe rather than consuming it, and testing it needs the upstream tree and a
+  GPU — neither is guesswork worth committing blind.
 
 ## Engine workshop
 

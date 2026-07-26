@@ -451,6 +451,12 @@ export function VoiceMode(props: Props): React.JSX.Element {
               onAsrPreferenceChange={(asrPreference) =>
                 session.setConfig({ ...config, asrPreference })
               }
+              spokenVoiceUri={config.spokenVoiceUri}
+              onSpokenVoiceChange={(spokenVoiceUri) =>
+                session.setConfig({ ...config, spokenVoiceUri })
+              }
+              spokenRate={config.spokenRate}
+              onSpokenRateChange={(spokenRate) => session.setConfig({ ...config, spokenRate })}
               agentSessionId={snapshot.agentSessionId}
               onAgentSessionBound={props.onAgentSessionBound}
               onError={props.onError}
