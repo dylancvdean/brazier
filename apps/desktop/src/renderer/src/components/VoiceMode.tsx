@@ -24,6 +24,7 @@ import {
 } from '../session/personaplexHandoff'
 import type { SessionCoordinatorHandle } from '../session/useSessionCoordinator'
 import { VoiceSessionConfig } from './VoiceSessionConfig'
+import { Markdown } from './Markdown'
 
 type Props = {
   models: LocalModel[]
@@ -356,7 +357,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
                     <span className="turn-badge">{message.status}</span>
                   )}
                 </div>
-                <p>{message.content}</p>
+                <Markdown>{message.content}</Markdown>
               </article>
             ))
           )}
@@ -366,7 +367,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
                 <Bot size={12} /> Answering
                 <LoaderCircle className="spin" size={12} />
               </div>
-              <p>{snapshot.streamingText}</p>
+              <Markdown>{snapshot.streamingText}</Markdown>
             </article>
           ) : null}
           {snapshot.partialTranscript ? (

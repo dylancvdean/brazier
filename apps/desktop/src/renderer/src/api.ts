@@ -521,7 +521,7 @@ export type ClientToolCall = {
 
 export type TranscriptMessagePayload = {
   role: string
-  content: string | null
+  content: string | ContentPart[] | null
   tool_calls?: unknown[] | null
   tool_call_id?: string | null
 }
@@ -539,6 +539,8 @@ export type ToolCallRecord = {
   arguments: string
   output: string
   is_error: boolean
+  /** Media produced by this tool, available immediately while it is running. */
+  media?: Array<{ sha256: string; mime_type: string }>
 }
 
 export type RuntimeForkHint = {
@@ -1861,9 +1863,13 @@ function messageContentForApi(content: string | ContentPart[]): string | Content
   return content
 }
 
-function messagesForCompletion(messages: Message[]): OpenAiChatMessage[] {
+export function messagesForCompletion(messages: Message[]): OpenAiChatMessage[] {
   const payload: OpenAiChatMessage[] = []
   for (const message of messages) {
+    // This assistant-role message exists only to place generated media in the
+    // human transcript. When enabled, a separate hidden system message carries
+    // the same blob into model context on the next real user turn.
+    if (message.metadata?.generated_media_display === true) continue
     if (message.role === 'tool' && message.tool_call_id) {
       payload.push({
         role: 'tool',

@@ -45,6 +45,7 @@ import {
 } from '../agentApi'
 import type { LocalModel } from '../api'
 import { modelDisplayName } from '../model-utils'
+import { Markdown } from './Markdown'
 
 /**
  * What the shared composer needs to drive a run. Agent mode has no input of its
@@ -912,7 +913,7 @@ export function AgentMode(props: Props): React.JSX.Element {
                     <pre>{message.reasoning}</pre>
                   </details>
                 )}
-                <p>{message.text}</p>
+                <Markdown>{message.text}</Markdown>
                 {message.role === 'assistant' && message.error && (
                   <p className="agent-message-error">{message.error}</p>
                 )}
@@ -948,7 +949,7 @@ export function AgentMode(props: Props): React.JSX.Element {
                   <pre>{reasoning}</pre>
                 </details>
               )}
-              <p>{streaming}</p>
+              <Markdown>{streaming}</Markdown>
             </div>
           </article>
         )}

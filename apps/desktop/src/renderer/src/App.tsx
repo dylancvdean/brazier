@@ -67,6 +67,7 @@ import { AgentMode, type AgentComposerControls } from './components/AgentMode'
 import { DownloadTray } from './components/DownloadTray'
 import { GenerationActivity } from './components/GenerationActivity'
 import { MessageMedia } from './components/MessageMedia'
+import { Markdown } from './components/Markdown'
 import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
@@ -151,7 +152,15 @@ function contentBlobs(
 ): Array<{ sha256: string; mime_type: string; original_name?: string | null }> {
   if (typeof message.content === 'string') return []
   return message.content.flatMap((part) =>
-    part.type === 'brazier_blob' ? [part.brazier_blob] : []
+    part.type === 'brazier_blob'
+      ? [
+          {
+            sha256: part.brazier_blob.sha256,
+            mime_type: part.brazier_blob.mime_type,
+            original_name: part.brazier_blob.name
+          }
+        ]
+      : []
   )
 }
 
@@ -214,28 +223,38 @@ function attachmentPart(attachment: Attachment): ContentPart {
   }
 }
 
-function ToolChips({ records }: { records: ToolCallRecord[] }): React.JSX.Element {
+function ToolChips({
+  records,
+  onError
+}: {
+  records: ToolCallRecord[]
+  onError?: (message: string) => void
+}): React.JSX.Element {
+  const media = records.flatMap((record) => record.media ?? [])
   return (
-    <div className="tool-chip-row">
-      {records.map((record, index) => (
-        <details className={record.is_error ? 'tool-chip error' : 'tool-chip'} key={index}>
-          <summary>
-            <Wrench size={12} />
-            {record.name}
-          </summary>
-          <div className="tool-chip-body">
-            <div>
-              <span>Arguments</span>
-              <code>{record.arguments}</code>
+    <>
+      <div className="tool-chip-row">
+        {records.map((record, index) => (
+          <details className={record.is_error ? 'tool-chip error' : 'tool-chip'} key={index}>
+            <summary>
+              <Wrench size={12} />
+              {record.name}
+            </summary>
+            <div className="tool-chip-body">
+              <div>
+                <span>Arguments</span>
+                <code>{record.arguments}</code>
+              </div>
+              <div>
+                <span>Result</span>
+                <code>{record.output}</code>
+              </div>
             </div>
-            <div>
-              <span>Result</span>
-              <code>{record.output}</code>
-            </div>
-          </div>
-        </details>
-      ))}
-    </div>
+          </details>
+        ))}
+      </div>
+      <MessageMedia blobs={media} onError={onError} />
+    </>
   )
 }
 
@@ -1080,6 +1099,34 @@ export function App(): React.JSX.Element {
         content: responseText,
         model: selectedModel
       })
+      let finalTipId = assistant.id
+      const generatedMedia = [
+        ...new Map(
+          toolRecords
+            .flatMap((record) => record.media ?? [])
+            .map((media) => [`${media.sha256}:${media.mime_type}`, media])
+        ).values()
+      ]
+      if (generatedMedia.length > 0) {
+        const generated = await createMessage(activeConversationId, {
+          parent_id: assistant.id,
+          role: 'assistant',
+          content: generatedMedia.map((media, index) => ({
+            type: 'brazier_blob' as const,
+            brazier_blob: {
+              sha256: media.sha256,
+              mime_type: media.mime_type,
+              name: media.mime_type.startsWith('video/')
+                ? `generated-video-${index + 1}`
+                : `generated-image-${index + 1}`
+            }
+          })),
+          model: selectedModel,
+          source: 'assistant_chat',
+          metadata: { generated_media_display: true }
+        })
+        finalTipId = generated.id
+      }
       if (runtime) {
         await recordRun(activeConversationId, {
           parent_message_id: userMessage.id,
@@ -1093,7 +1140,7 @@ export function App(): React.JSX.Element {
       setStreamingText('')
       setStreamingTools([])
       setModelLoadStatus(null)
-      await refreshMessages(activeConversationId, assistant.id)
+      await refreshMessages(activeConversationId, finalTipId)
       await refreshConversations()
       void listRunSnapshots(activeConversationId).then(setRunSnapshots).catch(() => {})
     } catch (cause) {
@@ -1495,12 +1542,16 @@ export function App(): React.JSX.Element {
                         <div className="message-meta">
                           <strong>Tools</strong>
                         </div>
-                        <ToolChips records={toolRecords} />
+                        <ToolChips records={toolRecords} onError={setError} />
                       </div>
                     </article>
                   )
                 }
                 if (message.role === 'tool') return null
+                // System context—including the deferred copy of generated
+                // media—is model plumbing. The separate assistant display
+                // message below contains only what the person should see.
+                if (message.role === 'system') return null
                 const media = contentMedia(message)
                 const spoken = message.source === 'user_voice'
                 const turn = turnLabel(message)
@@ -1541,7 +1592,7 @@ export function App(): React.JSX.Element {
                         </div>
                       )}
                       <MessageMedia blobs={contentBlobs(message)} onError={setError} />
-                      <p>{contentText(message)}</p>
+                      <Markdown>{contentText(message)}</Markdown>
                       <button
                         className="fork-button"
                         title="Continue a new branch from this message"
@@ -1563,8 +1614,10 @@ export function App(): React.JSX.Element {
                       <strong>{session.snapshot.streamingText ? 'Agent' : 'Brazier'}</strong>
                       <LoaderCircle className="spin" size={14} />
                     </div>
-                    {streamingTools.length > 0 && <ToolChips records={streamingTools} />}
-                    <p>{liveText}</p>
+                    {streamingTools.length > 0 && (
+                      <ToolChips records={streamingTools} onError={setError} />
+                    )}
+                    <Markdown>{liveText}</Markdown>
                   </div>
                 </article>
               )}

@@ -687,12 +687,54 @@ async fn create_message(
     Path(id): Path<String>,
     Json(request): Json<CreateMessage>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
+    register_message_blobs(&state, &request.content)
+        .await
+        .map_err(ApiError::bad_request)?;
     let message = state
         .db
         .create_message(&id, request)
         .await
         .map_err(ApiError::bad_request)?;
     Ok((StatusCode::CREATED, Json(json!(message))))
+}
+
+/// Tool-generated media is already present in the content-addressed blob
+/// store, but unlike an upload it has not passed through `upload_blob`, which
+/// normally creates the corresponding attachment row. Register references
+/// before message indexing so `message_attachments` never points at a missing
+/// attachment.
+async fn register_message_blobs(state: &AppState, content: &Value) -> anyhow::Result<()> {
+    let Value::Array(parts) = content else {
+        return Ok(());
+    };
+    for part in parts {
+        let Some(blob) = part.get("brazier_blob") else {
+            continue;
+        };
+        let sha256 = blob
+            .get("sha256")
+            .and_then(Value::as_str)
+            .context("brazier_blob missing sha256")?;
+        let mime_type = blob
+            .get("mime_type")
+            .and_then(Value::as_str)
+            .context("brazier_blob missing mime_type")?;
+        let original_name = blob.get("name").and_then(Value::as_str);
+        let path = blob_store::blob_path(&state.data_dir, sha256)?;
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .with_context(|| format!("blob not found: {sha256}"))?;
+        state
+            .db
+            .upsert_attachment(
+                sha256,
+                mime_type,
+                i64::try_from(metadata.len()).context("blob is too large to index")?,
+                original_name,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 /// Finalize a streamed message or relabel its status. Never deletes: a spoken
@@ -4380,6 +4422,58 @@ mod tests {
             runtimes_cache: Arc::new(Mutex::new(None)),
             agent_broker: Arc::new(crate::agent_exec::AgentBroker::new()),
         }
+    }
+
+    #[tokio::test]
+    async fn registers_tool_generated_blob_before_indexing_its_message() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let stored = blob_store::store_bytes(
+            dir.path(),
+            b"\x89PNG\r\n\x1a\nfake image",
+            "image/png",
+            Some("generated.png"),
+        )
+        .await
+        .unwrap();
+        let content = json!([{
+            "type": "brazier_blob",
+            "brazier_blob": {
+                "sha256": stored.sha256,
+                "mime_type": "image/png",
+                "name": "generated.png"
+            }
+        }]);
+
+        register_message_blobs(&state, &content).await.unwrap();
+        let conversation = state
+            .db
+            .create_conversation("Generated image")
+            .await
+            .unwrap();
+        let message = state
+            .db
+            .create_message(
+                &conversation.id,
+                CreateMessage {
+                    parent_id: None,
+                    role: crate::types::Role::Assistant,
+                    content,
+                    model: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    source: Some("assistant_chat".into()),
+                    correlation_id: None,
+                    status: None,
+                    metadata: Some(json!({ "generated_media_display": true })),
+                },
+            )
+            .await
+            .unwrap();
+
+        let messages = state.db.list_messages(&conversation.id).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, message.id);
     }
 
     async fn json_request(

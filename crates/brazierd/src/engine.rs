@@ -1921,21 +1921,13 @@ async fn append_tool_round(
         transcript.push(tool_message.clone());
         invocations.push(invocation.clone());
 
-        // Hand generated media back to a model that can actually look at it,
-        // so it can judge or refine its own output.
-        if let Some(feedback) =
-            generated_media_message(ctx, model_caps, settings, &invocation).await
-        {
-            messages.push(feedback.clone());
-            transcript.push(feedback.clone());
-            if let Some(tx) = events
-                && tx
-                    .send(Ok(StreamEvent::TranscriptMessage(feedback)))
-                    .await
-                    .is_err()
-            {
-                return AppendRoundOutcome::ChannelClosed;
-            }
+        // Persist generated media as deferred model context. It deliberately
+        // does not enter `messages`: adding it to the live tool round made the
+        // image look like a new user turn and immediately prompted another
+        // reply. The next real user request will carry this system message.
+        let generated_context = generated_media_context_message(model_caps, settings, &invocation);
+        if let Some(context) = &generated_context {
+            transcript.push(context.clone());
         }
         if let Some(tx) = events {
             if tx.send(Ok(StreamEvent::Tool(invocation))).await.is_err() {
@@ -1945,6 +1937,14 @@ async fn append_tool_round(
                 .send(Ok(StreamEvent::TranscriptMessage(tool_message)))
                 .await
                 .is_err()
+            {
+                return AppendRoundOutcome::ChannelClosed;
+            }
+            if let Some(context) = generated_context
+                && tx
+                    .send(Ok(StreamEvent::TranscriptMessage(context)))
+                    .await
+                    .is_err()
             {
                 return AppendRoundOutcome::ChannelClosed;
             }
@@ -1958,13 +1958,13 @@ async fn append_tool_round(
     AppendRoundOutcome::Continue
 }
 
-/// Build a user-role message carrying whatever a tool just generated, when the
-/// model can see it and the setting allows.
+/// Build deferred system context carrying whatever a tool just generated, when
+/// the model can see it and the setting allows.
 ///
-/// Returns `None` when the feature is off, the model has no vision, or the
-/// media cannot be prepared — a failure here should never break the round.
-async fn generated_media_message(
-    ctx: &ToolContext<'_>,
+/// The message keeps blob references rather than hydrated data URLs so it is
+/// cheap to persist and render. Media preparation happens with the rest of the
+/// conversation on the user's next real turn.
+fn generated_media_context_message(
     model_caps: &crate::types::ModelCapabilities,
     settings: &RuntimeSettings,
     invocation: &crate::tools::ToolInvocation,
@@ -1989,14 +1989,19 @@ async fn generated_media_message(
         if !allowed {
             continue;
         }
-        match crate::media::generated_media_parts(ctx.data_dir, &media.sha256, &media.mime_type)
-            .await
-        {
-            Ok(media_parts) => parts.extend(media_parts),
-            Err(error) => {
-                tracing::debug!(%error, "could not show generated media to the model");
+        let name = if media.mime_type.starts_with("video/") {
+            "generated-video"
+        } else {
+            "generated-image"
+        };
+        parts.push(serde_json::json!({
+            "type": "brazier_blob",
+            "brazier_blob": {
+                "sha256": media.sha256.clone(),
+                "mime_type": media.mime_type.clone(),
+                "name": name
             }
-        }
+        }));
     }
     if parts.is_empty() {
         return None;
@@ -2005,11 +2010,11 @@ async fn generated_media_message(
         0,
         serde_json::json!({
             "type": "text",
-            "text": "Here is what you just generated, so you can check it against the request."
+            "text": "Generated media from the previous assistant tool call. Use it as context when answering the user's next message; do not respond to this system context by itself."
         }),
     );
     Some(OpenAiMessage {
-        role: "user".to_owned(),
+        role: "system".to_owned(),
         content: serde_json::Value::Array(parts),
         tool_calls: None,
         tool_call_id: None,
@@ -2135,6 +2140,79 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[test]
+    fn generated_media_is_deferred_system_context_with_blob_references() {
+        let dir = tempdir().unwrap();
+        let settings = runtime_settings::load(dir.path());
+        let caps = ModelCapabilities {
+            input_modalities: vec!["text".into(), "image".into()],
+            output_modalities: vec!["text".into()],
+            streaming: true,
+            tools: true,
+            reasoning: false,
+            max_context_length: None,
+            reasoning_modes: Vec::new(),
+            harmony: false,
+            audio_input: None,
+        };
+        let invocation = tools::ToolInvocation {
+            call_id: "call-image".into(),
+            name: "generate_image".into(),
+            arguments: r#"{"prompt":"an ember"}"#.into(),
+            output: "Generated image.".into(),
+            is_error: false,
+            media: vec![tools::ToolMedia {
+                sha256: "abc123".into(),
+                mime_type: "image/png".into(),
+            }],
+        };
+
+        let message =
+            generated_media_context_message(&caps, &settings, &invocation).expect("context");
+        assert_eq!(message.role, "system");
+        assert_eq!(
+            message.content.pointer("/1/type"),
+            Some(&json!("brazier_blob"))
+        );
+        assert_eq!(
+            message.content.pointer("/1/brazier_blob/sha256"),
+            Some(&json!("abc123"))
+        );
+    }
+
+    #[test]
+    fn generated_media_context_requires_vision_and_the_setting() {
+        let dir = tempdir().unwrap();
+        let mut settings = runtime_settings::load(dir.path());
+        let mut caps = ModelCapabilities {
+            input_modalities: vec!["text".into()],
+            output_modalities: vec!["text".into()],
+            streaming: true,
+            tools: true,
+            reasoning: false,
+            max_context_length: None,
+            reasoning_modes: Vec::new(),
+            harmony: false,
+            audio_input: None,
+        };
+        let invocation = tools::ToolInvocation {
+            call_id: "call-image".into(),
+            name: "generate_image".into(),
+            arguments: "{}".into(),
+            output: "Generated image.".into(),
+            is_error: false,
+            media: vec![tools::ToolMedia {
+                sha256: "abc123".into(),
+                mime_type: "image/png".into(),
+            }],
+        };
+
+        assert!(generated_media_context_message(&caps, &settings, &invocation).is_none());
+        caps.input_modalities.push("image".into());
+        settings.show_generated_images_to_model = false;
+        assert!(generated_media_context_message(&caps, &settings, &invocation).is_none());
+    }
 
     #[tokio::test]
     async fn runtime_lists_only_disk_gguf() {

@@ -89,7 +89,29 @@ pub async fn read_blob(data_dir: &Path, sha256: &str) -> anyhow::Result<(Vec<u8>
     let path = blob_path(data_dir, sha256)?;
     anyhow::ensure!(path.is_file(), "blob not found");
     let bytes = tokio::fs::read(&path).await.context("read blob")?;
-    Ok((bytes, mime_type_from_path(&path)))
+    let mime_type = mime_type_from_bytes(&bytes).unwrap_or_else(|| mime_type_from_path(&path));
+    Ok((bytes, mime_type))
+}
+
+fn mime_type_from_bytes(bytes: &[u8]) -> Option<String> {
+    let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE") {
+        "audio/wav"
+    } else if bytes.get(4..8) == Some(b"ftyp") {
+        "video/mp4"
+    } else if bytes.starts_with(b"\x1a\x45\xdf\xa3") {
+        "video/webm"
+    } else {
+        return None;
+    };
+    Some(mime.to_owned())
 }
 
 fn mime_type_from_path(path: &Path) -> String {
@@ -157,6 +179,22 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.to_string().contains("limit"));
+    }
+
+    #[test]
+    fn detects_content_type_for_extensionless_blobs() {
+        assert_eq!(
+            mime_type_from_bytes(b"\x89PNG\r\n\x1a\nrest").as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            mime_type_from_bytes(b"\xff\xd8\xffrest").as_deref(),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            mime_type_from_bytes(b"\0\0\0\x18ftypisom").as_deref(),
+            Some("video/mp4")
+        );
     }
 
     #[tokio::test]
