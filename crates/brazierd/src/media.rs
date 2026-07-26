@@ -13,6 +13,7 @@ use tokio::process::Command;
 use crate::{
     blob_store,
     types::{ModelCapabilities, OpenAiMessage},
+    wav,
     whisper::{self, TranscribeContext, TranscribeRequest},
     whisperkit,
 };
@@ -434,13 +435,39 @@ fn extension_for_mime(mime: &str) -> &'static str {
     }
 }
 
+/// Produce a file the ASR workers can read: 16 kHz mono 16-bit PCM.
+///
+/// A `.wav` extension used to be taken as proof the audio was already in that
+/// shape. It is not — the voice capture graph runs at 24 kHz, and whisper.cpp
+/// refuses anything but 16 kHz rather than resampling — so every spoken turn
+/// sent to batch whisper failed while the same audio transcribed fine through
+/// streaming ASR, whose Python worker resamples on load. WAVs are now inspected
+/// and converted in process, which also means the microphone path needs no
+/// system ffmpeg; ffmpeg still handles the containers this cannot read.
 async fn ensure_wav(input: &Path) -> anyhow::Result<PathBuf> {
     if input
         .extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
     {
-        return Ok(input.to_path_buf());
+        let bytes = tokio::fs::read(input)
+            .await
+            .with_context(|| format!("read {}", input.display()))?;
+        match wav::to_whisper_wav(&bytes) {
+            Ok(None) => return Ok(input.to_path_buf()),
+            Ok(Some(converted)) => {
+                let output = input.with_extension("16k.wav");
+                tokio::fs::write(&output, &converted)
+                    .await
+                    .with_context(|| format!("write {}", output.display()))?;
+                return Ok(output);
+            }
+            // A file named .wav that is not one, or an encoding this cannot
+            // decode. ffmpeg is better at both, so fall through to it.
+            Err(error) => {
+                tracing::debug!("in-process WAV conversion declined ({error}); using ffmpeg");
+            }
+        }
     }
     anyhow::ensure!(ffmpeg_available(), "{}", ffmpeg_missing_message());
     let output = input.with_extension("16k.wav");
@@ -749,6 +776,31 @@ mod tests {
             tool_call_id: None,
         }];
         assert!(messages_contain_input_audio(&messages));
+    }
+
+    /// The microphone captures at 24 kHz and whisper.cpp reads only 16 kHz, so
+    /// a spoken turn has to be converted on the way through — without ffmpeg,
+    /// which the voice path should not depend on.
+    #[tokio::test]
+    async fn resamples_a_captured_utterance_for_batch_asr() {
+        let dir = tempfile::tempdir().unwrap();
+        let samples: Vec<f32> = (0..24_000)
+            .map(|index| (index as f32 * 0.05).sin() * 0.4)
+            .collect();
+        let captured = wav::encode_mono_pcm16(&samples, 24_000);
+        let stored = blob_store::store_bytes(dir.path(), &captured, "audio/wav", Some("turn.wav"))
+            .await
+            .unwrap();
+        let path = materialize_wav_from_blob(dir.path(), &stored.sha256, "audio/wav")
+            .await
+            .unwrap();
+        let converted = tokio::fs::read(&path).await.unwrap();
+        let info = wav::inspect(&converted).expect("the converted file must be a WAV");
+        assert!(
+            info.is_whisper_ready(),
+            "whisper.cpp refuses anything but 16 kHz mono PCM: {info:?}"
+        );
+        assert!((info.duration_seconds() - 1.0).abs() < 0.01);
     }
 
     #[tokio::test]

@@ -41,6 +41,7 @@ pub mod toolchain_hints;
 pub mod tools;
 pub mod types;
 pub mod voice;
+pub mod wav;
 pub mod whisper;
 pub mod whisperkit;
 
