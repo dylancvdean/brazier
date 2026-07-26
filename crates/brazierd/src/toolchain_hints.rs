@@ -166,7 +166,7 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
             "Enable the `extra` repo if needed, then: sudo pacman -S cuda".into(),
         ),
         (PackageManager::Pacman, ToolchainPackage::Vulkan) => {
-            Some("sudo pacman -S vulkan-devel cmake extra/glslang".into())
+            Some("sudo pacman -S spirv-headers vulkan-devel cmake extra/glslang".into())
         }
         (PackageManager::Pacman, ToolchainPackage::Ffmpeg) => Some("sudo pacman -S ffmpeg".into()),
 
@@ -613,9 +613,18 @@ pub fn missing_cuda(log_lower: &str) -> bool {
 }
 
 pub fn missing_vulkan(log_lower: &str, target: RuntimeTarget) -> bool {
-    matches!(target, RuntimeTarget::Vulkan)
-        && log_lower.contains("vulkan")
-        && (log_lower.contains("not found") || log_lower.contains("missing:"))
+    let mentions_vulkan_stack = ["vulkan", "spirv", "glslang", "shaderc"]
+        .iter()
+        .any(|component| log_lower.contains(component));
+    let reports_missing_component = [
+        "not found",
+        "could not find",
+        "missing:",
+        "no package configuration file",
+    ]
+    .iter()
+    .any(|marker| log_lower.contains(marker));
+    matches!(target, RuntimeTarget::Vulkan) && mentions_vulkan_stack && reports_missing_component
 }
 
 pub fn missing_cmake_or_vs_generator(log_lower: &str) -> bool {
@@ -777,6 +786,20 @@ mod tests {
     }
 
     #[test]
+    fn arch_vulkan_hint_includes_spirv_headers() {
+        let os = OsInfo {
+            family: OsFamily::Linux,
+            id: "arch".into(),
+            id_like: vec![],
+            pretty_name: "Arch Linux".into(),
+            package_manager: PackageManager::Pacman,
+        };
+        let cmd = install_command(ToolchainPackage::Vulkan, &os).unwrap();
+        assert!(cmd.contains("spirv-headers"));
+        assert!(cmd.contains("vulkan-devel"));
+    }
+
+    #[test]
     fn windows_git_uses_winget() {
         let os = OsInfo {
             family: OsFamily::Windows,
@@ -849,6 +872,24 @@ mod tests {
             "cmake error: could not find hip (missing: hip_library hip_include_dir)",
             "configure failed with 1",
             RuntimeTarget::Rocm,
+        ));
+    }
+
+    #[test]
+    fn detects_missing_spirv_headers_from_cmake_log() {
+        let log = r#"
+            -- Found Vulkan: /usr/lib/libvulkan.so
+            Could not find a package configuration file provided by "SPIRV-Headers"
+            with any of the following names:
+              SPIRV-HeadersConfig.cmake
+        "#;
+        assert!(missing_vulkan(
+            &log.to_ascii_lowercase(),
+            RuntimeTarget::Vulkan,
+        ));
+        assert!(!missing_vulkan(
+            &log.to_ascii_lowercase(),
+            RuntimeTarget::Cpu,
         ));
     }
 
