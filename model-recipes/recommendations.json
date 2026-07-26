@@ -1,0 +1,226 @@
+{
+  "schema_version": 1,
+  "_comment": [
+    "Startup model recommendations, chosen by how much memory a machine has.",
+    "",
+    "Edit this file to change what Brazier suggests. A copy placed at",
+    "<data>/model-recipes/recommendations.json replaces this one wholesale, so",
+    "recommendations can be updated without rebuilding the application.",
+    "",
+    "Every entry carries an `id`. Changing the id is what tells Brazier the",
+    "recommendation for that category has changed, which is what triggers the",
+    "offer to swap for anyone who installed the previous one through the welcome",
+    "flow. Correcting a label or a note without changing the model should leave",
+    "the id alone.",
+    "",
+    "`quant: by_memory` resolves at display time against the repository's real",
+    "file sizes: the best of Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q3_K_M, Q2_K that fits",
+    "in 60% of usable memory, preferring Unsloth's UD-*_XL build of that rung.",
+    "The remaining 40% is left for the KV cache, the OS, and everything else.",
+    "",
+    "A tier with no `agent` entry uses its `text` one. A category set to null is",
+    "offered nothing at that tier."
+  ],
+  "tiers": [
+    {
+      "min_gb": 8,
+      "text": {
+        "id": "bonsai-27b",
+        "label": "Bonsai 27B",
+        "repo_id": "prism-ml/Bonsai-27B-gguf",
+        "quant": "by_memory",
+        "summary": "A Qwen3.6-27B derivative. On 8GB it has to run at a very low quant, which costs real quality — it is here because nothing larger fits at all."
+      },
+      "image": {
+        "id": "sd15",
+        "label": "Stable Diffusion 1.5",
+        "bundle_id": "sd15",
+        "summary": "Small, fast, and endlessly finetuned. A 512px image in seconds on almost any machine."
+      },
+      "video": null
+    },
+    {
+      "min_gb": 16,
+      "text": {
+        "id": "bonsai-27b",
+        "label": "Bonsai 27B",
+        "repo_id": "prism-ml/Bonsai-27B-gguf",
+        "quant": "by_memory",
+        "summary": "A Qwen3.6-27B derivative, at a quant this machine can hold comfortably."
+      },
+      "image": {
+        "id": "sd35-medium",
+        "label": "Stable Diffusion 3.5 Medium",
+        "bundle_id": "TODO-sd35-medium",
+        "summary": "TODO: no stable-diffusion.cpp bundle exists for SD 3.5 Medium yet. Add one to model-recipes/sdcpp-bundles.json, or point this at an existing bundle id."
+      },
+      "video": {
+        "id": "wan2.2-ti2v-5b",
+        "label": "Wan 2.2 TI2V 5B",
+        "bundle_id": "wan2.2-ti2v-5b",
+        "summary": "Text-to-video and image-to-video in one model, at a size that fits a modest machine."
+      }
+    },
+    {
+      "min_gb": 24,
+      "text": {
+        "id": "gemma-4-26b-a4b-it",
+        "label": "Gemma 4 26B A4B it",
+        "repo_id": "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "quant": "by_memory",
+        "summary": "A 26B mixture-of-experts model with 4B active, so it answers at roughly the speed of a much smaller model while knowing much more."
+      },
+      "image": {
+        "id": "sd35-medium",
+        "label": "Stable Diffusion 3.5 Medium",
+        "bundle_id": "TODO-sd35-medium",
+        "summary": "TODO: no stable-diffusion.cpp bundle exists for SD 3.5 Medium yet."
+      },
+      "video": {
+        "id": "wan2.2-ti2v-5b",
+        "label": "Wan 2.2 TI2V 5B",
+        "bundle_id": "wan2.2-ti2v-5b",
+        "summary": "Text-to-video and image-to-video in one model."
+      }
+    },
+    {
+      "min_gb": 32,
+      "text": {
+        "id": "gemma-4-26b-a4b-it",
+        "label": "Gemma 4 26B A4B it",
+        "repo_id": "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "quant": "by_memory",
+        "summary": "A 26B mixture-of-experts model with 4B active — fast to answer, and at this tier it fits at a quant that costs almost nothing."
+      },
+      "image": {
+        "id": "flux1-dev-q8",
+        "label": "FLUX.1 dev (Q8)",
+        "bundle_id": "flux1-dev",
+        "variant": "Q8_0",
+        "summary": "The current quality benchmark for open image models, at the largest quant this machine holds."
+      },
+      "video": {
+        "id": "wan2.2-ti2v-5b",
+        "label": "Wan 2.2 TI2V 5B",
+        "bundle_id": "wan2.2-ti2v-5b",
+        "summary": "Text-to-video and image-to-video in one model."
+      }
+    },
+    {
+      "min_gb": 48,
+      "text": {
+        "id": "gemma-4-26b-a4b-it",
+        "label": "Gemma 4 26B A4B it",
+        "repo_id": "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "quant": "by_memory",
+        "summary": "A 26B mixture-of-experts model with 4B active. At this tier it runs at full 8-bit precision."
+      },
+      "image": {
+        "id": "flux1-dev-bf16",
+        "label": "FLUX.1 dev (full precision)",
+        "bundle_id": "flux1-dev",
+        "summary": "FLUX.1 dev with no quantisation applied to the diffusion model — the best it looks."
+      },
+      "video": {
+        "id": "wan2.2-a14b",
+        "label": "Wan 2.2 A14B",
+        "bundle_id": "TODO-wan2.2-a14b",
+        "summary": "TODO: no stable-diffusion.cpp bundle exists for Wan 2.2 A14B yet. The nearest shipped bundle is wan2.1-i2v-14b-480p."
+      }
+    },
+    {
+      "min_gb": 64,
+      "text": {
+        "id": "gemma-4-26b-a4b-it",
+        "label": "Gemma 4 26B A4B it",
+        "repo_id": "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "quant": "by_memory",
+        "summary": "A 26B mixture-of-experts model with 4B active, at full 8-bit precision."
+      },
+      "image": {
+        "id": "qwen-image-q8",
+        "label": "Qwen-Image 20B (Q8)",
+        "bundle_id": "qwen-image",
+        "variant": "Q8_0",
+        "summary": "A 20B image model that is unusually good at rendering text inside the picture."
+      },
+      "video": {
+        "id": "ltx-2.3-dev",
+        "label": "LTX-2.3 dev (audio + video)",
+        "bundle_id": "ltx-2.3-dev",
+        "summary": "Generates a soundtrack alongside the picture, which nothing else here does."
+      }
+    },
+    {
+      "min_gb": 96,
+      "text": {
+        "id": "gemma-4-26b-a4b-it",
+        "label": "Gemma 4 26B A4B it",
+        "repo_id": "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "quant": "by_memory",
+        "summary": "A 26B mixture-of-experts model with 4B active, at full 8-bit precision."
+      },
+      "agent": {
+        "id": "laguna-s-2.1",
+        "label": "Laguna S 2.1",
+        "repo_id": "unsloth/Laguna-S-2.1-GGUF",
+        "quant": "by_memory",
+        "summary": "A 117B model held back for agent work, where the extra reasoning is worth the slower answers."
+      },
+      "image": {
+        "id": "flux1-dev-bf16",
+        "label": "FLUX.1 dev (full precision)",
+        "bundle_id": "flux1-dev",
+        "summary": "FLUX.1 dev with no quantisation applied to the diffusion model."
+      },
+      "video": {
+        "id": "ltx-2.3-dev",
+        "label": "LTX-2.3 dev (audio + video)",
+        "bundle_id": "ltx-2.3-dev",
+        "summary": "Generates a soundtrack alongside the picture."
+      }
+    },
+    {
+      "min_gb": 192,
+      "text": {
+        "id": "laguna-s-2.1",
+        "label": "Laguna S 2.1",
+        "repo_id": "unsloth/Laguna-S-2.1-GGUF",
+        "quant": "by_memory",
+        "summary": "A 117B model that this machine can hold at a high quant, which is a better trade than a far larger model squeezed down to two bits."
+      },
+      "image": {
+        "id": "flux1-dev-bf16",
+        "label": "FLUX.1 dev (full precision)",
+        "bundle_id": "flux1-dev",
+        "summary": "FLUX.1 dev with no quantisation applied to the diffusion model."
+      },
+      "video": {
+        "id": "ltx-2.3-dev",
+        "label": "LTX-2.3 dev (audio + video)",
+        "bundle_id": "ltx-2.3-dev",
+        "summary": "Generates a soundtrack alongside the picture."
+      }
+    }
+  ],
+  "voice": {
+    "summary": "Realtime voice needs two models rather than one: PersonaPlex speaks and listens, and a separate recogniser turns what you say into text. Both are small enough that the same pair suits every machine.",
+    "models": [
+      {
+        "id": "personaplex",
+        "label": "PersonaPlex",
+        "kind": "personaplex",
+        "repo_id": "TODO/personaplex-repo-here",
+        "summary": "TODO: the PersonaPlex snapshot to install. Full-duplex speech in and speech out."
+      },
+      {
+        "id": "whisper-base-en",
+        "label": "Whisper base",
+        "kind": "whisper",
+        "repo_id": "ggerganov/whisper.cpp",
+        "filename": "ggml-base.en.bin",
+        "summary": "Transcribes your spoken turns, which PersonaPlex does not report on its own."
+      }
+    ]
+  }
+}

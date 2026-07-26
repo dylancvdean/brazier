@@ -31,6 +31,7 @@ pub mod model_library;
 pub mod model_settings;
 pub mod models_store;
 pub mod progress;
+pub mod recommendations;
 pub mod remote;
 pub mod rocm;
 pub mod runtime_settings;

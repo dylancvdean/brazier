@@ -17,6 +17,7 @@ import {
   Send,
   Settings2,
   SlidersHorizontal,
+  Sparkles,
   Square,
   Upload,
   Video,
@@ -30,6 +31,7 @@ import {
   engineStatus,
   fetchCapabilities,
   fetchModelBindings,
+  fetchRecommendations,
   fetchModelSettings,
   health,
   exportConversation,
@@ -49,6 +51,7 @@ import {
   type LocalModel,
   type ModelProfile,
   type PipelineFeatures,
+  type PendingSwap,
   type RunSnapshot,
   type RuntimeEntry,
   type RuntimeForkHint,
@@ -57,6 +60,7 @@ import {
   recordRun,
   saveRuntimeSettings,
   streamCompletion,
+  updateRecommendationState,
   uploadAttachmentBlob
 } from './api'
 import { AgentMode, type AgentComposerControls } from './components/AgentMode'
@@ -330,6 +334,7 @@ export function App(): React.JSX.Element {
   const [runSnapshots, setRunSnapshots] = useState<RunSnapshot[]>([])
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
   const [showWelcome, setShowWelcome] = useState<boolean | null>(null)
+  const [recommendationSwaps, setRecommendationSwaps] = useState<PendingSwap[]>([])
   const [appMode, setAppMode] = useState<'chat' | 'agent' | 'generate' | 'voice'>('chat')
   const [realtimeVoiceAvailable, setRealtimeVoiceAvailable] = useState(false)
   // Generate and Voice pick from their own model families; the top bar shows
@@ -342,6 +347,15 @@ export function App(): React.JSX.Element {
   // Agent mode has no composer of its own; it publishes these so the one at the
   // bottom of the window can drive it.
   const [agentComposer, setAgentComposer] = useState<AgentComposerControls | null>(null)
+
+  useEffect(() => {
+    if (showWelcome !== false) return
+    void fetchRecommendations()
+      .then((result) => setRecommendationSwaps(result.swaps))
+      .catch(() => {
+        // Recommendations are optional and may require the Hub; startup is not.
+      })
+  }, [showWelcome])
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
@@ -1117,6 +1131,7 @@ export function App(): React.JSX.Element {
             setManageOpen(true)
             setShowWelcome(false)
           }}
+          onModelsChanged={() => void refreshLocalModels().catch(() => {})}
         />
       </main>
     )
@@ -1817,6 +1832,46 @@ export function App(): React.JSX.Element {
           onSaved={setModelProfiles}
           onClose={() => setConfiguringModel(null)}
         />
+      )}
+      {recommendationSwaps.length > 0 && (
+        <aside className="recommendation-swap-notice" aria-live="polite">
+          <Sparkles size={16} />
+          <div>
+            <strong>A recommended model has changed</strong>
+            <span>
+              {recommendationSwaps
+                .map((swap) => `${swap.recommended_label} for ${swap.category}`)
+                .join(' · ')}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="chip-button"
+            onClick={() => {
+              setManageSection('recommended')
+              setManageOpen(true)
+              setRecommendationSwaps([])
+            }}
+          >
+            Review
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            title="Dismiss these suggestions"
+            onClick={() => {
+              const swaps = recommendationSwaps
+              setRecommendationSwaps([])
+              void Promise.all(
+                swaps.map((swap) =>
+                  updateRecommendationState({ dismiss: swap.recommended_id })
+                )
+              ).catch(() => {})
+            }}
+          >
+            <X size={14} />
+          </button>
+        </aside>
       )}
       <DownloadTray onChanged={() => void refreshLocalModels().catch(() => {})} />
 

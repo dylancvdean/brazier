@@ -35,8 +35,8 @@ use crate::{
     hf::{self, SearchQuery},
     hf_auth, llama, mcp, media, model_bindings, model_settings, models_store,
     progress::ProgressEvent,
-    remote, runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry,
-    toolchain_hints,
+    recommendations, remote, runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr,
+    tool_registry, toolchain_hints,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
@@ -410,6 +410,15 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             get(model_settings_list).put(update_model_settings),
         )
         .route("/api/v1/models/settings/reset", post(reset_model_settings))
+        .route("/api/v1/recommendations", get(model_recommendations))
+        .route(
+            "/api/v1/recommendations/state",
+            get(recommendation_state).put(update_recommendation_state),
+        )
+        .route(
+            "/api/v1/recommendations/installed",
+            post(record_recommendation_install),
+        )
         .route("/api/v1/adapters", get(list_adapters))
         .route("/api/v1/adapters/register", post(register_adapter))
         .route("/api/v1/adapters/forget", post(forget_adapter))
@@ -1380,6 +1389,226 @@ async fn reset_model_settings(
         "model_id": request.model_id,
         "models": store.models,
     })))
+}
+
+/// Resolve one repository-named recommendation against the Hub.
+///
+/// The quantisation is chosen here rather than written into the catalogue
+/// because it depends on both the machine and what the repository actually
+/// publishes. A repository that cannot be reached is not an error — the
+/// recommendation is still shown, with the reason it could not be sized.
+async fn resolve_repo_recommendation(
+    state: &AppState,
+    entry: &recommendations::RepoRecommendation,
+    memory_bytes: u64,
+) -> Value {
+    let mut resolved = json!({
+        "id": entry.id,
+        "label": entry.label,
+        "repo_id": entry.repo_id,
+        "summary": entry.summary,
+    });
+    // A catalogue entry still waiting for a real repository should say so
+    // rather than sending anyone to a 404.
+    if entry.repo_id.starts_with("TODO") || entry.repo_id.contains("TODO") {
+        resolved["unresolved"] = json!("This recommendation has no model set yet.");
+        return resolved;
+    }
+
+    let files =
+        match hf::list_repo_files(&state.http, &state.data_dir, &entry.repo_id, "main").await {
+            Ok(files) => files,
+            Err(error) => {
+                resolved["unresolved"] = json!(format!(
+                    "Could not reach Hugging Face to size this download: {error}"
+                ));
+                return resolved;
+            }
+        };
+    let listing: Vec<(String, Option<u64>)> = files
+        .into_iter()
+        .map(|file| (file.path, file.size))
+        .collect();
+
+    let choice = match entry.quant.as_deref() {
+        Some("by_memory") | None => recommendations::choose_quant(&listing, memory_bytes),
+        Some(quant) => recommendations::find_quant(&listing, quant),
+    };
+    match choice {
+        Some(choice) => {
+            resolved["quant"] = json!(choice.quant);
+            resolved["files"] = json!(choice.files);
+            resolved["bytes"] = json!(choice.bytes);
+            resolved["tight"] = json!(choice.tight);
+        }
+        None => {
+            resolved["unresolved"] =
+                json!("This repository publishes no GGUF weights Brazier can run.");
+        }
+    }
+    resolved
+}
+
+/// What to install on this machine, and whether any of it has changed.
+async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let hardware = crate::hardware::detect();
+    let catalog = recommendations::catalog(&state.data_dir);
+    let recorded = recommendations::load_state(&state.data_dir);
+
+    let Some(memory) = hardware.usable_model_memory_bytes else {
+        return Ok(Json(json!({
+            "memory_bytes": null,
+            "tier_gb": null,
+            "reason": "This machine did not report how much memory it has, so nothing can be recommended by size.",
+            "categories": {},
+            "voice": catalog.voice,
+            "state": recorded,
+            "swaps": [],
+        })));
+    };
+    let Some(tier) = catalog.tier_for(memory) else {
+        return Ok(Json(json!({
+            "memory_bytes": memory,
+            "tier_gb": null,
+            "reason": format!(
+                "{} GB is below the smallest tier Brazier has a recommendation for.",
+                memory / (1024 * 1024 * 1024)
+            ),
+            "categories": {},
+            "voice": catalog.voice,
+            "state": recorded,
+            "swaps": [],
+        })));
+    };
+
+    let mut categories = serde_json::Map::new();
+    if let Some(text) = tier.text.as_ref() {
+        categories.insert(
+            "text".into(),
+            resolve_repo_recommendation(&state, text, memory).await,
+        );
+    }
+    if let Some(agent) = recommendations::resolved_agent(tier) {
+        let mut resolved = resolve_repo_recommendation(&state, agent, memory).await;
+        // When the tier's own agent model cannot run here, say why the chat
+        // model is standing in rather than showing two identical cards with no
+        // explanation.
+        if let Some(note) = recommendations::agent_substitution_note(tier) {
+            resolved["substituted"] = json!(note);
+        }
+        categories.insert("agent".into(), resolved);
+    }
+    for (name, entry) in [
+        ("image", tier.image.as_ref()),
+        ("video", tier.video.as_ref()),
+    ] {
+        let Some(entry) = entry else { continue };
+        let mut resolved = serde_json::to_value(entry).unwrap_or_else(|_| json!({}));
+        // A bundle id that names nothing installable is a catalogue gap, and
+        // showing it as a working button would waste a download attempt.
+        let missing: Vec<String> = entry
+            .parts
+            .iter()
+            .map(|part| part.bundle_id.clone())
+            .chain(entry.bundle_id.clone())
+            .filter(|id| sdcpp_catalog::find(&state.data_dir, id).is_none())
+            .collect();
+        if !missing.is_empty() {
+            resolved["unresolved"] = json!(format!(
+                "No installable bundle for {} yet.",
+                missing.join(", ")
+            ));
+        }
+        categories.insert(name.into(), resolved);
+    }
+
+    let swaps = recommendations::pending_swaps(&catalog, &recorded, tier);
+    Ok(Json(json!({
+        "memory_bytes": memory,
+        "memory_source": if hardware.vram_bytes.is_some() { "vram" } else { "system" },
+        "tier_gb": tier.min_gb,
+        "categories": categories,
+        "voice": catalog.voice,
+        "state": recorded,
+        "swaps": swaps,
+    })))
+}
+
+async fn recommendation_state(State(state): State<AppState>) -> Json<Value> {
+    Json(json!(recommendations::load_state(&state.data_dir)))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateRecommendationStateRequest {
+    /// Stop mentioning changed recommendations entirely.
+    #[serde(default)]
+    suppressed: Option<bool>,
+    /// A recommendation id that was offered as a swap and declined.
+    #[serde(default)]
+    dismiss: Option<String>,
+}
+
+async fn update_recommendation_state(
+    State(state): State<AppState>,
+    Json(request): Json<UpdateRecommendationStateRequest>,
+) -> ApiResult<Json<Value>> {
+    let mut recorded = recommendations::load_state(&state.data_dir);
+    if let Some(suppressed) = request.suppressed {
+        recorded.suppressed = suppressed;
+    }
+    if let Some(dismiss) = request.dismiss
+        && !recorded.dismissed.contains(&dismiss)
+    {
+        recorded.dismissed.push(dismiss);
+    }
+    recommendations::save_state(&state.data_dir, &recorded)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!(recorded)))
+}
+
+#[derive(Debug, Deserialize)]
+struct RecordRecommendationInstallRequest {
+    /// `text`, `agent`, `image`, `video`, or `voice`.
+    category: String,
+    recommendation_id: String,
+    #[serde(default)]
+    model_id: Option<String>,
+}
+
+/// Record that a category was set up from a recommendation.
+///
+/// Only categories recorded here are ever mentioned again when the
+/// recommendation changes; a model chosen deliberately from Discover is nobody's
+/// business to second-guess.
+async fn record_recommendation_install(
+    State(state): State<AppState>,
+    Json(request): Json<RecordRecommendationInstallRequest>,
+) -> ApiResult<Json<Value>> {
+    let mut recorded = recommendations::load_state(&state.data_dir);
+    recommendations::record_install(
+        &mut recorded,
+        request.category.clone(),
+        request.recommendation_id.clone(),
+        request.model_id,
+        epoch_seconds(),
+    );
+    recommendations::save_state(&state.data_dir, &recorded)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!(recorded)))
+}
+
+/// Seconds since the Unix epoch, as a string.
+///
+/// The same shape conversation exports already use, so no date library is
+/// pulled in for one field.
+fn epoch_seconds() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("@{now}")
 }
 
 async fn list_adapters(State(state): State<AppState>) -> Json<Value> {

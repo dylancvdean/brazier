@@ -1051,6 +1051,121 @@ export async function cancelGeneration(): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
+// Startup model recommendations
+// ---------------------------------------------------------------------------
+
+/** The things a first-run installation can be set up for. */
+export type RecommendationCategory = 'text' | 'agent' | 'image' | 'video' | 'voice'
+
+/** A chat or agent model, resolved to the exact files to download. */
+export type RepoRecommendation = {
+  id: string
+  label: string
+  repo_id: string
+  summary?: string | null
+  /** The rung chosen for this machine, when one was recognised. */
+  quant?: string | null
+  /** Files to fetch, in order. More than one when the quant is sharded. */
+  files?: string[]
+  bytes?: number
+  /** Nothing fitted the memory budget; this is simply the smallest build. */
+  tight?: boolean
+  /** Why this could not be sized — a missing model, or an unreachable Hub. */
+  unresolved?: string
+  /** Why the chat model is standing in for the tier's own agent model. */
+  substituted?: string
+}
+
+/** An image or video model, named by stable-diffusion.cpp bundle. */
+export type BundleRecommendation = {
+  id: string
+  label: string
+  bundle_id?: string | null
+  variant?: string | null
+  /** Separate text-to-video and image-to-video models, when it is split. */
+  parts?: Array<{ bundle_id: string; role: string; label: string; variant?: string | null }>
+  summary?: string | null
+  unresolved?: string
+}
+
+export type VoiceRecommendationModel = {
+  id: string
+  label: string
+  /** `personaplex` or `whisper`. */
+  kind: string
+  repo_id: string
+  filename?: string | null
+  summary?: string | null
+}
+
+/** A category whose recommendation moved on since it was installed. */
+export type PendingSwap = {
+  category: RecommendationCategory
+  installed_id: string
+  recommended_id: string
+  recommended_label: string
+  summary?: string | null
+}
+
+export type RecommendationState = {
+  suppressed: boolean
+  installed: Record<
+    string,
+    { recommendation_id: string; model_id?: string | null; installed_at: string }
+  >
+  dismissed?: string[]
+}
+
+export type Recommendations = {
+  memory_bytes: number | null
+  /** Whether the tier was chosen by video memory or by system memory. */
+  memory_source?: 'vram' | 'system'
+  tier_gb: number | null
+  /** Why there is nothing to recommend, when there is nothing. */
+  reason?: string
+  categories: {
+    text?: RepoRecommendation
+    agent?: RepoRecommendation
+    image?: BundleRecommendation
+    video?: BundleRecommendation
+  }
+  voice?: { summary?: string | null; models: VoiceRecommendationModel[] } | null
+  state: RecommendationState
+  swaps: PendingSwap[]
+}
+
+export function fetchRecommendations(): Promise<Recommendations> {
+  return request('/api/v1/recommendations')
+}
+
+/** Record that a category was set up from a recommendation. */
+export function recordRecommendationInstall(
+  category: RecommendationCategory,
+  recommendationId: string,
+  modelId?: string
+): Promise<RecommendationState> {
+  return request('/api/v1/recommendations/installed', {
+    method: 'POST',
+    body: JSON.stringify({
+      category,
+      recommendation_id: recommendationId,
+      model_id: modelId ?? null
+    })
+  })
+}
+
+/** Stop mentioning changed recommendations, or decline one particular swap. */
+export function updateRecommendationState(patch: {
+  suppressed?: boolean
+  dismiss?: string
+}): Promise<RecommendationState> {
+  return request('/api/v1/recommendations/state', {
+    method: 'PUT',
+    body: JSON.stringify(patch)
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Adapters and per-model configuration
 // ---------------------------------------------------------------------------
 
