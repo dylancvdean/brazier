@@ -1218,7 +1218,7 @@ function DiffusionFields(
         />
         <TextField
           label="Parameter residency"
-          hint="Where weights wait between executions. Disk residency loads and releases phases on demand."
+          hint="Where weights wait between executions. CPU residency is required for layer streaming; disk residency only loads whole phases lazily."
           placeholder={props.inherited.paramsBackend ?? 'Default'}
           value={profile.params_backend}
           onChange={(value) => set('params_backend', value)}

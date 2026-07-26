@@ -404,7 +404,7 @@ export function InferenceMenu({
                             ? AMD_APU_VIDEO_DEFAULTS.maxVram
                             : undefined,
                         paramsBackend:
-                          useApuDefaults && modelKind === 'video' ? 'disk' : undefined,
+                          useApuDefaults && modelKind === 'video' ? 'cpu' : undefined,
                         streamLayers: useApuDefaults && modelKind === 'video',
                         offloadToCpu: false
                       }}

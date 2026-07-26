@@ -96,7 +96,7 @@ export function ModelSettingsModal(props: Props): React.JSX.Element {
       useApuDefaults && props.kind === 'video'
         ? AMD_APU_VIDEO_DEFAULTS.maxVram
         : undefined,
-    paramsBackend: useApuDefaults && props.kind === 'video' ? 'disk' : undefined,
+    paramsBackend: useApuDefaults && props.kind === 'video' ? 'cpu' : undefined,
     streamLayers: useApuDefaults && props.kind === 'video',
     offloadToCpu: false
   }

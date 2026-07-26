@@ -152,6 +152,11 @@ const BUILD_ENGINE_LABELS: Record<BuildEngine, string> = {
   whisperkit: 'ASR · WhisperKit'
 }
 
+// stable-diffusion.cpp intentionally has an unstable CLI. Keep this in sync
+// with the managed release pin in crates/brazierd/src/sdcpp.rs; the build form
+// remains editable for users who deliberately choose another revision.
+const SDCPP_SOURCE_REVISION = '2d0385ba85af358f7115dda608a63eafd9de7ffd'
+
 const BUILD_ENGINE_DEFAULTS: Record<
   BuildEngine,
   { repository: string; revision: string }
@@ -178,7 +183,7 @@ const BUILD_ENGINE_DEFAULTS: Record<
   },
   'stable-diffusion.cpp': {
     repository: 'https://github.com/leejet/stable-diffusion.cpp',
-    revision: 'master'
+    revision: SDCPP_SOURCE_REVISION
   },
   personaplex: {
     repository: 'https://github.com/NVIDIA/personaplex',
@@ -252,7 +257,7 @@ function progressLabel(event: ProgressEvent | null): string {
     return `Downloading ${formatBytes(event.bytes)}${total}${percent}`
   }
   if (event.phase === 'discover') return 'Checking for an installed runtime…'
-  if (event.phase === 'resolve') return 'Resolving the latest release…'
+  if (event.phase === 'resolve') return 'Resolving release…'
   if (event.phase === 'extract') return 'Extracting the release archive…'
   if (event.phase === 'hash') return 'Verifying download integrity…'
   if (event.phase === 'build') return 'Building from source…'
@@ -2671,7 +2676,10 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                       stable-diffusion.cpp · managed
                       {installed && <span className="installed-badge">Installed</span>}
                     </strong>
-                    <span>Prebuilt sd-cli for image and video generation (SD/Flux/Wan/LTX).</span>
+                    <span>
+                      Prebuilt sd-cli pinned to Brazier's supported release; build from source to
+                      opt into a newer version.
+                    </span>
                   </div>
                   <button
                     className="chip-button"
@@ -2973,6 +2981,8 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                     ? 'MLX builds create an isolated Python environment with uv. Install uv (`brew install uv`) before starting the build.'
                     : isWhisperBuild
                       ? 'whisper.cpp builds produce the whisper-cli binary used to transcribe audio and video soundtracks before chat.'
+                      : buildEngine === 'stable-diffusion.cpp'
+                        ? "stable-diffusion.cpp defaults to Brazier's reviewed commit; edit the revision above to opt into another upstream version."
                       : props.hardware?.os === 'macos'
                         ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
                         : props.hardware?.os === 'windows'

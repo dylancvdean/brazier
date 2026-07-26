@@ -35,7 +35,15 @@ use crate::{
 
 pub const ENGINE: &str = "stable-diffusion.cpp";
 
-const GITHUB_API: &str = "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/latest";
+/// Reviewed sd.cpp compatibility boundary.
+///
+/// Upstream intentionally ships an unstable CLI, so managed installs stay on
+/// this release until Brazier is updated and tested against a newer one. Users
+/// can still build another revision explicitly under Manage → Runtimes.
+const PINNED_RELEASE_TAG: &str = "master-796-2d0385b";
+pub const PINNED_SOURCE_REVISION: &str = "2d0385ba85af358f7115dda608a63eafd9de7ffd";
+const GITHUB_API: &str =
+    "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/tags/master-796-2d0385b";
 const USER_AGENT: &str = "brazier-sdcpp-manager";
 
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -233,7 +241,7 @@ pub struct ReleaseAsset {
     pub browser_download_url: String,
 }
 
-/// Newest release tag from cache, without waiting on GitHub.
+/// Supported release tag from cache, without waiting on GitHub.
 ///
 /// Status views call this on every open, so a stale-but-instant answer beats
 /// a blocking lookup; the refresh it triggers lands in time for the next one.
@@ -350,7 +358,7 @@ pub async fn install_managed_binary_with_progress(
 ) -> anyhow::Result<PathBuf> {
     progress(ProgressEvent::phase(
         "resolve",
-        "Looking up the latest stable-diffusion.cpp release",
+        format!("Looking up supported stable-diffusion.cpp release {PINNED_RELEASE_TAG}"),
     ));
     let (tag, asset) = resolve_managed_release(client, target).await?;
     tracing::info!(%tag, asset = %asset.name, "downloading managed stable-diffusion.cpp binary");
@@ -1234,13 +1242,17 @@ fn with_amd_apu_vulkan_defaults(
     profile.auto_fit.get_or_insert(false);
     if modality == Modality::Video {
         profile.max_vram.get_or_insert(AMD_APU_VIDEO_VRAM_GIB);
-        // The Vulkan runtime still executes every phase. Disk parameter
-        // residency loads each phase/layer on demand and releases it afterward
-        // instead of keeping the whole pipeline in the UMA Vulkan heap.
-        profile
-            .params_backend
-            .get_or_insert_with(|| "disk".to_owned());
         profile.stream_layers.get_or_insert(true);
+        // In the pinned sd.cpp API, layer streaming is enabled only when the
+        // diffusion parameter backend is CPU. The previous disk default caused
+        // sd.cpp to ignore --stream-layers and submit whole graph-cut segments,
+        // which still reset RADV on an APU. Also migrate that invalid pair if it
+        // was saved from the old Brazier default.
+        if profile.stream_layers == Some(true)
+            && matches!(profile.params_backend.as_deref(), None | Some("disk"))
+        {
+            profile.params_backend = Some("cpu".to_owned());
+        }
     }
     // This flag streams weights to the GPU every step. Unified memory does not
     // need that extra churn, and an explicit per-model `true` still wins.
@@ -1861,7 +1873,7 @@ mod tests {
         assert_eq!(video.video_frames, Some(AMD_APU_VIDEO_FRAMES));
         assert_eq!(video.auto_fit, Some(false));
         assert_eq!(video.max_vram, Some(AMD_APU_VIDEO_VRAM_GIB));
-        assert_eq!(video.params_backend.as_deref(), Some("disk"));
+        assert_eq!(video.params_backend.as_deref(), Some("cpu"));
         assert_eq!(video.stream_layers, Some(true));
     }
 
@@ -1911,8 +1923,31 @@ mod tests {
         assert_eq!(profile.offload_to_cpu, Some(false));
         assert_eq!(profile.auto_fit, Some(false));
         assert_eq!(profile.max_vram, Some(AMD_APU_VIDEO_VRAM_GIB));
-        assert_eq!(profile.params_backend.as_deref(), Some("disk"));
+        assert_eq!(profile.params_backend.as_deref(), Some("cpu"));
         assert_eq!(profile.stream_layers, Some(true));
+    }
+
+    #[test]
+    fn old_disk_streaming_default_is_migrated_but_an_explicit_disk_mode_is_preserved() {
+        let old_default = DiffusionProfile {
+            params_backend: Some("disk".to_owned()),
+            stream_layers: Some(true),
+            ..DiffusionProfile::default()
+        };
+        let migrated =
+            with_amd_apu_vulkan_defaults(Some(&old_default), true, Modality::Video).unwrap();
+        assert_eq!(migrated.params_backend.as_deref(), Some("cpu"));
+        assert_eq!(migrated.stream_layers, Some(true));
+
+        let explicit_disk = DiffusionProfile {
+            params_backend: Some("disk".to_owned()),
+            stream_layers: Some(false),
+            ..DiffusionProfile::default()
+        };
+        let preserved =
+            with_amd_apu_vulkan_defaults(Some(&explicit_disk), true, Modality::Video).unwrap();
+        assert_eq!(preserved.params_backend.as_deref(), Some("disk"));
+        assert_eq!(preserved.stream_layers, Some(false));
     }
 
     #[tokio::test]
@@ -1920,7 +1955,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let profile = DiffusionProfile {
             max_vram: Some(4.0),
-            params_backend: Some("disk".to_owned()),
+            params_backend: Some("cpu".to_owned()),
             stream_layers: Some(true),
             ..DiffusionProfile::default()
         };
@@ -1937,9 +1972,15 @@ mod tests {
         assert!(args.windows(2).any(|args| args == ["--max-vram", "4"]));
         assert!(
             args.windows(2)
-                .any(|args| args == ["--params-backend", "disk"])
+                .any(|args| args == ["--params-backend", "cpu"])
         );
         assert!(args.iter().any(|arg| arg == "--stream-layers"));
+    }
+
+    #[test]
+    fn managed_sdcpp_release_and_source_revision_are_pinned_together() {
+        assert!(GITHUB_API.ends_with(&format!("/releases/tags/{PINNED_RELEASE_TAG}")));
+        assert!(PINNED_RELEASE_TAG.ends_with(&PINNED_SOURCE_REVISION[..7]));
     }
 
     #[test]
