@@ -39,6 +39,9 @@ const GITHUB_API: &str = "https://api.github.com/repos/leejet/stable-diffusion.c
 const USER_AGENT: &str = "brazier-sdcpp-manager";
 
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(3600);
+const AMD_APU_VIDEO_WIDTH: u32 = 512;
+const AMD_APU_VIDEO_HEIGHT: u32 = 320;
+const AMD_APU_VIDEO_FRAMES: u32 = 17;
 /// Floor for a video job, covering model load plus a short clip.
 const VIDEO_TIMEOUT_BASE: Duration = Duration::from_secs(1800);
 /// Added per frame-step, so long clips are not cut off mid-render.
@@ -1194,6 +1197,61 @@ fn merge_negative_prompt(
     }
 }
 
+/// Conservative sd.cpp defaults for a Vulkan AMD APU.
+///
+/// RADV exposes an APU as a unified-memory Vulkan device, but sd.cpp otherwise
+/// places every model component on it. Large text encoders can then make the
+/// compute context reset with `VK_ERROR_DEVICE_LOST`. Keep those encoders in
+/// host memory and reduce peak attention/VAE allocations. A model profile can
+/// explicitly override every value here.
+fn with_amd_apu_vulkan_defaults(
+    profile: Option<&DiffusionProfile>,
+    enabled: bool,
+    modality: Modality,
+) -> Option<DiffusionProfile> {
+    if !enabled {
+        return profile.cloned();
+    }
+
+    let mut profile = profile.cloned().unwrap_or_default();
+    let (width, height) = match modality {
+        Modality::Image => (FALLBACK_WIDTH, FALLBACK_HEIGHT),
+        Modality::Video => (AMD_APU_VIDEO_WIDTH, AMD_APU_VIDEO_HEIGHT),
+    };
+    profile.width.get_or_insert(width);
+    profile.height.get_or_insert(height);
+    if modality == Modality::Video {
+        profile.video_frames.get_or_insert(AMD_APU_VIDEO_FRAMES);
+    }
+    profile.vae_tiling.get_or_insert(true);
+    profile.clip_on_cpu.get_or_insert(true);
+    profile.diffusion_fa.get_or_insert(true);
+    // This flag streams weights to the GPU every step. Unified memory does not
+    // need that extra churn, and an explicit per-model `true` still wins.
+    profile.offload_to_cpu.get_or_insert(false);
+    Some(profile)
+}
+
+/// Resolve the platform policy once for both image and video launch paths.
+fn effective_diffusion_profile(
+    data_dir: &Path,
+    profile: Option<&DiffusionProfile>,
+    modality: Modality,
+) -> Option<DiffusionProfile> {
+    let hardware = crate::hardware::detect();
+    let configured_target = crate::runtime_settings::load(data_dir).target;
+    let effective_target = if configured_target == RuntimeTarget::Auto {
+        hardware.recommended_target
+    } else {
+        configured_target
+    };
+    let enabled = hardware.amd_apu && effective_target == RuntimeTarget::Vulkan;
+    if enabled {
+        tracing::info!("applying Vulkan AMD APU defaults to stable-diffusion.cpp generation");
+    }
+    with_amd_apu_vulkan_defaults(profile, enabled, modality)
+}
+
 /// The `<lora:name:scale>` tags sd-cli reads out of the prompt itself.
 ///
 /// stable-diffusion.cpp has no flag naming a LoRA. It is given one directory to
@@ -1495,6 +1553,8 @@ pub async fn generate_image(
 
     let job_dir = job_output_dir(data_dir).await?;
     let output_path = job_dir.join("output.png");
+    let profile = effective_diffusion_profile(data_dir, profile, Modality::Image);
+    let profile = profile.as_ref();
 
     let width = request
         .width
@@ -1614,6 +1674,8 @@ pub async fn generate_video(
 
     let job_dir = job_output_dir(data_dir).await?;
     let output_path = job_dir.join("output.mp4");
+    let profile = effective_diffusion_profile(data_dir, profile, Modality::Video);
+    let profile = profile.as_ref();
 
     let width = request
         .width
@@ -1748,6 +1810,47 @@ mod tests {
         assert_eq!(
             effective_timeout(derived, Some(60)),
             Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn vulkan_amd_apu_defaults_cover_image_and_video_flags() {
+        let image = with_amd_apu_vulkan_defaults(None, true, Modality::Image).unwrap();
+        assert_eq!(image.width, Some(512));
+        assert_eq!(image.height, Some(512));
+        assert_eq!(image.vae_tiling, Some(true));
+        assert_eq!(image.clip_on_cpu, Some(true));
+        assert_eq!(image.diffusion_fa, Some(true));
+        assert_eq!(image.offload_to_cpu, Some(false));
+
+        let video = with_amd_apu_vulkan_defaults(None, true, Modality::Video).unwrap();
+        assert_eq!(video.width, Some(AMD_APU_VIDEO_WIDTH));
+        assert_eq!(video.height, Some(AMD_APU_VIDEO_HEIGHT));
+        assert_eq!(video.video_frames, Some(AMD_APU_VIDEO_FRAMES));
+    }
+
+    #[test]
+    fn explicit_model_settings_override_vulkan_amd_apu_defaults() {
+        let configured = DiffusionProfile {
+            width: Some(768),
+            vae_tiling: Some(false),
+            clip_on_cpu: Some(false),
+            diffusion_fa: Some(false),
+            offload_to_cpu: Some(true),
+            ..DiffusionProfile::default()
+        };
+        let profile =
+            with_amd_apu_vulkan_defaults(Some(&configured), true, Modality::Image).unwrap();
+        assert_eq!(profile.width, Some(768));
+        assert_eq!(profile.height, Some(512));
+        assert_eq!(profile.vae_tiling, Some(false));
+        assert_eq!(profile.clip_on_cpu, Some(false));
+        assert_eq!(profile.diffusion_fa, Some(false));
+        assert_eq!(profile.offload_to_cpu, Some(true));
+
+        assert_eq!(
+            with_amd_apu_vulkan_defaults(None, false, Modality::Video),
+            None
         );
     }
 

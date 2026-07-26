@@ -34,6 +34,11 @@ pub struct HardwareInfo {
     pub usable_model_memory_bytes: Option<u64>,
     pub gpu: Option<String>,
     pub gpu_arch: Option<String>,
+    /// An AMD GPU without local memory, so Vulkan allocations share system RAM.
+    ///
+    /// sd.cpp needs more conservative placement defaults on these devices than
+    /// it does on a discrete Vulkan GPU.
+    pub amd_apu: bool,
     pub targets: Vec<RuntimeTargetInfo>,
     pub recommended_target: RuntimeTarget,
 }
@@ -392,6 +397,7 @@ fn detect_uncached() -> HardwareInfo {
         || (cfg!(target_os = "windows")
             && Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists());
     let gpus = amd_gpus();
+    let amd_apu = gpus.iter().any(|gpu| gpu.integrated);
     let gfx_arches: Vec<String> = gpus.iter().map(|gpu| gpu.arch.clone()).collect();
     // Verified only against an installed ROCm build, which is the only thing
     // that knows which architectures it carries device code for. Until one is
@@ -488,6 +494,7 @@ fn detect_uncached() -> HardwareInfo {
                 .or_else(|| metal.then(|| "Apple GPU".to_owned()))
         }),
         gpu_arch: (!gfx_arches.is_empty()).then(|| gfx_arches.join(", ")),
+        amd_apu,
         targets,
         recommended_target,
     }

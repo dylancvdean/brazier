@@ -15,12 +15,17 @@ import {
   resetModelProfile,
   saveModelProfile,
   type Adapter,
+  type HardwareInfo,
   type LocalModel,
   type ModelKind,
   type ModelProfile,
   type RuntimeSettings
 } from '../api'
 import { modelDisplayName, modelEngine } from '../model-utils'
+import {
+  AMD_APU_VIDEO_DEFAULTS,
+  usesAmdApuVulkanDefaults
+} from '../runtime-defaults'
 import {
   ModelSettingsFields,
   emptyProfile,
@@ -35,6 +40,7 @@ type Props = {
   profile: ModelProfile | undefined
   /** Global defaults, shown as the placeholder behind each unset field. */
   settings: RuntimeSettings | null
+  hardware: HardwareInfo | null
   onSaved: (models: Record<string, ModelProfile>) => void
   onClose: () => void
 }
@@ -67,6 +73,7 @@ export function ModelSettingsModal(props: Props): React.JSX.Element {
 
   const meta = modelDisplayName(props.model.id, props.model)
   const engine = modelEngine(props.model)
+  const useApuDefaults = usesAmdApuVulkanDefaults(props.settings, props.hardware)
   const inherited: InheritedDefaults = {
     contextSize: props.settings?.context_size,
     batchSize: props.settings?.batch_size,
@@ -75,7 +82,16 @@ export function ModelSettingsModal(props: Props): React.JSX.Element {
     flashAttention: props.settings?.flash_attention,
     kvCacheTypeK: props.settings?.kv_cache_type_k,
     kvCacheTypeV: props.settings?.kv_cache_type_v,
-    maxTokens: props.settings?.max_tokens ?? null
+    maxTokens: props.settings?.max_tokens ?? null,
+    diffusionWidth:
+      useApuDefaults && props.kind === 'video' ? AMD_APU_VIDEO_DEFAULTS.width : 512,
+    diffusionHeight:
+      useApuDefaults && props.kind === 'video' ? AMD_APU_VIDEO_DEFAULTS.height : 512,
+    videoFrames: useApuDefaults ? AMD_APU_VIDEO_DEFAULTS.frames : 16,
+    vaeTiling: useApuDefaults,
+    clipOnCpu: useApuDefaults,
+    diffusionFa: useApuDefaults,
+    offloadToCpu: false
   }
   const dirty = JSON.stringify(draft) !== JSON.stringify(props.profile ?? emptyProfile(props.kind))
 

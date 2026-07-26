@@ -10,10 +10,15 @@ import {
   saveBlobToDisk,
   type DiffusionProfile,
   type GenerateBlobResult,
+  type HardwareInfo,
   type LocalModel,
   type RuntimeSettings,
   type SdcppDefaults
 } from '../api'
+import {
+  AMD_APU_VIDEO_DEFAULTS,
+  usesAmdApuVulkanDefaults
+} from '../runtime-defaults'
 
 type Modality = 'image' | 'video'
 
@@ -25,6 +30,7 @@ type Props = {
   /** Model chosen in the top bar; empty when none is installed. */
   modelId: string
   settings: RuntimeSettings | null
+  hardware: HardwareInfo | null
   onError: (message: string | null) => void
 }
 
@@ -117,17 +123,31 @@ export function GenerateMode(props: Props) {
 
   const available = props.models
   const selected = props.modelId
+  const useApuDefaults = usesAmdApuVulkanDefaults(props.settings, props.hardware)
 
   useEffect(() => {
     const curated = defaultsByModel[selected]
     const configured = configuredByModel[selected]
     if (!curated && !configured) return
-    const width = configured?.width ?? curated?.width
-    const height = configured?.height ?? curated?.height
+    const apuWidth = modality === 'video' ? AMD_APU_VIDEO_DEFAULTS.width : 512
+    const apuHeight = modality === 'video' ? AMD_APU_VIDEO_DEFAULTS.height : 512
+    const width =
+      configured?.width ??
+      (useApuDefaults ? Math.min(curated?.width ?? apuWidth, apuWidth) : curated?.width)
+    const height =
+      configured?.height ??
+      (useApuDefaults ? Math.min(curated?.height ?? apuHeight, apuHeight) : curated?.height)
     const steps = configured?.steps ?? curated?.steps
     const cfg = configured?.cfg_scale ?? curated?.cfg_scale
     const guidance = configured?.guidance ?? curated?.guidance
-    const frames = configured?.video_frames ?? curated?.video_frames
+    const frames =
+      configured?.video_frames ??
+      (useApuDefaults && modality === 'video'
+        ? Math.min(
+            curated?.video_frames ?? AMD_APU_VIDEO_DEFAULTS.frames,
+            AMD_APU_VIDEO_DEFAULTS.frames
+          )
+        : curated?.video_frames)
     const fps = configured?.fps ?? curated?.fps
     if (width) setWidth(width)
     if (height) setHeight(height)
@@ -136,7 +156,7 @@ export function GenerateMode(props: Props) {
     setGuidance(guidance != null ? String(guidance) : '')
     if (frames) setFrames(frames)
     if (fps) setFps(fps)
-  }, [selected, defaultsByModel, configuredByModel])
+  }, [selected, modality, defaultsByModel, configuredByModel, useApuDefaults])
 
   async function onSubmit(event: FormEvent): Promise<void> {
     event.preventDefault()

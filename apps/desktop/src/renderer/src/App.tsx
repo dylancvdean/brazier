@@ -1378,6 +1378,7 @@ export function App(): React.JSX.Element {
             onModalityChange={setGenerateModality}
             modelId={generateModel}
             settings={runtime}
+            hardware={hardware}
             onError={setError}
           />
         ) : null}
@@ -1813,6 +1814,7 @@ export function App(): React.JSX.Element {
       {inferenceMenuOpen && (
         <InferenceMenu
           settings={runtime}
+          hardware={hardware}
           selectedModel={selectedModel}
           models={localModels}
           saving={savingInference}
@@ -1829,6 +1831,7 @@ export function App(): React.JSX.Element {
           kind={modelKindFor(configuringModel)}
           profile={modelProfiles[configuringModel]}
           settings={runtime}
+          hardware={hardware}
           onSaved={setModelProfiles}
           onClose={() => setConfiguringModel(null)}
         />

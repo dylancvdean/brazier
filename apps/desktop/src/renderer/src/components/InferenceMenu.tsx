@@ -4,15 +4,21 @@ import {
   listAdapters,
   saveModelProfile,
   type Adapter,
+  type HardwareInfo,
   type LocalModel,
   type ModelProfile,
   type RuntimeSettings
 } from '../api'
 import { modelEngine, modelKindFor } from '../model-utils'
+import {
+  AMD_APU_VIDEO_DEFAULTS,
+  usesAmdApuVulkanDefaults
+} from '../runtime-defaults'
 import { ModelSettingsFields, emptyProfile } from './ModelSettingsFields'
 
 type InferenceMenuProps = {
   settings: RuntimeSettings | null
+  hardware: HardwareInfo | null
   selectedModel: string
   models: LocalModel[]
   saving: boolean
@@ -105,6 +111,7 @@ function applyReasoningMode(
  */
 export function InferenceMenu({
   settings,
+  hardware,
   selectedModel,
   models,
   saving,
@@ -149,6 +156,7 @@ export function InferenceMenu({
   const advancedModel = advancedModelId ?? selectedModel
   const advancedEntry = models.find((entry) => entry.id === advancedModel)
   const modelKind = advancedModel ? modelKindFor(advancedModel) : null
+  const useApuDefaults = usesAmdApuVulkanDefaults(draft, hardware)
   const storedProfile = useMemo(
     () => profile ?? (modelKind ? emptyProfile(modelKind) : null),
     [profile, modelKind]
@@ -375,7 +383,22 @@ export function InferenceMenu({
                         flashAttention: draft.flash_attention,
                         kvCacheTypeK: draft.kv_cache_type_k,
                         kvCacheTypeV: draft.kv_cache_type_v,
-                        maxTokens: draft.max_tokens
+                        maxTokens: draft.max_tokens,
+                        diffusionWidth:
+                          useApuDefaults && modelKind === 'video'
+                            ? AMD_APU_VIDEO_DEFAULTS.width
+                            : 512,
+                        diffusionHeight:
+                          useApuDefaults && modelKind === 'video'
+                            ? AMD_APU_VIDEO_DEFAULTS.height
+                            : 512,
+                        videoFrames: useApuDefaults
+                          ? AMD_APU_VIDEO_DEFAULTS.frames
+                          : 16,
+                        vaeTiling: useApuDefaults,
+                        clipOnCpu: useApuDefaults,
+                        diffusionFa: useApuDefaults,
+                        offloadToCpu: false
                       }}
                       onChange={setProfileDraft}
                       onAdapterAdded={refreshAdapters}

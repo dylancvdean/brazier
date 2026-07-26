@@ -575,6 +575,13 @@ export type InheritedDefaults = {
   kvCacheTypeK?: string
   kvCacheTypeV?: string
   maxTokens?: number | null
+  diffusionWidth?: number
+  diffusionHeight?: number
+  videoFrames?: number
+  vaeTiling?: boolean
+  clipOnCpu?: boolean
+  diffusionFa?: boolean
+  offloadToCpu?: boolean
 }
 
 type SectionProps<T> = {
@@ -983,7 +990,7 @@ function DiffusionFields(
       <FieldGroup title="Output" open>
         <NumberField
           label="Width"
-          inherited={512}
+          inherited={props.inherited.diffusionWidth ?? 512}
           min={64}
           max={4096}
           step={64}
@@ -992,7 +999,7 @@ function DiffusionFields(
         />
         <NumberField
           label="Height"
-          inherited={512}
+          inherited={props.inherited.diffusionHeight ?? 512}
           min={64}
           max={4096}
           step={64}
@@ -1011,7 +1018,7 @@ function DiffusionFields(
           <>
             <NumberField
               label="Frames"
-              inherited={16}
+              inherited={props.inherited.videoFrames ?? 16}
               min={1}
               max={1024}
               value={profile.video_frames}
@@ -1167,6 +1174,7 @@ function DiffusionFields(
         <ToggleField
           label="VAE tiling"
           hint="Decodes in tiles, which is how a large image fits in VRAM."
+          inherited={props.inherited.vaeTiling}
           value={profile.vae_tiling}
           onChange={(value) => set('vae_tiling', value)}
         />
@@ -1177,17 +1185,20 @@ function DiffusionFields(
         />
         <ToggleField
           label="CLIP on CPU"
+          inherited={props.inherited.clipOnCpu}
           value={profile.clip_on_cpu}
           onChange={(value) => set('clip_on_cpu', value)}
         />
         <ToggleField
           label="Diffusion flash attention"
+          inherited={props.inherited.diffusionFa}
           value={profile.diffusion_fa}
           onChange={(value) => set('diffusion_fa', value)}
         />
         <ToggleField
           label="Offload to CPU"
           hint="Keeps weights in RAM and moves them per step. Slower, but it fits."
+          inherited={props.inherited.offloadToCpu}
           value={profile.offload_to_cpu}
           onChange={(value) => set('offload_to_cpu', value)}
         />
