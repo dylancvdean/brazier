@@ -224,6 +224,10 @@ pub struct DiffusionProfile {
     pub clip_on_cpu: Option<bool>,
     /// Flash attention in the diffusion model (`--diffusion-fa`).
     pub diffusion_fa: Option<bool>,
+    /// Let sd.cpp choose phase-aware runtime and parameter placement.
+    pub auto_fit: Option<bool>,
+    /// Per-device graph execution budget in GiB (`--max-vram`).
+    pub max_vram: Option<f32>,
     /// Keep weights in RAM and move them per step (`--offload-to-cpu`).
     pub offload_to_cpu: Option<bool>,
     /// `std_default` or `cuda`.
@@ -509,6 +513,7 @@ fn validate_diffusion(profile: &DiffusionProfile) -> anyhow::Result<()> {
     ensure_range(profile.skip_layer_start, 0.0, 1.0, "skip-layer start")?;
     ensure_range(profile.skip_layer_end, 0.0, 1.0, "skip-layer end")?;
     ensure_range(profile.flow_shift, 0.0, 100.0, "flow shift")?;
+    ensure_range(profile.max_vram, 0.0, 256.0, "maximum VRAM")?;
     ensure_range(profile.video_frames, 1, 1024, "frames")?;
     ensure_range(profile.fps, 1, 120, "FPS")?;
     ensure_one_of(
@@ -856,6 +861,12 @@ mod tests {
             ..DiffusionProfile::default()
         });
         assert!(diffusion.validate("sdcpp-image:flux").is_err());
+
+        let diffusion = ModelProfile::Video(DiffusionProfile {
+            max_vram: Some(512.0),
+            ..DiffusionProfile::default()
+        });
+        assert!(diffusion.validate("sdcpp-video:wan").is_err());
     }
 
     #[test]

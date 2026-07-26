@@ -42,6 +42,8 @@ const IMAGE_TIMEOUT: Duration = Duration::from_secs(3600);
 const AMD_APU_VIDEO_WIDTH: u32 = 512;
 const AMD_APU_VIDEO_HEIGHT: u32 = 320;
 const AMD_APU_VIDEO_FRAMES: u32 = 17;
+const AMD_APU_IMAGE_VRAM_GIB: f32 = 8.0;
+const AMD_APU_VIDEO_VRAM_GIB: f32 = 4.0;
 /// Floor for a video job, covering model load plus a short clip.
 const VIDEO_TIMEOUT_BASE: Duration = Duration::from_secs(1800);
 /// Added per frame-step, so long clips are not cut off mid-render.
@@ -1226,6 +1228,11 @@ fn with_amd_apu_vulkan_defaults(
     profile.vae_tiling.get_or_insert(true);
     profile.clip_on_cpu.get_or_insert(true);
     profile.diffusion_fa.get_or_insert(true);
+    profile.auto_fit.get_or_insert(true);
+    profile.max_vram.get_or_insert(match modality {
+        Modality::Image => AMD_APU_IMAGE_VRAM_GIB,
+        Modality::Video => AMD_APU_VIDEO_VRAM_GIB,
+    });
     // This flag streams weights to the GPU every step. Unified memory does not
     // need that extra churn, and an explicit per-model `true` still wins.
     profile.offload_to_cpu.get_or_insert(false);
@@ -1338,6 +1345,12 @@ async fn apply_diffusion_profile(
     }
     if profile.diffusion_fa.unwrap_or(false) {
         command.arg("--diffusion-fa");
+    }
+    if profile.auto_fit.unwrap_or(false) {
+        command.arg("--auto-fit");
+    }
+    if let Some(value) = profile.max_vram {
+        command.arg("--max-vram").arg(value.to_string());
     }
     if profile.offload_to_cpu.unwrap_or(false) {
         command.arg("--offload-to-cpu");
@@ -1821,12 +1834,16 @@ mod tests {
         assert_eq!(image.vae_tiling, Some(true));
         assert_eq!(image.clip_on_cpu, Some(true));
         assert_eq!(image.diffusion_fa, Some(true));
+        assert_eq!(image.auto_fit, Some(true));
+        assert_eq!(image.max_vram, Some(AMD_APU_IMAGE_VRAM_GIB));
         assert_eq!(image.offload_to_cpu, Some(false));
 
         let video = with_amd_apu_vulkan_defaults(None, true, Modality::Video).unwrap();
         assert_eq!(video.width, Some(AMD_APU_VIDEO_WIDTH));
         assert_eq!(video.height, Some(AMD_APU_VIDEO_HEIGHT));
         assert_eq!(video.video_frames, Some(AMD_APU_VIDEO_FRAMES));
+        assert_eq!(video.auto_fit, Some(true));
+        assert_eq!(video.max_vram, Some(AMD_APU_VIDEO_VRAM_GIB));
     }
 
     #[test]
@@ -1836,6 +1853,8 @@ mod tests {
             vae_tiling: Some(false),
             clip_on_cpu: Some(false),
             diffusion_fa: Some(false),
+            auto_fit: Some(false),
+            max_vram: Some(6.0),
             offload_to_cpu: Some(true),
             ..DiffusionProfile::default()
         };
@@ -1846,12 +1865,35 @@ mod tests {
         assert_eq!(profile.vae_tiling, Some(false));
         assert_eq!(profile.clip_on_cpu, Some(false));
         assert_eq!(profile.diffusion_fa, Some(false));
+        assert_eq!(profile.auto_fit, Some(false));
+        assert_eq!(profile.max_vram, Some(6.0));
         assert_eq!(profile.offload_to_cpu, Some(true));
 
         assert_eq!(
             with_amd_apu_vulkan_defaults(None, false, Modality::Video),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn modern_residency_settings_reach_sd_cli() {
+        let dir = tempdir().unwrap();
+        let profile = DiffusionProfile {
+            auto_fit: Some(true),
+            max_vram: Some(4.0),
+            ..DiffusionProfile::default()
+        };
+        let mut command = Command::new("sd-cli");
+        apply_diffusion_profile(&mut command, dir.path(), Some(&profile), "test")
+            .await
+            .unwrap();
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(1).any(|args| args == ["--auto-fit"]));
+        assert!(args.windows(2).any(|args| args == ["--max-vram", "4"]));
     }
 
     #[test]

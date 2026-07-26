@@ -1281,6 +1281,8 @@ export type DiffusionProfile = {
   vae_on_cpu?: boolean | null
   clip_on_cpu?: boolean | null
   diffusion_fa?: boolean | null
+  auto_fit?: boolean | null
+  max_vram?: number | null
   offload_to_cpu?: boolean | null
   rng?: string | null
   negative_prompt?: string | null

@@ -581,6 +581,8 @@ export type InheritedDefaults = {
   vaeTiling?: boolean
   clipOnCpu?: boolean
   diffusionFa?: boolean
+  autoFit?: boolean
+  maxVram?: number
   offloadToCpu?: boolean
 }
 
@@ -1194,6 +1196,23 @@ function DiffusionFields(
           inherited={props.inherited.diffusionFa}
           value={profile.diffusion_fa}
           onChange={(value) => set('diffusion_fa', value)}
+        />
+        <ToggleField
+          label="Automatic placement"
+          hint="Lets sd.cpp time-share model components and choose their execution backends."
+          inherited={props.inherited.autoFit}
+          value={profile.auto_fit}
+          onChange={(value) => set('auto_fit', value)}
+        />
+        <NumberField
+          label="GPU graph budget (GiB)"
+          hint="Maximum GiB used by one device before sd.cpp splits the execution graph."
+          inherited={props.inherited.maxVram}
+          min={0}
+          max={256}
+          step={0.5}
+          value={profile.max_vram}
+          onChange={(value) => set('max_vram', value)}
         />
         <ToggleField
           label="Offload to CPU"
