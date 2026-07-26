@@ -82,6 +82,8 @@ export type RuntimeSettings = {
   show_generated_video_to_model?: boolean
   default_image_gen_model?: string | null
   default_video_gen_model?: string | null
+  /** Flat ceiling for one generation job; 0 derives it from frames and steps. */
+  generation_timeout_secs?: number
   voice_python?: string | null
   default_voice_model?: string | null
   default_voice_persona?: string | null
@@ -324,6 +326,22 @@ export async function pauseDownloadJob(jobId: string): Promise<void> {
   })
 }
 
+/** Forget a finished, failed, or cancelled job so it leaves the list. */
+export async function dismissDownloadJob(jobId: string): Promise<void> {
+  await request('/api/v1/models/download/dismiss', {
+    method: 'POST',
+    body: JSON.stringify({ job_id: jobId })
+  })
+}
+
+/** Forget every settled job at once. Resolves how many were cleared. */
+export async function dismissFinishedDownloadJobs(): Promise<number> {
+  const payload = await request<{ dismissed: number }>('/api/v1/models/downloads/finished', {
+    method: 'DELETE'
+  })
+  return payload.dismissed
+}
+
 /** Put a paused, failed, or cancelled job back in line; it resumes in place. */
 export async function resumeDownloadJob(jobId: string): Promise<void> {
   await request('/api/v1/models/download/resume', {
@@ -357,11 +375,12 @@ export async function queueSdcppInstall(
 export async function queueModelDownload(
   repoId: string,
   filename: string,
-  revision = 'main'
+  revision = 'main',
+  engine: 'llama.cpp' | 'whisper.cpp' = 'llama.cpp'
 ): Promise<{ job_id: string }> {
   return request('/api/v1/models/download/queue', {
     method: 'POST',
-    body: JSON.stringify({ repo_id: repoId, filename, revision })
+    body: JSON.stringify({ repo_id: repoId, filename, revision, engine })
   })
 }
 
@@ -982,6 +1001,34 @@ export function generateVideo(body: GenerateBody): Promise<GenerateBlobResult> {
   })
 }
 
+/** A generation in flight, including one a model started on its own. */
+export type ActiveGeneration = {
+  id: string
+  modality: 'image' | 'video'
+  model_id: string
+  prompt: string
+  negative_prompt?: string | null
+  /** Blob of the conditioning image, when the job was given one. */
+  init_image_blob?: string | null
+  /** Whether the person or a model asked for this. */
+  origin: 'user' | 'model'
+  elapsed_secs: number
+  timeout_secs: number
+}
+
+export async function fetchActiveGeneration(): Promise<ActiveGeneration | null> {
+  const payload = await request<{ active: ActiveGeneration | null }>('/api/v1/generate/active')
+  return payload.active
+}
+
+/** Stop the running generation. Resolves false when nothing was running. */
+export async function cancelGeneration(): Promise<boolean> {
+  const payload = await request<{ cancelled: boolean }>('/api/v1/generate/cancel', {
+    method: 'POST'
+  })
+  return payload.cancelled
+}
+
 /** Generation settings that suit a curated model, used to prefill the panel. */
 export type SdcppDefaults = {
   width?: number
@@ -993,6 +1040,15 @@ export type SdcppDefaults = {
   fps?: number
 }
 
+/** One size a component is offered in — the GGUF quant choice, for bundles. */
+export type SdcppComponentVariant = {
+  label: string
+  path: string
+  repo_id?: string | null
+  approx_bytes?: number | null
+  note?: string | null
+}
+
 export type SdcppBundleComponent = {
   repo_id: string
   path: string
@@ -1001,6 +1057,8 @@ export type SdcppBundleComponent = {
   role: string
   gated: boolean
   approx_bytes?: number | null
+  /** Sizes on offer. Empty or absent means the single file named above. */
+  variants?: SdcppComponentVariant[]
 }
 
 export type SdcppBundle = {
@@ -1018,8 +1076,48 @@ export type SdcppBundle = {
   origin: 'builtin' | 'custom'
   /** Whether the model can start from a supplied image. */
   supports_init_image?: boolean
+  /** Shown in the short list rather than behind "show every model". */
+  featured?: boolean
   defaults: SdcppDefaults
   components: SdcppBundleComponent[]
+}
+
+/**
+ * Resolve a bundle's chosen sizes into the concrete one to install.
+ *
+ * Picking a quant produces a different set of files, so the bundle is sent in
+ * full rather than by id, and its key gains the chosen sizes — two quants of
+ * one model are separate installs, exactly as two GGUF quants are.
+ */
+export function resolveBundleVariants(
+  bundle: SdcppBundle,
+  choices: Record<number, string>
+): SdcppBundle {
+  const picked: string[] = []
+  const components = bundle.components.map((component, index) => {
+    const wanted = choices[index]
+    const variant = component.variants?.find((option) => option.label === wanted)
+    if (!variant) return component
+    picked.push(variant.label)
+    return {
+      ...component,
+      repo_id: variant.repo_id || component.repo_id,
+      path: variant.path,
+      approx_bytes: variant.approx_bytes ?? component.approx_bytes
+    }
+  })
+  if (picked.length === 0) return { ...bundle, components }
+  const slug = picked
+    .join('-')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+  return {
+    ...bundle,
+    id: `${bundle.id}-${slug}`,
+    key: `${bundle.key}-${slug}`,
+    components
+  }
 }
 
 /** A bundle proposed for an arbitrary checkpoint, before it is installed. */
@@ -1471,6 +1569,41 @@ export async function fetchBlobObjectUrl(sha256: string): Promise<string> {
   const url = URL.createObjectURL(blob)
   blobUrlCache.set(sha256, url)
   return url
+}
+
+/** Extension to suggest for a stored blob, from its MIME type. */
+function extensionForMime(mimeType: string): string {
+  const known: Record<string, string> = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'video/mp4': 'mp4',
+    'video/webm': 'webm'
+  }
+  return known[mimeType] ?? mimeType.split('/').at(-1) ?? 'bin'
+}
+
+/**
+ * Save a stored blob to disk through a native save dialog.
+ *
+ * Resolves the chosen path, or null when the dialog was dismissed. Generated
+ * media otherwise only exists inside the app's blob store, where it is
+ * addressed by hash and effectively unreachable.
+ */
+export async function saveBlobToDisk(
+  sha256: string,
+  mimeType: string,
+  suggestedName?: string | null
+): Promise<string | null> {
+  const daemon = await connection()
+  const headers = new Headers()
+  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
+  const response = await fetch(`${daemon.address}/api/v1/blobs/${sha256}`, { headers })
+  if (!response.ok) throw new Error(`Could not read that file (${response.status}).`)
+  const bytes = await response.arrayBuffer()
+  const fallback = `brazier-${sha256.slice(0, 12)}.${extensionForMime(mimeType)}`
+  return window.brazier.saveFile(suggestedName || fallback, bytes)
 }
 
 export async function uploadAttachmentBlob(file: File): Promise<StoredBlob> {

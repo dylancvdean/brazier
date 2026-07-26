@@ -99,6 +99,11 @@ pub struct RuntimeSettings {
     /// Default video generation model id (`sdcpp-video:…`) for tools and Generate mode.
     #[serde(default)]
     pub default_video_gen_model: Option<String>,
+    /// Flat ceiling in seconds for one generation job. Zero keeps the budget
+    /// Brazier derives from the frames and steps asked for, which suits most
+    /// machines; a slow CPU-only host may want hours instead.
+    #[serde(default)]
+    pub generation_timeout_secs: u32,
     /// Absolute path of an activated PersonaPlex / Moshi Python interpreter.
     #[serde(default)]
     pub voice_python: Option<String>,
@@ -168,6 +173,7 @@ impl Default for RuntimeSettings {
             show_generated_video_to_model: false,
             default_image_gen_model: None,
             default_video_gen_model: None,
+            generation_timeout_secs: 0,
             voice_python: None,
             default_voice_model: None,
             default_voice_persona: None,

@@ -1,27 +1,76 @@
 {
   "bundles": [
     {
+      "id": "sd15",
+      "label": "Stable Diffusion 1.5",
+      "modality": "image",
+      "key": "runwayml/stable-diffusion-v1-5",
+      "summary": "The small, old reliable. Runs on almost anything, generates a 512px image in seconds, and has by far the largest back catalogue of finetunes and LoRAs.",
+      "license": "creativeml-openrail-m",
+      "featured": true,
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 25,
+        "cfg_scale": 7.0
+      },
+      "supports_init_image": true,
+      "components": [
+        {
+          "repo_id": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+          "path": "v1-5-pruned-emaonly.safetensors",
+          "role": "Checkpoint (UNet + VAE + text encoders)",
+          "approx_bytes": 4265146304
+        }
+      ]
+    },
+    {
       "id": "sdxl-base-1.0",
       "label": "SDXL 1.0 base",
       "modality": "image",
       "key": "stabilityai/sdxl-base-1.0",
       "summary": "The dependable baseline: one self-contained checkpoint, no separate text encoders, and the largest LoRA and finetune ecosystem.",
       "license": "openrail++",
+      "featured": true,
       "defaults": {
         "width": 1024,
         "height": 1024,
         "steps": 30,
         "cfg_scale": 7.0
       },
+      "supports_init_image": true,
       "components": [
         {
           "repo_id": "stabilityai/stable-diffusion-xl-base-1.0",
           "path": "sd_xl_base_1.0.safetensors",
           "role": "Checkpoint (UNet + VAE + text encoders)",
-          "approx_bytes": 6938040706
+          "approx_bytes": 6938078334
         }
-      ],
-      "supports_init_image": true
+      ]
+    },
+    {
+      "id": "sdxl-turbo",
+      "label": "SDXL Turbo",
+      "modality": "image",
+      "key": "stabilityai/sdxl-turbo",
+      "summary": "SDXL distilled down to one to four steps. The fastest way to see an idea, at some cost in detail; keep CFG at 1.0.",
+      "license": "sai-nc-community",
+      "featured": false,
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 4,
+        "cfg_scale": 1.0
+      },
+      "supports_init_image": true,
+      "components": [
+        {
+          "repo_id": "stabilityai/sdxl-turbo",
+          "path": "sd_xl_turbo_1.0_fp16.safetensors",
+          "role": "Checkpoint (UNet + VAE + text encoders)",
+          "approx_bytes": 6938081905
+        }
+      ]
     },
     {
       "id": "realvisxl-v5",
@@ -30,67 +79,304 @@
       "key": "SG161222/realvisxl-v5",
       "summary": "Photoreal SDXL finetune. Same single-file simplicity as SDXL base, noticeably better faces and lighting.",
       "license": "openrail++",
+      "featured": true,
       "defaults": {
         "width": 1024,
         "height": 1024,
         "steps": 30,
         "cfg_scale": 5.0
       },
+      "supports_init_image": true,
       "components": [
         {
           "repo_id": "SG161222/RealVisXL_V5.0",
           "path": "RealVisXL_V5.0_fp16.safetensors",
           "role": "Checkpoint (UNet + VAE + text encoders)",
-          "approx_bytes": 6938040706
+          "approx_bytes": 6938065488
         }
-      ],
-      "supports_init_image": true
+      ]
     },
     {
-      "id": "flux1-schnell-q8",
-      "label": "FLUX.1 schnell (Q8_0)",
+      "id": "flux1-schnell",
+      "label": "FLUX.1 schnell",
       "modality": "image",
-      "key": "black-forest-labs/flux1-schnell-q8",
+      "key": "black-forest-labs/flux1-schnell",
       "summary": "Best quality per second: Apache-2.0, four steps, and CFG pinned at 1.0. Pulls its two text encoders and VAE alongside the diffusion weights.",
       "license": "apache-2.0",
+      "featured": true,
       "defaults": {
         "width": 1024,
         "height": 1024,
         "steps": 4,
         "cfg_scale": 1.0
       },
+      "supports_init_image": true,
       "components": [
         {
           "repo_id": "city96/FLUX.1-schnell-gguf",
-          "path": "flux1-schnell-Q8_0.gguf",
-          "flag": "diffusion-model",
+          "path": "flux1-schnell-Q4_K_S.gguf",
           "role": "Diffusion model",
-          "approx_bytes": 12600000000
+          "flag": "diffusion-model",
+          "approx_bytes": 6783943712,
+          "variants": [
+            {
+              "label": "Q2_K",
+              "path": "flux1-schnell-Q2_K.gguf",
+              "approx_bytes": 4010296352,
+              "note": "Smallest; noticeably degraded."
+            },
+            {
+              "label": "Q3_K_S",
+              "path": "flux1-schnell-Q3_K_S.gguf",
+              "approx_bytes": 5212210208,
+              "note": "Fits a 8 GB machine."
+            },
+            {
+              "label": "Q4_K_S",
+              "path": "flux1-schnell-Q4_K_S.gguf",
+              "approx_bytes": 6783943712,
+              "note": "Recommended for 12–16 GB."
+            },
+            {
+              "label": "Q5_K_S",
+              "path": "flux1-schnell-Q5_K_S.gguf",
+              "approx_bytes": 8263222304,
+              "note": "Better fidelity."
+            },
+            {
+              "label": "Q6_K",
+              "path": "flux1-schnell-Q6_K.gguf",
+              "approx_bytes": 9834955808,
+              "note": "Close to full quality."
+            },
+            {
+              "label": "Q8_0",
+              "path": "flux1-schnell-Q8_0.gguf",
+              "approx_bytes": 12687821728,
+              "note": "Effectively lossless; largest."
+            }
+          ]
         },
         {
           "repo_id": "black-forest-labs/FLUX.1-schnell",
           "path": "ae.safetensors",
-          "flag": "vae",
           "role": "VAE",
+          "flag": "vae",
           "gated": true,
           "approx_bytes": 335304388
         },
         {
           "repo_id": "comfyanonymous/flux_text_encoders",
           "path": "clip_l.safetensors",
-          "flag": "clip_l",
           "role": "Text encoder (CLIP-L)",
+          "flag": "clip_l",
           "approx_bytes": 246144152
         },
         {
           "repo_id": "comfyanonymous/flux_text_encoders",
           "path": "t5xxl_fp16.safetensors",
-          "flag": "t5xxl",
           "role": "Text encoder (T5-XXL)",
+          "flag": "t5xxl",
           "approx_bytes": 9787841024
         }
-      ],
-      "supports_init_image": true
+      ]
+    },
+    {
+      "id": "flux1-dev",
+      "label": "FLUX.1 dev",
+      "modality": "image",
+      "key": "black-forest-labs/flux1-dev",
+      "summary": "The higher-quality FLUX at 20–30 steps and distilled guidance around 3.5. Non-commercial licence, and its VAE repo is gated.",
+      "license": "flux-1-dev-non-commercial",
+      "featured": false,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 25,
+        "cfg_scale": 1.0,
+        "guidance": 3.5
+      },
+      "supports_init_image": true,
+      "components": [
+        {
+          "repo_id": "city96/FLUX.1-dev-gguf",
+          "path": "flux1-dev-Q4_K_S.gguf",
+          "role": "Diffusion model",
+          "flag": "diffusion-model",
+          "approx_bytes": 6805988640,
+          "variants": [
+            {
+              "label": "Q2_K",
+              "path": "flux1-dev-Q2_K.gguf",
+              "approx_bytes": 4032341280,
+              "note": "Smallest; noticeably degraded."
+            },
+            {
+              "label": "Q3_K_S",
+              "path": "flux1-dev-Q3_K_S.gguf",
+              "approx_bytes": 5234255136,
+              "note": "Fits a 8 GB machine."
+            },
+            {
+              "label": "Q4_K_S",
+              "path": "flux1-dev-Q4_K_S.gguf",
+              "approx_bytes": 6805988640,
+              "note": "Recommended for 12–16 GB."
+            },
+            {
+              "label": "Q5_K_S",
+              "path": "flux1-dev-Q5_K_S.gguf",
+              "approx_bytes": 8285267232,
+              "note": "Better fidelity."
+            },
+            {
+              "label": "Q6_K",
+              "path": "flux1-dev-Q6_K.gguf",
+              "approx_bytes": 9857000736,
+              "note": "Close to full quality."
+            },
+            {
+              "label": "Q8_0",
+              "path": "flux1-dev-Q8_0.gguf",
+              "approx_bytes": 12708281504,
+              "note": "Effectively lossless; largest."
+            }
+          ]
+        },
+        {
+          "repo_id": "black-forest-labs/FLUX.1-dev",
+          "path": "ae.safetensors",
+          "role": "VAE",
+          "flag": "vae",
+          "gated": true,
+          "approx_bytes": 335304388
+        },
+        {
+          "repo_id": "comfyanonymous/flux_text_encoders",
+          "path": "clip_l.safetensors",
+          "role": "Text encoder (CLIP-L)",
+          "flag": "clip_l",
+          "approx_bytes": 246144152
+        },
+        {
+          "repo_id": "comfyanonymous/flux_text_encoders",
+          "path": "t5xxl_fp16.safetensors",
+          "role": "Text encoder (T5-XXL)",
+          "flag": "t5xxl",
+          "approx_bytes": 9787841024
+        }
+      ]
+    },
+    {
+      "id": "chroma1-hd",
+      "label": "Chroma1 HD",
+      "modality": "image",
+      "key": "lodestones/chroma1-hd",
+      "summary": "An Apache-2.0 FLUX derivative retrained without distillation, so it takes real CFG and is fully unlocked. Runs in 6 GB of VRAM at Q4.",
+      "license": "apache-2.0",
+      "featured": false,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 26,
+        "cfg_scale": 4.0
+      },
+      "supports_init_image": true,
+      "components": [
+        {
+          "repo_id": "silveroxides/Chroma-GGUF",
+          "path": "Chroma1-HD/Chroma1-HD-Q4_0.gguf",
+          "role": "Diffusion model",
+          "flag": "diffusion-model",
+          "approx_bytes": 5432053920
+        },
+        {
+          "repo_id": "black-forest-labs/FLUX.1-dev",
+          "path": "ae.safetensors",
+          "role": "VAE",
+          "flag": "vae",
+          "gated": true,
+          "approx_bytes": 335304388
+        },
+        {
+          "repo_id": "comfyanonymous/flux_text_encoders",
+          "path": "t5xxl_fp16.safetensors",
+          "role": "Text encoder (T5-XXL)",
+          "flag": "t5xxl",
+          "approx_bytes": 9787841024
+        }
+      ]
+    },
+    {
+      "id": "qwen-image",
+      "label": "Qwen-Image",
+      "modality": "image",
+      "key": "qwen/qwen-image",
+      "summary": "The strongest open model for images containing text, in English or Chinese. Large: the diffusion weights and its Qwen2.5-VL encoder are both sizeable.",
+      "license": "apache-2.0",
+      "featured": false,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 20,
+        "cfg_scale": 2.5
+      },
+      "supports_init_image": true,
+      "components": [
+        {
+          "repo_id": "city96/Qwen-Image-gguf",
+          "path": "qwen-image-Q4_K_M.gguf",
+          "role": "Diffusion model",
+          "flag": "diffusion-model",
+          "approx_bytes": 13065746976,
+          "variants": [
+            {
+              "label": "Q2_K",
+              "path": "qwen-image-Q2_K.gguf",
+              "approx_bytes": 7062518304,
+              "note": "Smallest; text rendering suffers."
+            },
+            {
+              "label": "Q3_K_M",
+              "path": "qwen-image-Q3_K_M.gguf",
+              "approx_bytes": 9679567392,
+              "note": "Fits a 16 GB machine."
+            },
+            {
+              "label": "Q4_K_M",
+              "path": "qwen-image-Q4_K_M.gguf",
+              "approx_bytes": 13065746976,
+              "note": "Recommended."
+            },
+            {
+              "label": "Q5_K_M",
+              "path": "qwen-image-Q5_K_M.gguf",
+              "approx_bytes": 14934899232,
+              "note": "Better fidelity, larger."
+            },
+            {
+              "label": "Q8_0",
+              "path": "qwen-image-Q8_0.gguf",
+              "approx_bytes": 21761817120,
+              "note": "Near-full quality; very large."
+            }
+          ]
+        },
+        {
+          "repo_id": "Comfy-Org/Qwen-Image_ComfyUI",
+          "path": "split_files/vae/qwen_image_vae.safetensors",
+          "role": "VAE",
+          "flag": "vae",
+          "approx_bytes": 253806246
+        },
+        {
+          "repo_id": "Comfy-Org/Qwen-Image_ComfyUI",
+          "path": "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+          "role": "Text encoder (Qwen2.5-VL 7B)",
+          "flag": "llm",
+          "approx_bytes": 9384670680
+        }
+      ]
     },
     {
       "id": "wan2.2-ti2v-5b",
@@ -99,6 +385,7 @@
       "key": "wan-ai/wan2.2-ti2v-5b",
       "summary": "One model for text-to-video and image-to-video at up to 720p. The best video starting point on Apple Silicon.",
       "license": "apache-2.0",
+      "featured": true,
       "defaults": {
         "width": 704,
         "height": 480,
@@ -107,70 +394,393 @@
         "video_frames": 49,
         "fps": 24
       },
+      "supports_init_image": true,
       "components": [
         {
           "repo_id": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
           "path": "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
-          "flag": "diffusion-model",
           "role": "Diffusion model",
-          "approx_bytes": 10200000000
+          "flag": "diffusion-model",
+          "approx_bytes": 9999658848
         },
         {
           "repo_id": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
           "path": "split_files/vae/wan2.2_vae.safetensors",
-          "flag": "vae",
           "role": "VAE",
-          "approx_bytes": 1400000000
+          "flag": "vae",
+          "approx_bytes": 1409400960
         },
         {
-          "repo_id": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+          "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
           "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-          "flag": "t5xxl",
           "role": "Text encoder (umT5-XXL)",
-          "approx_bytes": 6700000000
+          "flag": "t5xxl",
+          "approx_bytes": 6735906897
         }
-      ],
-      "supports_init_image": true
+      ]
     },
     {
       "id": "wan2.1-t2v-1.3b",
       "label": "Wan 2.1 T2V 1.3B",
       "modality": "video",
       "key": "wan-ai/wan2.1-t2v-1.3b",
-      "summary": "The small, fast video model. 480p clips in a fraction of the time \u2014 good for finding a prompt before committing to the 5B.",
+      "summary": "The small, fast video model. 480p clips in a fraction of the time — good for finding a prompt before committing to a larger model. Text prompts only.",
       "license": "apache-2.0",
+      "featured": true,
       "defaults": {
         "width": 832,
         "height": 480,
         "steps": 20,
         "cfg_scale": 6.0,
-        "video_frames": 49,
+        "video_frames": 33,
         "fps": 16
       },
+      "supports_init_image": false,
       "components": [
         {
           "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
           "path": "split_files/diffusion_models/wan2.1_t2v_1.3B_bf16.safetensors",
-          "flag": "diffusion-model",
           "role": "Diffusion model",
-          "approx_bytes": 2900000000
+          "flag": "diffusion-model",
+          "approx_bytes": 2838104528
         },
         {
           "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
           "path": "split_files/vae/wan_2.1_vae.safetensors",
-          "flag": "vae",
           "role": "VAE",
-          "approx_bytes": 254000000
+          "flag": "vae",
+          "approx_bytes": 253815318
         },
         {
           "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
           "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-          "flag": "t5xxl",
           "role": "Text encoder (umT5-XXL)",
-          "approx_bytes": 6700000000
+          "flag": "t5xxl",
+          "approx_bytes": 6735906897,
+          "variants": [
+            {
+              "label": "fp8 scaled",
+              "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+              "approx_bytes": 6735906897,
+              "note": "Half the size, the usual choice."
+            },
+            {
+              "label": "fp16",
+              "path": "split_files/text_encoders/umt5_xxl_fp16.safetensors",
+              "approx_bytes": 11366399385,
+              "note": "Full precision text encoder."
+            }
+          ]
         }
-      ],
-      "supports_init_image": false
+      ]
+    },
+    {
+      "id": "wan2.1-i2v-14b-480p",
+      "label": "Wan 2.1 I2V 14B (480p)",
+      "modality": "video",
+      "key": "wan-ai/wan2.1-i2v-14b-480p",
+      "summary": "Animates a photo you supply rather than inventing the scene from text. The dedicated image-to-video model: it needs a starting picture, and reads it through its own vision encoder.",
+      "license": "apache-2.0",
+      "featured": true,
+      "defaults": {
+        "width": 832,
+        "height": 480,
+        "steps": 20,
+        "cfg_scale": 6.0,
+        "video_frames": 33,
+        "fps": 16
+      },
+      "supports_init_image": true,
+      "components": [
+        {
+          "repo_id": "city96/Wan2.1-I2V-14B-480P-gguf",
+          "path": "wan2.1-i2v-14b-480p-Q4_K_M.gguf",
+          "role": "Diffusion model",
+          "flag": "diffusion-model",
+          "approx_bytes": 11341184384,
+          "variants": [
+            {
+              "label": "Q3_K_S",
+              "path": "wan2.1-i2v-14b-480p-Q3_K_S.gguf",
+              "approx_bytes": 7925939584,
+              "note": "Smallest usable; fits 8–12 GB."
+            },
+            {
+              "label": "Q4_K_M",
+              "path": "wan2.1-i2v-14b-480p-Q4_K_M.gguf",
+              "approx_bytes": 11341184384,
+              "note": "Recommended."
+            },
+            {
+              "label": "Q5_K_M",
+              "path": "wan2.1-i2v-14b-480p-Q5_K_M.gguf",
+              "approx_bytes": 12743654784,
+              "note": "Better fidelity."
+            },
+            {
+              "label": "Q6_K",
+              "path": "wan2.1-i2v-14b-480p-Q6_K.gguf",
+              "approx_bytes": 14233779584,
+              "note": "Near-full quality."
+            },
+            {
+              "label": "Q8_0",
+              "path": "wan2.1-i2v-14b-480p-Q8_0.gguf",
+              "approx_bytes": 18144640384,
+              "note": "Largest; effectively lossless."
+            }
+          ]
+        },
+        {
+          "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+          "path": "split_files/vae/wan_2.1_vae.safetensors",
+          "role": "VAE",
+          "flag": "vae",
+          "approx_bytes": 253815318
+        },
+        {
+          "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+          "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+          "role": "Text encoder (umT5-XXL)",
+          "flag": "t5xxl",
+          "approx_bytes": 6735906897,
+          "variants": [
+            {
+              "label": "fp8 scaled",
+              "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+              "approx_bytes": 6735906897,
+              "note": "Half the size, the usual choice."
+            },
+            {
+              "label": "fp16",
+              "path": "split_files/text_encoders/umt5_xxl_fp16.safetensors",
+              "approx_bytes": 11366399385,
+              "note": "Full precision text encoder."
+            }
+          ]
+        },
+        {
+          "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+          "path": "split_files/clip_vision/clip_vision_h.safetensors",
+          "role": "Vision encoder (CLIP-H), reads the supplied photo",
+          "flag": "clip_vision",
+          "approx_bytes": 1264219396
+        }
+      ]
+    },
+    {
+      "id": "ltx-2.3-distilled",
+      "label": "LTX-2.3 distilled",
+      "modality": "video",
+      "key": "lightricks/ltx-2.3-distilled",
+      "summary": "Lightricks' 22B video model, distilled to about eight steps with CFG at 1.0. Does both text-to-video and image-to-video, and generates audio alongside the picture.",
+      "license": "ltx-2.3-open",
+      "featured": true,
+      "supports_init_image": true,
+      "defaults": {
+        "width": 1280,
+        "height": 704,
+        "steps": 8,
+        "cfg_scale": 1.0,
+        "video_frames": 33,
+        "fps": 24
+      },
+      "components": [
+        {
+          "repo_id": "unsloth/LTX-2.3-GGUF",
+          "path": "distilled-1.1/ltx-2.3-22b-distilled-1.1-Q2_K.gguf",
+          "role": "Diffusion model",
+          "flag": "diffusion-model",
+          "approx_bytes": 7935826976,
+          "variants": [
+            {
+              "label": "Q2_K",
+              "path": "distilled-1.1/ltx-2.3-22b-distilled-1.1-Q2_K.gguf",
+              "approx_bytes": 7935826976,
+              "note": "Smallest; visible quality cost on video."
+            },
+            {
+              "label": "Q3_K_M",
+              "path": "distilled-1.1/ltx-2.3-22b-distilled-1.1-Q3_K_M.gguf",
+              "approx_bytes": 10629508128,
+              "note": "A middle option for 16 GB machines."
+            },
+            {
+              "label": "Q4_K_M",
+              "path": "distilled-1.1/ltx-2.3-22b-distilled-1.1-Q4_K_M.gguf",
+              "approx_bytes": 14194441248,
+              "note": "Recommended; the usual quality/size balance."
+            },
+            {
+              "label": "Q5_K_M",
+              "path": "distilled-1.1/ltx-2.3-22b-distilled-1.1-Q5_K_M.gguf",
+              "approx_bytes": 15930424352,
+              "note": "Better fidelity, noticeably larger."
+            },
+            {
+              "label": "Q6_K",
+              "path": "distilled-1.1/ltx-2.3-22b-distilled-1.1-Q6_K.gguf",
+              "approx_bytes": 17774906400,
+              "note": "Near-full quality, large."
+            }
+          ]
+        },
+        {
+          "repo_id": "unsloth/LTX-2.3-GGUF",
+          "path": "vae/ltx-2.3-22b-distilled_video_vae.safetensors",
+          "role": "Video VAE",
+          "flag": "vae",
+          "approx_bytes": 1452256522
+        },
+        {
+          "repo_id": "unsloth/LTX-2.3-GGUF",
+          "path": "vae/ltx-2.3-22b-distilled_audio_vae.safetensors",
+          "role": "Audio VAE",
+          "flag": "audio-vae",
+          "approx_bytes": 364853140
+        },
+        {
+          "repo_id": "unsloth/LTX-2.3-GGUF",
+          "path": "text_encoders/ltx-2.3-22b-distilled_embeddings_connectors.safetensors",
+          "role": "Embedding connectors",
+          "flag": "embeddings-connectors",
+          "approx_bytes": 2312144712
+        },
+        {
+          "repo_id": "unsloth/gemma-3-12b-it-GGUF",
+          "path": "gemma-3-12b-it-UD-Q4_K_XL.gguf",
+          "role": "Text encoder (Gemma 3 12B)",
+          "flag": "llm",
+          "approx_bytes": 7432229216,
+          "variants": [
+            {
+              "label": "Q4_K_XL",
+              "path": "gemma-3-12b-it-UD-Q4_K_XL.gguf",
+              "approx_bytes": 7432229216,
+              "note": "Recommended balance."
+            },
+            {
+              "label": "Q3_K_S",
+              "path": "gemma-3-12b-it-Q3_K_S.gguf",
+              "approx_bytes": 5458315616,
+              "note": "Smaller, for a tight machine."
+            },
+            {
+              "label": "Q6_K",
+              "path": "gemma-3-12b-it-Q6_K.gguf",
+              "approx_bytes": 9660811616,
+              "note": "Larger, marginal gain."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ltx-2.3-dev",
+      "label": "LTX-2.3 dev",
+      "modality": "video",
+      "key": "lightricks/ltx-2.3-dev",
+      "summary": "The undistilled LTX-2.3: better fidelity at around 30 steps and real CFG, for when the distilled model's output is not holding up. Same text-to-video and image-to-video support.",
+      "license": "ltx-2.3-open",
+      "featured": false,
+      "supports_init_image": true,
+      "defaults": {
+        "width": 1280,
+        "height": 704,
+        "steps": 30,
+        "cfg_scale": 6.0,
+        "video_frames": 33,
+        "fps": 24
+      },
+      "components": [
+        {
+          "repo_id": "unsloth/LTX-2.3-GGUF",
+          "path": "ltx-2.3-22b-dev-Q2_K.gguf",
+          "role": "Diffusion model",
+          "flag": "diffusion-model",
+          "approx_bytes": 8275987488,
+          "variants": [
+            {
+              "label": "Q2_K",
+              "path": "ltx-2.3-22b-dev-Q2_K.gguf",
+              "approx_bytes": 8275987488,
+              "note": "Smallest; visible quality cost on video."
+            },
+            {
+              "label": "Q3_K_M",
+              "path": "ltx-2.3-22b-dev-Q3_K_M.gguf",
+              "approx_bytes": 10770199584,
+              "note": "A middle option for 16 GB machines."
+            },
+            {
+              "label": "Q4_K_M",
+              "path": "ltx-2.3-22b-dev-Q4_K_M.gguf",
+              "approx_bytes": 14326856736,
+              "note": "Recommended; the usual quality/size balance."
+            },
+            {
+              "label": "Q5_K_M",
+              "path": "ltx-2.3-22b-dev-Q5_K_M.gguf",
+              "approx_bytes": 16071115808,
+              "note": "Better fidelity, noticeably larger."
+            },
+            {
+              "label": "Q6_K",
+              "path": "ltx-2.3-22b-dev-Q6_K.gguf",
+              "approx_bytes": 17774906400,
+              "note": "Near-full quality, large."
+            }
+          ]
+        },
+        {
+          "repo_id": "unsloth/LTX-2.3-GGUF",
+          "path": "vae/ltx-2.3-22b-dev_video_vae.safetensors",
+          "role": "Video VAE",
+          "flag": "vae",
+          "approx_bytes": 1452256522
+        },
+        {
+          "repo_id": "unsloth/LTX-2.3-GGUF",
+          "path": "vae/ltx-2.3-22b-dev_audio_vae.safetensors",
+          "role": "Audio VAE",
+          "flag": "audio-vae",
+          "approx_bytes": 364853140
+        },
+        {
+          "repo_id": "unsloth/LTX-2.3-GGUF",
+          "path": "text_encoders/ltx-2.3-22b-dev_embeddings_connectors.safetensors",
+          "role": "Embedding connectors",
+          "flag": "embeddings-connectors",
+          "approx_bytes": 2312144712
+        },
+        {
+          "repo_id": "unsloth/gemma-3-12b-it-GGUF",
+          "path": "gemma-3-12b-it-UD-Q4_K_XL.gguf",
+          "role": "Text encoder (Gemma 3 12B)",
+          "flag": "llm",
+          "approx_bytes": 7432229216,
+          "variants": [
+            {
+              "label": "Q4_K_XL",
+              "path": "gemma-3-12b-it-UD-Q4_K_XL.gguf",
+              "approx_bytes": 7432229216,
+              "note": "Recommended balance."
+            },
+            {
+              "label": "Q3_K_S",
+              "path": "gemma-3-12b-it-Q3_K_S.gguf",
+              "approx_bytes": 5458315616,
+              "note": "Smaller, for a tight machine."
+            },
+            {
+              "label": "Q6_K",
+              "path": "gemma-3-12b-it-Q6_K.gguf",
+              "approx_bytes": 9660811616,
+              "note": "Larger, marginal gain."
+            }
+          ]
+        }
+      ]
     }
   ]
 }

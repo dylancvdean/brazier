@@ -17,7 +17,7 @@ test-results/
 .env.*
 !.env.example
 .uv-cache/
-
+bugs.txt
 # Local Cargo cache (when CARGO_HOME is set inside the repo).
 .cargo-home/
 

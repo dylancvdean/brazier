@@ -79,8 +79,11 @@ code {
   transition: width 180ms ease, transform 180ms ease;
 }
 
+/* Nothing sits beside the traffic lights any more, so the sidebar starts below
+   them rather than reserving a column of space next to one. */
 .platform-darwin .sidebar.open {
   position: relative;
+  padding-top: 54px;
 }
 
 .sidebar:not(.open) {
@@ -90,13 +93,6 @@ code {
   padding-right: 0;
   overflow: hidden;
   transform: translateX(-100%);
-}
-
-.brand {
-  display: flex;
-  gap: 11px;
-  align-items: center;
-  padding: 0 6px 16px;
 }
 
 .welcome-mark {
@@ -117,22 +113,9 @@ code {
   box-shadow: 0 6px 24px rgba(255, 146, 74, 0.12);
 }
 
-.brand strong,
-.brand span,
 .model-picker strong,
 .model-picker span {
   display: block;
-}
-
-.brand strong {
-  font-size: 15px;
-  letter-spacing: -0.02em;
-}
-
-.brand span {
-  margin-top: 2px;
-  color: var(--muted);
-  font-size: 11px;
 }
 
 .new-chat {
@@ -296,6 +279,14 @@ code {
   color: #e8adb1;
 }
 
+/* Why a pause, resume, or cancel did not take effect. */
+.download-tray-error {
+  margin: 4px 0 0;
+  color: #e8adb1;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .download-tray-title,
 .download-tray-row {
   display: flex;
@@ -356,100 +347,6 @@ code {
   background: #656565;
 }
 
-.download-progress-tray {
-  position: fixed;
-  z-index: 40;
-  left: 16px;
-  bottom: 16px;
-  width: min(320px, calc(100vw - 32px));
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px 13px;
-  border: 1px solid #3a3a3a;
-  border-radius: 12px;
-  background: rgba(8, 8, 9, 0.96);
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(8px);
-  pointer-events: auto;
-}
-
-.download-progress-tray-head {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #f78438;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.download-progress-tray-head strong {
-  font-size: 10px;
-  font-weight: 700;
-  color: #f78438;
-}
-
-.download-progress-tray-item {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-}
-
-.download-progress-tray-title {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-
-.download-progress-tray-name {
-  overflow: hidden;
-  color: #f8924e;
-  font-size: 12px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.download-progress-tray-pct {
-  flex: 0 0 auto;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.download-progress-tray-detail {
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.download-progress-tray-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-}
-
-.download-progress-tray-row .download-progress-tray-detail {
-  flex: 1;
-  min-width: 0;
-}
-
-.download-progress-tray .progress-track.compact {
-  margin-top: 0;
-  height: 5px;
-}
-
 .download-jobs-panel {
   margin: 14px 0;
   padding: 10px 12px;
@@ -470,6 +367,37 @@ code {
 
 .download-job-row:last-child {
   border-bottom: 0;
+}
+
+.download-jobs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.download-jobs-head .section-label {
+  margin: 0;
+}
+
+.download-job-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+/* Dismiss control on a settled row: present, but not competing with the
+   actions that still do something to a live transfer. */
+.download-job-actions .icon-button.subtle {
+  width: 24px;
+  height: 24px;
+  color: var(--muted);
+}
+
+.download-job-actions .icon-button.subtle:hover {
+  color: #fff;
+  background: #1a1a1a;
 }
 
 .quant-actions {
@@ -611,10 +539,6 @@ code {
   -webkit-app-region: drag;
 }
 
-.platform-darwin .sidebar.open .brand {
-  margin-top: 6px;
-  padding-left: 72px;
-}
 
 .platform-darwin .sidebar.open :is(button, input, select, a, label) {
   -webkit-app-region: no-drag;
@@ -3308,9 +3232,137 @@ a.inline-link {
 }
 
 .generate-card figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 8px 10px;
   color: #8c8c8c;
   font-size: 11px;
+}
+
+.generate-submit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Generated media in the transcript, shown rather than only named. */
+.message-media {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.message-media-item {
+  margin: 0;
+  width: min(280px, 100%);
+  border: 1px solid #343434;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #080808;
+}
+
+.message-media-item img,
+.message-media-item video {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  background: #050505;
+}
+
+.message-media-item audio {
+  width: 100%;
+}
+
+.message-media-placeholder {
+  display: grid;
+  place-items: center;
+  height: 120px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.message-media-item figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  color: #8c8c8c;
+  font-size: 10px;
+}
+
+/* A generation in flight, above the composer in every mode. */
+.generation-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid #3a3a3a;
+  border-radius: 10px;
+  background: #0b0b0c;
+}
+
+.generation-activity-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--soft);
+  font-size: 12px;
+}
+
+.generation-activity-head strong {
+  color: #f8924e;
+  font-size: 12px;
+}
+
+.generation-activity-timing {
+  flex: 1;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.generation-activity-body {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.generation-activity-init {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: #050505;
+}
+
+.generation-activity-prompt {
+  min-width: 0;
+  flex: 1;
+}
+
+.generation-activity-prompt p {
+  margin: 0;
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.generation-activity-prompt p.negative {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.generation-activity-model {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
 }
 
 /* Curated stable-diffusion.cpp bundles in Manage → Download models. */
@@ -3390,9 +3442,50 @@ a.inline-link {
   margin-left: auto;
 }
 
+/* Quant picker, the same choice the GGUF list offers. */
+.bundle-quant {
+  margin-left: auto;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--soft);
+  background: #0c0c0c;
+  font-size: 11px;
+}
+
+/* Text-to-video and image-to-video are not interchangeable, so the list says
+   which one a model is before it is downloaded. */
+.kind-badge {
+  margin-left: 8px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: help;
+}
+
+.kind-badge.i2v {
+  border-color: #3c5a46;
+  color: #9fd3b0;
+  background: #16211a;
+}
+
+.kind-badge.t2v {
+  border-color: #4a4636;
+  color: #d6c79a;
+  background: #201d15;
+}
+
 .bundle-actions {
   display: flex;
   gap: 8px;
+}
+
+.bundle-show-all {
+  align-self: flex-start;
+  margin-top: 4px;
 }
 
 .bundle-assemble {
@@ -3655,6 +3748,47 @@ label.span-2 {
   border-color: #67393c;
   color: #e8adb1;
   background: #241819;
+}
+
+.agent-sandbox-status {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Shown on hover and on keyboard focus, so the help cursor is not the only
+   route to the explanation. */
+.agent-sandbox-tip {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  width: 320px;
+  padding: 10px 12px;
+  border: 1px solid #3a3a3a;
+  border-radius: 10px;
+  color: var(--soft);
+  background: rgba(8, 8, 9, 0.98);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+  line-height: 1.5;
+  pointer-events: none;
+}
+
+.agent-sandbox-status:hover .agent-sandbox-tip,
+.agent-sandbox-status:focus-within .agent-sandbox-tip {
+  display: flex;
+}
+
+.agent-sandbox-tip strong {
+  color: #fff;
+  font-size: 12px;
+}
+
+.agent-sandbox-tip-note {
+  color: var(--muted);
 }
 
 .agent-mode-select {

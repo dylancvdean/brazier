@@ -74,7 +74,7 @@ pub fn merge_definitions(
                 .unwrap_or("")
                 .to_owned()
         };
-        if let Some(items) = crate::tools::definitions().as_array() {
+        if let Some(items) = crate::tools::definitions_for(data_dir).as_array() {
             for item in items {
                 if request.tool_name_allowed(&def_name(item)) {
                     defs.push(item.clone());

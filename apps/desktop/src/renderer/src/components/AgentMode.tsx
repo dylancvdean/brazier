@@ -15,7 +15,7 @@ import {
   Wrench,
   X
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type {
   AgentApproval,
@@ -157,16 +157,44 @@ function timelineFromRecords(records: ToolExecutionRecord[]): TimelineEntry[] {
   }))
 }
 
+/**
+ * Sandbox status, with the explanation its help cursor promises.
+ *
+ * The explanation is a real popover rather than a `title`: the badge answers a
+ * question the user is right to ask before letting a model run commands, and a
+ * native tooltip is too easy to miss to be the only answer.
+ */
 function SandboxBadge({
   sandbox
 }: {
   sandbox: { isolated: boolean; backend: string; detail: string }
 }): React.JSX.Element {
   const badge = sandboxBadge(sandbox)
+  const tipId = useId()
   return (
-    <span className={`agent-sandbox-badge ${badge.tone}`} title={badge.detail}>
-      {badge.tone === 'sandboxed' ? <ShieldCheck size={13} /> : <ShieldAlert size={13} />}
-      {badge.label}
+    <span className="agent-sandbox-status">
+      <span
+        className={`agent-sandbox-badge ${badge.tone}`}
+        tabIndex={0}
+        aria-describedby={tipId}
+        title={badge.detail}
+      >
+        {badge.tone === 'sandboxed' ? <ShieldCheck size={13} /> : <ShieldAlert size={13} />}
+        {badge.label}
+      </span>
+      <span className="agent-sandbox-tip" role="tooltip" id={tipId}>
+        <strong>
+          {badge.tone === 'sandboxed'
+            ? 'Commands the agent runs are confined by the operating system.'
+            : 'Commands the agent runs are not confined by the operating system.'}
+        </strong>
+        <span>{badge.detail}</span>
+        <span className="agent-sandbox-tip-note">
+          {badge.tone === 'sandboxed'
+            ? 'Anything reaching outside the workspace is treated as a host action and asks first.'
+            : 'Every action is held for approval, and sandbox-only mode refuses to run at all.'}
+        </span>
+      </span>
     </span>
   )
 }

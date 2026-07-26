@@ -11,7 +11,7 @@ use axum::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -73,6 +73,31 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "The request could not be completed.".to_owned(),
+            fork_hints: None,
+        }
+    }
+
+    /// A local engine failed and its own account of why is worth showing.
+    ///
+    /// Unlike [`Self::internal`], the message survives to the interface: an
+    /// sd-cli job that ran out of time or died mid-render is diagnosable only
+    /// if the person is told what it said, rather than being sent to the
+    /// terminal to find out.
+    fn engine_failure(error: impl ToString) -> Self {
+        let message = error.to_string();
+        tracing::error!(error = %message, "engine job failed");
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message,
+            fork_hints: None,
+        }
+    }
+
+    /// The user stopped the work; not a failure, and told apart by its status.
+    fn cancelled(error: impl ToString) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: error.to_string(),
             fork_hints: None,
         }
     }
@@ -196,6 +221,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/models/sdcpp/install", post(install_sdcpp_bundle))
         .route("/api/v1/generate/image", post(generate_image))
         .route("/api/v1/generate/video", post(generate_video))
+        .route("/api/v1/generate/active", get(active_generation))
+        .route("/api/v1/generate/cancel", post(cancel_generation))
         .route(
             "/api/v1/voice/sessions",
             get(list_voice_session).post(create_voice_session),
@@ -290,6 +317,14 @@ pub fn router(state: AppState) -> Router {
             post(cancel_model_download),
         )
         .route("/api/v1/models/downloads", get(list_download_jobs))
+        .route(
+            "/api/v1/models/download/dismiss",
+            post(dismiss_model_download),
+        )
+        .route(
+            "/api/v1/models/downloads/finished",
+            delete(dismiss_finished_model_downloads),
+        )
         .route(
             "/api/v1/models/library-paths/suggestions",
             get(model_library_path_suggestions),
@@ -1632,6 +1667,9 @@ async fn generate_image(
         cfg_scale: request.cfg_scale,
         guidance: request.guidance,
         init_image,
+        init_image_blob: request.init_image_blob.clone(),
+        origin: sdcpp::GenerationOrigin::User,
+        timeout_secs: Some(settings.generation_timeout_secs),
     };
     let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
     let generated =
@@ -1640,8 +1678,10 @@ async fn generate_image(
     let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
             ApiError::bad_request(e.to_string())
+        } else if e.downcast_ref::<sdcpp::CancelledError>().is_some() {
+            ApiError::cancelled(e)
         } else {
-            ApiError::internal(e)
+            ApiError::engine_failure(e)
         }
     })?;
     let bytes = tokio::fs::read(&result.output_path)
@@ -1656,6 +1696,20 @@ async fn generate_image(
         "metadata": result.metadata,
         "engine": "stable-diffusion.cpp",
     })))
+}
+
+/// The generation running right now, if any.
+///
+/// Polled by the interface so a job a model started is visible while it runs —
+/// prompt, conditioning image, and how long it has been going — rather than
+/// only when it finally produces something.
+async fn active_generation() -> Json<Value> {
+    Json(json!({ "active": sdcpp::active_generation() }))
+}
+
+/// Stop the running generation.
+async fn cancel_generation() -> Json<Value> {
+    Json(json!({ "cancelled": sdcpp::cancel_active_generation() }))
 }
 
 async fn generate_video(
@@ -1687,6 +1741,9 @@ async fn generate_video(
         cfg_scale: request.cfg_scale,
         guidance: request.guidance,
         init_image,
+        init_image_blob: request.init_image_blob.clone(),
+        origin: sdcpp::GenerationOrigin::User,
+        timeout_secs: Some(settings.generation_timeout_secs),
         video_frames: request.video_frames.unwrap_or(16),
         fps: request.fps,
     };
@@ -1697,8 +1754,10 @@ async fn generate_video(
     let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
             ApiError::bad_request(e.to_string())
+        } else if e.downcast_ref::<sdcpp::CancelledError>().is_some() {
+            ApiError::cancelled(e)
         } else {
-            ApiError::internal(e)
+            ApiError::engine_failure(e)
         }
     })?;
     let bytes = tokio::fs::read(&result.output_path)
@@ -2249,6 +2308,29 @@ async fn pause_model_download(
     Ok(Json(json!({ "paused": request.job_id })))
 }
 
+/// Forget a finished, failed, or cancelled job so it leaves the list.
+async fn dismiss_model_download(
+    State(state): State<AppState>,
+    Json(request): Json<DownloadJobRequest>,
+) -> ApiResult<Json<Value>> {
+    state
+        .db
+        .dismiss_download_job(&request.job_id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "dismissed": request.job_id })))
+}
+
+/// Clear every settled job at once, for a list that has built up over time.
+async fn dismiss_finished_model_downloads(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let dismissed = state
+        .db
+        .dismiss_finished_download_jobs()
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "dismissed": dismissed })))
+}
+
 /// Put a paused, failed, or cancelled job back in line. The transfer resumes
 /// from its partial file rather than starting over.
 async fn resume_model_download(
@@ -2681,6 +2763,7 @@ fn bundle_json(
         "gated": bundle.gated(),
         "approx_bytes": bundle.approx_bytes(),
         "supports_init_image": bundle.supports_init_image,
+        "featured": bundle.featured,
         "origin": origin,
         "defaults": bundle.defaults,
         "components": bundle.components.iter().map(|component| json!({
@@ -2690,6 +2773,7 @@ fn bundle_json(
             "role": component.role,
             "gated": component.gated,
             "approx_bytes": component.approx_bytes,
+            "variants": component.variants,
         })).collect::<Vec<_>>(),
     })
 }

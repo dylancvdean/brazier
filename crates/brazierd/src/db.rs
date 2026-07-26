@@ -1286,6 +1286,41 @@ impl Database {
         Ok(())
     }
 
+    /// Statuses a job never leaves on its own, and so can be dismissed.
+    const SETTLED_STATUSES: &'static str = "('completed', 'failed', 'cancelled')";
+
+    /// Forget one settled job.
+    ///
+    /// Refuses anything still running or queued, so dismissing a row cannot
+    /// silently orphan a transfer that is still writing to disk.
+    pub async fn dismiss_download_job(&self, job_id: &str) -> anyhow::Result<()> {
+        let affected = sqlx::query(&format!(
+            "DELETE FROM download_jobs WHERE id = ? AND status IN {}",
+            Self::SETTLED_STATUSES
+        ))
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        anyhow::ensure!(
+            affected > 0,
+            "that download is still active; cancel it before dismissing it"
+        );
+        Ok(())
+    }
+
+    /// Forget every settled job, returning how many were cleared.
+    pub async fn dismiss_finished_download_jobs(&self) -> anyhow::Result<u64> {
+        let affected = sqlx::query(&format!(
+            "DELETE FROM download_jobs WHERE status IN {}",
+            Self::SETTLED_STATUSES
+        ))
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(affected)
+    }
+
     pub async fn list_download_jobs(&self, limit: i64) -> anyhow::Result<Vec<DownloadJob>> {
         let rows = sqlx::query_as::<_, DownloadJobRow>(
             r#"SELECT id, repo_id, filename, revision, status, kind, payload, label, bytes_downloaded, total_bytes,
@@ -1529,6 +1564,60 @@ mod tests {
         let cleared: UpdateConversation =
             serde_json::from_value(json!({ "agent_session_id": null })).unwrap();
         assert_eq!(cleared.agent_session_id, Some(None));
+    }
+
+    /// Dismissing is for tidying a list, so it must never reach a job that is
+    /// still writing to disk.
+    #[tokio::test]
+    async fn only_settled_downloads_can_be_dismissed() {
+        let (_dir, db) = open().await;
+        let running = db
+            .create_download_job("acme/models", "big.gguf", "main")
+            .await
+            .unwrap();
+        let failed = db
+            .create_download_job("acme/models", "broken.gguf", "main")
+            .await
+            .unwrap();
+        db.fail_download_job(&failed.id, "connection reset")
+            .await
+            .unwrap();
+
+        assert!(
+            db.dismiss_download_job(&running.id).await.is_err(),
+            "a queued transfer must survive a dismiss"
+        );
+        db.dismiss_download_job(&failed.id).await.unwrap();
+
+        let remaining = db.list_download_jobs(30).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, running.id);
+    }
+
+    #[tokio::test]
+    async fn clearing_finished_downloads_leaves_the_active_ones() {
+        let (_dir, db) = open().await;
+        let running = db
+            .create_download_job("acme/models", "live.gguf", "main")
+            .await
+            .unwrap();
+        for (name, settle) in [("done.gguf", "complete"), ("gone.gguf", "cancel")] {
+            let job = db
+                .create_download_job("acme/models", name, "main")
+                .await
+                .unwrap();
+            match settle {
+                "complete" => db.complete_download_job(&job.id, "abc", 10).await.unwrap(),
+                _ => db.cancel_download_job(&job.id).await.unwrap(),
+            }
+        }
+
+        assert_eq!(db.dismiss_finished_download_jobs().await.unwrap(), 2);
+        let remaining = db.list_download_jobs(30).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, running.id);
+        // Clearing an already-clean list is not an error.
+        assert_eq!(db.dismiss_finished_download_jobs().await.unwrap(), 0);
     }
 
     #[tokio::test]

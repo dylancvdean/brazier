@@ -17,11 +17,34 @@ use crate::sdcpp::{self, Modality};
 
 const BUNDLES: &str = include_str!("../../../model-recipes/sdcpp-bundles.json");
 
+/// One interchangeable file for a component: a quantisation of the same model.
+///
+/// The trade-off is the familiar one from GGUF language models — a smaller
+/// quant fits a smaller machine and looks slightly worse — so it is offered the
+/// same way, as a choice made at download time rather than a separate recipe
+/// per size.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Variant {
+    /// Short label for the picker, e.g. `Q4_K_M`.
+    pub label: String,
+    /// Path inside the repository. The component's `repo_id` is used unless
+    /// this names its own.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approx_bytes: Option<u64>,
+    /// One-line note on what this size costs or buys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// One file within a bundle, and the sd-cli flag it is passed as.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Component {
     pub repo_id: String,
-    /// Path inside the Hub repository.
+    /// Path inside the Hub repository. When `variants` is non-empty this is the
+    /// default choice, and the interface may substitute another.
     pub path: String,
     /// sd-cli flag without the leading `--` (`diffusion-model`, `vae`,
     /// `clip_l`, `t5xxl`, …). Absent for a self-contained checkpoint, which is
@@ -36,6 +59,9 @@ pub struct Component {
     /// Rough size for the pre-download summary; not used for verification.
     #[serde(default)]
     pub approx_bytes: Option<u64>,
+    /// Sizes this component is offered in. Empty means the one file above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<Variant>,
 }
 
 impl Component {
@@ -80,8 +106,15 @@ pub struct Bundle {
     #[serde(default)]
     pub defaults: GenerationDefaults,
     /// Whether the model can animate or restyle a supplied image.
+    ///
+    /// For video this is the text-to-video / image-to-video split, which
+    /// decides whether a photo can be handed to it at all.
     #[serde(default)]
     pub supports_init_image: bool,
+    /// Shown in the short list rather than behind "show every model". A few
+    /// good defaults are more useful than a wall of near-identical choices.
+    #[serde(default)]
+    pub featured: bool,
     pub components: Vec<Component>,
 }
 
@@ -265,21 +298,48 @@ pub fn validate(bundle: &Bundle) -> anyhow::Result<()> {
         models == 1,
         "a bundle needs exactly one checkpoint or diffusion model"
     );
+    /// Paths become filenames on disk, so every one is checked — including the
+    /// alternatives a quant picker can substitute for the default.
+    fn valid_path(path: &str) -> bool {
+        !path.is_empty()
+            && !path.starts_with('/')
+            && !path.contains('\\')
+            && !path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+    }
+
     let mut seen_files = std::collections::HashSet::new();
     for component in &bundle.components {
         crate::models_store::validate_repo_id(&component.repo_id)
             .with_context(|| format!("invalid repository `{}`", component.repo_id))?;
         anyhow::ensure!(
-            !component.path.is_empty()
-                && !component.path.starts_with('/')
-                && !component.path.contains('\\')
-                && !component
-                    .path
-                    .split('/')
-                    .any(|part| part.is_empty() || part == "." || part == ".."),
+            valid_path(&component.path),
             "invalid file path `{}`",
             component.path
         );
+        for variant in &component.variants {
+            anyhow::ensure!(
+                !variant.label.trim().is_empty(),
+                "a size option needs a label"
+            );
+            anyhow::ensure!(
+                valid_path(&variant.path),
+                "invalid file path `{}`",
+                variant.path
+            );
+            if let Some(repo_id) = &variant.repo_id {
+                crate::models_store::validate_repo_id(repo_id)
+                    .with_context(|| format!("invalid repository `{repo_id}`"))?;
+            }
+            sdcpp::component_destination(
+                Path::new("/"),
+                bundle.modality,
+                &bundle.key,
+                variant.path.rsplit('/').next().unwrap_or(&variant.path),
+            )
+            .with_context(|| format!("invalid file name in `{}`", variant.path))?;
+        }
         sdcpp::component_destination(
             Path::new("/"),
             bundle.modality,
@@ -372,12 +432,15 @@ mod tests {
 
     #[test]
     fn multi_component_bundles_produce_flag_manifests() {
-        let flux = builtin("flux1-schnell-q8").expect("flux bundle");
+        let flux = builtin("flux1-schnell").expect("flux bundle");
         let manifest = flux.manifest();
         assert_eq!(manifest.single_file, None);
-        assert_eq!(
-            manifest.args.get("diffusion-model").map(String::as_str),
-            Some("flux1-schnell-Q8_0.gguf")
+        assert!(
+            manifest
+                .args
+                .get("diffusion-model")
+                .is_some_and(|name| name.starts_with("flux1-schnell-") && name.ends_with(".gguf")),
+            "the manifest names whichever quant was chosen"
         );
         // The whole point of bundles: encoders arrive with the model.
         assert_eq!(
@@ -389,6 +452,56 @@ mod tests {
             Some("t5xxl_fp16.safetensors")
         );
         assert!(flux.gated(), "flux VAE comes from a gated repo");
+    }
+
+    /// Every offered size must be a real, safe path, since picking one
+    /// substitutes it into the component that gets downloaded.
+    #[test]
+    fn quant_options_are_coherent() {
+        let mut with_variants = 0;
+        for bundle in builtin_bundles() {
+            validate(bundle).unwrap_or_else(|error| panic!("{}: {error}", bundle.id));
+            for component in &bundle.components {
+                if component.variants.is_empty() {
+                    continue;
+                }
+                with_variants += 1;
+                // The default has to be one of the choices, or the picker opens
+                // showing a size the bundle would not actually download.
+                assert!(
+                    component
+                        .variants
+                        .iter()
+                        .any(|variant| variant.path == component.path),
+                    "{}: default {} is not among its own size options",
+                    bundle.id,
+                    component.path
+                );
+            }
+        }
+        assert!(with_variants > 0, "the catalog offers sizes to choose from");
+    }
+
+    /// The text-to-video / image-to-video split is what decides whether a photo
+    /// can be handed to a model at all, so the catalog has to offer both.
+    #[test]
+    fn the_catalog_covers_both_kinds_of_video_model() {
+        let video: Vec<_> = builtin_bundles()
+            .iter()
+            .filter(|bundle| bundle.modality == Modality::Video)
+            .collect();
+        assert!(
+            video.iter().any(|bundle| bundle.supports_init_image),
+            "no image-to-video model on offer"
+        );
+        assert!(
+            video.iter().any(|bundle| !bundle.supports_init_image),
+            "no text-to-video model on offer"
+        );
+        assert!(
+            builtin_bundles().iter().any(|bundle| bundle.featured),
+            "a shortlist needs something on it"
+        );
     }
 
     #[test]
@@ -425,6 +538,7 @@ mod tests {
             license: None,
             defaults: GenerationDefaults::default(),
             supports_init_image: false,
+            featured: false,
             components: vec![Component {
                 repo_id: "acme/repo".into(),
                 path: "model.safetensors".into(),
@@ -432,6 +546,7 @@ mod tests {
                 role: "Checkpoint".into(),
                 gated: false,
                 approx_bytes: None,
+                variants: Vec::new(),
             }],
         }
     }
@@ -502,6 +617,7 @@ mod tests {
             role: "Diffusion".into(),
             gated: false,
             approx_bytes: None,
+            variants: Vec::new(),
         });
         assert!(validate(&two_models).is_err());
 
@@ -515,6 +631,7 @@ mod tests {
             role: "VAE".into(),
             gated: false,
             approx_bytes: None,
+            variants: Vec::new(),
         });
         assert!(validate(&collision).is_err());
 

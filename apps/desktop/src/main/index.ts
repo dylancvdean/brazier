@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createWriteStream, existsSync, mkdirSync, renameSync, type WriteStream } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
@@ -452,6 +453,28 @@ app.whenReady().then(async () => {
       return null
     }
     return result.filePaths[0] ?? null
+  })
+  // Saving generated media. The renderer holds the bytes already, so this only
+  // has to ask where they go — writing from the main process keeps the renderer
+  // without filesystem access.
+  ipcMain.handle(
+    'brazier:save-file',
+    async (event, suggestedName: string, data: ArrayBuffer): Promise<string | null> => {
+      const window = BrowserWindow.fromWebContents(event.sender)
+      const options = {
+        title: 'Save generated media',
+        defaultPath: join(app.getPath('downloads'), suggestedName)
+      }
+      const result = window
+        ? await dialog.showSaveDialog(window, options)
+        : await dialog.showSaveDialog(options)
+      if (result.canceled || !result.filePath) return null
+      await writeFile(result.filePath, Buffer.from(data))
+      return result.filePath
+    }
+  )
+  ipcMain.handle('brazier:reveal-file', (_event, path: string) => {
+    shell.showItemInFolder(path)
   })
   // Agent mode reaches the machine only through the daemon, so the worker gets
   // the loopback address and bearer token once the daemon is ready.

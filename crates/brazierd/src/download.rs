@@ -85,6 +85,50 @@ fn noop_progress() -> ProgressCallback {
     Box::new(|_| {})
 }
 
+/// How long to wait for the response headers before giving up on a transfer.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long a transfer may receive nothing before it is called stalled.
+///
+/// This is deliberately an *idle* timeout rather than a deadline on the whole
+/// request. A multi-gigabyte model legitimately takes hours on a slow link, and
+/// a total timeout kills it mid-stream — which surfaced as a download that
+/// stalled with "read download chunk" and could only be nudged along by
+/// starting it again.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Await the response headers, failing with a clear message on a hung connect.
+async fn send_with_connect_timeout(
+    builder: reqwest::RequestBuilder,
+    what: &str,
+) -> anyhow::Result<reqwest::Response> {
+    match tokio::time::timeout(CONNECT_TIMEOUT, builder.send()).await {
+        Ok(result) => result.with_context(|| what.to_owned()),
+        Err(_) => anyhow::bail!(
+            "{what}: no response after {}s. Check your network connection and retry.",
+            CONNECT_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+/// Pull the next chunk of a body, failing when the connection goes quiet.
+///
+/// Returning `Ok(None)` means the body ended normally.
+async fn next_chunk<S, B>(stream: &mut S, downloaded: u64) -> anyhow::Result<Option<B>>
+where
+    S: futures::Stream<Item = reqwest::Result<B>> + Unpin,
+{
+    match tokio::time::timeout(IDLE_TIMEOUT, stream.next()).await {
+        Ok(Some(chunk)) => Ok(Some(chunk.context("read download chunk")?)),
+        Ok(None) => Ok(None),
+        Err(_) => anyhow::bail!(
+            "download stalled: nothing received for {}s after {}. It can be resumed from here.",
+            IDLE_TIMEOUT.as_secs(),
+            format_bytes_short(downloaded)
+        ),
+    }
+}
+
 /// Download a GGUF file into the models store, resuming partial files when present.
 pub async fn download_gguf(
     client: &reqwest::Client,
@@ -197,23 +241,17 @@ pub async fn download_gguf_with_progress(
     let url = resolve_url(&request.repo_id, &request.revision, &request.filename);
 
     let mut builder = hf_auth::apply_auth(
-        client
-            .get(&url)
-            .header(
-                "user-agent",
-                format!("brazier/{}", env!("CARGO_PKG_VERSION")),
-            )
-            .timeout(Duration::from_secs(600)),
+        client.get(&url).header(
+            "user-agent",
+            format!("brazier/{}", env!("CARGO_PKG_VERSION")),
+        ),
         data_dir,
     );
     if existing > 0 {
         builder = builder.header("range", format!("bytes={existing}-"));
     }
 
-    let response = builder
-        .send()
-        .await
-        .context("start Hugging Face download")?;
+    let response = send_with_connect_timeout(builder, "start Hugging Face download").await?;
     let status = response.status();
     if status.as_u16() == 416 {
         anyhow::bail!("server rejected resume range; delete the partial and retry");
@@ -252,7 +290,7 @@ pub async fn download_gguf_with_progress(
     let mut written = existing;
     let mut last_emit = 0_u64;
     progress(ProgressEvent::download(written, total));
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = next_chunk(&mut stream, written).await? {
         if let Some(reason) = cancel.as_ref().and_then(|flag| flag.reason()) {
             // Flush before letting go so a paused transfer resumes from every
             // byte it actually received; only a cancel discards the partial.
@@ -264,7 +302,6 @@ pub async fn download_gguf_with_progress(
             }
             anyhow::bail!("download paused");
         }
-        let chunk = chunk.context("read download chunk")?;
         file.write_all(&chunk)
             .await
             .context("write download chunk")?;
@@ -555,23 +592,17 @@ async fn download_file_to_with_opts(
     let url = resolve_url(repo_id, revision, filename);
 
     let mut builder = hf_auth::apply_auth(
-        client
-            .get(&url)
-            .header(
-                "user-agent",
-                format!("brazier/{}", env!("CARGO_PKG_VERSION")),
-            )
-            .timeout(Duration::from_secs(600)),
+        client.get(&url).header(
+            "user-agent",
+            format!("brazier/{}", env!("CARGO_PKG_VERSION")),
+        ),
         data_dir,
     );
     if existing > 0 {
         builder = builder.header("range", format!("bytes={existing}-"));
     }
 
-    let response = builder
-        .send()
-        .await
-        .context("start Hugging Face download")?;
+    let response = send_with_connect_timeout(builder, "start Hugging Face download").await?;
     let status = response.status();
     if status.as_u16() == 416 {
         anyhow::bail!("server rejected resume range; delete the partial and retry");
@@ -609,7 +640,7 @@ async fn download_file_to_with_opts(
     let mut written = existing;
     let mut last_emit = 0_u64;
     emit_file_download_progress(progress, snapshot, written, total, job);
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = next_chunk(&mut stream, written).await? {
         if let Some(reason) = cancel.and_then(|flag| flag.reason()) {
             let _ = file.flush().await;
             drop(file);
@@ -619,7 +650,6 @@ async fn download_file_to_with_opts(
             }
             anyhow::bail!("download paused");
         }
-        let chunk = chunk.context("read download chunk")?;
         file.write_all(&chunk)
             .await
             .context("write download chunk")?;

@@ -1,7 +1,8 @@
 import { ChevronDown, ChevronRight, Download, Pause, Play, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   cancelDownloadJob,
+  dismissDownloadJob,
   formatBytes,
   listDownloadJobs,
   pauseDownloadJob,
@@ -23,7 +24,20 @@ function jobPercent(job: DownloadJob): number | null {
   return Math.min(100, (job.bytes_downloaded / job.total_bytes) * 100)
 }
 
-function jobDetail(job: DownloadJob): string {
+/** Bytes per second, smoothed across polls; see {@link useTransferRates}. */
+type RateSample = { bytes: number; at: number; rate: number | null }
+
+/** Round an ETA to something worth reading — nobody needs "4211 seconds". */
+function formatEta(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return ''
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))}s left`
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min left`
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.round((seconds % 3600) / 60)
+  return minutes > 0 ? `${hours}h ${minutes}m left` : `${hours}h left`
+}
+
+function jobDetail(job: DownloadJob, rate: number | null): string {
   if (job.status === 'paused') return 'Paused — resumes where it left off'
   if (job.status === 'pending') return 'Waiting in queue'
   if (job.status === 'failed') return job.error ?? 'Failed'
@@ -31,7 +45,50 @@ function jobDetail(job: DownloadJob): string {
   if (job.status === 'completed') return 'Done'
   if (job.bytes_downloaded == null) return 'Starting…'
   const total = job.total_bytes ? ` / ${formatBytes(job.total_bytes)}` : ''
-  return `${formatBytes(job.bytes_downloaded)}${total}`
+  const size = `${formatBytes(job.bytes_downloaded)}${total}`
+  if (!rate || rate <= 0) return size
+  const speed = `${formatBytes(rate)}/s`
+  if (job.total_bytes == null) return `${size} · ${speed}`
+  const eta = formatEta((job.total_bytes - job.bytes_downloaded) / rate)
+  return eta ? `${size} · ${speed} · ${eta}` : `${size} · ${speed}`
+}
+
+/**
+ * Transfer rate per job, derived from successive polls.
+ *
+ * The daemon records only how many bytes have landed, so speed and ETA are
+ * worked out here. The rate is smoothed because a raw delta between two polls
+ * swings wildly enough to make the ETA jump around and read as broken.
+ */
+function useTransferRates(jobs: DownloadJob[]): Record<string, number | null> {
+  const samples = useRef<Record<string, RateSample>>({})
+  const now = Date.now()
+  const rates: Record<string, number | null> = {}
+  for (const job of jobs) {
+    const bytes = job.bytes_downloaded
+    if (job.status !== 'downloading' || bytes == null) {
+      delete samples.current[job.id]
+      rates[job.id] = null
+      continue
+    }
+    const previous = samples.current[job.id]
+    if (!previous) {
+      samples.current[job.id] = { bytes, at: now, rate: null }
+      rates[job.id] = null
+      continue
+    }
+    const elapsed = (now - previous.at) / 1000
+    // Ignore repeat polls that landed on the same reading.
+    if (elapsed < 0.5 || bytes === previous.bytes) {
+      rates[job.id] = previous.rate
+      continue
+    }
+    const instant = Math.max(0, (bytes - previous.bytes) / elapsed)
+    const smoothed = previous.rate == null ? instant : previous.rate * 0.7 + instant * 0.3
+    samples.current[job.id] = { bytes, at: now, rate: smoothed }
+    rates[job.id] = smoothed
+  }
+  return rates
 }
 
 /**
@@ -44,6 +101,8 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
   const [jobs, setJobs] = useState<DownloadJob[]>([])
   const [collapsed, setCollapsed] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<{ id: string; message: string } | null>(null)
+  const rates = useTransferRates(jobs)
 
   async function refresh(): Promise<void> {
     try {
@@ -72,12 +131,18 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
     action: (id: string) => Promise<void>
   ): Promise<void> {
     setBusy(job.id)
+    setActionError(null)
     try {
       await action(job.id)
       await refresh()
       onChanged?.()
-    } catch {
-      // Surfaced by the row's own status on the next refresh.
+    } catch (cause) {
+      // A refused resume leaves the row exactly as it was, so without this the
+      // button looks like it did nothing at all.
+      setActionError({
+        id: job.id,
+        message: cause instanceof Error ? cause.message : String(cause)
+      })
     } finally {
       setBusy(null)
     }
@@ -129,7 +194,7 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
                   </div>
                 )}
                 <div className="download-tray-row">
-                  <span className="download-tray-detail">{jobDetail(job)}</span>
+                  <span className="download-tray-detail">{jobDetail(job, rates[job.id] ?? null)}</span>
                   <div className="download-tray-actions">
                     {(running || pending) && (
                       <button
@@ -149,17 +214,20 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
                         <Play size={12} />
                       </button>
                     )}
-                    {!finished && (
-                      <button
-                        title="Cancel"
-                        disabled={busy === job.id}
-                        onClick={() => void act(job, cancelDownloadJob)}
-                      >
-                        <X size={12} />
-                      </button>
-                    )}
+                    <button
+                      title={finished ? 'Dismiss' : 'Cancel'}
+                      disabled={busy === job.id}
+                      onClick={() =>
+                        void act(job, finished ? dismissDownloadJob : cancelDownloadJob)
+                      }
+                    >
+                      <X size={12} />
+                    </button>
                   </div>
                 </div>
+                {actionError?.id === job.id && (
+                  <p className="download-tray-error">{actionError.message}</p>
+                )}
               </div>
             )
           })}

@@ -49,5 +49,9 @@ contextBridge.exposeInMainWorld('brazier', {
   platform: process.platform,
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-directory'),
   selectWorkspace: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-workspace'),
+  /** Ask where to put a file and write it. Resolves null when dismissed. */
+  saveFile: (suggestedName: string, data: ArrayBuffer): Promise<string | null> =>
+    ipcRenderer.invoke('brazier:save-file', suggestedName, data),
+  revealFile: (path: string): Promise<void> => ipcRenderer.invoke('brazier:reveal-file', path),
   agent
 })

@@ -59,6 +59,8 @@ import {
 } from './api'
 import { AgentMode, type AgentComposerControls } from './components/AgentMode'
 import { DownloadTray } from './components/DownloadTray'
+import { GenerationActivity } from './components/GenerationActivity'
+import { MessageMedia } from './components/MessageMedia'
 import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
@@ -88,7 +90,6 @@ import {
   writeCachedRuntimes
 } from './inventoryCache'
 import type { Attachment, ContentPart, Conversation, Message, Role } from './types'
-import brazierLogo from './assets/brazier-logo.png'
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 
@@ -133,6 +134,16 @@ function contentMedia(message: Message): Array<'image' | 'audio' | 'video'> {
     if (part.type === 'input_video') return ['video'] as const
     return []
   })
+}
+
+/** Stored blobs attached to a message, which are the ones that can be saved. */
+function contentBlobs(
+  message: Message
+): Array<{ sha256: string; mime_type: string; original_name?: string | null }> {
+  if (typeof message.content === 'string') return []
+  return message.content.flatMap((part) =>
+    part.type === 'brazier_blob' ? [part.brazier_blob] : []
+  )
 }
 
 /**
@@ -1085,13 +1096,6 @@ export function App(): React.JSX.Element {
   return (
     <main className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
-        <div className="brand">
-          <img className="brand-mark" src={brazierLogo} alt="" width={32} height={32} />
-          <div>
-            <strong>Brazier</strong>
-            <span>Local AI workspace</span>
-          </div>
-        </div>
         <button className="new-chat" onClick={() => void newConversation()}>
           <MessageSquarePlus size={17} />
           New conversation
@@ -1491,6 +1495,7 @@ export function App(): React.JSX.Element {
                           ))}
                         </div>
                       )}
+                      <MessageMedia blobs={contentBlobs(message)} onError={setError} />
                       <p>{contentText(message)}</p>
                       <button
                         className="fork-button"
@@ -1524,6 +1529,9 @@ export function App(): React.JSX.Element {
         </div>
 
         <div className="composer-area">
+          {/* Sits above the composer in every mode: a generation a model
+              started is otherwise invisible until it finishes. */}
+          <GenerationActivity onStopped={() => void refreshLocalModels().catch(() => {})} />
           {error && (
             <div className="error-banner">
               <div className="error-banner-body">

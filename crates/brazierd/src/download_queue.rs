@@ -1,10 +1,11 @@
-//! Serial background queue for every kind of model download.
+//! Background queue for every kind of model download.
 //!
-//! One transfer runs at a time — they are bandwidth- and disk-bound, and
-//! interleaving them only makes each slower — but anything can be queued while
-//! one is in flight. Work is described by [`QueuedWork`], which is persisted on
-//! the job row so a paused download can be resumed later, including after a
-//! restart.
+//! A few transfers run at once and the rest wait their turn. Transfers are
+//! bandwidth- and disk-bound, so running everything in parallel makes each one
+//! slower without finishing the set any sooner — but a strict single file makes
+//! a small download wait behind a multi-gigabyte one, which is worse to sit in
+//! front of. Work is described by [`QueuedWork`], which is persisted on the job
+//! row so a paused download can be resumed later, including after a restart.
 
 use std::{path::Path, sync::Arc};
 
@@ -107,6 +108,12 @@ pub struct DownloadQueue {
     tx: mpsc::Sender<QueuedDownload>,
 }
 
+/// How many transfers may be in flight at once.
+///
+/// Enough that a small model is not stuck behind a huge one, few enough that
+/// they are not all crawling.
+const CONCURRENT_TRANSFERS: usize = 3;
+
 impl DownloadQueue {
     pub fn spawn(
         http: reqwest::Client,
@@ -116,8 +123,21 @@ impl DownloadQueue {
     ) -> Self {
         let (tx, mut rx) = mpsc::channel::<QueuedDownload>(256);
         tokio::spawn(async move {
+            let slots = Arc::new(tokio::sync::Semaphore::new(CONCURRENT_TRANSFERS));
             while let Some(work) = rx.recv().await {
-                run_one(&http, &data_dir, &db, &active, work).await;
+                // Taking the slot before accepting the next job keeps jobs
+                // starting in the order they were queued.
+                let Ok(slot) = Arc::clone(&slots).acquire_owned().await else {
+                    break;
+                };
+                let http = http.clone();
+                let data_dir = data_dir.clone();
+                let db = db.clone();
+                let active = Arc::clone(&active);
+                tokio::spawn(async move {
+                    run_one(&http, &data_dir, &db, &active, work).await;
+                    drop(slot);
+                });
             }
         });
         Self { tx }
@@ -215,5 +235,36 @@ async fn run_one(
                 let _ = db.fail_download_job(&work.job_id, &error.to_string()).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Resuming reads the work back off the job row, so a payload that does not
+    /// survive the round trip is a job that can only be started from scratch.
+    #[test]
+    fn queued_work_survives_the_job_row_it_is_stored_on() {
+        let work = QueuedWork::Gguf(DownloadRequest {
+            repo_id: "acme/models".into(),
+            filename: "nested/model-Q4_K_M.gguf".into(),
+            revision: "main".into(),
+            engine: "whisper.cpp".into(),
+        });
+        let payload = serde_json::to_string(&work).expect("serialize");
+        let restored: QueuedWork = serde_json::from_str(&payload).expect("deserialize");
+
+        assert_eq!(restored.kind(), "gguf");
+        assert_eq!(restored.repo_id(), "acme/models");
+        assert_eq!(restored.filename(), "nested/model-Q4_K_M.gguf");
+        // The label is what the tray shows, so it stays the bare file name.
+        assert_eq!(restored.label(), "model-Q4_K_M.gguf");
+        let QueuedWork::Gguf(request) = restored else {
+            panic!("kind changed across the round trip");
+        };
+        // The engine decides where the file lands; losing it would resume a
+        // whisper model into the llama.cpp store.
+        assert_eq!(request.engine, "whisper.cpp");
     }
 }

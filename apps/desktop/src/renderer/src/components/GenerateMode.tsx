@@ -1,10 +1,12 @@
-import { Image, LoaderCircle, Video } from 'lucide-react'
+import { Download, Image, LoaderCircle, Square, Video } from 'lucide-react'
 import { type FormEvent, useEffect, useState } from 'react'
 import {
+  cancelGeneration,
   fetchBlobObjectUrl,
   generateImage,
   generateVideo,
   listSdcppBundles,
+  saveBlobToDisk,
   type GenerateBlobResult,
   type LocalModel,
   type RuntimeSettings,
@@ -28,6 +30,11 @@ function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
 
+/** Whether a failed generation was simply stopped by the user. */
+function isCancellation(cause: unknown): boolean {
+  return errorText(cause).toLowerCase().includes('stopped by the user')
+}
+
 export function GenerateMode(props: Props) {
   const modality = props.modality
   const [prompt, setPrompt] = useState('')
@@ -41,6 +48,9 @@ export function GenerateMode(props: Props) {
   const [guidance, setGuidance] = useState('')
   const [fps, setFps] = useState(24)
   const [busy, setBusy] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [saving, setSaving] = useState<string | null>(null)
+  const [saved, setSaved] = useState<Record<string, string>>({})
   const [results, setResults] = useState<GenerateBlobResult[]>([])
   const [urls, setUrls] = useState<Record<string, string>>({})
   const [defaultsByModel, setDefaultsByModel] = useState<Record<string, SdcppDefaults>>({})
@@ -119,9 +129,38 @@ export function GenerateMode(props: Props) {
         modality === 'image' ? await generateImage(body) : await generateVideo(body)
       setResults((current) => [result, ...current])
     } catch (cause) {
-      props.onError(errorText(cause))
+      // Stopping it yourself is not an error worth a red banner.
+      props.onError(isCancellation(cause) ? null : errorText(cause))
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function save(result: GenerateBlobResult): Promise<void> {
+    setSaving(result.blob.sha256)
+    try {
+      const path = await saveBlobToDisk(
+        result.blob.sha256,
+        result.blob.mime_type,
+        result.blob.original_name
+      )
+      // Dismissing the dialog is a decision, not a failure.
+      if (path) setSaved((current) => ({ ...current, [result.blob.sha256]: path }))
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(null)
+    }
+  }
+
+  async function stop(): Promise<void> {
+    setStopping(true)
+    try {
+      await cancelGeneration()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setStopping(false)
     }
   }
 
@@ -265,15 +304,23 @@ export function GenerateMode(props: Props) {
               />
             </label>
           </div>
-          <button type="submit" className="primary" disabled={busy || !prompt.trim()}>
-            {busy ? (
-              <>
-                <LoaderCircle className="spin" size={16} /> Generating…
-              </>
-            ) : (
-              `Generate ${modality}`
+          <div className="generate-submit">
+            <button type="submit" className="primary" disabled={busy || !prompt.trim()}>
+              {busy ? (
+                <>
+                  <LoaderCircle className="spin" size={16} /> Generating…
+                </>
+              ) : (
+                `Generate ${modality}`
+              )}
+            </button>
+            {busy && (
+              <button type="button" onClick={() => void stop()} disabled={stopping}>
+                <Square size={14} fill="currentColor" />
+                {stopping ? 'Stopping…' : 'Stop'}
+              </button>
             )}
-          </button>
+          </div>
         </form>
       )}
 
@@ -291,7 +338,18 @@ export function GenerateMode(props: Props) {
                   <img src={url} alt="Generated output" />
                 )}
                 <figcaption>
-                  {result.blob.mime_type} · {(result.blob.size_bytes / 1024).toFixed(0)} KB
+                  <span>
+                    {result.blob.mime_type} · {(result.blob.size_bytes / 1024).toFixed(0)} KB
+                  </span>
+                  <button
+                    type="button"
+                    className="chip-button subtle"
+                    disabled={saving === result.blob.sha256}
+                    onClick={() => void save(result)}
+                  >
+                    <Download size={12} />
+                    {saved[result.blob.sha256] ? 'Saved' : 'Save'}
+                  </button>
                 </figcaption>
               </figure>
             )

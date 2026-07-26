@@ -20,6 +20,9 @@ declare global {
       selectDirectory(): Promise<string | null>
       /** Folder picker for an agent workspace. */
       selectWorkspace(): Promise<string | null>
+      /** Save bytes somewhere the user chooses; null when they dismiss it. */
+      saveFile(suggestedName: string, data: ArrayBuffer): Promise<string | null>
+      revealFile(path: string): Promise<void>
       /**
        * Agent mode bridge. Commands go to the agent worker process; events come
        * back on one channel. The renderer never touches the worker directly.

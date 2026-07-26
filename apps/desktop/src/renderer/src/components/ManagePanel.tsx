@@ -23,16 +23,15 @@ import {
   buildRuntime,
   cancelBuild,
   cancelDownloadJob,
+  dismissDownloadJob,
+  dismissFinishedDownloadJobs,
+  resumeDownloadJob,
   checkRuntimeUpdates,
   type SourceRuntimeUpdate,
   deleteModel,
   createMcpServer,
   deleteMcpServer,
   deleteRuntime,
-  downloadModel,
-  downloadMlxModel,
-  downloadPersonaplexModel,
-  downloadStreamingAsrModel,
   ensureLlamaEngine,
   ensureSdcppEngine,
   ensureWhisperEngine,
@@ -46,6 +45,7 @@ import {
   formatBytes,
   listSdcppBundles,
   queueSdcppInstall,
+  resolveBundleVariants,
   queueSnapshotDownload,
   saveSdcppBundle,
   clearHuggingFaceToken,
@@ -235,118 +235,6 @@ function progressLabel(event: ProgressEvent | null): string {
   if (event.phase === 'start') return 'Starting download…'
   if (event.phase === 'warning') return event.message ?? 'Notice'
   return event.phase
-}
-
-/** Whole-number percent for progress UI, or null when still unknown. */
-function progressPercent(event: ProgressEvent | null): number | null {
-  if (!event) return null
-  if (event.percent != null && Number.isFinite(event.percent)) {
-    return Math.round(Math.min(100, Math.max(0, event.percent)))
-  }
-  if (
-    event.bytes != null &&
-    event.total != null &&
-    event.total > 0 &&
-    Number.isFinite(event.bytes)
-  ) {
-    return Math.round(Math.min(100, Math.max(0, (event.bytes / event.total) * 100)))
-  }
-  return null
-}
-
-function downloadKeyTitle(key: string): string {
-  const [repo, path] = key.split('::')
-  if (!path || path === 'snapshot') {
-    return repo ?? key
-  }
-  return path.split('/').at(-1) ?? path
-}
-
-function DownloadProgressTray({
-  live,
-  jobs,
-  onCancelJob
-}: {
-  live: { key: string; event: ProgressEvent | null } | null
-  jobs: DownloadJob[]
-  onCancelJob: (jobId: string) => void
-}): React.JSX.Element | null {
-  const activeJobs = jobs.filter(
-    (job) => job.status === 'pending' || job.status === 'downloading'
-  )
-  if (!live && activeJobs.length === 0) return null
-
-  const livePct = live ? progressPercent(live.event) : null
-  const liveBar = livePct ?? (live ? 8 : 0)
-
-  return (
-    <div className="download-progress-tray" role="status" aria-live="polite">
-      <div className="download-progress-tray-head">
-        <Download size={13} />
-        <strong>Downloads</strong>
-      </div>
-      {live && (
-        <div className="download-progress-tray-item">
-          <div className="download-progress-tray-title">
-            <span className="download-progress-tray-name" title={live.key}>
-              {downloadKeyTitle(live.key)}
-            </span>
-            <span className="download-progress-tray-pct">
-              {livePct != null ? `${livePct}%` : '…'}
-            </span>
-          </div>
-          <div className="progress-track compact">
-            <div
-              className="progress-fill"
-              style={{ width: `${Math.min(100, Math.max(4, liveBar))}%` }}
-            />
-          </div>
-          <span className="download-progress-tray-detail">{progressLabel(live.event)}</span>
-        </div>
-      )}
-      {activeJobs.slice(0, 4).map((job) => {
-        const basename = job.filename.split('/').at(-1) ?? job.filename
-        const pct =
-          job.bytes_downloaded != null && job.total_bytes
-            ? Math.round(
-                Math.min(100, (job.bytes_downloaded / job.total_bytes) * 100)
-              )
-            : null
-        return (
-          <div className="download-progress-tray-item" key={job.id}>
-            <div className="download-progress-tray-title">
-              <span className="download-progress-tray-name" title={job.repo_id}>
-                {basename}
-              </span>
-              <span className="download-progress-tray-pct">
-                {pct != null ? `${pct}%` : job.status === 'pending' ? 'queued' : '…'}
-              </span>
-            </div>
-            {pct != null && (
-              <div className="progress-track compact">
-                <div className="progress-fill" style={{ width: `${pct}%` }} />
-              </div>
-            )}
-            <div className="download-progress-tray-row">
-              <span className="download-progress-tray-detail">
-                {job.repo_id}
-                {job.bytes_downloaded != null && job.total_bytes
-                  ? ` · ${formatBytes(job.bytes_downloaded)} / ${formatBytes(job.total_bytes)}`
-                  : ` · ${job.status}`}
-              </span>
-              <button
-                type="button"
-                className="chip-button subtle"
-                onClick={() => onCancelJob(job.id)}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        )
-      })}
-    </div>
-  )
 }
 
 type BuildStep = { current: number; total: number; label: string }
@@ -876,6 +764,11 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [bundles, setBundles] = useState<SdcppBundle[]>([])
   const [bundlesLoading, setBundlesLoading] = useState(false)
+  const [showAllBundles, setShowAllBundles] = useState(false)
+  /** Chosen size per bundle, keyed by the component's position. */
+  const [variantChoices, setVariantChoices] = useState<
+    Record<string, Record<number, string>>
+  >({})
   const [queuedRepos, setQueuedRepos] = useState<Record<string, boolean>>({})
   const [assembleRepo, setAssembleRepo] = useState('')
   const [assemblePath, setAssemblePath] = useState('')
@@ -893,10 +786,6 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [repoFiles, setRepoFiles] = useState<Record<string, HubFile[]>>({})
   const [preferredFiles, setPreferredFiles] = useState<Record<string, string | null>>({})
   const [loadingFilesFor, setLoadingFilesFor] = useState<string | null>(null)
-  const [downloadProgress, setDownloadProgress] = useState<{
-    key: string
-    event: ProgressEvent | null
-  } | null>(null)
   const [enginePhase, setEnginePhase] = useState<string | null>(null)
   const [trustByRepo, setTrustByRepo] = useState<Record<string, ModelTrust>>({})
   const [acknowledgedRepos, setAcknowledgedRepos] = useState<Record<string, boolean>>({})
@@ -939,10 +828,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         .catch(() => setDownloadJobs([]))
     }
     refresh()
-    // Faster poll while a foreground download is running so the tray stays fresh.
-    const timer = window.setInterval(refresh, downloadProgress != null ? 1200 : 3000)
+    const timer = window.setInterval(refresh, 2000)
     return () => window.clearInterval(timer)
-  }, [downloadProgress != null])
+  }, [])
 
   async function saveHubToken(event: FormEvent): Promise<void> {
     event.preventDefault()
@@ -1039,7 +927,22 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     }
   }
 
-  async function installBundle(bundle: SdcppBundle): Promise<void> {
+  // A shortlist by default. The full catalog covers gated, very large, and
+  // niche models, which is a poor first thing to meet — but everything stays
+  // one click away rather than being hidden.
+  const featuredBundles = bundles.filter(
+    (bundle) => bundle.featured || bundle.origin === 'custom' || bundle.installed
+  )
+  const visibleBundles = showAllBundles || featuredBundles.length === 0 ? bundles : featuredBundles
+  const hiddenBundleCount = bundles.length - featuredBundles.length
+  // A chosen quant installs under its own key, so `installed` on the shipped
+  // bundle does not answer whether *this* size is already on disk.
+  const installedModelIds = new Set(props.models.map((model) => model.id))
+
+  async function installBundle(
+    bundle: SdcppBundle,
+    choices: Record<number, string>
+  ): Promise<void> {
     if (bundle.gated && hfTokenSource === 'none') {
       props.onError(
         `${bundle.label} includes a file from a gated repository. Accept its terms on Hugging Face and save an access token above first.`
@@ -1047,9 +950,14 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       return
     }
     props.onError(null)
+    const resolved = resolveBundleVariants(bundle, choices)
     try {
-      await queueSdcppInstall({ id: bundle.id })
-      setQueuedRepos((current) => ({ ...current, [bundle.id]: true }))
+      // A bundle whose sizes were chosen is no longer the shipped one, so it
+      // travels in full rather than by id.
+      await queueSdcppInstall(
+        resolved.id === bundle.id ? { id: bundle.id } : { bundle: resolved }
+      )
+      setQueuedRepos((current) => ({ ...current, [resolved.id]: true }))
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -1098,7 +1006,8 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       setProposal(null)
       setAssembleRepo('')
       setAssemblePath('')
-      if (install) await installBundle(saved)
+      // A hand-assembled bundle names exact files already; nothing to choose.
+      if (install) await installBundle(saved, {})
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -1192,6 +1101,11 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     }
   }
 
+  /**
+   * Queue a single file. Every download takes this route, so each one has a
+   * job row that survives losing this panel — or the window — and can be
+   * paused and resumed from the tray.
+   */
   async function downloadQuant(repoId: string, path: string): Promise<void> {
     const trust = trustByRepo[repoId]
     if (trust?.gated && hfTokenSource === 'none') {
@@ -1202,58 +1116,29 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       props.onError('Review and acknowledge the license / remote-code notice before downloading.')
       return
     }
-    const key = `${repoId}::${path}`
-    setDownloadProgress({ key, event: null })
     props.onError(null)
+    const engine = discoverEngine === 'whisper.cpp' ? 'whisper.cpp' : 'llama.cpp'
     try {
-      const engine = discoverEngine === 'whisper.cpp' ? 'whisper.cpp' : 'llama.cpp'
-      await downloadModel(
-        repoId,
-        path,
-        (event) => setDownloadProgress({ key, event }),
-        'main',
-        engine
-      )
-      await props.refreshModels()
-      if (engine === 'whisper.cpp') {
-        props.onError(null)
-        return
-      }
-      // Make sure a runtime exists so the model is immediately usable.
-      setEnginePhase('Checking the inference runtime…')
-      try {
-        await ensureLlamaEngine((event) => setEnginePhase(progressLabel(event)))
-      } catch (cause) {
-        props.onError(
-          `Model downloaded, but no runtime is installed yet: ${errorText(cause)}. ` +
-            'Open the Runtimes section to install or build one.'
-        )
-      } finally {
-        setEnginePhase(null)
-      }
-    } catch (cause) {
-      props.onError(errorText(cause))
-    } finally {
-      setDownloadProgress(null)
-    }
-  }
-
-  async function queueQuant(repoId: string, path: string): Promise<void> {
-    const trust = trustByRepo[repoId]
-    if (trust?.gated && hfTokenSource === 'none') {
-      props.onError('This model is gated on Hugging Face. Save an access token above first.')
-      return
-    }
-    if (trust?.requires_acknowledgement && !acknowledgedRepos[repoId]) {
-      props.onError('Review and acknowledge the license / remote-code notice before downloading.')
-      return
-    }
-    props.onError(null)
-    try {
-      await queueModelDownload(repoId, path)
+      await queueModelDownload(repoId, path, 'main', engine)
+      setQueuedRepos((current) => ({ ...current, [repoId]: true }))
       setDownloadJobs(await listDownloadJobs())
     } catch (cause) {
       props.onError(errorText(cause))
+      return
+    }
+    if (engine === 'whisper.cpp') return
+    // Install the runtime alongside the transfer rather than after it, so the
+    // model is usable the moment it lands.
+    setEnginePhase('Checking the inference runtime…')
+    try {
+      await ensureLlamaEngine((event) => setEnginePhase(progressLabel(event)))
+    } catch (cause) {
+      props.onError(
+        `The download is queued, but no runtime is installed yet: ${errorText(cause)}. ` +
+          'Open the Runtimes section to install or build one.'
+      )
+    } finally {
+      setEnginePhase(null)
     }
   }
 
@@ -1266,6 +1151,41 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       props.onError(errorText(cause))
     }
   }
+
+  async function dismissJob(jobId: string): Promise<void> {
+    props.onError(null)
+    try {
+      await dismissDownloadJob(jobId)
+      setDownloadJobs(await listDownloadJobs())
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function clearFinishedJobs(): Promise<void> {
+    props.onError(null)
+    try {
+      await dismissFinishedDownloadJobs()
+      setDownloadJobs(await listDownloadJobs())
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function retryJob(jobId: string): Promise<void> {
+    props.onError(null)
+    try {
+      await resumeDownloadJob(jobId)
+      setDownloadJobs(await listDownloadJobs())
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  /** Settled jobs, which are the ones "clear finished" would remove. */
+  const finishedJobCount = downloadJobs.filter(
+    (job) => job.status !== 'pending' && job.status !== 'downloading' && job.status !== 'paused'
+  ).length
 
   return (
     <section>
@@ -1385,11 +1305,6 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           </button>
         </form>
       )}
-      <DownloadProgressTray
-        live={downloadProgress}
-        jobs={downloadJobs}
-        onCancelJob={(jobId) => void cancelJob(jobId)}
-      />
       {enginePhase && (
         <div className="engine-phase-note">
           <LoaderCircle className="spin" size={14} />
@@ -1398,8 +1313,21 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       )}
       {downloadJobs.length > 0 && (
         <div className="download-jobs-panel">
-          <div className="section-label">Download queue</div>
-          {downloadJobs.slice(0, 6).map((job) => {
+          <div className="download-jobs-head">
+            <div className="section-label">Download queue</div>
+            {finishedJobCount > 0 && (
+              <button
+                type="button"
+                className="chip-button subtle"
+                title="Remove finished, failed, and cancelled downloads from this list"
+                onClick={() => void clearFinishedJobs()}
+              >
+                <Trash2 size={12} />
+                Clear {finishedJobCount} finished
+              </button>
+            )}
+          </div>
+          {downloadJobs.slice(0, 12).map((job) => {
             const active = job.status === 'pending' || job.status === 'downloading'
             const basename = job.filename.split('/').at(-1) ?? job.filename
             const pct =
@@ -1424,11 +1352,37 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                   )}
                   {job.error && <span className="run-error-text">{job.error}</span>}
                 </div>
-                {active && (
-                  <button type="button" className="chip-button subtle" onClick={() => void cancelJob(job.id)}>
-                    Cancel
-                  </button>
-                )}
+                <div className="download-job-actions">
+                  {job.status === 'failed' && (
+                    <button
+                      type="button"
+                      className="chip-button subtle"
+                      title="Try this download again, resuming from what it already fetched"
+                      onClick={() => void retryJob(job.id)}
+                    >
+                      Retry
+                    </button>
+                  )}
+                  {active ? (
+                    <button
+                      type="button"
+                      className="chip-button subtle"
+                      onClick={() => void cancelJob(job.id)}
+                    >
+                      Cancel
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="icon-button subtle"
+                      title="Dismiss"
+                      aria-label={`Dismiss ${basename}`}
+                      onClick={() => void dismissJob(job.id)}
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
               </div>
             )
           })}
@@ -1524,14 +1478,25 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       )}
       {isSdcpp && (
         <div className="bundle-list">
-          <div className="section-label">Curated models · installs every required file</div>
+          <div className="section-label">
+            {showAllBundles
+              ? 'Every preconfigured model · installs each required file'
+              : 'Recommended models · installs every required file'}
+          </div>
           {bundlesLoading && bundles.length === 0 && (
             <p className="empty-models-inline">
               <LoaderCircle className="spin" size={14} /> Loading the model catalog…
             </p>
           )}
-          {bundles.map((bundle) => {
-            const queued = Boolean(queuedRepos[bundle.id])
+          {visibleBundles.map((bundle) => {
+            const chosen = variantChoices[bundle.id] ?? {}
+            const resolved = resolveBundleVariants(bundle, chosen)
+            const queued = Boolean(queuedRepos[resolved.id])
+            const installed = bundle.installed || installedModelIds.has(resolved.model_id)
+            const totalBytes = resolved.components.reduce(
+              (sum, component) => sum + (component.approx_bytes ?? 0),
+              0
+            )
             return (
               <article className="bundle-card" key={bundle.id}>
                 <div className="bundle-head">
@@ -1544,8 +1509,22 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                         imageIn: bundle.supports_init_image
                       }}
                     />
-                    {bundle.installed && <span className="installed-badge">Installed</span>}
-                    {bundle.gated && !bundle.installed && (
+                    {bundle.modality === 'video' && (
+                      // The one distinction that decides whether a photo can be
+                      // handed to this model at all.
+                      <span
+                        className={`kind-badge ${bundle.supports_init_image ? 'i2v' : 't2v'}`}
+                        title={
+                          bundle.supports_init_image
+                            ? 'Image-to-video: animates a picture you supply, and can also work from text alone.'
+                            : 'Text-to-video: builds the clip from the prompt only. It cannot start from a picture.'
+                        }
+                      >
+                        {bundle.supports_init_image ? 'Image → video' : 'Text → video'}
+                      </span>
+                    )}
+                    {installed && <span className="installed-badge">Installed</span>}
+                    {bundle.gated && !installed && (
                       <span className="installed-badge gated">Token required</span>
                     )}
                   </strong>
@@ -1553,32 +1532,61 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                     {bundle.modality === 'video' ? 'Video' : 'Image'}
                     {bundle.origin === 'custom' ? ' · Yours' : ''}
                     {bundle.license ? ` · ${bundle.license}` : ''}
-                    {bundle.approx_bytes ? ` · ~${formatBytes(bundle.approx_bytes)}` : ''}
+                    {totalBytes > 0 ? ` · ~${formatBytes(totalBytes)}` : ''}
                   </span>
                 </div>
                 <p className="bundle-summary">{bundle.summary}</p>
                 <ul className="bundle-components">
-                  {bundle.components.map((component) => (
-                    <li key={`${component.repo_id}/${component.path}`}>
-                      <span className="bundle-role">{component.role}</span>
-                      <code>{component.repo_id}</code>
-                      {component.approx_bytes ? (
-                        <span className="bundle-size">{formatBytes(component.approx_bytes)}</span>
-                      ) : null}
-                    </li>
-                  ))}
+                  {bundle.components.map((component, index) => {
+                    const options = component.variants ?? []
+                    const selected =
+                      chosen[index] ??
+                      options.find((option) => option.path === component.path)?.label ??
+                      ''
+                    const active = options.find((option) => option.label === selected)
+                    return (
+                      <li key={`${component.repo_id}/${component.path}`}>
+                        <span className="bundle-role">{component.role}</span>
+                        <code>{component.repo_id}</code>
+                        {options.length > 0 ? (
+                          <select
+                            className="bundle-quant"
+                            value={selected}
+                            title={active?.note ?? 'Choose a size'}
+                            onChange={(event) =>
+                              setVariantChoices((current) => ({
+                                ...current,
+                                [bundle.id]: { ...chosen, [index]: event.target.value }
+                              }))
+                            }
+                          >
+                            {options.map((option) => (
+                              <option key={option.label} value={option.label}>
+                                {option.label}
+                                {option.approx_bytes
+                                  ? ` · ${formatBytes(option.approx_bytes)}`
+                                  : ''}
+                              </option>
+                            ))}
+                          </select>
+                        ) : component.approx_bytes ? (
+                          <span className="bundle-size">{formatBytes(component.approx_bytes)}</span>
+                        ) : null}
+                      </li>
+                    )
+                  })}
                 </ul>
                 <div className="bundle-actions">
                 <button
                   className="chip-button"
-                  disabled={queued || bundle.installed}
-                  onClick={() => void installBundle(bundle)}
+                  disabled={queued || installed}
+                  onClick={() => void installBundle(bundle, chosen)}
                 >
                   {queued ? (
                     <>
                       <LoaderCircle className="spin" size={13} /> Queued
                     </>
-                  ) : bundle.installed ? (
+                  ) : installed ? (
                     <>
                       <Check size={13} /> Installed
                     </>
@@ -1601,6 +1609,17 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
               </article>
             )
           })}
+          {hiddenBundleCount > 0 && (
+            <button
+              type="button"
+              className="chip-button subtle bundle-show-all"
+              onClick={() => setShowAllBundles((shown) => !shown)}
+            >
+              {showAllBundles
+                ? 'Show only the recommended models'
+                : `Show all ${bundles.length} preconfigured models`}
+            </button>
+          )}
         </div>
       )}
       {!isSdcpp && !hasSearched && (
@@ -1759,41 +1778,20 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                         </span>
                       </div>
                       <div className="quant-actions">
-                        {(() => {
-                          const snapshotKey = `${model.id}::snapshot`
-                          const snapshotActive = downloadProgress?.key === snapshotKey
-                          const snapshotPct = snapshotActive
-                            ? progressPercent(downloadProgress.event)
-                            : null
-                          return (
-                            <button
-                              type="button"
-                              disabled={snapshotActive}
-                              onClick={() => void downloadSnapshot(model.id)}
-                            >
-                              {snapshotActive ? (
-                                <>
-                                  <LoaderCircle className="spin" size={14} />
-                                  {snapshotPct != null ? `${snapshotPct}%` : '…'}
-                                </>
-                              ) : (
-                                <>
-                                  <Download size={14} />
-                                  Download
-                                </>
-                              )}
-                            </button>
-                          )
-                        })()}
+                        <button
+                          type="button"
+                          title="Downloads in the background; track it in the download tray"
+                          onClick={() => void downloadSnapshot(model.id)}
+                        >
+                          <Download size={14} />
+                          Download
+                        </button>
                       </div>
                     </div>
                   ) : files.length === 0 ? (
                     <p className="empty-models-inline">No GGUF files found in this repo.</p>
                   ) : (
                     files.map((file) => {
-                    const key = `${model.id}::${file.path}`
-                    const active = downloadProgress?.key === key
-                    const activePct = active ? progressPercent(downloadProgress.event) : null
                     const basename = file.path.split('/').at(-1) ?? file.path
                     const isProjector = basename.toLowerCase().includes('mmproj')
                     const isPreferred =
@@ -1811,48 +1809,16 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                             {file.path}
                             {file.size != null ? ` · ${formatBytes(file.size)}` : ''}
                           </span>
-                          {active && (
-                            <div className="progress-block compact">
-                              <div className="progress-track">
-                                <div
-                                  className="progress-fill"
-                                  style={{
-                                    width: `${Math.min(100, activePct ?? 8)}%`
-                                  }}
-                                />
-                              </div>
-                              <span>{progressLabel(downloadProgress.event)}</span>
-                            </div>
-                          )}
                         </div>
                         <div className="quant-actions">
                           <button
                             type="button"
-                            disabled={downloadProgress != null}
+                            title="Downloads in the background; track it in the download tray"
                             onClick={() => void downloadQuant(model.id, file.path)}
                           >
-                            {active ? (
-                              <>
-                                <LoaderCircle className="spin" size={15} />
-                                {activePct != null ? `${activePct}%` : '…'}
-                              </>
-                            ) : isProjector ? (
-                              'Add capability'
-                            ) : (
-                              'Download'
-                            )}
+                            <Download size={14} />
+                            {isProjector ? 'Add capability' : 'Download'}
                           </button>
-                          {!active && (
-                            <button
-                              type="button"
-                              className="chip-button subtle"
-                              disabled={downloadProgress != null}
-                              title="Download in the background queue"
-                              onClick={() => void queueQuant(model.id, file.path)}
-                            >
-                              Queue
-                            </button>
-                          )}
                         </div>
                       </div>
                     )
@@ -3109,6 +3075,27 @@ function EngineSection(props: SectionProps): React.JSX.Element {
                   </option>
                 ))}
             </select>
+          </label>
+          <label>
+            <span>Generation timeout (seconds)</span>
+            <input
+              type="number"
+              min={0}
+              max={86400}
+              step={60}
+              value={draft.generation_timeout_secs ?? 0}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  generation_timeout_secs: Math.max(0, Number(event.target.value) || 0)
+                })
+              }
+            />
+            <small className="model-help">
+              0 lets Brazier work it out from the frames and steps asked for, which suits most
+              machines. Raise it if a slow, CPU-only host is being cut off while still rendering;
+              a running job can always be stopped by hand.
+            </small>
           </label>
           <label>
             <span>Default voice model</span>

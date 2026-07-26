@@ -11,8 +11,11 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::OnceLock,
-    time::Duration,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -20,7 +23,7 @@ use flate2::read::GzDecoder;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tar::Archive;
-use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex as AsyncMutex};
+use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex as AsyncMutex, sync::Notify};
 
 use crate::{
     models_store,
@@ -34,13 +37,19 @@ pub const ENGINE: &str = "stable-diffusion.cpp";
 const GITHUB_API: &str = "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/latest";
 const USER_AGENT: &str = "brazier-sdcpp-manager";
 
-const IMAGE_TIMEOUT: Duration = Duration::from_secs(600);
+const IMAGE_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Floor for a video job, covering model load plus a short clip.
 const VIDEO_TIMEOUT_BASE: Duration = Duration::from_secs(1800);
 /// Added per frame-step, so long clips are not cut off mid-render.
-const VIDEO_TIMEOUT_PER_FRAME_STEP: Duration = Duration::from_millis(1500);
+///
+/// Sized for a machine with no usable GPU: an integrated APU renders a frame
+/// step in seconds, not milliseconds, and the previous allowance killed those
+/// jobs hours before they would have finished. Being generous costs nothing now
+/// that a job can be stopped from the interface — waiting too long is a click
+/// away from over, while cutting one off throws away everything it rendered.
+const VIDEO_TIMEOUT_PER_FRAME_STEP: Duration = Duration::from_secs(30);
 /// Ceiling, so a wedged sd-cli is still eventually reclaimed.
-const VIDEO_TIMEOUT_MAX: Duration = Duration::from_secs(6 * 3600);
+const VIDEO_TIMEOUT_MAX: Duration = Duration::from_secs(24 * 3600);
 
 /// Budget for one video job.
 ///
@@ -54,6 +63,17 @@ fn video_timeout(steps: u32, frames: u32) -> Duration {
             VIDEO_TIMEOUT_PER_FRAME_STEP.saturating_mul(work.min(u32::MAX as u64) as u32),
         )
         .min(VIDEO_TIMEOUT_MAX)
+}
+
+/// Apply a configured override to a computed budget.
+///
+/// No amount of tuning suits every machine, so Engine configuration can name a
+/// flat limit; zero or absent keeps the size-derived one.
+fn effective_timeout(computed: Duration, override_secs: Option<u32>) -> Duration {
+    match override_secs {
+        Some(secs) if secs > 0 => Duration::from_secs(u64::from(secs)),
+        _ => computed,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -908,6 +928,121 @@ impl std::fmt::Display for BusyError {
 
 impl std::error::Error for BusyError {}
 
+/// Returned when the user stopped a generation from the interface.
+///
+/// A distinct type because this is not a failure: a model that asked for the
+/// picture needs to hear that the person decided against it, not that the
+/// engine broke.
+#[derive(Debug)]
+pub struct CancelledError;
+
+impl std::fmt::Display for CancelledError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "generation was stopped by the user")
+    }
+}
+
+impl std::error::Error for CancelledError {}
+
+/// Who asked for a generation, so the interface can say whose prompt it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GenerationOrigin {
+    /// Typed by the person, in Generate mode.
+    #[default]
+    User,
+    /// Requested by a model through the generate tools.
+    Model,
+}
+
+/// What a running generation is doing, for the interface to show and stop.
+///
+/// A model-driven generation is otherwise opaque: it can run for hours on the
+/// strength of a prompt the user never saw, so everything needed to judge it —
+/// and to decide to stop it — is published here while it runs.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveGeneration {
+    pub id: String,
+    pub modality: Modality,
+    pub model_id: String,
+    pub prompt: String,
+    pub negative_prompt: Option<String>,
+    /// Blob the conditioning image came from, so the interface can show it.
+    pub init_image_blob: Option<String>,
+    pub origin: GenerationOrigin,
+    /// How long it has been running, refreshed on every read.
+    pub elapsed_secs: u64,
+    /// When this job will be given up on, so a long render is not a mystery.
+    pub timeout_secs: u64,
+}
+
+struct RunningJob {
+    info: ActiveGeneration,
+    started: Instant,
+    cancel: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+static RUNNING: OnceLock<Mutex<Option<RunningJob>>> = OnceLock::new();
+
+fn running() -> &'static Mutex<Option<RunningJob>> {
+    RUNNING.get_or_init(|| Mutex::new(None))
+}
+
+/// The generation in flight, if any, with its elapsed time brought up to date.
+pub fn active_generation() -> Option<ActiveGeneration> {
+    let guard = running().lock().expect("generation lock");
+    guard.as_ref().map(|job| {
+        let mut info = job.info.clone();
+        info.elapsed_secs = job.started.elapsed().as_secs();
+        info
+    })
+}
+
+/// Ask the running generation to stop. False when nothing is running.
+pub fn cancel_active_generation() -> bool {
+    let guard = running().lock().expect("generation lock");
+    match guard.as_ref() {
+        Some(job) => {
+            job.cancel.store(true, AtomicOrdering::SeqCst);
+            job.notify.notify_waiters();
+            true
+        }
+        None => false,
+    }
+}
+
+/// Registers a generation for the lifetime of the job and clears it on drop,
+/// so a panic cannot leave the interface showing a job that is not running.
+struct JobRegistration {
+    cancel: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl JobRegistration {
+    fn open(info: ActiveGeneration) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+        *running().lock().expect("generation lock") = Some(RunningJob {
+            info,
+            started: Instant::now(),
+            cancel: Arc::clone(&cancel),
+            notify: Arc::clone(&notify),
+        });
+        Self { cancel, notify }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(AtomicOrdering::SeqCst)
+    }
+}
+
+impl Drop for JobRegistration {
+    fn drop(&mut self) {
+        *running().lock().expect("generation lock") = None;
+    }
+}
+
 fn default_width() -> u32 {
     512
 }
@@ -946,6 +1081,17 @@ pub struct GenerateImageRequest {
     /// Optional path to a local image to condition an img2img generation.
     #[serde(default)]
     pub init_image: Option<PathBuf>,
+    /// Blob the init image came from, carried only so the interface can show
+    /// what a running job was given.
+    #[serde(default)]
+    pub init_image_blob: Option<String>,
+    /// Whether the person or a model asked for this.
+    #[serde(default)]
+    pub origin: GenerationOrigin,
+    /// Flat timeout in seconds from Engine configuration; 0 or absent uses the
+    /// size-derived budget.
+    #[serde(default)]
+    pub timeout_secs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -970,6 +1116,17 @@ pub struct GenerateVideoRequest {
     /// Optional path to a local image to condition an img2vid generation.
     #[serde(default)]
     pub init_image: Option<PathBuf>,
+    /// Blob the init image came from, carried only so the interface can show
+    /// what a running job was given.
+    #[serde(default)]
+    pub init_image_blob: Option<String>,
+    /// Whether the person or a model asked for this.
+    #[serde(default)]
+    pub origin: GenerationOrigin,
+    /// Flat timeout in seconds from Engine configuration; 0 or absent uses the
+    /// size-derived budget.
+    #[serde(default)]
+    pub timeout_secs: Option<u32>,
     #[serde(default = "default_video_frames")]
     pub video_frames: u32,
     /// Playback rate written into the clip; sd-cli defaults to 24.
@@ -1022,29 +1179,140 @@ fn apply_manifest_args(
     Ok(())
 }
 
-/// Spawn `sd-cli` with the given argv, waiting up to `timeout` for completion.
-async fn run_sd_cli(mut command: Command, timeout: Duration) -> anyhow::Result<()> {
+/// How many trailing output lines to keep for diagnosis.
+const OUTPUT_TAIL_LINES: usize = 40;
+
+/// Last lines sd-cli wrote, newest last.
+#[derive(Clone, Default)]
+struct OutputTail(Arc<Mutex<std::collections::VecDeque<String>>>);
+
+impl OutputTail {
+    fn push(&self, line: String) {
+        let mut lines = self.0.lock().expect("sd-cli output lock");
+        if lines.len() == OUTPUT_TAIL_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line);
+    }
+
+    fn text(&self) -> String {
+        self.0
+            .lock()
+            .expect("sd-cli output lock")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Drain a child pipe into the tail buffer, also echoing it to the daemon log.
+fn collect_output<R>(reader: R, tail: OutputTail) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::debug!(target: "sdcpp", "{line}");
+            tail.push(line);
+        }
+    })
+}
+
+/// Spawn `sd-cli`, waiting up to `timeout` for it to finish.
+///
+/// Its output is captured as it runs rather than read at the end, so a job that
+/// times out or is stopped can still say what the engine was doing — previously
+/// a timeout surfaced as a bare failure with the detail left in the terminal.
+async fn run_sd_cli(
+    mut command: Command,
+    timeout: Duration,
+    job: &JobRegistration,
+) -> anyhow::Result<()> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    let started = Instant::now();
     let mut child = command.spawn().context("spawn sd-cli")?;
-    let status = tokio::time::timeout(timeout, child.wait())
-        .await
-        .map_err(|_| anyhow::anyhow!("sd-cli timed out after {}s", timeout.as_secs()))?
-        .context("wait for sd-cli")?;
-    if !status.success() {
-        let mut stderr = String::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            let _ = pipe.read_to_end(&mut buf).await;
-            stderr = String::from_utf8_lossy(&buf).into_owned();
+
+    let tail = OutputTail::default();
+    let mut readers = Vec::new();
+    if let Some(pipe) = child.stdout.take() {
+        readers.push(collect_output(pipe, tail.clone()));
+    }
+    if let Some(pipe) = child.stderr.take() {
+        readers.push(collect_output(pipe, tail.clone()));
+    }
+
+    let status = loop {
+        tokio::select! {
+            finished = child.wait() => break finished.context("wait for sd-cli")?,
+            _ = tokio::time::sleep_until((started + timeout).into()) => {
+                let _ = child.kill().await;
+                for reader in readers {
+                    let _ = reader.await;
+                }
+                anyhow::bail!(
+                    "sd-cli ran for {} without finishing and was stopped (limit {}). \
+                     Try fewer frames or steps, or raise the generation timeout in \
+                     Engine configuration.{}",
+                    format_duration(started.elapsed()),
+                    format_duration(timeout),
+                    format_tail(&tail.text()),
+                );
+            }
+            _ = job.notify.notified() => {
+                if job.cancelled() {
+                    let _ = child.kill().await;
+                    for reader in readers {
+                        let _ = reader.await;
+                    }
+                    return Err(CancelledError.into());
+                }
+            }
         }
-        anyhow::bail!("sd-cli failed with {status}: {stderr}");
+    };
+
+    for reader in readers {
+        let _ = reader.await;
+    }
+    // A stop that lands as the process exits still counts as a stop.
+    if job.cancelled() {
+        return Err(CancelledError.into());
+    }
+    if !status.success() {
+        anyhow::bail!(
+            "sd-cli failed with {status} after {}.{}",
+            format_duration(started.elapsed()),
+            format_tail(&tail.text()),
+        );
     }
     Ok(())
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m {}s", seconds % 60);
+    }
+    format!("{}h {}m", minutes / 60, minutes % 60)
+}
+
+fn format_tail(tail: &str) -> String {
+    let trimmed = tail.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nLast output from sd-cli:\n{trimmed}")
+    }
 }
 
 /// Generate a single image with sd-cli. Resolves the binary and the model's
@@ -1112,7 +1380,19 @@ pub async fn generate_image(
         prepend_library_path(&mut command, dir);
     }
 
-    run_sd_cli(command, IMAGE_TIMEOUT).await?;
+    let timeout = effective_timeout(IMAGE_TIMEOUT, request.timeout_secs);
+    let job = JobRegistration::open(ActiveGeneration {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        modality: Modality::Image,
+        model_id: request.model_id.clone(),
+        prompt: request.prompt.clone(),
+        negative_prompt: request.negative_prompt.clone(),
+        init_image_blob: request.init_image_blob.clone(),
+        origin: request.origin,
+        elapsed_secs: 0,
+        timeout_secs: timeout.as_secs(),
+    });
+    run_sd_cli(command, timeout, &job).await?;
     anyhow::ensure!(
         output_path.is_file(),
         "sd-cli did not produce an output image at {}",
@@ -1203,7 +1483,22 @@ pub async fn generate_video(
         prepend_library_path(&mut command, dir);
     }
 
-    run_sd_cli(command, video_timeout(request.steps, request.video_frames)).await?;
+    let timeout = effective_timeout(
+        video_timeout(request.steps, request.video_frames),
+        request.timeout_secs,
+    );
+    let job = JobRegistration::open(ActiveGeneration {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        modality: Modality::Video,
+        model_id: request.model_id.clone(),
+        prompt: request.prompt.clone(),
+        negative_prompt: request.negative_prompt.clone(),
+        init_image_blob: request.init_image_blob.clone(),
+        origin: request.origin,
+        elapsed_secs: 0,
+        timeout_secs: timeout.as_secs(),
+    });
+    run_sd_cli(command, timeout, &job).await?;
     anyhow::ensure!(
         output_path.is_file(),
         "sd-cli did not produce an output video at {}",
@@ -1243,6 +1538,41 @@ mod tests {
         assert_eq!(video_timeout(150, 241), VIDEO_TIMEOUT_MAX);
         // Zero-ish inputs must not underflow into an instant timeout.
         assert!(video_timeout(0, 0) >= VIDEO_TIMEOUT_BASE);
+    }
+
+    #[test]
+    fn a_configured_timeout_replaces_the_derived_one() {
+        let derived = video_timeout(20, 49);
+        // Absent or zero keeps whatever the frames and steps imply.
+        assert_eq!(effective_timeout(derived, None), derived);
+        assert_eq!(effective_timeout(derived, Some(0)), derived);
+        // A slow host can be given hours instead.
+        assert_eq!(
+            effective_timeout(derived, Some(6 * 3600)),
+            Duration::from_secs(6 * 3600)
+        );
+        // Including a shorter one, for someone who would rather fail fast.
+        assert_eq!(
+            effective_timeout(derived, Some(60)),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn a_cpu_only_host_gets_hours_rather_than_minutes() {
+        // The reported failure: a small model rendering a short clip on an
+        // integrated GPU was cut off while it was still making progress.
+        let budget = video_timeout(20, 16);
+        assert!(
+            budget >= Duration::from_secs(2 * 3600),
+            "{budget:?} is too tight for a machine without a discrete GPU"
+        );
+    }
+
+    #[test]
+    fn stopping_nothing_is_harmless() {
+        assert!(active_generation().is_none());
+        assert!(!cancel_active_generation(), "nothing was running");
     }
 
     #[test]

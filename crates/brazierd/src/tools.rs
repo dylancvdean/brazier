@@ -36,6 +36,71 @@ pub struct ToolMedia {
     pub mime_type: String,
 }
 
+/// Tool definitions with the generation tools described for this machine.
+///
+/// Whether a photo can be handed to `generate_video` is not a property of the
+/// tool but of the model installed behind it: a text-to-video model rejects an
+/// init image outright. Saying which one is configured — and what it accepts —
+/// is what stops a model from confidently passing a picture to a model that
+/// cannot take one.
+pub fn definitions_for(data_dir: &std::path::Path) -> Value {
+    let mut defs = definitions();
+    let settings = crate::runtime_settings::load(data_dir);
+    let Some(items) = defs.as_array_mut() else {
+        return defs;
+    };
+    for item in items {
+        let Some(name) = item.pointer("/function/name").and_then(Value::as_str) else {
+            continue;
+        };
+        let note = match name {
+            "generate_video" => Some(describe_video_model(data_dir, &settings)),
+            "generate_image" => Some(describe_image_model(&settings)),
+            _ => None,
+        };
+        if let Some(note) = note
+            && let Some(description) = item.pointer_mut("/function/description")
+            && let Some(text) = description.as_str()
+        {
+            *description = Value::String(format!("{text} {note}"));
+        }
+    }
+    defs
+}
+
+/// What the configured video model is, and whether it can animate a picture.
+fn describe_video_model(
+    data_dir: &std::path::Path,
+    settings: &crate::runtime_settings::RuntimeSettings,
+) -> String {
+    let Some(model_id) = settings.default_video_gen_model.as_deref() else {
+        return "No default video model is configured yet, so this tool cannot run until the \
+                user installs one."
+            .to_owned();
+    };
+    if crate::sdcpp::supports_init_image(data_dir, model_id) {
+        format!(
+            "The configured model (`{model_id}`) is an image-to-video model: it accepts \
+             `init_image`, so a photo the user shared can be animated."
+        )
+    } else {
+        format!(
+            "The configured model (`{model_id}`) is text-to-video only: it has no `init_image` \
+             support and will refuse one. To animate a picture the user shared, tell them they \
+             need an image-to-video model such as Wan 2.2 TI2V or LTX-2.3 instead of guessing."
+        )
+    }
+}
+
+fn describe_image_model(settings: &crate::runtime_settings::RuntimeSettings) -> String {
+    match settings.default_image_gen_model.as_deref() {
+        Some(model_id) => format!("The configured model is `{model_id}`."),
+        None => "No default image model is configured yet, so this tool cannot run until the \
+                 user installs one."
+            .to_owned(),
+    }
+}
+
 /// OpenAI-style tool definitions for every bundled tool.
 pub fn definitions() -> Value {
     json!([
@@ -128,7 +193,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "generate_video",
-                "description": "Generate a short video with the configured local stable-diffusion.cpp Wan/LTX model. Returns a brazier_blob reference. Requires an installed sd-cli runtime and a default video generation model.",
+                "description": "Generate a short video with the configured local stable-diffusion.cpp Wan/LTX model. Returns a brazier_blob reference. Requires an installed sd-cli runtime and a default video generation model. Video models come in two kinds: text-to-video builds the clip from the prompt alone, while image-to-video starts from a picture passed as `init_image`. Only pass `init_image` when the configured model supports it.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -361,6 +426,31 @@ impl From<String> for ToolOutput {
     }
 }
 
+/// Restate a generation failure in terms the calling model can act on.
+///
+/// A stop is not an engine fault: the person watched the prompt, decided it was
+/// not what they wanted, and stopped it. Saying so plainly is what lets the
+/// model wait for direction instead of dutifully generating the same thing
+/// again.
+fn describe_generation_failure(error: anyhow::Error) -> anyhow::Error {
+    if error
+        .downcast_ref::<crate::sdcpp::CancelledError>()
+        .is_some()
+    {
+        return anyhow::anyhow!(
+            "The user stopped this generation before it finished. Do not start it again on your \
+             own — acknowledge the interruption and ask what they would like changed."
+        );
+    }
+    error
+}
+
+/// An init image resolved to both its file and the blob it came from.
+struct InitImage {
+    path: std::path::PathBuf,
+    sha256: String,
+}
+
 /// Resolve an `init_image` argument to a stored blob.
 ///
 /// The model can pass `latest` to mean the most recent image in the
@@ -370,7 +460,7 @@ fn resolve_init_image(
     data_dir: &std::path::Path,
     args: &Value,
     images: &[crate::tool_registry::ConversationImage],
-) -> anyhow::Result<Option<std::path::PathBuf>> {
+) -> anyhow::Result<Option<InitImage>> {
     let Some(requested) = args.get("init_image").and_then(Value::as_str) else {
         return Ok(None);
     };
@@ -392,7 +482,7 @@ fn resolve_init_image(
     let path = crate::blob_store::blob_path(data_dir, &sha256)
         .context("that image is not in this conversation")?;
     anyhow::ensure!(path.is_file(), "that image is no longer stored locally");
-    Ok(Some(path))
+    Ok(Some(InitImage { path, sha256 }))
 }
 
 async fn generate_image_tool(
@@ -409,6 +499,7 @@ async fn generate_image_tool(
         .default_image_gen_model
         .clone()
         .context("no default image generation model configured (set one in Manage → Engine)")?;
+    let init_image = resolve_init_image(data_dir, args, images)?;
     let request = crate::sdcpp::GenerateImageRequest {
         prompt: prompt.to_owned(),
         model_id,
@@ -440,10 +531,14 @@ async fn generate_image_tool(
             .get("guidance")
             .and_then(Value::as_f64)
             .map(|v| v as f32),
-        init_image: resolve_init_image(data_dir, args, images)?,
+        init_image: init_image.as_ref().map(|image| image.path.clone()),
+        init_image_blob: init_image.as_ref().map(|image| image.sha256.clone()),
+        origin: crate::sdcpp::GenerationOrigin::Model,
+        timeout_secs: Some(settings.generation_timeout_secs),
     };
-    let result =
-        crate::sdcpp::generate_image(data_dir, settings.sdcpp_binary.as_deref(), &request).await?;
+    let result = crate::sdcpp::generate_image(data_dir, settings.sdcpp_binary.as_deref(), &request)
+        .await
+        .map_err(describe_generation_failure)?;
     let bytes = tokio::fs::read(&result.output_path)
         .await
         .context("read generated image")?;
@@ -514,7 +609,10 @@ async fn generate_video_tool(
             .get("guidance")
             .and_then(Value::as_f64)
             .map(|v| v as f32),
-        init_image: init_image.clone(),
+        init_image: init_image.as_ref().map(|image| image.path.clone()),
+        init_image_blob: init_image.as_ref().map(|image| image.sha256.clone()),
+        origin: crate::sdcpp::GenerationOrigin::Model,
+        timeout_secs: Some(settings.generation_timeout_secs),
         video_frames: args
             .get("video_frames")
             .and_then(Value::as_u64)
@@ -522,8 +620,9 @@ async fn generate_video_tool(
             .unwrap_or(16),
         fps: args.get("fps").and_then(Value::as_u64).map(|v| v as u32),
     };
-    let result =
-        crate::sdcpp::generate_video(data_dir, settings.sdcpp_binary.as_deref(), &request).await?;
+    let result = crate::sdcpp::generate_video(data_dir, settings.sdcpp_binary.as_deref(), &request)
+        .await
+        .map_err(describe_generation_failure)?;
     let bytes = tokio::fs::read(&result.output_path)
         .await
         .context("read generated video")?;
@@ -1113,5 +1212,45 @@ exit 0
             "{}",
             invocation.output
         );
+    }
+
+    fn video_tool_description(defs: &Value) -> String {
+        defs.as_array()
+            .expect("array")
+            .iter()
+            .find(|item| {
+                item.pointer("/function/name").and_then(Value::as_str) == Some("generate_video")
+            })
+            .and_then(|item| item.pointer("/function/description"))
+            .and_then(Value::as_str)
+            .expect("generate_video description")
+            .to_owned()
+    }
+
+    /// Refusing a bad call is a poor substitute for not making it: the model
+    /// should be able to read which kind of video model is installed.
+    #[tokio::test]
+    async fn the_video_tool_says_whether_it_can_take_a_picture() {
+        let (i2v, _, _) = setup(true).await;
+        let described = video_tool_description(&definitions_for(i2v.path()));
+        assert!(
+            described.contains("image-to-video model: it accepts"),
+            "{described}"
+        );
+
+        let (t2v, _, _) = setup(false).await;
+        let described = video_tool_description(&definitions_for(t2v.path()));
+        assert!(described.contains("text-to-video only"), "{described}");
+        assert!(
+            described.contains("sdcpp-video:test/model"),
+            "it should name the model actually configured: {described}"
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_machine_says_so_rather_than_promising_a_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let described = video_tool_description(&definitions_for(dir.path()));
+        assert!(described.contains("No default video model"), "{described}");
     }
 }

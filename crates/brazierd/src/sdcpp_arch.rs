@@ -434,6 +434,7 @@ pub fn assemble(
         },
         gated: false,
         approx_bytes: None,
+        variants: Vec::new(),
     });
     for requirement in requirements {
         if requirement.gated {
@@ -449,6 +450,7 @@ pub fn assemble(
             role: requirement.role,
             gated: requirement.gated,
             approx_bytes: None,
+            variants: Vec::new(),
         });
     }
 
@@ -476,6 +478,8 @@ pub fn assemble(
             summary: format!("Assembled from {repo_id}/{path}"),
             license: None,
             defaults,
+            // Hand-assembled bundles are the user's own, not a shortlist pick.
+            featured: false,
             components,
         },
         architecture: architecture.map(|arch| arch.id.clone()),
