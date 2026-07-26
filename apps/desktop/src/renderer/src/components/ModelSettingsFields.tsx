@@ -583,6 +583,8 @@ export type InheritedDefaults = {
   diffusionFa?: boolean
   autoFit?: boolean
   maxVram?: number
+  paramsBackend?: string
+  streamLayers?: boolean
   offloadToCpu?: boolean
 }
 
@@ -1199,7 +1201,7 @@ function DiffusionFields(
         />
         <ToggleField
           label="Automatic placement"
-          hint="Lets sd.cpp time-share model components and choose their execution backends."
+          hint="Lets sd.cpp choose execution devices. Disabled by default on integrated Vulkan GPUs, which upstream auto-fit currently skips."
           inherited={props.inherited.autoFit}
           value={profile.auto_fit}
           onChange={(value) => set('auto_fit', value)}
@@ -1213,6 +1215,20 @@ function DiffusionFields(
           step={0.5}
           value={profile.max_vram}
           onChange={(value) => set('max_vram', value)}
+        />
+        <TextField
+          label="Parameter residency"
+          hint="Where weights wait between executions. Disk residency loads and releases phases on demand."
+          placeholder={props.inherited.paramsBackend ?? 'Default'}
+          value={profile.params_backend}
+          onChange={(value) => set('params_backend', value)}
+        />
+        <ToggleField
+          label="Stream layers"
+          hint="Loads and prefetches layers within the GPU graph budget instead of keeping the full model resident."
+          inherited={props.inherited.streamLayers}
+          value={profile.stream_layers}
+          onChange={(value) => set('stream_layers', value)}
         />
         <ToggleField
           label="Offload to CPU"

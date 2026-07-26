@@ -1283,6 +1283,8 @@ export type DiffusionProfile = {
   diffusion_fa?: boolean | null
   auto_fit?: boolean | null
   max_vram?: number | null
+  params_backend?: string | null
+  stream_layers?: boolean | null
   offload_to_cpu?: boolean | null
   rng?: string | null
   negative_prompt?: string | null

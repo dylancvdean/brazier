@@ -23,7 +23,6 @@ import {
 } from '../api'
 import { modelDisplayName, modelEngine } from '../model-utils'
 import {
-  AMD_APU_IMAGE_MAX_VRAM,
   AMD_APU_VIDEO_DEFAULTS,
   usesAmdApuVulkanDefaults
 } from '../runtime-defaults'
@@ -90,15 +89,15 @@ export function ModelSettingsModal(props: Props): React.JSX.Element {
       useApuDefaults && props.kind === 'video' ? AMD_APU_VIDEO_DEFAULTS.height : 512,
     videoFrames: useApuDefaults ? AMD_APU_VIDEO_DEFAULTS.frames : 16,
     vaeTiling: useApuDefaults,
-    clipOnCpu: useApuDefaults,
+    clipOnCpu: useApuDefaults && props.kind === 'image',
     diffusionFa: useApuDefaults,
-    autoFit: useApuDefaults,
+    autoFit: false,
     maxVram:
       useApuDefaults && props.kind === 'video'
         ? AMD_APU_VIDEO_DEFAULTS.maxVram
-        : useApuDefaults
-          ? AMD_APU_IMAGE_MAX_VRAM
-          : undefined,
+        : undefined,
+    paramsBackend: useApuDefaults && props.kind === 'video' ? 'disk' : undefined,
+    streamLayers: useApuDefaults && props.kind === 'video',
     offloadToCpu: false
   }
   const dirty = JSON.stringify(draft) !== JSON.stringify(props.profile ?? emptyProfile(props.kind))

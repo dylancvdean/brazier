@@ -228,6 +228,10 @@ pub struct DiffusionProfile {
     pub auto_fit: Option<bool>,
     /// Per-device graph execution budget in GiB (`--max-vram`).
     pub max_vram: Option<f32>,
+    /// Where sd.cpp keeps weights between executions (`--params-backend`).
+    pub params_backend: Option<String>,
+    /// Stream and prefetch layers within the graph budget.
+    pub stream_layers: Option<bool>,
     /// Keep weights in RAM and move them per step (`--offload-to-cpu`).
     pub offload_to_cpu: Option<bool>,
     /// `std_default` or `cuda`.
@@ -514,6 +518,15 @@ fn validate_diffusion(profile: &DiffusionProfile) -> anyhow::Result<()> {
     ensure_range(profile.skip_layer_end, 0.0, 1.0, "skip-layer end")?;
     ensure_range(profile.flow_shift, 0.0, 100.0, "flow shift")?;
     ensure_range(profile.max_vram, 0.0, 256.0, "maximum VRAM")?;
+    if let Some(value) = &profile.params_backend {
+        anyhow::ensure!(
+            !value.is_empty()
+                && value.len() <= 512
+                && !value.contains('\0')
+                && !value.contains('\n'),
+            "parameter backend assignment is invalid"
+        );
+    }
     ensure_range(profile.video_frames, 1, 1024, "frames")?;
     ensure_range(profile.fps, 1, 120, "FPS")?;
     ensure_one_of(
@@ -864,6 +877,12 @@ mod tests {
 
         let diffusion = ModelProfile::Video(DiffusionProfile {
             max_vram: Some(512.0),
+            ..DiffusionProfile::default()
+        });
+        assert!(diffusion.validate("sdcpp-video:wan").is_err());
+
+        let diffusion = ModelProfile::Video(DiffusionProfile {
+            params_backend: Some("disk\n--unexpected".to_owned()),
             ..DiffusionProfile::default()
         });
         assert!(diffusion.validate("sdcpp-video:wan").is_err());

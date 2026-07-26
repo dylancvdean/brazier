@@ -11,7 +11,6 @@ import {
 } from '../api'
 import { modelEngine, modelKindFor } from '../model-utils'
 import {
-  AMD_APU_IMAGE_MAX_VRAM,
   AMD_APU_VIDEO_DEFAULTS,
   usesAmdApuVulkanDefaults
 } from '../runtime-defaults'
@@ -397,15 +396,16 @@ export function InferenceMenu({
                           ? AMD_APU_VIDEO_DEFAULTS.frames
                           : 16,
                         vaeTiling: useApuDefaults,
-                        clipOnCpu: useApuDefaults,
+                        clipOnCpu: useApuDefaults && modelKind === 'image',
                         diffusionFa: useApuDefaults,
-                        autoFit: useApuDefaults,
+                        autoFit: false,
                         maxVram:
                           useApuDefaults && modelKind === 'video'
                             ? AMD_APU_VIDEO_DEFAULTS.maxVram
-                            : useApuDefaults
-                              ? AMD_APU_IMAGE_MAX_VRAM
-                              : undefined,
+                            : undefined,
+                        paramsBackend:
+                          useApuDefaults && modelKind === 'video' ? 'disk' : undefined,
+                        streamLayers: useApuDefaults && modelKind === 'video',
                         offloadToCpu: false
                       }}
                       onChange={setProfileDraft}

@@ -4,10 +4,8 @@ export const AMD_APU_VIDEO_DEFAULTS = {
   width: 512,
   height: 320,
   frames: 17,
-  maxVram: 4
+  maxVram: 2
 } as const
-
-export const AMD_APU_IMAGE_MAX_VRAM = 8
 
 /** Whether sd.cpp should use its unified-memory Vulkan safety defaults. */
 export function usesAmdApuVulkanDefaults(

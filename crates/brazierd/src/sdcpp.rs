@@ -42,8 +42,7 @@ const IMAGE_TIMEOUT: Duration = Duration::from_secs(3600);
 const AMD_APU_VIDEO_WIDTH: u32 = 512;
 const AMD_APU_VIDEO_HEIGHT: u32 = 320;
 const AMD_APU_VIDEO_FRAMES: u32 = 17;
-const AMD_APU_IMAGE_VRAM_GIB: f32 = 8.0;
-const AMD_APU_VIDEO_VRAM_GIB: f32 = 4.0;
+const AMD_APU_VIDEO_VRAM_GIB: f32 = 2.0;
 /// Floor for a video job, covering model load plus a short clip.
 const VIDEO_TIMEOUT_BASE: Duration = Duration::from_secs(1800);
 /// Added per frame-step, so long clips are not cut off mid-render.
@@ -1226,13 +1225,23 @@ fn with_amd_apu_vulkan_defaults(
         profile.video_frames.get_or_insert(AMD_APU_VIDEO_FRAMES);
     }
     profile.vae_tiling.get_or_insert(true);
-    profile.clip_on_cpu.get_or_insert(true);
+    profile
+        .clip_on_cpu
+        .get_or_insert(modality == Modality::Image);
     profile.diffusion_fa.get_or_insert(true);
-    profile.auto_fit.get_or_insert(true);
-    profile.max_vram.get_or_insert(match modality {
-        Modality::Image => AMD_APU_IMAGE_VRAM_GIB,
-        Modality::Video => AMD_APU_VIDEO_VRAM_GIB,
-    });
+    // Upstream auto-fit currently enumerates only discrete GPU device types,
+    // so RADV integrated devices are skipped even though Vulkan can run them.
+    profile.auto_fit.get_or_insert(false);
+    if modality == Modality::Video {
+        profile.max_vram.get_or_insert(AMD_APU_VIDEO_VRAM_GIB);
+        // The Vulkan runtime still executes every phase. Disk parameter
+        // residency loads each phase/layer on demand and releases it afterward
+        // instead of keeping the whole pipeline in the UMA Vulkan heap.
+        profile
+            .params_backend
+            .get_or_insert_with(|| "disk".to_owned());
+        profile.stream_layers.get_or_insert(true);
+    }
     // This flag streams weights to the GPU every step. Unified memory does not
     // need that extra churn, and an explicit per-model `true` still wins.
     profile.offload_to_cpu.get_or_insert(false);
@@ -1354,6 +1363,12 @@ async fn apply_diffusion_profile(
     }
     if profile.offload_to_cpu.unwrap_or(false) {
         command.arg("--offload-to-cpu");
+    }
+    if let Some(value) = &profile.params_backend {
+        command.arg("--params-backend").arg(value);
+    }
+    if profile.stream_layers.unwrap_or(false) {
+        command.arg("--stream-layers");
     }
 
     // sd-cli takes one ControlNet per invocation, so the first enabled binding
@@ -1834,16 +1849,20 @@ mod tests {
         assert_eq!(image.vae_tiling, Some(true));
         assert_eq!(image.clip_on_cpu, Some(true));
         assert_eq!(image.diffusion_fa, Some(true));
-        assert_eq!(image.auto_fit, Some(true));
-        assert_eq!(image.max_vram, Some(AMD_APU_IMAGE_VRAM_GIB));
+        assert_eq!(image.auto_fit, Some(false));
+        assert_eq!(image.max_vram, None);
+        assert_eq!(image.params_backend, None);
+        assert_eq!(image.stream_layers, None);
         assert_eq!(image.offload_to_cpu, Some(false));
 
         let video = with_amd_apu_vulkan_defaults(None, true, Modality::Video).unwrap();
         assert_eq!(video.width, Some(AMD_APU_VIDEO_WIDTH));
         assert_eq!(video.height, Some(AMD_APU_VIDEO_HEIGHT));
         assert_eq!(video.video_frames, Some(AMD_APU_VIDEO_FRAMES));
-        assert_eq!(video.auto_fit, Some(true));
+        assert_eq!(video.auto_fit, Some(false));
         assert_eq!(video.max_vram, Some(AMD_APU_VIDEO_VRAM_GIB));
+        assert_eq!(video.params_backend.as_deref(), Some("disk"));
+        assert_eq!(video.stream_layers, Some(true));
     }
 
     #[test]
@@ -1855,6 +1874,8 @@ mod tests {
             diffusion_fa: Some(false),
             auto_fit: Some(false),
             max_vram: Some(6.0),
+            params_backend: Some("cpu".to_owned()),
+            stream_layers: Some(false),
             offload_to_cpu: Some(true),
             ..DiffusionProfile::default()
         };
@@ -1867,6 +1888,8 @@ mod tests {
         assert_eq!(profile.diffusion_fa, Some(false));
         assert_eq!(profile.auto_fit, Some(false));
         assert_eq!(profile.max_vram, Some(6.0));
+        assert_eq!(profile.params_backend.as_deref(), Some("cpu"));
+        assert_eq!(profile.stream_layers, Some(false));
         assert_eq!(profile.offload_to_cpu, Some(true));
 
         assert_eq!(
@@ -1875,12 +1898,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn saved_legacy_placement_still_inherits_new_residency_defaults() {
+        let configured = DiffusionProfile {
+            clip_on_cpu: Some(true),
+            offload_to_cpu: Some(false),
+            ..DiffusionProfile::default()
+        };
+        let profile =
+            with_amd_apu_vulkan_defaults(Some(&configured), true, Modality::Video).unwrap();
+        assert_eq!(profile.clip_on_cpu, Some(true));
+        assert_eq!(profile.offload_to_cpu, Some(false));
+        assert_eq!(profile.auto_fit, Some(false));
+        assert_eq!(profile.max_vram, Some(AMD_APU_VIDEO_VRAM_GIB));
+        assert_eq!(profile.params_backend.as_deref(), Some("disk"));
+        assert_eq!(profile.stream_layers, Some(true));
+    }
+
     #[tokio::test]
     async fn modern_residency_settings_reach_sd_cli() {
         let dir = tempdir().unwrap();
         let profile = DiffusionProfile {
-            auto_fit: Some(true),
             max_vram: Some(4.0),
+            params_backend: Some("disk".to_owned()),
+            stream_layers: Some(true),
             ..DiffusionProfile::default()
         };
         let mut command = Command::new("sd-cli");
@@ -1892,8 +1933,13 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(args.windows(1).any(|args| args == ["--auto-fit"]));
+        assert!(!args.iter().any(|arg| arg == "--auto-fit"));
         assert!(args.windows(2).any(|args| args == ["--max-vram", "4"]));
+        assert!(
+            args.windows(2)
+                .any(|args| args == ["--params-backend", "disk"])
+        );
+        assert!(args.iter().any(|arg| arg == "--stream-layers"));
     }
 
     #[test]
