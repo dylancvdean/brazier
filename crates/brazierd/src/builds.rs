@@ -521,9 +521,19 @@ pub fn diagnose_failure(
             "The Python environment did not finish correctly. Confirm `uv` is installed and retry the build; the log usually shows the first pip or import error.".into(),
         );
     }
-    if step == Some("Clone repository") && hints.is_empty() {
+    if step.is_some_and(|label| label.starts_with("Clone ")) && hints.is_empty() {
         hints.push(
             "Clone failed. Verify the repository URL and that the revision (branch, tag, or commit) exists.".into(),
+        );
+    }
+    if step == Some("Checkout selected revision") && hints.is_empty() {
+        hints.push(
+            "Checkout failed. Verify that the requested revision exists in the repository.".into(),
+        );
+    }
+    if step == Some("Initialize source submodules") {
+        hints.push(
+            "A required Git submodule could not be checked out. Verify its URL and your access to it, especially when building a private fork.".into(),
         );
     }
 
@@ -924,6 +934,48 @@ mod tests {
             "feature-new-model"
         );
         assert_eq!(sanitize_id_segment("--evil"), "evil");
+    }
+
+    #[test]
+    fn checkout_failures_receive_step_specific_hints() {
+        let clone = diagnose_failure(
+            "Clone source without running hooks failed with exit status: 128",
+            Some("Clone source without running hooks"),
+            "",
+            RuntimeTarget::Cpu,
+        );
+        assert!(
+            clone
+                .hints
+                .iter()
+                .any(|hint| hint.starts_with("Clone failed."))
+        );
+
+        let checkout = diagnose_failure(
+            "Checkout selected revision failed with exit status: 128",
+            Some("Checkout selected revision"),
+            "",
+            RuntimeTarget::Cpu,
+        );
+        assert!(
+            checkout
+                .hints
+                .iter()
+                .any(|hint| hint.starts_with("Checkout failed."))
+        );
+
+        let submodule = diagnose_failure(
+            "Initialize source submodules failed with exit status: 128",
+            Some("Initialize source submodules"),
+            "fatal: could not read from remote repository",
+            RuntimeTarget::Cpu,
+        );
+        assert!(
+            submodule
+                .hints
+                .iter()
+                .any(|hint| hint.contains("required Git submodule"))
+        );
     }
 
     #[test]

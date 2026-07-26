@@ -208,6 +208,20 @@ pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
                     "--".into(),
                 ],
             },
+            PlannedCommand {
+                label: "Initialize source submodules".to_owned(),
+                program: "git".to_owned(),
+                args: vec![
+                    "-c".into(),
+                    "core.hooksPath=".into(),
+                    "-C".into(),
+                    "{source}".into(),
+                    "submodule".into(),
+                    "update".into(),
+                    "--init".into(),
+                    "--recursive".into(),
+                ],
+            },
         ]
     };
     let skip_checkout = recipe.skip_checkout;
@@ -263,6 +277,44 @@ mod tests {
         .unwrap();
         assert!(plan.trusted_origin);
         assert!(plan.warning.is_none());
+    }
+
+    #[test]
+    fn initializes_submodules_after_checking_out_the_requested_revision() {
+        let plan = plan(BuildPlanRequest {
+            engine: "stable-diffusion.cpp".into(),
+            repository: "https://github.com/leejet/stable-diffusion.cpp.git".into(),
+            revision: "master".into(),
+            platform: "linux-x64".into(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            plan.checkout
+                .iter()
+                .map(|step| step.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Clone source without running hooks",
+                "Checkout selected revision",
+                "Initialize source submodules",
+            ]
+        );
+        let submodules = &plan.checkout[2];
+        assert_eq!(submodules.program, "git");
+        assert_eq!(
+            submodules.args,
+            [
+                "-c",
+                "core.hooksPath=",
+                "-C",
+                "{source}",
+                "submodule",
+                "update",
+                "--init",
+                "--recursive",
+            ]
+        );
     }
 
     #[test]
