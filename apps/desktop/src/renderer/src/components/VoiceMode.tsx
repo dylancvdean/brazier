@@ -130,6 +130,22 @@ export function VoiceMode(props: Props): React.JSX.Element {
     session.setMuted(next)
   }
 
+  /**
+   * Shown wherever the agent destination is in force. Speech reaching an agent
+   * means a misheard word can edit files and run commands, and the pieces that
+   * make it safe to say that casually — a reliable transcript, a confirmation
+   * step — are not built yet.
+   */
+  const agentWarning = (
+    <p className="voice-danger">
+      <AlertTriangle size={14} />
+      <span>
+        Voice control for agents is extremely experimental. Please don't use it on anything you care
+        about, and even then only if you know what you're doing.
+      </span>
+    </p>
+  )
+
   const statusLabel = starting
     ? 'Loading the voice model — first run takes a minute…'
     : live
@@ -231,6 +247,8 @@ export function VoiceMode(props: Props): React.JSX.Element {
           <span>{snapshot.notice ?? snapshot.voiceError}</span>
         </p>
       ) : null}
+
+      {live && config.voiceSessionTarget === 'agent' ? agentWarning : null}
 
       {live ? (
         <div className="voice-conversation">
@@ -364,6 +382,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
               <p className="voice-notice">
                 {TARGETS.find(([value]) => value === config.voiceSessionTarget)?.[2]}
               </p>
+              {config.voiceSessionTarget === 'agent' ? agentWarning : null}
             </div>
 
             <VoiceSessionConfig

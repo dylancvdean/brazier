@@ -175,6 +175,14 @@ renders the shared conversation itself, and has no text box. Speech already has
 a chosen destination, so a second input alongside it would be a second,
 unlabelled one.
 
+Pointing speech at the agent is marked experimental in the interface, and the
+warning is not decoration. A misheard word reaches a subsystem that edits files
+and runs commands, and the transcript is produced by segmenting a microphone on
+energy — so the words the agent acts on are the least reliable input in the
+application. The permission layer still judges every call, which is what stops
+this being dangerous rather than merely unwise, but nothing yet confirms a
+spoken instruction before it becomes one.
+
 Three cancellations stay separate, because they are different decisions:
 stopping the audio, dropping the current answer, and abandoning the agent task.
 Talking over the assistant does the first only — a long task survives a

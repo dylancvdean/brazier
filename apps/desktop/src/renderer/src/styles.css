@@ -4703,3 +4703,30 @@ label.span-2 {
   gap: 6px;
   color: var(--muted);
 }
+
+/* Louder than `.voice-notice`: this one is about what the agent can do to a
+   filesystem on the strength of a transcript. */
+.voice-danger {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #5a3033;
+  border-radius: 10px;
+  background: #1a1010;
+  color: #e7bdbd;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.voice-danger svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #e79a9a;
+}
+
+.voice-mode > .voice-danger {
+  margin: 0 max(20px, calc((100% - 900px) / 2));
+  margin-top: 12px;
+}
