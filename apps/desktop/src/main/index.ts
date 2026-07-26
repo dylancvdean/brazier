@@ -307,6 +307,30 @@ async function createWindow(): Promise<void> {
     if (url.startsWith('file://')) return
     event.preventDefault()
   })
+  // The app deliberately has no menu bar, and the menu bar is what normally
+  // carries reload and developer tools. Without them the only way to pick up a
+  // renderer change is quitting: Vite's module updates reach the page, but
+  // long-lived objects built once per mount — the session coordinator, an open
+  // audio graph — keep running the code they were constructed with.
+  if (!app.isPackaged) {
+    window.webContents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown') return
+      const accelerator = process.platform === 'darwin' ? input.meta : input.control
+      if (!accelerator) return
+      // Matched on physical key: Option+I on macOS produces a dead key rather
+      // than the letter.
+      if (input.code === 'KeyR') {
+        window.webContents.reload()
+        event.preventDefault()
+        return
+      }
+      if (input.alt && input.code === 'KeyI') {
+        window.webContents.toggleDevTools()
+        event.preventDefault()
+      }
+    })
+  }
+
   window.webContents.on('did-fail-load', (_event, code, description, validatedURL) => {
     console.error(`[brazier] renderer failed to load (${code}): ${description} @ ${validatedURL}`)
     if (!window.isDestroyed() && !window.isVisible()) window.show()

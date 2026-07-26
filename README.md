@@ -43,6 +43,15 @@ cargo test --workspace
 pnpm dev
 ```
 
+The window has no menu bar, so development builds bind the two things a menu
+would normally provide: `Cmd/Ctrl+R` reloads the renderer and
+`Cmd/Ctrl+Alt+I` toggles developer tools.
+
+Reload rather than trust hot updates when changing anything long-lived. Vite
+applies module updates to the page, but objects constructed once per mount —
+the session coordinator, an open audio graph — keep running the code they were
+built with. A live voice session needs restarting too, not just the page.
+
 The first launch shows a welcome checklist for host tools (git, cmake, a C++
 toolchain, uv, ffmpeg). To reopen it during development:
 
