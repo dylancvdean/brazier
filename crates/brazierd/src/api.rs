@@ -2437,6 +2437,12 @@ async fn audio_transcriptions(
     State(state): State<AppState>,
     Json(request): Json<TranscriptionRequest>,
 ) -> ApiResult<Response> {
+    // Timed and reported, because which interface should transcribe a spoken
+    // turn is an open question with two plausible answers — one binary
+    // invocation against a resident Python worker — and it cannot be settled by
+    // reasoning about them. `duration_ms` covers everything the daemon does with
+    // the audio: decode, convert, and run the engine.
+    let started = std::time::Instant::now();
     let settings = state.runtime.settings().await;
     let prefer_streaming = request.stream
         || request
@@ -2491,10 +2497,12 @@ async fn audio_transcriptions(
                 .map_err(ApiError::internal)?
                 .map_err(ApiError::bad_request)?;
             let _ = tokio::fs::remove_file(&wav).await;
-            return Ok(
-                Json(json!({ "text": text.trim(), "engine": streaming_asr::ENGINE }))
-                    .into_response(),
-            );
+            return Ok(Json(json!({
+                "text": text.trim(),
+                "engine": streaming_asr::ENGINE,
+                "duration_ms": started.elapsed().as_millis() as u64,
+            }))
+            .into_response());
         }
         let stream_events = stream! {
             while let Some(item) = events.recv().await {
@@ -2524,6 +2532,7 @@ async fn audio_transcriptions(
                                 "type": "transcription.done",
                                 "text": text,
                                 "engine": streaming_asr::ENGINE,
+                                "duration_ms": started.elapsed().as_millis() as u64,
                             }).to_string()));
                     }
                     Ok(streaming_asr::WorkerEvent::Error { message }) => {
@@ -2616,7 +2625,12 @@ async fn audio_transcriptions(
         .join("\n")
         .trim()
         .to_owned();
-    Ok(Json(json!({ "text": text, "engine": "whisper.cpp" })).into_response())
+    Ok(Json(json!({
+        "text": text,
+        "engine": whisper::ENGINE,
+        "duration_ms": started.elapsed().as_millis() as u64,
+    }))
+    .into_response())
 }
 
 async fn download_streaming_asr_model(

@@ -90,12 +90,35 @@ export type CoordinatorSnapshot = {
    */
   capture: { frames: number; peak: number; status: string }
   /**
+   * What transcription is costing, per interface that has served an utterance
+   * this session. Which one should transcribe a spoken turn is an open
+   * question — a whisper.cpp invocation per utterance against a resident
+   * Nemotron worker — and this is the number that answers it, on the machine
+   * the answer has to hold for.
+   */
+  transcription: TranscriptionCost[]
+  /**
    * The last thing the coordinator wanted to tell the user: agent status, or a
    * failure that did not stop the session. It is in the snapshot as well as on
    * the chat adapter because a host that shows no chat transcript would
    * otherwise drop it, and a turn failing silently looks like nothing happened.
    */
   notice: string | null
+}
+
+/** Rolling transcription cost for one ASR interface. */
+export type TranscriptionCost = {
+  engine: string
+  utterances: number
+  /** Most recent round trip, in milliseconds. */
+  lastMs: number
+  /** Mean round trip over the session. */
+  averageMs: number
+  /**
+   * Mean round trip divided by the length of the audio. Below 1 the interface
+   * transcribes faster than people speak, which is what a conversation needs.
+   */
+  realTimeFactor: number
 }
 
 export type CoordinatorDeps = {
@@ -157,6 +180,11 @@ export class SessionCoordinator {
   private notice: string | null = null
   private hearing: CoordinatorSnapshot['hearing'] = 'idle'
   private capture: CoordinatorSnapshot['capture'] = { frames: 0, peak: 0, status: '' }
+  /** Per-engine transcription totals; see `CoordinatorSnapshot.transcription`. */
+  private readonly transcription = new Map<
+    string,
+    { utterances: number; lastMs: number; totalMs: number; totalAudioSeconds: number }
+  >()
   private pendingRenewal: string | null = null
   private backchanneling = new Set<string>()
   private statusCued = new Set<string>()
@@ -292,6 +320,14 @@ export class SessionCoordinator {
       speakingCorrelationId: this.speakingCorrelationId,
       hearing: this.hearing,
       capture: this.capture,
+      transcription: [...this.transcription.entries()].map(([engine, totals]) => ({
+        engine,
+        utterances: totals.utterances,
+        lastMs: totals.lastMs,
+        averageMs: Math.round(totals.totalMs / Math.max(1, totals.utterances)),
+        realTimeFactor:
+          totals.totalAudioSeconds > 0 ? totals.totalMs / 1000 / totals.totalAudioSeconds : 0
+      })),
       notice: this.notice
     }
   }
@@ -740,6 +776,27 @@ export class SessionCoordinator {
       }
       case 'transcriptionStarted': {
         this.hearing = 'transcribing'
+        this.publish()
+        return
+      }
+      case 'transcriptionMeasured': {
+        const totals = this.transcription.get(event.engine) ?? {
+          utterances: 0,
+          lastMs: 0,
+          totalMs: 0,
+          totalAudioSeconds: 0
+        }
+        totals.utterances += 1
+        totals.lastMs = event.roundTripMs
+        totals.totalMs += event.roundTripMs
+        totals.totalAudioSeconds += event.audioSeconds
+        this.transcription.set(event.engine, totals)
+        this.emit('USER_VOICE_TRANSCRIBED', event.utteranceId, 'voice', {
+          engine: event.engine,
+          roundTripMs: event.roundTripMs,
+          engineMs: event.engineMs,
+          audioSeconds: Number(event.audioSeconds.toFixed(2))
+        })
         this.publish()
         return
       }

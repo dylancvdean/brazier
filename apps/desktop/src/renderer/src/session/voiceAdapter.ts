@@ -338,11 +338,27 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   }): Promise<void> {
     this.transcribing += 1
     this.publish({ type: 'transcriptionStarted', utteranceId: utterance.id })
+    const startedAt = Date.now()
+    const audioSeconds = utterance.samples.length / utterance.sampleRate
     try {
       // Padded so the decoder flushes its last words rather than dropping them.
       const audio = padTrailingSilence(utterance.samples, utterance.sampleRate)
-      const text = await transcribeAudio(encodeWav(audio, utterance.sampleRate), {
+      const result = await transcribeAudio(encodeWav(audio, utterance.sampleRate), {
         engine: this.options.asrEngine?.()
+      })
+      const text = result.text
+      const roundTripMs = Date.now() - startedAt
+      console.debug(
+        `[voice] ${result.engine} transcribed ${audioSeconds.toFixed(1)}s in ${roundTripMs}ms` +
+          (result.durationMs === null ? '' : ` (${result.durationMs}ms in the daemon)`)
+      )
+      this.publish({
+        type: 'transcriptionMeasured',
+        utteranceId: utterance.id,
+        engine: result.engine,
+        roundTripMs,
+        engineMs: result.durationMs,
+        audioSeconds
       })
       // Whatever leaked past the echo canceller is not a new question, and is
       // the one case where dropping the utterance without a word is correct.

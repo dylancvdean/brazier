@@ -473,22 +473,41 @@ export function updateConversation(
  * whisper.cpp or WhisperKit. The utterance is already complete either way, so
  * this asks for the collected text rather than an SSE stream.
  */
+export type Transcription = {
+  text: string
+  /**
+   * Which ASR interface actually served this, which is not always the one asked
+   * for: `auto` sends no preference and the daemon picks. Reported so a session
+   * can say what transcribed it rather than what it hoped would.
+   */
+  engine: string
+  /** How long the daemon spent on the audio: decode, convert, and engine. */
+  durationMs: number | null
+}
+
 export async function transcribeAudio(
   wav: Uint8Array,
   options: { signal?: AbortSignal; engine?: string } = {}
-): Promise<string> {
+): Promise<Transcription> {
   let binary = ''
   for (let index = 0; index < wav.length; index += 1) binary += String.fromCharCode(wav[index])
-  const payload = await request<{ text?: string }>('/v1/audio/transcriptions', {
-    method: 'POST',
-    signal: options.signal,
-    body: JSON.stringify({
-      file_base64: btoa(binary),
-      mime_type: 'audio/wav',
-      ...(options.engine ? { engine: options.engine } : {})
-    })
-  })
-  return (payload.text ?? '').trim()
+  const payload = await request<{ text?: string; engine?: string; duration_ms?: number }>(
+    '/v1/audio/transcriptions',
+    {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify({
+        file_base64: btoa(binary),
+        mime_type: 'audio/wav',
+        ...(options.engine ? { engine: options.engine } : {})
+      })
+    }
+  )
+  return {
+    text: (payload.text ?? '').trim(),
+    engine: payload.engine ?? options.engine ?? 'unknown',
+    durationMs: typeof payload.duration_ms === 'number' ? payload.duration_ms : null
+  }
 }
 
 export type ClientToolCall = {

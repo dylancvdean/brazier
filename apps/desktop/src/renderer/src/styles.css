@@ -4864,3 +4864,19 @@ label.span-2 {
   margin: 0 max(20px, calc((100% - 900px) / 2));
   margin-top: 12px;
 }
+
+/* What transcription is costing, per interface. Deliberately in the live pane
+   rather than a diagnostics panel: it is the number that decides which ASR
+   interface a machine should use, and it is only true while a session runs. */
+.voice-asr-cost {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 6px max(20px, calc((100% - 900px) / 2));
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}

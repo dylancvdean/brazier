@@ -7,6 +7,7 @@ import {
   MicOff,
   PhoneOff,
   Square,
+  Timer,
   Volume2,
   VolumeX
 } from 'lucide-react'
@@ -47,6 +48,12 @@ type Props = {
   /** The shared conversation. Voice turns land in it beside typed ones. */
   session: SessionCoordinatorHandle
   onError: (message: string | null) => void
+}
+
+/** Engine ids as the daemon reports them, in the words the UI uses elsewhere. */
+const ASR_LABELS: Record<string, string> = {
+  'whisper.cpp': 'Whisper',
+  'streaming-asr': 'Nemotron streaming'
 }
 
 function errorText(cause: unknown): string {
@@ -448,6 +455,23 @@ export function VoiceMode(props: Props): React.JSX.Element {
           </div>
         </div>
       )}
+
+      {/* Which interface should transcribe a spoken turn is an open question,
+          and the honest answer is whichever is faster on this machine. Say what
+          each one is actually costing rather than leaving it to be felt. */}
+      {live && snapshot.transcription.length > 0 ? (
+        <p className="voice-asr-cost">
+          <Timer size={12} />
+          {snapshot.transcription.map((cost) => (
+            <span key={cost.engine}>
+              {ASR_LABELS[cost.engine] ?? cost.engine}: {(cost.lastMs / 1000).toFixed(2)}s last,{' '}
+              {(cost.averageMs / 1000).toFixed(2)}s average over {cost.utterances}{' '}
+              {cost.utterances === 1 ? 'utterance' : 'utterances'} ({cost.realTimeFactor.toFixed(2)}×
+              real time)
+            </span>
+          ))}
+        </p>
+      ) : null}
 
       {live && config.showVoiceTranscripts && snapshot.voiceModelText ? (
         <details className="voice-model-text">

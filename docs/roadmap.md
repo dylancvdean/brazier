@@ -89,11 +89,17 @@
 The nearest-term track. Voice, chat, and the agent share one conversation now;
 what is left is mostly the difference between working and trustworthy.
 
-- **Whisper as the alternative transcription path.** The interface and the
-  preference already exist (`auto`, `whisper.cpp`, `streaming-asr`) and pick
-  whichever is installed. What is untested is batch whisper driving a spoken
-  turn, and whether one binary invocation beats a resident Python worker per
-  utterance — plausible, since it has no interpreter to start.
+- **Whisper as the alternative transcription path.** *Unblocked and measured;
+  the verdict needs a machine with both installed.* Batch whisper could not
+  transcribe a spoken turn at all: capture runs at 24 kHz, whisper.cpp reads
+  only 16 kHz and refuses rather than resamples, and a `.wav` extension was
+  taken as proof the audio was already right. WAVs are now inspected and
+  converted in process (downmix, decode, windowed-sinc resample) with no ffmpeg
+  in the way of a microphone. Every utterance is timed and attributed to the
+  interface that actually served it, and the live pane shows what each is
+  costing — last, average, and multiple of real time — so whether one binary
+  invocation beats a resident Python worker is now a reading rather than an
+  argument.
 - **Turn latency.** Transcription is about 0.18 s once the worker is warm, but a
   turn does not begin until 700 ms of silence has closed the utterance, so the
   wait is mostly that window. Shortening it trades directly against cutting

@@ -112,6 +112,26 @@ export type VoiceAdapterEvent =
   /** A finished utterance is being transcribed. */
   | { type: 'transcriptionStarted'; utteranceId: string }
   /**
+   * What transcribing one utterance cost, and which interface served it.
+   *
+   * Reported for every outcome, including an empty transcript, because the
+   * choice between batch whisper and a resident streaming worker is an open
+   * question that only measurement on real hardware can settle — and because a
+   * session that has become slow should be able to say so rather than feeling
+   * vaguely sluggish.
+   */
+  | {
+      type: 'transcriptionMeasured'
+      utteranceId: string
+      engine: string
+      /** Wall clock from sending the audio to holding the text. */
+      roundTripMs: number
+      /** What the daemon reports spending on the audio, when it says. */
+      engineMs: number | null
+      /** Audio length, so cost per second of speech is recoverable. */
+      audioSeconds: number
+    }
+  /**
    * Transcription returned nothing. Reported rather than dropped: silence is
    * indistinguishable from a pipeline that stopped working.
    */

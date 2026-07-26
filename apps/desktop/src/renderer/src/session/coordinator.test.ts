@@ -760,4 +760,55 @@ describe('observability', () => {
     voice.emit({ type: 'speechInterrupted', correlationId })
     expect(coordinator.metrics().interruptToSpeechStopMs).toEqual([15])
   })
+
+  /**
+   * Whether batch whisper or the resident streaming worker should transcribe a
+   * spoken turn is a question about this machine, and the session is the only
+   * thing in a position to answer it.
+   */
+  it('keeps what each transcription interface costs, separately', async () => {
+    const { coordinator, voice } = await live()
+    voice.emit({
+      type: 'transcriptionMeasured',
+      utteranceId: 'utt-1',
+      engine: 'whisper.cpp',
+      roundTripMs: 400,
+      engineMs: 380,
+      audioSeconds: 2
+    })
+    voice.emit({
+      type: 'transcriptionMeasured',
+      utteranceId: 'utt-2',
+      engine: 'whisper.cpp',
+      roundTripMs: 600,
+      engineMs: 560,
+      audioSeconds: 2
+    })
+    voice.emit({
+      type: 'transcriptionMeasured',
+      utteranceId: 'utt-3',
+      engine: 'streaming-asr',
+      roundTripMs: 180,
+      engineMs: 150,
+      audioSeconds: 2
+    })
+
+    const costs = coordinator.snapshot().transcription
+    expect(costs).toEqual([
+      {
+        engine: 'whisper.cpp',
+        utterances: 2,
+        lastMs: 600,
+        averageMs: 500,
+        realTimeFactor: 0.25
+      },
+      {
+        engine: 'streaming-asr',
+        utterances: 1,
+        lastMs: 180,
+        averageMs: 180,
+        realTimeFactor: 0.09
+      }
+    ])
+  })
 })

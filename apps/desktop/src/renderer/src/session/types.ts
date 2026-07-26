@@ -102,6 +102,8 @@ export type TaskState = {
 export type SessionEventType =
   | 'USER_TEXT_SUBMITTED'
   | 'USER_VOICE_PARTIAL'
+  /** One utterance transcribed: which interface served it, and what it cost. */
+  | 'USER_VOICE_TRANSCRIBED'
   | 'USER_VOICE_FINAL'
   | 'AGENT_REQUESTED'
   | 'AGENT_STARTED'
