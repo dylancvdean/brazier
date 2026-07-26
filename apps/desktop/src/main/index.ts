@@ -331,6 +331,19 @@ async function createWindow(): Promise<void> {
     })
   }
 
+  // Renderer logs go to the developer tools console, which is a different place
+  // from the terminal `pnpm dev` prints to — so "the console is silent" can mean
+  // either. Development builds forward them, making the terminal the one place
+  // to look.
+  if (!app.isPackaged) {
+    window.webContents.on('console-message', (event) => {
+      const label = `[renderer] ${event.message}`
+      if (event.level === 'error') console.error(label)
+      else if (event.level === 'warning') console.warn(label)
+      else console.log(label)
+    })
+  }
+
   window.webContents.on('did-fail-load', (_event, code, description, validatedURL) => {
     console.error(`[brazier] renderer failed to load (${code}): ${description} @ ${validatedURL}`)
     if (!window.isDestroyed() && !window.isVisible()) window.show()

@@ -246,10 +246,12 @@ export function VoiceMode(props: Props): React.JSX.Element {
                   count as speech — and only this tells them apart. */}
               <p className="voice-capture">
                 {snapshot.capture.frames === 0
-                  ? 'No audio is reaching the microphone tap yet.'
+                  ? `No audio is reaching the microphone tap yet${
+                      snapshot.capture.status ? ` — ${snapshot.capture.status}` : ''
+                    }.`
                   : `Microphone: ${snapshot.capture.frames} frames, loudest recent ${snapshot.capture.peak.toFixed(
                       3
-                    )} — speech has to clear ${SPEECH_THRESHOLD}.`}
+                    )} — speech has to clear ${SPEECH_THRESHOLD}. ${snapshot.capture.status}`}
               </p>
             </>
           ) : (

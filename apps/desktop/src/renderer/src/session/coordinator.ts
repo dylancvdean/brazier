@@ -87,7 +87,7 @@ export type CoordinatorSnapshot = {
    * graph is not running; frames with a peak under the gate means the room or
    * the gain is too quiet.
    */
-  capture: { frames: number; peak: number }
+  capture: { frames: number; peak: number; status: string }
   /**
    * The last thing the coordinator wanted to tell the user: agent status, or a
    * failure that did not stop the session. It is in the snapshot as well as on
@@ -144,7 +144,7 @@ export class SessionCoordinator {
   private speakingCorrelationId: string | null = null
   private notice: string | null = null
   private hearing: CoordinatorSnapshot['hearing'] = 'idle'
-  private capture: CoordinatorSnapshot['capture'] = { frames: 0, peak: 0 }
+  private capture: CoordinatorSnapshot['capture'] = { frames: 0, peak: 0, status: '' }
   private pendingRenewal: string | null = null
   private backchanneling = new Set<string>()
   private statusCued = new Set<string>()
@@ -680,7 +680,7 @@ export class SessionCoordinator {
         return
       }
       case 'captureLevel': {
-        this.capture = { frames: event.frames, peak: event.peak }
+        this.capture = { frames: event.frames, peak: event.peak, status: event.status }
         this.publish()
         return
       }

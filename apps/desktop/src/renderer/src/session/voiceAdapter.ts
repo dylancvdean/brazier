@@ -32,8 +32,8 @@ import { PlatformSpeechRenderer, type SpeechRenderer } from './speechRenderer'
 import type { SpeechRequest, VoiceContext } from './types'
 import { renderVoicePrompt } from './voiceContext'
 
-/** How often the capture level is reported, in milliseconds. */
-const CAPTURE_REPORT_MS = 500
+/** How often the capture path reports its state, in milliseconds. */
+const CAPTURE_REPORT_MS = 1000
 
 /** How long to wait for the first microphone frame before reporting silence. */
 const CAPTURE_GRACE_MS = 2000
@@ -68,7 +68,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   private modelAudioEnabled = true
   private captureFrames = 0
   private capturePeak = 0
-  private captureReportedAt = 0
+  private captureTimer: number | null = null
 
   constructor(private readonly options: PersonaPlexAdapterOptions = {}) {
     this.renderer = options.renderer ?? new PlatformSpeechRenderer()
@@ -127,6 +127,9 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     stream.setOutputGate(this.modelAudioEnabled)
     this.stream = stream
     this.sessionId = session.id
+    this.captureFrames = 0
+    this.capturePeak = 0
+    this.startCaptureReports(stream)
     // A capture path that produces nothing is silent by nature, so ask it what
     // state it is in rather than waiting for a symptom that never comes.
     setTimeout(() => {
@@ -222,6 +225,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     const sessionId = this.sessionId
     // Cleared first so the socket closing is not reported as a session failure.
     this.sessionId = null
+    this.stopCaptureReports()
     this.renderer.stop()
     this.speaking = null
     this.segmenter?.flush()
@@ -254,12 +258,35 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     this.segmenter?.push(samples, sampleRate)
     this.captureFrames += 1
     this.capturePeak = Math.max(this.capturePeak, frameRms(samples))
-    const now = Date.now()
-    if (now - this.captureReportedAt < CAPTURE_REPORT_MS) return
-    this.captureReportedAt = now
-    this.publish({ type: 'captureLevel', frames: this.captureFrames, peak: this.capturePeak })
-    // Peak is per window, so a loud moment does not mask a subsequent silence.
-    this.capturePeak = 0
+  }
+
+  /**
+   * Publish the state of the capture path on a timer.
+   *
+   * Driven by a clock rather than by arriving frames, because zero frames is
+   * the case that most needs reporting and a frame callback cannot report it.
+   */
+  private startCaptureReports(stream: VoiceStream): void {
+    this.stopCaptureReports()
+    this.captureTimer = window.setInterval(() => {
+      if (this.stream !== stream) {
+        this.stopCaptureReports()
+        return
+      }
+      this.publish({
+        type: 'captureLevel',
+        frames: this.captureFrames,
+        peak: this.capturePeak,
+        status: stream.inputStatus()
+      })
+      // Peak is per window, so a loud moment cannot mask a later silence.
+      this.capturePeak = 0
+    }, CAPTURE_REPORT_MS)
+  }
+
+  private stopCaptureReports(): void {
+    if (this.captureTimer !== null) window.clearInterval(this.captureTimer)
+    this.captureTimer = null
   }
 
   private async transcribe(utterance: {
