@@ -32,11 +32,14 @@ export type UtteranceSegmenterHandlers = {
   onUtterance?: (utterance: { id: string; samples: Float32Array; sampleRate: number }) => void
 }
 
+/** The level speech has to clear, exposed so the UI can say what it is. */
+export const SPEECH_THRESHOLD = 0.006
+
 const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   // Low enough for a quiet microphone at modest gain. A fixed 0.02 was above
   // some working setups entirely, and a gate that never opens produces no
   // utterance, no transcript, and no error — the session simply ignores you.
-  threshold: 0.006,
+  threshold: SPEECH_THRESHOLD,
   // At 20 ms per frame: 60 ms to open, 700 ms of silence to close, 200 ms of
   // voiced audio to count as a turn, 30 s cap.
   framesToOpen: 3,
@@ -47,6 +50,11 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
 
 /** Silence kept at the end of an utterance, so ASR sees a clean release. */
 const TRAILING_SILENCE_FRAMES = 5
+
+/** Loudness of one captured frame, on the same scale as `threshold`. */
+export function frameRms(samples: Float32Array): number {
+  return rms(samples)
+}
 
 function rms(samples: Float32Array): number {
   let sum = 0

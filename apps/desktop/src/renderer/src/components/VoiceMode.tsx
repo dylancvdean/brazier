@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { BundledTool, LocalModel, RuntimeSettings } from '../api'
+import { SPEECH_THRESHOLD } from '../audio/utterance'
 import { modelDisplayName } from '../model-utils'
 import type { VoiceSessionTarget } from '../session/config'
 import type { SessionCoordinatorHandle } from '../session/useSessionCoordinator'
@@ -224,11 +225,24 @@ export function VoiceMode(props: Props): React.JSX.Element {
       {live ? (
         <div className="voice-conversation">
           {snapshot.messages.length === 0 && !snapshot.streamingText ? (
-            <p className="voice-hint">
-              {config.voiceSessionTarget === 'neither'
-                ? 'Speak whenever you like. Nothing is recorded — this is PersonaPlex on its own.'
-                : 'Speak whenever you like. Pause when you are done and the turn is sent.'}
-            </p>
+            <>
+              <p className="voice-hint">
+                {config.voiceSessionTarget === 'neither'
+                  ? 'Speak whenever you like. Nothing is recorded — this is PersonaPlex on its own.'
+                  : 'Speak whenever you like. Pause when you are done and the turn is sent.'}
+              </p>
+              {/* Until the first turn lands, say what the microphone is
+                  actually delivering. "Nothing happened" has two causes that
+                  look identical — no audio arriving, and audio too quiet to
+                  count as speech — and only this tells them apart. */}
+              <p className="voice-capture">
+                {snapshot.capture.frames === 0
+                  ? 'No audio is reaching the microphone tap yet.'
+                  : `Microphone: ${snapshot.capture.frames} frames, loudest recent ${snapshot.capture.peak.toFixed(
+                      3
+                    )} — speech has to clear ${SPEECH_THRESHOLD}.`}
+              </p>
+            </>
           ) : (
             snapshot.messages.map((message) => (
               <article className={`voice-turn ${message.role} ${message.status}`} key={message.id}>

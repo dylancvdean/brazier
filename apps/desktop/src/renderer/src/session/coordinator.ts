@@ -82,6 +82,13 @@ export type CoordinatorSnapshot = {
    */
   hearing: 'idle' | 'speaking' | 'transcribing'
   /**
+   * What the microphone has delivered: total frames, and the loudest recent
+   * frame on the same scale as the speech gate. Zero frames means the capture
+   * graph is not running; frames with a peak under the gate means the room or
+   * the gain is too quiet.
+   */
+  capture: { frames: number; peak: number }
+  /**
    * The last thing the coordinator wanted to tell the user: agent status, or a
    * failure that did not stop the session. It is in the snapshot as well as on
    * the chat adapter because a host that shows no chat transcript would
@@ -137,6 +144,7 @@ export class SessionCoordinator {
   private speakingCorrelationId: string | null = null
   private notice: string | null = null
   private hearing: CoordinatorSnapshot['hearing'] = 'idle'
+  private capture: CoordinatorSnapshot['capture'] = { frames: 0, peak: 0 }
   private pendingRenewal: string | null = null
   private backchanneling = new Set<string>()
   private statusCued = new Set<string>()
@@ -251,6 +259,7 @@ export class SessionCoordinator {
       voiceModelText: this.voiceModelText,
       speakingCorrelationId: this.speakingCorrelationId,
       hearing: this.hearing,
+      capture: this.capture,
       notice: this.notice
     }
   }
@@ -668,6 +677,11 @@ export class SessionCoordinator {
         this.hearing = 'speaking'
         this.publish()
         void this.onBargeIn()
+        return
+      }
+      case 'captureLevel': {
+        this.capture = { frames: event.frames, peak: event.peak }
+        this.publish()
         return
       }
       case 'transcriptionStarted': {

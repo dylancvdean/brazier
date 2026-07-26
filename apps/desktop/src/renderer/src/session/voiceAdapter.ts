@@ -25,12 +25,15 @@ import {
   type VoiceSessionInfo
 } from '../api'
 import { VoiceStream, voiceStreamSupported } from '../audio/voiceStream'
-import { UtteranceSegmenter, encodeWav } from '../audio/utterance'
+import { UtteranceSegmenter, encodeWav, frameRms } from '../audio/utterance'
 import type { VoiceAdapter, VoiceAdapterEvent, VoiceSessionHandle } from './adapters'
 import { isEchoOfSpokenText } from './echoGuard'
 import { PlatformSpeechRenderer, type SpeechRenderer } from './speechRenderer'
 import type { SpeechRequest, VoiceContext } from './types'
 import { renderVoicePrompt } from './voiceContext'
+
+/** How often the capture level is reported, in milliseconds. */
+const CAPTURE_REPORT_MS = 500
 
 export type PersonaPlexAdapterOptions = {
   /** PersonaPlex model to run; empty picks the daemon's default. */
@@ -60,6 +63,9 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   private lastSpokenText: string | null = null
   /** Whether PersonaPlex's own voice is audible. See `setModelAudioEnabled`. */
   private modelAudioEnabled = true
+  private captureFrames = 0
+  private capturePeak = 0
+  private captureReportedAt = 0
 
   constructor(private readonly options: PersonaPlexAdapterOptions = {}) {
     this.renderer = options.renderer ?? new PlatformSpeechRenderer()
@@ -96,7 +102,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       onText: (text) => this.publish({ type: 'modelText', text }),
       onInputLevel: this.options.onInputLevel,
       onOutputLevel: this.options.onOutputLevel,
-      onCaptureFrame: (samples, sampleRate) => this.segmenter?.push(samples, sampleRate),
+      onCaptureFrame: (samples, sampleRate) => this.onCaptureFrame(samples, sampleRate),
       onError: (error) => this.publish({ type: 'sessionError', error, fatal: false }),
       onState: (state) => {
         if (state === 'closed' && this.sessionId) {
@@ -216,6 +222,26 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   /** True while at least one utterance is being transcribed. */
   isTranscribing(): boolean {
     return this.transcribing > 0
+  }
+
+  /**
+   * Feed the segmenter, and report what the microphone is delivering.
+   *
+   * The report exists because a session that hears nothing looks the same
+   * whether no frames are arriving or every frame is below the speech gate,
+   * and the difference decides whether to look at the capture graph or the
+   * threshold.
+   */
+  private onCaptureFrame(samples: Float32Array, sampleRate: number): void {
+    this.segmenter?.push(samples, sampleRate)
+    this.captureFrames += 1
+    this.capturePeak = Math.max(this.capturePeak, frameRms(samples))
+    const now = Date.now()
+    if (now - this.captureReportedAt < CAPTURE_REPORT_MS) return
+    this.captureReportedAt = now
+    this.publish({ type: 'captureLevel', frames: this.captureFrames, peak: this.capturePeak })
+    // Peak is per window, so a loud moment does not mask a subsequent silence.
+    this.capturePeak = 0
   }
 
   private async transcribe(utterance: {

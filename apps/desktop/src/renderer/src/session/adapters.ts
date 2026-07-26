@@ -102,6 +102,13 @@ export type VoiceAdapterEvent =
   | { type: 'userTranscriptFinal'; utteranceId: string; text: string }
   /** The user started talking; the coordinator decides whether to duck audio. */
   | { type: 'userSpeechStarted'; utteranceId: string }
+  /**
+   * What the microphone is delivering, sampled periodically. Reported because
+   * "nothing happened" has two very different causes — no frames arriving at
+   * all, and frames too quiet to count as speech — and they are not otherwise
+   * distinguishable from outside.
+   */
+  | { type: 'captureLevel'; frames: number; peak: number }
   /** A finished utterance is being transcribed. */
   | { type: 'transcriptionStarted'; utteranceId: string }
   /**
