@@ -76,6 +76,12 @@ export type CoordinatorSnapshot = {
   voiceModelText: string
   speakingCorrelationId: string | null
   /**
+   * Where the microphone has got to. Voice has more silent steps than any other
+   * surface — speech detection, transcription, routing — and each one looks
+   * exactly like nobody having spoken.
+   */
+  hearing: 'idle' | 'speaking' | 'transcribing'
+  /**
    * The last thing the coordinator wanted to tell the user: agent status, or a
    * failure that did not stop the session. It is in the snapshot as well as on
    * the chat adapter because a host that shows no chat transcript would
@@ -130,6 +136,7 @@ export class SessionCoordinator {
   private voiceError: string | null = null
   private speakingCorrelationId: string | null = null
   private notice: string | null = null
+  private hearing: CoordinatorSnapshot['hearing'] = 'idle'
   private pendingRenewal: string | null = null
   private backchanneling = new Set<string>()
   private statusCued = new Set<string>()
@@ -243,6 +250,7 @@ export class SessionCoordinator {
       partialTranscript: this.partialTranscript,
       voiceModelText: this.voiceModelText,
       speakingCorrelationId: this.speakingCorrelationId,
+      hearing: this.hearing,
       notice: this.notice
     }
   }
@@ -657,7 +665,21 @@ export class SessionCoordinator {
   private onVoiceEvent(event: VoiceAdapterEvent): void {
     switch (event.type) {
       case 'userSpeechStarted': {
+        this.hearing = 'speaking'
+        this.publish()
         void this.onBargeIn()
+        return
+      }
+      case 'transcriptionStarted': {
+        this.hearing = 'transcribing'
+        this.publish()
+        return
+      }
+      case 'transcriptionEmpty': {
+        // Every other step reports itself; without this one an utterance that
+        // transcribed to nothing is indistinguishable from one never heard.
+        this.hearing = 'idle'
+        this.report('That came back with no words in it. Try speaking a little longer.')
         return
       }
       case 'userTranscriptPartial': {
@@ -744,6 +766,7 @@ export class SessionCoordinator {
 
   private async onTranscriptFinal(utteranceId: string, text: string): Promise<void> {
     const trimmed = text.trim()
+    this.hearing = 'idle'
     this.partialTranscript = ''
     if (!trimmed) return
     // One utterance is one turn even if the transcript is delivered twice.

@@ -137,7 +137,13 @@ export function VoiceMode(props: Props): React.JSX.Element {
           ? 'Speaking'
           : working
             ? 'Working on your request'
-            : 'Listening'
+            : // Speech detection and transcription can each stall without a
+              // word, so the bar names the step the microphone has reached.
+              snapshot.hearing === 'speaking'
+              ? 'Hearing you…'
+              : snapshot.hearing === 'transcribing'
+                ? 'Transcribing…'
+                : 'Listening'
       : snapshot.voiceStatus === 'error'
         ? `Stopped: ${snapshot.voiceError ?? 'unknown error'}`
         : blockedReason || 'Ready — press Start conversation'

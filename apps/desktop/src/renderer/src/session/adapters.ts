@@ -102,6 +102,13 @@ export type VoiceAdapterEvent =
   | { type: 'userTranscriptFinal'; utteranceId: string; text: string }
   /** The user started talking; the coordinator decides whether to duck audio. */
   | { type: 'userSpeechStarted'; utteranceId: string }
+  /** A finished utterance is being transcribed. */
+  | { type: 'transcriptionStarted'; utteranceId: string }
+  /**
+   * Transcription returned nothing. Reported rather than dropped: silence is
+   * indistinguishable from a pipeline that stopped working.
+   */
+  | { type: 'transcriptionEmpty'; utteranceId: string }
   | { type: 'speechStarted'; correlationId: string }
   | { type: 'speechCompleted'; correlationId: string }
   | { type: 'speechInterrupted'; correlationId: string }

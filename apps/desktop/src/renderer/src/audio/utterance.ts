@@ -33,7 +33,10 @@ export type UtteranceSegmenterHandlers = {
 }
 
 const DEFAULTS: Required<UtteranceSegmenterOptions> = {
-  threshold: 0.02,
+  // Low enough for a quiet microphone at modest gain. A fixed 0.02 was above
+  // some working setups entirely, and a gate that never opens produces no
+  // utterance, no transcript, and no error — the session simply ignores you.
+  threshold: 0.006,
   // At 20 ms per frame: 60 ms to open, 700 ms of silence to close, 200 ms of
   // voiced audio to count as a turn, 30 s cap.
   framesToOpen: 3,

@@ -224,13 +224,21 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     sampleRate: number
   }): Promise<void> {
     this.transcribing += 1
+    this.publish({ type: 'transcriptionStarted', utteranceId: utterance.id })
     try {
       const text = await transcribeAudio(encodeWav(utterance.samples, utterance.sampleRate), {
         engine: this.options.asrEngine?.()
       })
-      if (!text) return
-      // Whatever leaked past the echo canceller is not a new question.
-      if (isEchoOfSpokenText(text, this.lastSpokenText)) return
+      // Whatever leaked past the echo canceller is not a new question, and is
+      // the one case where dropping the utterance without a word is correct.
+      if (isEchoOfSpokenText(text, this.lastSpokenText)) {
+        this.publish({ type: 'transcriptionEmpty', utteranceId: utterance.id })
+        return
+      }
+      if (!text) {
+        this.publish({ type: 'transcriptionEmpty', utteranceId: utterance.id })
+        return
+      }
       this.publish({ type: 'userTranscriptFinal', utteranceId: utterance.id, text })
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)

@@ -45,6 +45,21 @@ describe('UtteranceSegmenter', () => {
     expect(utterances[1].id).not.toBe(utterances[0].id)
   })
 
+  /**
+   * The failure this guards: a gate above the microphone's actual speech level
+   * never opens, and produces no utterance, no transcript, and no error — the
+   * session just ignores you. Microphone gain varies by an order of magnitude
+   * across machines, so the floor has to suit a quiet one.
+   */
+  it('opens for speech that is quiet in absolute terms', () => {
+    const utterances: unknown[] = []
+    const segmenter = new UtteranceSegmenter({ onUtterance: (value) => utterances.push(value) })
+    feed(segmenter, 0.0005, 40) // a quiet room
+    feed(segmenter, 0.015, 25) // well under the old fixed 0.02 threshold
+    feed(segmenter, 0.0005, 40)
+    expect(utterances).toHaveLength(1)
+  })
+
   it('does not break an utterance at a short pause', () => {
     const utterances: number[] = []
     const segmenter = new UtteranceSegmenter({
