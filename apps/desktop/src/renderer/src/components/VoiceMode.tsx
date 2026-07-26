@@ -464,10 +464,10 @@ export function VoiceMode(props: Props): React.JSX.Element {
           <Timer size={12} />
           {snapshot.transcription.map((cost) => (
             <span key={cost.engine}>
-              {ASR_LABELS[cost.engine] ?? cost.engine}: {(cost.lastMs / 1000).toFixed(2)}s last,{' '}
-              {(cost.averageMs / 1000).toFixed(2)}s average over {cost.utterances}{' '}
-              {cost.utterances === 1 ? 'utterance' : 'utterances'} ({cost.realTimeFactor.toFixed(2)}×
-              real time)
+              {ASR_LABELS[cost.engine] ?? cost.engine}: {(cost.averageMs / 1000).toFixed(2)}s per
+              utterance ({cost.realTimeFactor.toFixed(2)}× real time), of which{' '}
+              {(cost.averageWaitMs / 1000).toFixed(2)}s waited for — {cost.startedAtPause} of{' '}
+              {cost.utterances} started at a pause
             </span>
           ))}
         </p>

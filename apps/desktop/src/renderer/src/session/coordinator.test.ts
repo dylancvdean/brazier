@@ -773,24 +773,30 @@ describe('observability', () => {
       utteranceId: 'utt-1',
       engine: 'whisper.cpp',
       roundTripMs: 400,
+      waitedMs: 20,
       engineMs: 380,
-      audioSeconds: 2
+      audioSeconds: 2,
+      startedAtPause: true
     })
     voice.emit({
       type: 'transcriptionMeasured',
       utteranceId: 'utt-2',
       engine: 'whisper.cpp',
       roundTripMs: 600,
+      waitedMs: 600,
       engineMs: 560,
-      audioSeconds: 2
+      audioSeconds: 2,
+      startedAtPause: false
     })
     voice.emit({
       type: 'transcriptionMeasured',
       utteranceId: 'utt-3',
       engine: 'streaming-asr',
       roundTripMs: 180,
+      waitedMs: 180,
       engineMs: 150,
-      audioSeconds: 2
+      audioSeconds: 2,
+      startedAtPause: false
     })
 
     const costs = coordinator.snapshot().transcription
@@ -800,6 +806,8 @@ describe('observability', () => {
         utterances: 2,
         lastMs: 600,
         averageMs: 500,
+        averageWaitMs: 310,
+        startedAtPause: 1,
         realTimeFactor: 0.25
       },
       {
@@ -807,8 +815,12 @@ describe('observability', () => {
         utterances: 1,
         lastMs: 180,
         averageMs: 180,
+        averageWaitMs: 180,
+        startedAtPause: 0,
         realTimeFactor: 0.09
       }
     ])
+    // What the turn waited is the number the latency work is judged on.
+    expect(coordinator.metrics().transcriptWaitMs).toEqual([20, 600, 180])
   })
 })

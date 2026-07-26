@@ -100,12 +100,18 @@ what is left is mostly the difference between working and trustworthy.
   costing — last, average, and multiple of real time — so whether one binary
   invocation beats a resident Python worker is now a reading rather than an
   argument.
-- **Turn latency.** Transcription is about 0.18 s once the worker is warm, but a
-  turn does not begin until 700 ms of silence has closed the utterance, so the
-  wait is mostly that window. Shortening it trades directly against cutting
-  people off mid-sentence; feeding the streaming endpoint continuously and
-  taking real partial transcripts is the better answer, and the coordinator
-  already accepts partials it never receives.
+- **Turn latency.** *Transcription moved inside the silence window; the window
+  itself is unchanged.* A turn used to wait for 700 ms of silence and then wait
+  again while the audio decoded. Transcription now starts at the first 300 ms
+  pause, and when that pause turns out to be the end of the turn — which is most
+  of them — the transcript is already in hand when the gate closes, so the
+  second wait is gone. The audio is byte-identical to what closing delivers, so
+  the early transcript can be the final one; when speech resumes instead, it is
+  shown as a partial and discarded, which is what the coordinator's unused
+  partial path was for. What each utterance waited for is measured beside what
+  it cost. Still open: continuous feeding of the streaming endpoint, which needs
+  a session protocol in the Python worker rather than a file per request, and
+  would give word-incremental partials and let the close window itself shrink.
 - **Voice activity detection that adapts to the room.** The gate is a fixed RMS
   floor chosen to suit a quiet microphone. A noise-floor tracker was written and
   backed out: it only learned from frames below the gate, so steady noise above

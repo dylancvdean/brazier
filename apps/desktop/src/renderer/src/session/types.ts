@@ -179,6 +179,11 @@ export type DiagnosticRecord = {
 }
 
 export type SessionMetrics = {
+  /**
+   * Utterance close to transcript in hand: the silence between someone
+   * finishing a sentence and anything at all happening.
+   */
+  transcriptWaitMs: number[]
   /** Final transcript to agent start. */
   transcriptToAgentStartMs: number[]
   /** Agent final response to speech start. */

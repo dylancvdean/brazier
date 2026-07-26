@@ -91,6 +91,76 @@ describe('UtteranceSegmenter', () => {
     expect(lengths[0]).toBeLessThanOrEqual(50 * FRAME)
   })
 
+  /**
+   * The pause snapshot exists so transcription can happen inside the silence
+   * window instead of after it. That only works if the audio offered at the
+   * pause is what the closed utterance turns out to be — otherwise the
+   * transcript describes something the user did not finish saying.
+   */
+  it('offers the utterance at a pause, identical to what closing delivers', () => {
+    const pauses: Array<{ id: string; samples: Float32Array; voicedFrames: number }> = []
+    const utterances: Array<{ id: string; samples: Float32Array; voicedFrames: number }> = []
+    const segmenter = new UtteranceSegmenter({
+      onPause: (snapshot) => pauses.push(snapshot),
+      onUtterance: (utterance) => utterances.push(utterance)
+    })
+
+    feed(segmenter, 0.5, 25)
+    expect(pauses).toHaveLength(0)
+    feed(segmenter, 0.001, 15) // framesToPause
+    expect(pauses).toHaveLength(1)
+    expect(utterances).toHaveLength(0)
+
+    feed(segmenter, 0.001, 20) // on to framesToClose
+    expect(utterances).toHaveLength(1)
+    expect(utterances[0].id).toBe(pauses[0].id)
+    expect(utterances[0].voicedFrames).toBe(pauses[0].voicedFrames)
+    expect(Array.from(utterances[0].samples)).toEqual(Array.from(pauses[0].samples))
+  })
+
+  it('says how much speech there was, so a stale snapshot is recognisable', () => {
+    const pauses: number[] = []
+    const utterances: number[] = []
+    const segmenter = new UtteranceSegmenter({
+      onPause: ({ voicedFrames }) => pauses.push(voicedFrames),
+      onUtterance: ({ voicedFrames }) => utterances.push(voicedFrames)
+    })
+
+    feed(segmenter, 0.5, 25)
+    feed(segmenter, 0.001, 15)
+    expect(pauses).toHaveLength(1)
+    // Speech resumes: the snapshot no longer covers the whole utterance.
+    feed(segmenter, 0.5, 25)
+    feed(segmenter, 0.001, 40)
+    expect(utterances[0]).toBeGreaterThan(pauses[0])
+  })
+
+  it('does not offer a pause for every gap in a hesitant sentence', () => {
+    const pauses: number[] = []
+    const segmenter = new UtteranceSegmenter({ onPause: () => pauses.push(1) })
+    feed(segmenter, 0.5, 25)
+    feed(segmenter, 0.001, 15)
+    expect(pauses).toHaveLength(1)
+    for (let round = 0; round < 2; round += 1) {
+      feed(segmenter, 0.5, 4) // a word, under framesBetweenPauses
+      feed(segmenter, 0.001, 15)
+    }
+    expect(pauses).toHaveLength(1)
+
+    // Enough new speech, though, and the snapshot is worth taking again.
+    feed(segmenter, 0.5, 12)
+    feed(segmenter, 0.001, 15)
+    expect(pauses).toHaveLength(2)
+  })
+
+  it('offers nothing for a sound too short to be a turn', () => {
+    const pauses: unknown[] = []
+    const segmenter = new UtteranceSegmenter({ onPause: (value) => pauses.push(value) })
+    feed(segmenter, 0.6, 4)
+    feed(segmenter, 0.001, 20)
+    expect(pauses).toHaveLength(0)
+  })
+
   it('flushes a partial utterance on demand', () => {
     const utterances: unknown[] = []
     const segmenter = new UtteranceSegmenter({ onUtterance: (value) => utterances.push(value) })

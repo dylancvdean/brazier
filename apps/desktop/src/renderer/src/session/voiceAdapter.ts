@@ -34,6 +34,7 @@ import {
 import type { VoiceAdapter, VoiceAdapterEvent, VoiceSessionHandle } from './adapters'
 import { isEchoOfSpokenText } from './echoGuard'
 import { PlatformSpeechRenderer, type SpeechRenderer } from './speechRenderer'
+import { coversUtterance } from './speculativeTranscript'
 import type { SpeechRequest, VoiceContext } from './types'
 import { renderVoicePrompt } from './voiceContext'
 
@@ -71,6 +72,18 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   private lastSpokenText: string | null = null
   /** Whether PersonaPlex's own voice is audible. See `setModelAudioEnabled`. */
   private modelAudioEnabled = true
+  /**
+   * A transcription started at a pause, before the utterance closed. Kept so
+   * the close can adopt it instead of paying for the same audio twice.
+   */
+  private speculative: {
+    utteranceId: string
+    voicedFrames: number
+    sampleCount: number
+    audioSeconds: number
+    startedAt: number
+    done: Promise<{ text: string; engine: string; engineMs: number | null; roundTripMs: number }>
+  } | null = null
   private captureFrames = 0
   private capturePeak = 0
   private captureTimer: number | null = null
@@ -129,6 +142,11 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       onSustainedSpeech: (utteranceId) => {
         console.debug(`[voice] sustained speech (${utteranceId}) — interrupting`)
         this.publish({ type: 'userSpeechStarted', utteranceId })
+      },
+      onPause: (snapshot) => {
+        const seconds = (snapshot.samples.length / snapshot.sampleRate).toFixed(2)
+        console.debug(`[voice] pause in ${snapshot.id} at ${seconds}s — transcribing ahead`)
+        this.onPause(snapshot)
       },
       onUtterance: (utterance) => {
         const seconds = (utterance.samples.length / utterance.sampleRate).toFixed(2)
@@ -272,6 +290,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     this.speaking = null
     this.segmenter?.flush()
     this.segmenter = null
+    this.speculative = null
     await this.stream?.stop()
     this.stream = null
     if (sessionId) await endVoiceSession(sessionId).catch(() => undefined)
@@ -331,34 +350,115 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     this.captureTimer = null
   }
 
+  /**
+   * Transcribe the utterance so far, while the close window is still running.
+   *
+   * A turn cannot start until the silence gate closes, and then it used to wait
+   * again while the audio was decoded. Most pauses of this length are the end of
+   * the sentence, so the transcript is usually already in hand when the gate
+   * closes and the second wait disappears. When speech resumes instead, the
+   * result is a partial — display only, never a turn — and the work is lost,
+   * which is the trade being made.
+   */
+  private onPause(snapshot: {
+    id: string
+    samples: Float32Array
+    sampleRate: number
+    voicedFrames: number
+  }): void {
+    const pending = this.startTranscription(snapshot.samples, snapshot.sampleRate)
+    this.speculative = {
+      utteranceId: snapshot.id,
+      voicedFrames: snapshot.voicedFrames,
+      sampleCount: snapshot.samples.length,
+      audioSeconds: snapshot.samples.length / snapshot.sampleRate,
+      ...pending
+    }
+    const claimed = this.speculative
+    void pending.done
+      .then((result) => {
+        // Superseded means the user kept talking and this describes a fragment.
+        if (this.speculative !== claimed || !result.text) return
+        if (isEchoOfSpokenText(result.text, this.lastSpokenText)) return
+        this.publish({
+          type: 'userTranscriptPartial',
+          utteranceId: snapshot.id,
+          text: result.text
+        })
+      })
+      .catch(() => {
+        // A speculative failure is not worth reporting: the utterance is still
+        // open, and the transcription that decides the turn has not run yet.
+        if (this.speculative === claimed) this.speculative = null
+      })
+  }
+
+  /** Send audio for transcription, timing the round trip. */
+  private startTranscription(
+    samples: Float32Array,
+    sampleRate: number
+  ): {
+    startedAt: number
+    done: Promise<{ text: string; engine: string; engineMs: number | null; roundTripMs: number }>
+  } {
+    const startedAt = Date.now()
+    // Padded so the decoder flushes its last words rather than dropping them.
+    const audio = padTrailingSilence(samples, sampleRate)
+    const done = transcribeAudio(encodeWav(audio, sampleRate), {
+      engine: this.options.asrEngine?.()
+    }).then((result) => ({
+      text: result.text,
+      engine: result.engine,
+      engineMs: result.durationMs,
+      roundTripMs: Date.now() - startedAt
+    }))
+    return { startedAt, done }
+  }
+
   private async transcribe(utterance: {
     id: string
     samples: Float32Array
     sampleRate: number
+    voicedFrames: number
   }): Promise<void> {
+    const closedAt = Date.now()
     this.transcribing += 1
     this.publish({ type: 'transcriptionStarted', utteranceId: utterance.id })
-    const startedAt = Date.now()
     const audioSeconds = utterance.samples.length / utterance.sampleRate
+    // Usable only when it covers this exact audio: same utterance, same speech,
+    // same samples. Anything else describes a sentence that was still going.
+    const speculative = this.speculative
+    const reused = coversUtterance(speculative, {
+      id: utterance.id,
+      voicedFrames: utterance.voicedFrames,
+      sampleCount: utterance.samples.length
+    })
+    this.speculative = null
     try {
-      // Padded so the decoder flushes its last words rather than dropping them.
-      const audio = padTrailingSilence(utterance.samples, utterance.sampleRate)
-      const result = await transcribeAudio(encodeWav(audio, utterance.sampleRate), {
-        engine: this.options.asrEngine?.()
-      })
+      const pending =
+        reused && speculative
+          ? speculative
+          : this.startTranscription(utterance.samples, utterance.sampleRate)
+      const result = await pending.done
       const text = result.text
-      const roundTripMs = Date.now() - startedAt
+      // Two different numbers: what the engine cost, and what the turn waited
+      // for after the user stopped talking. Only the second is felt.
+      const waitedMs = Date.now() - closedAt
       console.debug(
-        `[voice] ${result.engine} transcribed ${audioSeconds.toFixed(1)}s in ${roundTripMs}ms` +
-          (result.durationMs === null ? '' : ` (${result.durationMs}ms in the daemon)`)
+        `[voice] ${result.engine} transcribed ${audioSeconds.toFixed(1)}s in ` +
+          `${result.roundTripMs}ms, turn waited ${waitedMs}ms` +
+          (reused ? ' (started at the pause)' : '') +
+          (result.engineMs === null ? '' : ` (${result.engineMs}ms in the daemon)`)
       )
       this.publish({
         type: 'transcriptionMeasured',
         utteranceId: utterance.id,
         engine: result.engine,
-        roundTripMs,
-        engineMs: result.durationMs,
-        audioSeconds
+        roundTripMs: result.roundTripMs,
+        waitedMs,
+        engineMs: result.engineMs,
+        audioSeconds,
+        startedAtPause: reused
       })
       // Whatever leaked past the echo canceller is not a new question, and is
       // the one case where dropping the utterance without a word is correct.

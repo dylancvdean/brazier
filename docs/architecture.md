@@ -85,6 +85,14 @@ collapse them into a single Audio badge meaning.
    utterances are padded with silence before transcription; without it
    "which test is failing" comes back as "which test".
 
+   Audio arrives from the capture graph at 24 kHz, and whisper.cpp reads only
+   16 kHz — it refuses rather than resamples — so WAVs are inspected and, when
+   they need it, converted in the daemon (`wav.rs`) rather than through ffmpeg:
+   a microphone should not need a system media toolchain to be heard. Every
+   transcription response carries the engine that served it and the
+   milliseconds it took, which is how a machine with both interfaces installed
+   answers which one it should use.
+
 4. **Realtime voice / PersonaPlex-class** — Full-duplex speech-to-speech with
    persona control over the Moshi WebSocket protocol (NVIDIA PersonaPlex
    primary flavor). Dedicated Voice workspace mode and
@@ -194,6 +202,11 @@ adapter supplies them:
 - **User transcripts.** The socket's text frames are the model's own speech, so
   the user's words come from segmenting the captured microphone stream and
   transcribing each finished utterance through `/v1/audio/transcriptions`.
+  Transcription starts at the first 300 ms pause rather than waiting for the
+  700 ms that closes the utterance, so the decoding happens inside the silence
+  window instead of after it. If the speaker carries on, the early transcript is
+  shown as a partial and discarded; if they were done, it *is* the final one,
+  byte-identical audio, and the turn starts without a second wait.
 - **Speaking specific text.** PersonaPlex takes its persona as a launch flag and
   accepts audio only, so an authoritative answer is spoken verbatim through the
   platform synthesizer. Since PersonaPlex answers on its own and cannot be told

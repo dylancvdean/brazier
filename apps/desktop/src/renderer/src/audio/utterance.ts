@@ -31,6 +31,18 @@ export type UtteranceSegmenterOptions = {
   guardedFactor?: number
   /** Consecutive silent frames that close it. */
   framesToClose?: number
+  /**
+   * Silent frames after which the audio so far is offered for transcription,
+   * without closing the utterance.
+   *
+   * The turn cannot begin until the close window has elapsed, and then it waits
+   * again while the words are decoded. This makes the second wait happen inside
+   * the first: most pauses of this length are the end of the sentence, and when
+   * they are not the speculative transcript is thrown away.
+   */
+  framesToPause?: number
+  /** Voiced frames that must accumulate before another pause is offered. */
+  framesBetweenPauses?: number
   /** Utterances with less voiced audio than this are noise, not turns. */
   minimumFrames?: number
   /** Hard cap so a stuck-open gate cannot grow without bound. */
@@ -46,8 +58,28 @@ export type UtteranceSegmenterHandlers = {
    * interrupts.
    */
   onSustainedSpeech?: (utteranceId: string) => void
+  /**
+   * The utterance so far, at a pause that has not yet closed it.
+   *
+   * Byte-for-byte what `onUtterance` will deliver if the pause turns out to be
+   * the end of the turn, so a transcript made from it can be used as the final
+   * one. `voicedFrames` is how the caller tells: unchanged at close means no
+   * more speech arrived, and the speculative transcript still describes all of
+   * the audio.
+   */
+  onPause?: (snapshot: {
+    id: string
+    samples: Float32Array
+    sampleRate: number
+    voicedFrames: number
+  }) => void
   /** A finished utterance, as mono PCM at `sampleRate`. */
-  onUtterance?: (utterance: { id: string; samples: Float32Array; sampleRate: number }) => void
+  onUtterance?: (utterance: {
+    id: string
+    samples: Float32Array
+    sampleRate: number
+    voicedFrames: number
+  }) => void
   /**
    * An utterance opened and was then thrown away. Reported because it is
    * otherwise indistinguishable from speech never having been detected.
@@ -72,6 +104,12 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   framesToSustain: 15,
   guardedFactor: 4,
   framesToClose: 35,
+  // 300 ms of silence: long enough not to fire between words, short enough that
+  // the transcription overlaps most of the 700 ms close window.
+  framesToPause: 15,
+  // 250 ms of new speech before the next offer, so a hesitant sentence does not
+  // queue a transcription per gap.
+  framesBetweenPauses: 12,
   minimumFrames: 10,
   maximumFrames: 1500
 }
@@ -101,6 +139,8 @@ export class UtteranceSegmenter {
   private open = false
   private sustained = false
   private guarded = false
+  /** Voiced-frame count at the last pause offered, so gaps are not re-offered. */
+  private pausedAtVoicedFrames: number | null = null
   private currentId: string | null = null
   private counter = 0
 
@@ -155,7 +195,33 @@ export class UtteranceSegmenter {
       this.close()
       return
     }
+    if (this.silenceRun === this.options.framesToPause) this.offerPause()
     if (this.frames.length >= this.options.maximumFrames) this.close()
+  }
+
+  /**
+   * Hand out the utterance so far, once per pause.
+   *
+   * Trimmed exactly as `close` trims, so if this pause turns out to be the end
+   * of the turn the caller already holds a transcript of the whole utterance and
+   * the turn does not have to wait for one.
+   */
+  private offerPause(): void {
+    if (!this.currentId || !this.handlers.onPause) return
+    if (this.voicedFrames < this.options.minimumFrames) return
+    if (
+      this.pausedAtVoicedFrames !== null &&
+      this.voicedFrames - this.pausedAtVoicedFrames < this.options.framesBetweenPauses
+    ) {
+      return
+    }
+    this.pausedAtVoicedFrames = this.voicedFrames
+    this.handlers.onPause({
+      id: this.currentId,
+      samples: this.collect(this.keptFrames()),
+      sampleRate: this.sampleRate,
+      voicedFrames: this.voicedFrames
+    })
   }
 
   /** Force the current utterance closed, e.g. when the microphone is muted. */
@@ -164,12 +230,28 @@ export class UtteranceSegmenter {
     this.reset()
   }
 
+  /** The frames that belong to the utterance: everything but the closing pause. */
+  private keptFrames(): Float32Array[] {
+    // Long trailing silence is what closed the utterance, not part of it.
+    const trailing = Math.max(0, this.silenceRun - TRAILING_SILENCE_FRAMES)
+    return this.frames.slice(0, Math.max(0, this.frames.length - trailing))
+  }
+
+  private collect(frames: Float32Array[]): Float32Array {
+    const total = frames.reduce((sum, frame) => sum + frame.length, 0)
+    const samples = new Float32Array(total)
+    let offset = 0
+    for (const frame of frames) {
+      samples.set(frame, offset)
+      offset += frame.length
+    }
+    return samples
+  }
+
   private close(): void {
     const id = this.currentId
     const voiced = this.voicedFrames
-    // Long trailing silence is what closed the utterance, not part of it.
-    const trailing = Math.max(0, this.silenceRun - TRAILING_SILENCE_FRAMES)
-    const frames = this.frames.slice(0, Math.max(0, this.frames.length - trailing))
+    const frames = this.keptFrames()
     this.reset()
     if (!id) return
     if (voiced < this.options.minimumFrames) {
@@ -179,14 +261,12 @@ export class UtteranceSegmenter {
       )
       return
     }
-    const total = frames.reduce((sum, frame) => sum + frame.length, 0)
-    const samples = new Float32Array(total)
-    let offset = 0
-    for (const frame of frames) {
-      samples.set(frame, offset)
-      offset += frame.length
-    }
-    this.handlers.onUtterance?.({ id, samples, sampleRate: this.sampleRate })
+    this.handlers.onUtterance?.({
+      id,
+      samples: this.collect(frames),
+      sampleRate: this.sampleRate,
+      voicedFrames: voiced
+    })
   }
 
   private reset(): void {
@@ -197,6 +277,7 @@ export class UtteranceSegmenter {
     this.open = false
     this.sustained = false
     this.currentId = null
+    this.pausedAtVoicedFrames = null
   }
 }
 

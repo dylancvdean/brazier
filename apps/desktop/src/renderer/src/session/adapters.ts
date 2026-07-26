@@ -126,10 +126,18 @@ export type VoiceAdapterEvent =
       engine: string
       /** Wall clock from sending the audio to holding the text. */
       roundTripMs: number
+      /**
+       * How long the turn waited after the utterance closed. This is the part
+       * a person feels, and it is not the same as the round trip: a
+       * transcription started at a pause has usually finished by then.
+       */
+      waitedMs: number
       /** What the daemon reports spending on the audio, when it says. */
       engineMs: number | null
       /** Audio length, so cost per second of speech is recoverable. */
       audioSeconds: number
+      /** Whether this transcription began before the user stopped talking. */
+      startedAtPause: boolean
     }
   /**
    * Transcription returned nothing. Reported rather than dropped: silence is

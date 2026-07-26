@@ -115,6 +115,14 @@ export type TranscriptionCost = {
   /** Mean round trip over the session. */
   averageMs: number
   /**
+   * Mean wait after the user stopped talking — the part of the round trip a
+   * person actually sits through. Far below `averageMs` means transcription is
+   * mostly finishing inside the silence window rather than after it.
+   */
+  averageWaitMs: number
+  /** Utterances whose transcription began at a pause, before the close. */
+  startedAtPause: number
+  /**
    * Mean round trip divided by the length of the audio. Below 1 the interface
    * transcribes faster than people speak, which is what a conversation needs.
    */
@@ -183,7 +191,14 @@ export class SessionCoordinator {
   /** Per-engine transcription totals; see `CoordinatorSnapshot.transcription`. */
   private readonly transcription = new Map<
     string,
-    { utterances: number; lastMs: number; totalMs: number; totalAudioSeconds: number }
+    {
+      utterances: number
+      lastMs: number
+      totalMs: number
+      totalWaitedMs: number
+      totalAudioSeconds: number
+      startedAtPause: number
+    }
   >()
   private pendingRenewal: string | null = null
   private backchanneling = new Set<string>()
@@ -192,6 +207,7 @@ export class SessionCoordinator {
 
   private readonly listeners = new Set<(snapshot: CoordinatorSnapshot) => void>()
   private readonly metricsState: SessionMetrics = {
+    transcriptWaitMs: [],
     transcriptToAgentStartMs: [],
     responseToSpeechStartMs: [],
     interruptToSpeechStopMs: [],
@@ -325,6 +341,8 @@ export class SessionCoordinator {
         utterances: totals.utterances,
         lastMs: totals.lastMs,
         averageMs: Math.round(totals.totalMs / Math.max(1, totals.utterances)),
+        averageWaitMs: Math.round(totals.totalWaitedMs / Math.max(1, totals.utterances)),
+        startedAtPause: totals.startedAtPause,
         realTimeFactor:
           totals.totalAudioSeconds > 0 ? totals.totalMs / 1000 / totals.totalAudioSeconds : 0
       })),
@@ -784,18 +802,25 @@ export class SessionCoordinator {
           utterances: 0,
           lastMs: 0,
           totalMs: 0,
-          totalAudioSeconds: 0
+          totalWaitedMs: 0,
+          totalAudioSeconds: 0,
+          startedAtPause: 0
         }
         totals.utterances += 1
         totals.lastMs = event.roundTripMs
         totals.totalMs += event.roundTripMs
+        totals.totalWaitedMs += event.waitedMs
         totals.totalAudioSeconds += event.audioSeconds
+        if (event.startedAtPause) totals.startedAtPause += 1
         this.transcription.set(event.engine, totals)
+        this.metricsState.transcriptWaitMs.push(event.waitedMs)
         this.emit('USER_VOICE_TRANSCRIBED', event.utteranceId, 'voice', {
           engine: event.engine,
           roundTripMs: event.roundTripMs,
+          waitedMs: event.waitedMs,
           engineMs: event.engineMs,
-          audioSeconds: Number(event.audioSeconds.toFixed(2))
+          audioSeconds: Number(event.audioSeconds.toFixed(2)),
+          startedAtPause: event.startedAtPause
         })
         this.publish()
         return
