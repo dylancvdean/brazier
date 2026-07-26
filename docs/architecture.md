@@ -73,6 +73,18 @@ collapse them into a single Audio badge meaning.
    `POST /v1/audio/transcriptions` with `stream=true` (SSE partials). Distinct
    from chat attachment hydration.
 
+   The worker process is resident: it loads the model once and then takes one
+   request per line on stdin, because loading Nemotron costs about three seconds
+   and paying it per utterance is the difference between 3.1 s and 0.18 s a turn.
+   A worker that dies, or that holds a different model, is replaced on the next
+   request — one cold request, then warm again. Its source is put on
+   `PYTHONPATH` from the recipe directory, so the worker always matches the
+   daemon shipping it rather than whatever copy the last runtime build installed.
+
+   A streaming decoder needs trailing audio to emit its final tokens, so
+   utterances are padded with silence before transcription; without it
+   "which test is failing" comes back as "which test".
+
 4. **Realtime voice / PersonaPlex-class** — Full-duplex speech-to-speech with
    persona control over the Moshi WebSocket protocol (NVIDIA PersonaPlex
    primary flavor). Dedicated Voice workspace mode and

@@ -81,6 +81,8 @@ struct WhisperState {
 
 struct StreamingAsrState {
     python: Option<PathBuf>,
+    /// Loaded model, kept across requests. See `streaming_asr::Worker`.
+    worker: Option<streaming_asr::Worker>,
 }
 
 struct SdCppState {
@@ -196,6 +198,7 @@ impl Runtime {
             }),
             streaming_asr: Mutex::new(StreamingAsrState {
                 python: streaming_asr_python,
+                worker: None,
             }),
             sdcpp: Mutex::new(SdCppState {
                 binary: sdcpp_binary,
@@ -411,11 +414,16 @@ impl Runtime {
                 .map(PathBuf::from)
                 .or_else(|| whisper::resolve_binary(&self.data_dir, None));
             let mut streaming_asr = self.streaming_asr.lock().await;
-            streaming_asr.python = settings
+            let next_python = settings
                 .streaming_asr_python
                 .as_ref()
                 .map(PathBuf::from)
                 .or_else(|| streaming_asr::resolve_python(&self.data_dir, None));
+            if streaming_asr.python != next_python {
+                // The resident worker belongs to the old interpreter.
+                streaming_asr.worker = None;
+            }
+            streaming_asr.python = next_python;
             let mut sdcpp_state = self.sdcpp.lock().await;
             sdcpp_state.binary = settings
                 .sdcpp_binary
@@ -924,6 +932,59 @@ impl Runtime {
                     fork_hints: load_err.fork_hints.clone(),
                 }
                 .into())
+            }
+        }
+    }
+
+    /// Transcribe audio through the resident streaming ASR worker.
+    ///
+    /// The worker holds a loaded model, so the cost of a request is decoding
+    /// rather than decoding plus a model load. Requests serialise on the state
+    /// lock, which is what the worker's line protocol requires anyway.
+    ///
+    /// A worker that has died, or that loaded a different model, is replaced.
+    pub async fn transcribe_streaming(
+        &self,
+        model: &std::path::Path,
+        audio: &std::path::Path,
+        lookahead: Option<u32>,
+        events: tokio::sync::mpsc::Sender<anyhow::Result<streaming_asr::WorkerEvent>>,
+    ) -> anyhow::Result<String> {
+        // The package directory itself, not the recipe directory that holds it:
+        // pointing one level too high leaves Python to fall back to whatever
+        // copy was installed into the virtualenv, which is the stale one.
+        let package_dir =
+            crate::build_recipe::ensure_recipe_files(&self.data_dir)?.join("streaming_asr_pkg");
+        let mut state = self.streaming_asr.lock().await;
+        let python = state
+            .python
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("streaming ASR interpreter is not installed"))?;
+        let reusable = state
+            .worker
+            .as_mut()
+            .is_some_and(|worker| worker.serves(&python, model));
+        if !reusable {
+            state.worker = Some(
+                streaming_asr::Worker::start(
+                    &python,
+                    model,
+                    &package_dir,
+                    lookahead.unwrap_or(streaming_asr::DEFAULT_LOOKAHEAD),
+                )
+                .await?,
+            );
+        }
+        let worker = state.worker.as_mut().expect("worker present above");
+        match worker.transcribe(audio, lookahead, &events).await {
+            Ok(text) => Ok(text),
+            Err(error) => {
+                // A request error leaves the worker serving; a broken pipe does
+                // not, and the distinction is whether it is still alive.
+                if !worker.serves(&python, model) {
+                    state.worker = None;
+                }
+                Err(error)
             }
         }
     }

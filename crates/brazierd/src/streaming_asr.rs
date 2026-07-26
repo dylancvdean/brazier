@@ -9,14 +9,18 @@ use std::{
 use anyhow::Context;
 use serde::Deserialize;
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
+    process::{Child, ChildStdin, ChildStdout, Command},
     sync::mpsc,
 };
 
 use crate::{builds, models_store, types::ModelDescriptor};
 
 pub const ENGINE: &str = "streaming-asr";
+
+/// `num_lookahead_tokens`: how much audio the decoder waits for before
+/// committing a token. Six is roughly 560 ms.
+pub const DEFAULT_LOOKAHEAD: u32 = 6;
 
 pub fn models_root(data_dir: &Path) -> PathBuf {
     data_dir.join("models").join("streaming-asr")
@@ -242,124 +246,160 @@ pub enum WorkerEvent {
     },
 }
 
-pub struct StreamTranscribeRequest<'a> {
-    pub python: &'a Path,
-    pub model: &'a Path,
-    pub audio: &'a Path,
-    pub lookahead: Option<u32>,
+/// A worker process kept alive across requests.
+///
+/// Loading Nemotron costs seconds, and it was being paid per utterance: every
+/// spoken turn waited on a model that had been in memory moments earlier. The
+/// process now stays resident and takes one request per line on stdin.
+///
+/// Requests are serialised by the mutex the caller holds it behind, which is
+/// what the protocol needs anyway — one set of events per request, read until
+/// `done` or `error`.
+pub struct Worker {
+    child: Child,
+    stdin: ChildStdin,
+    lines: Lines<BufReader<ChildStdout>>,
+    /// The model this process loaded. A different one needs a different process.
+    model: PathBuf,
+    python: PathBuf,
 }
 
-/// Spawn the Python worker and stream NDJSON events.
-pub async fn transcribe_stream(
-    request: StreamTranscribeRequest<'_>,
-) -> anyhow::Result<mpsc::Receiver<anyhow::Result<WorkerEvent>>> {
-    anyhow::ensure!(request.python.is_file(), "streaming ASR Python missing");
-    anyhow::ensure!(
-        request.model.is_dir(),
-        "streaming ASR model directory missing"
-    );
-    anyhow::ensure!(request.audio.is_file(), "audio file missing");
+impl Worker {
+    /// Start a worker and wait for it to report that the model is loaded.
+    ///
+    /// `package_dir` is put on `PYTHONPATH` so the worker source always matches
+    /// the daemon that ships it, rather than whatever copy was installed into
+    /// the virtualenv when the runtime was last built.
+    pub async fn start(
+        python: &Path,
+        model: &Path,
+        package_dir: &Path,
+        lookahead: u32,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(python.is_file(), "streaming ASR Python missing");
+        anyhow::ensure!(model.is_dir(), "streaming ASR model directory missing");
 
-    let mut command = Command::new(request.python);
-    command
-        .arg("-m")
-        .arg("brazier_streaming_asr")
-        .arg("--model")
-        .arg(request.model)
-        .arg("--audio")
-        .arg(request.audio)
-        .arg("--lookahead")
-        .arg(request.lookahead.unwrap_or(6).to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        let mut child = Command::new(python)
+            .arg("-m")
+            .arg("brazier_streaming_asr")
+            .arg("--model")
+            .arg(model)
+            .arg("--serve")
+            .arg("--lookahead")
+            .arg(lookahead.to_string())
+            .env("PYTHONPATH", package_dir)
+            .env("PYTHONUNBUFFERED", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawn streaming ASR worker")?;
 
-    let mut child = command.spawn().context("spawn streaming ASR worker")?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("worker stdout missing"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("worker stderr missing"))?;
+        let stdin = child.stdin.take().context("worker stdin missing")?;
+        let stdout = child.stdout.take().context("worker stdout missing")?;
+        let stderr = child.stderr.take().context("worker stderr missing")?;
+        // Drained continuously: a full stderr pipe would otherwise block the
+        // worker mid-request, and the lines are worth having in the log.
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "streaming_asr", "{line}");
+            }
+        });
 
-    let (tx, rx) = mpsc::channel(64);
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        let mut stderr_lines = BufReader::new(stderr).lines();
-        let mut stderr_buf = String::new();
+        let mut worker = Self {
+            child,
+            stdin,
+            lines: BufReader::new(stdout).lines(),
+            model: model.to_path_buf(),
+            python: python.to_path_buf(),
+        };
+        worker.wait_until_ready().await?;
+        Ok(worker)
+    }
+
+    /// Whether this worker can serve a request for `python` and `model`.
+    pub fn serves(&mut self, python: &Path, model: &Path) -> bool {
+        self.model == model && self.python == python && matches!(self.child.try_wait(), Ok(None))
+    }
+
+    async fn wait_until_ready(&mut self) -> anyhow::Result<()> {
+        // Model load, so generous: a cold snapshot read is slow on any disk.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
         loop {
-            tokio::select! {
-                line = lines.next_line() => {
-                    match line {
-                        Ok(Some(line)) => {
-                            if line.trim().is_empty() {
-                                continue;
-                            }
-                            match serde_json::from_str::<WorkerEvent>(&line) {
-                                Ok(event) => {
-                                    if tx.send(Ok(event)).await.is_err() {
-                                        let _ = child.kill().await;
-                                        return;
-                                    }
-                                }
-                                Err(error) => {
-                                    let _ = tx
-                                        .send(Err(anyhow::anyhow!(
-                                            "invalid worker event: {error}; line={line}"
-                                        )))
-                                        .await;
-                                    let _ = child.kill().await;
-                                    return;
-                                }
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(error) => {
-                            let _ = tx.send(Err(error.into())).await;
-                            let _ = child.kill().await;
-                            return;
-                        }
-                    }
+            let line = tokio::time::timeout_at(deadline, self.lines.next_line())
+                .await
+                .context("streaming ASR worker did not become ready in time")?
+                .context("read from streaming ASR worker")?
+                .context("streaming ASR worker exited before becoming ready")?;
+            match parse_event(&line)? {
+                Some(WorkerEvent::Status { phase, .. }) if phase.as_deref() == Some("ready") => {
+                    return Ok(());
                 }
-                line = stderr_lines.next_line() => {
-                    if let Ok(Some(line)) = line {
-                        if stderr_buf.len() < 8_192 {
-                            if !stderr_buf.is_empty() {
-                                stderr_buf.push('\n');
-                            }
-                            stderr_buf.push_str(&line);
-                        }
-                    }
-                }
+                Some(WorkerEvent::Error { message }) => anyhow::bail!(message),
+                _ => continue,
             }
         }
-        match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
-            Ok(Ok(status)) if status.success() => {}
-            Ok(Ok(status)) => {
-                let detail = if stderr_buf.is_empty() {
-                    format!("streaming ASR worker exited with {status}")
-                } else {
-                    format!("streaming ASR worker exited with {status}: {stderr_buf}")
-                };
-                let _ = tx.send(Err(anyhow::anyhow!(detail))).await;
-            }
-            Ok(Err(error)) => {
-                let _ = tx.send(Err(error.into())).await;
-            }
-            Err(_) => {
-                let _ = child.kill().await;
-                let _ = tx
-                    .send(Err(anyhow::anyhow!(
-                        "streaming ASR worker timed out after stdout closed"
-                    )))
-                    .await;
+    }
+
+    /// Transcribe one file, forwarding events until the request completes.
+    ///
+    /// Returns the final text. Errors reported by the worker are request
+    /// failures rather than worker failures, so the process is left running.
+    pub async fn transcribe(
+        &mut self,
+        audio: &Path,
+        lookahead: Option<u32>,
+        events: &mpsc::Sender<anyhow::Result<WorkerEvent>>,
+    ) -> anyhow::Result<String> {
+        anyhow::ensure!(audio.is_file(), "audio file missing");
+        let request = serde_json::json!({
+            "audio": audio.display().to_string(),
+            "lookahead": lookahead.unwrap_or(DEFAULT_LOOKAHEAD),
+        });
+        self.stdin
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .context("write request to streaming ASR worker")?;
+        self.stdin
+            .flush()
+            .await
+            .context("flush request to streaming ASR worker")?;
+
+        loop {
+            let line = self
+                .lines
+                .next_line()
+                .await
+                .context("read from streaming ASR worker")?
+                .context("streaming ASR worker closed mid-request")?;
+            let Some(event) = parse_event(&line)? else {
+                continue;
+            };
+            let finished = match &event {
+                WorkerEvent::Done { text } => Some(Ok(text.clone())),
+                WorkerEvent::Error { message } => Some(Err(anyhow::anyhow!(message.clone()))),
+                _ => None,
+            };
+            let _ = events.send(Ok(event)).await;
+            match finished {
+                Some(result) => return result,
+                None => continue,
             }
         }
-    });
-    Ok(rx)
+    }
+}
+
+/// Parse one NDJSON line, treating blank lines as nothing to report.
+fn parse_event(line: &str) -> anyhow::Result<Option<WorkerEvent>> {
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(line)
+        .map(Some)
+        .with_context(|| format!("invalid worker event: {line}"))
 }
 
 #[cfg(test)]

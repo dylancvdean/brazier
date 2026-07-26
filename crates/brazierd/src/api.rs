@@ -2362,7 +2362,8 @@ async fn audio_transcriptions(
             .as_deref()
             .is_some_and(|engine| engine == streaming_asr::ENGINE);
     if prefer_streaming {
-        let python = streaming_asr::resolve_python(
+        // Checked for the actionable message; the worker resolves its own copy.
+        streaming_asr::resolve_python(
             &state.data_dir,
             settings.streaming_asr_python.as_deref(),
         )
@@ -2387,28 +2388,26 @@ async fn audio_transcriptions(
         let wav = media::materialize_wav_from_blob(&state.data_dir, &sha256, &mime)
             .await
             .map_err(ApiError::bad_request)?;
-        let mut events = streaming_asr::transcribe_stream(streaming_asr::StreamTranscribeRequest {
-            python: &python,
-            model: &model_path,
-            audio: &wav,
-            lookahead: None,
-        })
-        .await
-        .map_err(ApiError::bad_request)?;
+        // The worker outlives the request, so the model is loaded once per
+        // session rather than once per utterance. Events arrive on a channel
+        // either way; a non-streaming caller just collects them.
+        let (tx, mut events) = tokio::sync::mpsc::channel(64);
+        let transcription = {
+            let runtime = state.runtime.clone();
+            let model_path = model_path.clone();
+            let wav = wav.clone();
+            tokio::spawn(async move {
+                runtime
+                    .transcribe_streaming(&model_path, &wav, None, tx)
+                    .await
+            })
+        };
         if !request.stream {
-            let mut text = String::new();
-            while let Some(item) = events.recv().await {
-                match item.map_err(ApiError::bad_request)? {
-                    streaming_asr::WorkerEvent::Delta { text: delta } => text.push_str(&delta),
-                    streaming_asr::WorkerEvent::Done { text: final_text } => {
-                        text = final_text;
-                    }
-                    streaming_asr::WorkerEvent::Error { message } => {
-                        return Err(ApiError::bad_request(message));
-                    }
-                    streaming_asr::WorkerEvent::Status { .. } => {}
-                }
-            }
+            while events.recv().await.is_some() {}
+            let text = transcription
+                .await
+                .map_err(ApiError::internal)?
+                .map_err(ApiError::bad_request)?;
             let _ = tokio::fs::remove_file(&wav).await;
             return Ok(
                 Json(json!({ "text": text.trim(), "engine": streaming_asr::ENGINE }))
