@@ -45,7 +45,7 @@
     ],
     "asarUnpack": [
       "out/agent/**",
-      "node_modules/@earendil-works/**"
+      "node_modules/**"
     ],
     "extraResources": [
       {

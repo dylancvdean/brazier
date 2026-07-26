@@ -180,9 +180,15 @@ what is left is mostly the difference between working and trustworthy.
 
 ## Agent mode follow-ons
 
-- Verify Agent mode inside a packaged build: the worker is an ESM bundle that
-  imports Pi from `node_modules`, so `asarUnpack` coverage needs checking on all
-  three platforms.
+- **`asarUnpack` coverage is fixed and enforced**, though a packaged build on
+  each platform has still not been run. The worker keeps every import external,
+  so what it needs at run time is Pi *and its whole dependency closure* — 94
+  packages, mostly provider SDKs — while only `@earendil-works/**` was unpacked.
+  `node_modules/**` is now unpacked rather than an enumerated list that would
+  rot on the next upgrade, and a test walks the real closure and fails with the
+  names of anything a narrower glob would miss. What remains is running the
+  packaged application on macOS, Linux, and Windows and starting an agent
+  session in it.
 - Windows sandboxing. There is no backend today, so the daemon reports
   `isolated: false` and command execution is treated as host execution.
 - Live output streaming for `shell_run` (long commands currently report at
