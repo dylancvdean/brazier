@@ -1,0 +1,17 @@
+# Direct dependencies of the streaming ASR worker. `streaming-asr.lock` is
+# compiled from this file and is what the recipe installs:
+#
+#     uv pip compile --python 3.12 -o engine-recipes/streaming-asr.lock \
+#         engine-recipes/streaming-asr.in
+#
+# The lock was previously compiled from a file in /tmp, so there was no record
+# of what had been asked for — only of what came out.
+accelerate
+# Nemotron's feature extractor imports librosa for its mel filterbank and
+# resampling. Transformers treats it as an optional extra, so nothing pulls it
+# in transitively and the worker fails at first use rather than at install.
+librosa
+numpy
+soundfile
+torch
+transformers
