@@ -122,7 +122,12 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     // being too short looks the same from outside as speech never detected.
     this.segmenter = new UtteranceSegmenter({
       onSpeechStart: (utteranceId) => {
+        // Capturing, not interrupting. A cough gets recorded and then thrown
+        // away without ever taking the assistant's turn from it.
         console.debug(`[voice] speech detected (${utteranceId})`)
+      },
+      onSustainedSpeech: (utteranceId) => {
+        console.debug(`[voice] sustained speech (${utteranceId}) — interrupting`)
         this.publish({ type: 'userSpeechStarted', utteranceId })
       },
       onUtterance: (utterance) => {
@@ -222,15 +227,18 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     this.renderer.stop()
     this.speaking = request.correlationId
     this.lastSpokenText = request.text
+    this.segmenter?.setGuarded(true)
     this.renderer.speak(request.text, {
       onStart: () => this.publish({ type: 'speechStarted', correlationId: request.correlationId }),
       onEnd: () => {
         if (this.speaking !== request.correlationId) return
         this.speaking = null
+        this.segmenter?.setGuarded(false)
         this.publish({ type: 'speechCompleted', correlationId: request.correlationId })
       },
       onError: (error) => {
         if (this.speaking === request.correlationId) this.speaking = null
+        this.segmenter?.setGuarded(false)
         this.publish({ type: 'sessionError', error, fatal: false })
       }
     })
@@ -250,6 +258,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     if (correlationId && this.speaking && this.speaking !== correlationId) return
     const interrupted = this.speaking
     this.speaking = null
+    this.segmenter?.setGuarded(false)
     this.renderer.stop()
     if (interrupted) this.publish({ type: 'speechInterrupted', correlationId: interrupted })
   }

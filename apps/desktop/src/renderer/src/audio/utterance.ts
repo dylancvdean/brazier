@@ -17,6 +17,18 @@ export type UtteranceSegmenterOptions = {
   threshold?: number
   /** Consecutive speech frames before an utterance opens. */
   framesToOpen?: number
+  /**
+   * Voiced frames before speech counts as sustained. Opening an utterance is
+   * cheap and reversible; interrupting the assistant is not, so the two are
+   * separate decisions and this is the bar for the second.
+   */
+  framesToSustain?: number
+  /**
+   * Multiplier applied to the threshold while the assistant is speaking. Its
+   * own voice reaches the microphone through the speakers, attenuated but not
+   * gone, and echo should not be able to take its turn away.
+   */
+  guardedFactor?: number
   /** Consecutive silent frames that close it. */
   framesToClose?: number
   /** Utterances with less voiced audio than this are noise, not turns. */
@@ -26,8 +38,14 @@ export type UtteranceSegmenterOptions = {
 }
 
 export type UtteranceSegmenterHandlers = {
-  /** An utterance began. Used for barge-in, before any transcript exists. */
+  /** An utterance began, and audio is being kept. Not a barge-in. */
   onSpeechStart?: (utteranceId: string) => void
+  /**
+   * Speech has continued long enough to be someone talking rather than a cough,
+   * a keystroke, or the assistant's own voice leaking back in. This is what
+   * interrupts.
+   */
+  onSustainedSpeech?: (utteranceId: string) => void
   /** A finished utterance, as mono PCM at `sampleRate`. */
   onUtterance?: (utterance: { id: string; samples: Float32Array; sampleRate: number }) => void
   /**
@@ -48,6 +66,11 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   // At 20 ms per frame: 60 ms to open, 700 ms of silence to close, 200 ms of
   // voiced audio to count as a turn, 30 s cap.
   framesToOpen: 3,
+  // 300 ms of voiced audio: long enough that a knock or a breath does not stop
+  // the assistant mid-sentence, short enough to feel immediate when interrupting
+  // deliberately.
+  framesToSustain: 15,
+  guardedFactor: 4,
   framesToClose: 35,
   minimumFrames: 10,
   maximumFrames: 1500
@@ -76,6 +99,8 @@ export class UtteranceSegmenter {
   private silenceRun = 0
   private voicedFrames = 0
   private open = false
+  private sustained = false
+  private guarded = false
   private currentId: string | null = null
   private counter = 0
 
@@ -84,10 +109,24 @@ export class UtteranceSegmenter {
     this.options = { ...DEFAULTS, ...options }
   }
 
+  /**
+   * Raise the bar while the assistant is speaking.
+   *
+   * Echo through the speakers is quieter than the person in the room, so a
+   * higher gate keeps the assistant from interrupting itself while leaving a
+   * real interruption audible.
+   */
+  setGuarded(guarded: boolean): void {
+    this.guarded = guarded
+  }
+
   /** Feed one captured frame. */
   push(samples: Float32Array, sampleRate: number): void {
     this.sampleRate = sampleRate
-    const loud = rms(samples) >= this.options.threshold
+    const gate = this.guarded
+      ? this.options.threshold * this.options.guardedFactor
+      : this.options.threshold
+    const loud = rms(samples) >= gate
 
     if (!this.open) {
       this.speechRun = loud ? this.speechRun + 1 : 0
@@ -107,6 +146,10 @@ export class UtteranceSegmenter {
 
     this.frames.push(samples.slice())
     if (loud) this.voicedFrames += 1
+    if (!this.sustained && this.voicedFrames >= this.options.framesToSustain) {
+      this.sustained = true
+      if (this.currentId) this.handlers.onSustainedSpeech?.(this.currentId)
+    }
     this.silenceRun = loud ? 0 : this.silenceRun + 1
     if (this.silenceRun >= this.options.framesToClose) {
       this.close()
@@ -152,6 +195,7 @@ export class UtteranceSegmenter {
     this.silenceRun = 0
     this.voicedFrames = 0
     this.open = false
+    this.sustained = false
     this.currentId = null
   }
 }

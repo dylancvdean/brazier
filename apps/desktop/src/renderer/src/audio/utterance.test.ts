@@ -147,3 +147,46 @@ describe('padTrailingSilence', () => {
     expect(padded.length - 10).toBeGreaterThanOrEqual(16000 * 0.8)
   })
 })
+
+describe('barge-in versus capture', () => {
+  /**
+   * The complaint this fixes: any small sound stopped the assistant mid-sentence
+   * and cost it its turn, because opening an utterance and interrupting were the
+   * same event. Capturing is cheap and reversible; interrupting is not.
+   */
+  it('captures a short sound without interrupting', () => {
+    const started: string[] = []
+    const sustained: string[] = []
+    const segmenter = new UtteranceSegmenter({
+      onSpeechStart: (id) => started.push(id),
+      onSustainedSpeech: (id) => sustained.push(id)
+    })
+    feed(segmenter, 0.5, 8) // ~160 ms: a cough
+    feed(segmenter, 0.001, 40)
+    expect(started).toHaveLength(1)
+    expect(sustained).toHaveLength(0)
+  })
+
+  it('interrupts once speech is sustained', () => {
+    const sustained: string[] = []
+    const segmenter = new UtteranceSegmenter({ onSustainedSpeech: (id) => sustained.push(id) })
+    feed(segmenter, 0.5, 20) // ~400 ms: someone talking
+    expect(sustained).toHaveLength(1)
+  })
+
+  /**
+   * The assistant's own voice reaches the microphone through the speakers. At
+   * normal sensitivity that echo was enough to make it interrupt itself.
+   */
+  it('ignores echo-level audio while the assistant speaks', () => {
+    const sustained: string[] = []
+    const segmenter = new UtteranceSegmenter({ onSustainedSpeech: (id) => sustained.push(id) })
+    segmenter.setGuarded(true)
+    feed(segmenter, 0.01, 40) // above the open gate, below the guarded one
+    expect(sustained).toHaveLength(0)
+
+    // A person talking over it is still louder than the echo.
+    feed(segmenter, 0.5, 20)
+    expect(sustained).toHaveLength(1)
+  })
+})

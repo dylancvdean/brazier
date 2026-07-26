@@ -27,6 +27,7 @@ import type {
 } from './adapters'
 import { DEFAULT_INTEGRATION_CONFIG, type IntegrationConfig } from './config'
 import { SessionEventLog } from './eventLog'
+import { isTooThinToSubmit } from './echoGuard'
 import { classifyUtterance, isControlIntent, type UtteranceIntent } from './interruption'
 import type {
   ConversationMessage,
@@ -853,6 +854,15 @@ export class SessionCoordinator {
     // conversation is not ours to write to. The transcript is still shown.
     if (this.config.voiceSessionTarget === 'neither') {
       this.partialTranscript = ''
+      this.publish()
+      return
+    }
+
+    // Noise that cleared the gate is not worth a turn. Without this the
+    // assistant abandons what it was saying to report that it understood
+    // nothing, which is a worse outcome than having ignored the sound.
+    if (isTooThinToSubmit(trimmed)) {
+      this.report(`Ignored “${trimmed}” — too little to act on.`)
       this.publish()
       return
     }

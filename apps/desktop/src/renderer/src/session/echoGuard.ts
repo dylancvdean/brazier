@@ -45,3 +45,25 @@ export function isEchoOfSpokenText(transcript: string, spoken: string | null): b
   }
   return matched / heard.length >= ECHO_WORD_OVERLAP
 }
+
+/**
+ * Whether a transcript is too thin to be a turn.
+ *
+ * Noise that clears the gate still transcribes to *something* — a syllable, a
+ * stray word — and submitting it costs a real turn: the assistant gives up what
+ * it was saying to answer that it did not understand. Refusing here is cheaper
+ * than answering nothing.
+ */
+export function isTooThinToSubmit(transcript: string): boolean {
+  const cleaned = transcript
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s']/gu, ' ')
+    .trim()
+  if (cleaned.length < 2) return true
+  const words = cleaned.split(/\s+/).filter(Boolean)
+  // Length alone cannot be the test: "yes", "no", and "stop" are whole turns,
+  // and the segmenter has already required a couple of hundred milliseconds of
+  // voiced audio. Only hesitation is refused.
+  const filler = new Set(['uh', 'um', 'erm', 'hmm', 'mm', 'mhm', 'ah', 'oh', 'eh', 'huh', 'er'])
+  return words.every((word) => filler.has(word))
+}

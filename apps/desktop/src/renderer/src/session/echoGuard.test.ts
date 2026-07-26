@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { isEchoOfSpokenText } from './echoGuard'
+import { isEchoOfSpokenText, isTooThinToSubmit } from './echoGuard'
 
 describe('isEchoOfSpokenText', () => {
   const spoken = 'One test failed: the oggOpus muxer test in the audio suite.'
@@ -36,5 +36,21 @@ describe('isEchoOfSpokenText', () => {
   it('does not treat a repeated word as a whole echo', () => {
     // "test" appears twice in the answer; three times is not accounted for.
     expect(isEchoOfSpokenText('test test test test', spoken)).toBe(false)
+  })
+})
+
+describe('isTooThinToSubmit', () => {
+  it('refuses what noise transcribes to', () => {
+    for (const text of ['', ' ', '.', 'a', 'uh', 'um', 'hmm', 'uh um', 'Mm-hmm', '...']) {
+      expect(isTooThinToSubmit(text)).toBe(true)
+    }
+  })
+
+  it('keeps short answers, which are whole turns', () => {
+    // The reason length cannot be the test. Dropping these would make the
+    // assistant ignore an answer to its own question.
+    for (const text of ['yes', 'No.', 'stop', 'One.', 'Vulkan', 'the docs']) {
+      expect(isTooThinToSubmit(text)).toBe(false)
+    }
   })
 })
