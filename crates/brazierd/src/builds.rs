@@ -315,7 +315,10 @@ fn install_swift_product(
 ) -> anyhow::Result<PathBuf> {
     let candidates = [
         build_dir.join("release").join(product),
-        build_dir.join("arm64-apple-macosx").join("release").join(product),
+        build_dir
+            .join("arm64-apple-macosx")
+            .join("release")
+            .join(product),
         build_dir.join("bin").join(product),
     ];
     let built = candidates

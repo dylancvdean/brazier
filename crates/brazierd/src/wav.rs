@@ -124,12 +124,9 @@ fn decode_mono(bytes: &[u8], info: &WavInfo) -> anyhow::Result<Vec<f32>> {
             let sample = &data[start..start + width];
             sum += match (info.format, info.bits_per_sample) {
                 (FORMAT_PCM, 8) => (sample[0] as f32 - 128.0) / 128.0,
-                (FORMAT_PCM, 16) => {
-                    i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0
-                }
+                (FORMAT_PCM, 16) => i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0,
                 (FORMAT_PCM, 24) => {
-                    let value =
-                        i32::from_le_bytes([0, sample[0], sample[1], sample[2]]) >> 8;
+                    let value = i32::from_le_bytes([0, sample[0], sample[1], sample[2]]) >> 8;
                     value as f32 / 8_388_608.0
                 }
                 (FORMAT_PCM, 32) => {
@@ -290,7 +287,10 @@ mod tests {
         assert_eq!(info.sample_rate, 24_000);
         assert_eq!(info.channels, 1);
         assert_eq!(info.bits_per_sample, 16);
-        assert!(!info.is_whisper_ready(), "24 kHz is not what whisper accepts");
+        assert!(
+            !info.is_whisper_ready(),
+            "24 kHz is not what whisper accepts"
+        );
         assert!((info.duration_seconds() - 0.25).abs() < 0.01);
     }
 

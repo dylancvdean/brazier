@@ -33,9 +33,10 @@ use crate::{
     engine::{Engine, StreamEvent},
     fork_hints::{self, ModelLoadError, RuntimeForkHint},
     hf::{self, SearchQuery},
-    hf_auth, llama, mcp, media, model_bindings, models_store, remote,
+    hf_auth, llama, mcp, media, model_bindings, models_store,
     progress::ProgressEvent,
-    runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry, toolchain_hints,
+    remote, runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry,
+    toolchain_hints,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
@@ -145,13 +146,17 @@ const DEFAULT_ORIGINS: [&str; 3] = ["null", "http://localhost:5173", "http://127
 /// command.
 pub fn parse_origins(origins: &[String]) -> anyhow::Result<Vec<HeaderValue>> {
     let mut values = Vec::new();
-    for origin in DEFAULT_ORIGINS.iter().map(|origin| (*origin).to_owned()).chain(
-        origins
-            .iter()
-            .flat_map(|value| value.split(','))
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty()),
-    ) {
+    for origin in DEFAULT_ORIGINS
+        .iter()
+        .map(|origin| (*origin).to_owned())
+        .chain(
+            origins
+                .iter()
+                .flat_map(|value| value.split(','))
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+        )
+    {
         anyhow::ensure!(
             origin != "*",
             "a wildcard CORS origin is not accepted; name the origins that may call this daemon"
@@ -176,7 +181,10 @@ pub fn parse_origins(origins: &[String]) -> anyhow::Result<Vec<HeaderValue>> {
 }
 
 pub fn router(state: AppState) -> Router {
-    router_with_origins(state, parse_origins(&[]).expect("built-in origins are valid"))
+    router_with_origins(
+        state,
+        parse_origins(&[]).expect("built-in origins are valid"),
+    )
 }
 
 /// The router, with the set of browser origins allowed to call it.

@@ -453,8 +453,8 @@ mod tests {
     /// model list nothing but its own entries.
     #[tokio::test]
     async fn a_server_that_refuses_does_not_empty_the_list() {
-        let (base_url, _) = stub_server(r#"{"error":"nope"}"#, axum::http::StatusCode::FORBIDDEN)
-            .await;
+        let (base_url, _) =
+            stub_server(r#"{"error":"nope"}"#, axum::http::StatusCode::FORBIDDEN).await;
         let dir = tempfile::tempdir().unwrap();
         upsert(
             dir.path(),
@@ -468,7 +468,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(list_models(&reqwest::Client::new(), dir.path()).await.is_empty());
+        assert!(
+            list_models(&reqwest::Client::new(), dir.path())
+                .await
+                .is_empty()
+        );
 
         let connection = find(dir.path(), "work").unwrap();
         let error = fetch_model_names(&reqwest::Client::new(), &connection)
@@ -480,8 +484,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_connection_switched_off_is_not_contacted() {
-        let (base_url, seen) = stub_server(r#"{"data":[{"id":"a"}]}"#, axum::http::StatusCode::OK)
-            .await;
+        let (base_url, seen) =
+            stub_server(r#"{"data":[{"id":"a"}]}"#, axum::http::StatusCode::OK).await;
         let dir = tempfile::tempdir().unwrap();
         upsert(
             dir.path(),
@@ -495,7 +499,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(list_models(&reqwest::Client::new(), dir.path()).await.is_empty());
+        assert!(
+            list_models(&reqwest::Client::new(), dir.path())
+                .await
+                .is_empty()
+        );
         assert!(seen.lock().unwrap().is_none(), "it must not be contacted");
     }
 }

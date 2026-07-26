@@ -1067,10 +1067,7 @@ pub async fn chat_once(
     if let Some(key) = api_key {
         request = request.bearer_auth(key);
     }
-    let response = request
-        .send()
-        .await
-        .context("llama-server chat request")?;
+    let response = request.send().await.context("llama-server chat request")?;
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
