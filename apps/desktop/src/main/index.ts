@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { existsSync, mkdirSync, renameSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, renameSync, type WriteStream } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
@@ -14,6 +14,9 @@ import { AgentSupervisor, registerAgentIpc } from './agent'
  * name, and `migrateLegacyDataDirectory` needs to be able to find them.
  */
 const LEGACY_USER_DATA = app.getPath('userData')
+
+/** Session log, opened on first write. See `appendLog`. */
+let logStream: WriteStream | undefined
 
 // Names the process for menus, notifications, and crash reports. The Dock
 // label in development comes from the Electron bundle instead, which
@@ -151,6 +154,37 @@ function migrateLegacyDataDirectory(target: string): void {
   }
 }
 
+/**
+ * Append a line to the session log.
+ *
+ * Diagnosing anything in the terminal meant quitting the app to copy what it
+ * had printed — which killed whatever was still in flight, so the interesting
+ * part was never in the paste. The same lines go to a file that can be read
+ * while the app keeps running.
+ */
+function appendLog(line: string): void {
+  try {
+    logStream ??= createWriteStream(logPath(), { flags: 'a' })
+    logStream.write(`${new Date().toISOString()} ${line.replace(/\s+$/, '')}\n`)
+  } catch {
+    // Logging must never be the thing that stops the app starting.
+  }
+}
+
+function logPath(): string {
+  const directory = join(dataDirectory(), 'logs')
+  mkdirSync(directory, { recursive: true })
+  return join(directory, 'brazier.log')
+}
+
+/** Print to the terminal and record it, so both places have the whole story. */
+function report(line: string, level: 'log' | 'warn' | 'error' = 'log'): void {
+  if (level === 'error') console.error(line)
+  else if (level === 'warn') console.warn(line)
+  else console.log(line)
+  appendLog(line)
+}
+
 function startDaemon(): Promise<Connection> {
   const directory = dataDirectory()
   migrateLegacyDataDirectory(directory)
@@ -172,7 +206,11 @@ function startDaemon(): Promise<Connection> {
   })
   daemon = child
   child.stdin.end()
-  child.stderr.on('data', (chunk) => process.stderr.write(`[brazierd] ${chunk}`))
+  child.stderr.on('data', (chunk) => {
+    const text = `[brazierd] ${chunk}`
+    process.stderr.write(text)
+    appendLog(text)
+  })
 
   return new Promise((resolveConnection, reject) => {
     let buffer = ''
@@ -337,10 +375,8 @@ async function createWindow(): Promise<void> {
   // to look.
   if (!app.isPackaged) {
     window.webContents.on('console-message', (event) => {
-      const label = `[renderer] ${event.message}`
-      if (event.level === 'error') console.error(label)
-      else if (event.level === 'warning') console.warn(label)
-      else console.log(label)
+      const level = event.level === 'error' ? 'error' : event.level === 'warning' ? 'warn' : 'log'
+      report(`[renderer] ${event.message}`, level)
     })
   }
 
@@ -349,7 +385,8 @@ async function createWindow(): Promise<void> {
     if (!window.isDestroyed() && !window.isVisible()) window.show()
   })
   window.webContents.on('did-finish-load', () => {
-    console.error('[brazier] renderer finished load')
+    // Says where the log is, so reading it does not require quitting first.
+    report(`[brazier] renderer finished load — session log: ${logPath()}`)
     if (!window.isDestroyed() && !window.isVisible()) window.show()
   })
   window.webContents.on('render-process-gone', (_event, details) => {

@@ -47,6 +47,16 @@ The window has no menu bar, so development builds bind the two things a menu
 would normally provide: `Cmd/Ctrl+R` reloads the renderer and
 `Cmd/Ctrl+Alt+I` toggles developer tools.
 
+Daemon output and renderer console messages are written to a session log
+alongside the data directory — `logs/brazier.log` — and its path is printed at
+startup. Read that rather than the terminal when something is still running:
+quitting to copy what scrolled past also cancels whatever you were waiting for.
+
+```sh
+tail -f ~/Library/Application\\ Support/Brazier/logs/brazier.log   # macOS
+tail -f ~/.local/share/brazier/logs/brazier.log                    # Linux
+```
+
 Reload rather than trust hot updates when changing anything long-lived. Vite
 applies module updates to the page, but objects constructed once per mount —
 the session coordinator, an open audio graph — keep running the code they were
