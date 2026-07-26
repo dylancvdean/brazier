@@ -18,6 +18,7 @@ test-results/
 !.env.example
 .uv-cache/
 bugs.txt
+models.txt
 # Local Cargo cache (when CARGO_HOME is set inside the repo).
 .cargo-home/
 

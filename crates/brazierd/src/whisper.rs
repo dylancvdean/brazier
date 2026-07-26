@@ -665,6 +665,79 @@ pub struct TranscribeRequest<'a> {
     pub binary: &'a Path,
     pub model: &'a Path,
     pub audio: &'a Path,
+    /// Decoding options configured for this ASR model, when it has any.
+    pub profile: Option<&'a crate::model_settings::TranscriptionProfile>,
+}
+
+/// Add a model's decoding options to a whisper-cli command line.
+///
+/// Every flag is opt-in, so a model with no profile is invoked exactly as it
+/// was before. The names are whisper.cpp's own rather than its short forms,
+/// which reads better against the settings that produced them.
+fn apply_transcription_profile(
+    command: &mut Command,
+    profile: Option<&crate::model_settings::TranscriptionProfile>,
+) {
+    let Some(profile) = profile else { return };
+    if let Some(language) = &profile.language {
+        command.arg("--language").arg(language);
+    }
+    if profile.translate.unwrap_or(false) {
+        command.arg("--translate");
+    }
+    if let Some(value) = profile.beam_size {
+        command.arg("--beam-size").arg(value.to_string());
+    }
+    if let Some(value) = profile.best_of {
+        command.arg("--best-of").arg(value.to_string());
+    }
+    if let Some(value) = profile.temperature {
+        command.arg("--temperature").arg(value.to_string());
+    }
+    if let Some(value) = profile.max_context {
+        command.arg("--max-context").arg(value.to_string());
+    }
+    if let Some(value) = profile.max_len {
+        command.arg("--max-len").arg(value.to_string());
+    }
+    if profile.split_on_word.unwrap_or(false) {
+        command.arg("--split-on-word");
+    }
+    if let Some(value) = profile.word_threshold {
+        command.arg("--word-thold").arg(value.to_string());
+    }
+    if let Some(value) = profile.entropy_threshold {
+        command.arg("--entropy-thold").arg(value.to_string());
+    }
+    if let Some(value) = profile.logprob_threshold {
+        command.arg("--logprob-thold").arg(value.to_string());
+    }
+    if let Some(value) = profile.no_speech_threshold {
+        command.arg("--no-speech-thold").arg(value.to_string());
+    }
+    if profile.no_fallback.unwrap_or(false) {
+        command.arg("--no-fallback");
+    }
+    if profile.suppress_nst.unwrap_or(false) {
+        command.arg("--suppress-nst");
+    }
+    if let Some(value) = profile.threads {
+        command.arg("--threads").arg(value.to_string());
+    }
+    if profile.flash_attention.unwrap_or(false) {
+        command.arg("--flash-attn");
+    }
+    if let Some(prompt) = profile
+        .initial_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command.arg("--prompt").arg(prompt);
+    }
+    for arg in &profile.extra_args {
+        command.arg(arg);
+    }
 }
 
 /// Optional context for backends that download models themselves (WhisperKit).
@@ -698,7 +771,12 @@ pub async fn transcribe_with_context(
             data_dir,
             model: model_pref,
             audio: request.audio,
-            language: None,
+            // WhisperKit takes a language and nothing else this profile offers,
+            // so the rest of the decoding options do not reach it.
+            language: request
+                .profile
+                .and_then(|profile| profile.language.as_deref())
+                .filter(|value| *value != "auto"),
         })
         .await;
     }
@@ -709,7 +787,8 @@ pub async fn transcribe_with_context(
     let output_txt = PathBuf::from(format!("{}.txt", output_base.display()));
     let _ = tokio::fs::remove_file(&output_txt).await;
 
-    let mut child = Command::new(request.binary)
+    let mut command = Command::new(request.binary);
+    command
         .arg("-m")
         .arg(request.model)
         .arg("-f")
@@ -717,7 +796,9 @@ pub async fn transcribe_with_context(
         .arg("-otxt")
         .arg("-of")
         .arg(&output_base)
-        .arg("-np")
+        .arg("-np");
+    apply_transcription_profile(&mut command, request.profile);
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -740,13 +821,16 @@ pub async fn transcribe_with_context(
     }
 
     // Fallback: some builds print the transcript to stdout.
-    let output = Command::new(request.binary)
+    let mut command = Command::new(request.binary);
+    command
         .arg("-m")
         .arg(request.model)
         .arg("-f")
         .arg(request.audio)
         .arg("-nt")
-        .arg("-np")
+        .arg("-np");
+    apply_transcription_profile(&mut command, request.profile);
+    let output = command
         .output()
         .await
         .context("re-run whisper-cli for stdout")?;

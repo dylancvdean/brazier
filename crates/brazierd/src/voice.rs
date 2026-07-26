@@ -374,6 +374,40 @@ pub struct VoiceLaunchOptions {
     pub voice_id: Option<String>,
     /// Hugging Face token for gated model downloads on first run.
     pub hf_token: Option<String>,
+    /// Weight quantisation in bits (MLX `-q`); 4 is the on-device default.
+    pub quantization: Option<u8>,
+    /// Arguments appended to the server's command line verbatim.
+    pub extra_args: Vec<String>,
+}
+
+impl VoiceLaunchOptions {
+    /// Lay a model's configured voice settings under whatever the session asked
+    /// for, so a session that names nothing still starts the model the way it
+    /// was configured.
+    pub fn with_profile(mut self, profile: Option<&crate::model_settings::VoiceProfile>) -> Self {
+        let Some(profile) = profile else { return self };
+        if self
+            .persona_text
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty)
+        {
+            self.persona_text = profile.persona_text.clone();
+        }
+        if self.voice_prompt.is_none() {
+            self.voice_prompt = profile
+                .voice_prompt_path
+                .as_deref()
+                .map(PathBuf::from)
+                .filter(|path| path.is_file());
+        }
+        if self.voice_id.is_none() {
+            self.voice_id = profile.voice_id.clone();
+        }
+        self.quantization = self.quantization.or(profile.quantization);
+        self.extra_args.extend(profile.extra_args.iter().cloned());
+        self
+    }
 }
 
 /// A running Moshi or PersonaPlex-MLX process bound to loopback.
@@ -475,7 +509,7 @@ impl VoiceServer {
                     .arg(persona)
                     // 4-bit is the practical default for on-device Apple Silicon.
                     .arg("-q")
-                    .arg(MLX_QUANTIZATION.to_string())
+                    .arg(options.quantization.unwrap_or(MLX_QUANTIZATION).to_string())
                     // Clients talk to the WS proxy, never the bundled web UI;
                     // skipping it also avoids a `dist.tgz` download on startup.
                     .arg("--static")
@@ -505,7 +539,11 @@ impl VoiceServer {
                     if tokenizer.is_file() {
                         command.arg("--tokenizer").arg(tokenizer);
                     }
-                    if let Some(weight) = snapshot_lm_weight(dir, MLX_QUANTIZATION) {
+                    // The weight file has to match the quantisation asked for,
+                    // or the server loads one precision and is told another.
+                    if let Some(weight) =
+                        snapshot_lm_weight(dir, options.quantization.unwrap_or(MLX_QUANTIZATION))
+                    {
                         command.arg("--moshi-weight").arg(weight);
                     }
                     if let Some(weight) = snapshot_mimi_weight(dir) {
@@ -516,6 +554,10 @@ impl VoiceServer {
                     }
                 }
             }
+        }
+
+        for arg in &options.extra_args {
+            command.arg(arg);
         }
 
         let module = match backend {
@@ -662,6 +704,7 @@ impl SessionManager {
         persona_text: String,
         voice_prompt: Option<PathBuf>,
         hf_token: Option<String>,
+        profile: Option<&crate::model_settings::VoiceProfile>,
     ) -> anyhow::Result<VoiceSession> {
         let mut guard = self.session.lock().await;
         anyhow::ensure!(
@@ -676,7 +719,10 @@ impl SessionManager {
                 voice_prompt: voice_prompt.clone(),
                 voice_id: None,
                 hf_token,
-            },
+                quantization: None,
+                extra_args: Vec::new(),
+            }
+            .with_profile(profile),
         )
         .await?;
         let session = VoiceSession {

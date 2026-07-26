@@ -26,6 +26,7 @@ use tar::Archive;
 use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex as AsyncMutex, sync::Notify};
 
 use crate::{
+    model_settings::DiffusionProfile,
     models_store,
     progress::{ProgressCallback, ProgressEvent},
     runtime_settings::RuntimeTarget,
@@ -1043,21 +1044,12 @@ impl Drop for JobRegistration {
     }
 }
 
-fn default_width() -> u32 {
-    512
-}
-
-fn default_height() -> u32 {
-    512
-}
-
-fn default_steps() -> u32 {
-    20
-}
-
-fn default_video_frames() -> u32 {
-    16
-}
+/// Fallbacks for a job that names no size and belongs to a model that has not
+/// been configured with one.
+const FALLBACK_WIDTH: u32 = 512;
+const FALLBACK_HEIGHT: u32 = 512;
+const FALLBACK_STEPS: u32 = 20;
+const FALLBACK_VIDEO_FRAMES: u32 = 16;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GenerateImageRequest {
@@ -1065,12 +1057,14 @@ pub struct GenerateImageRequest {
     pub model_id: String,
     #[serde(default)]
     pub negative_prompt: Option<String>,
-    #[serde(default = "default_width")]
-    pub width: u32,
-    #[serde(default = "default_height")]
-    pub height: u32,
-    #[serde(default = "default_steps")]
-    pub steps: u32,
+    /// Absent means "whatever this model is configured for", which is how a
+    /// model that only works at one resolution gets used at it.
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub steps: Option<u32>,
     #[serde(default)]
     pub seed: Option<i64>,
     #[serde(default)]
@@ -1100,12 +1094,12 @@ pub struct GenerateVideoRequest {
     pub model_id: String,
     #[serde(default)]
     pub negative_prompt: Option<String>,
-    #[serde(default = "default_width")]
-    pub width: u32,
-    #[serde(default = "default_height")]
-    pub height: u32,
-    #[serde(default = "default_steps")]
-    pub steps: u32,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub steps: Option<u32>,
     #[serde(default)]
     pub seed: Option<i64>,
     #[serde(default)]
@@ -1127,8 +1121,8 @@ pub struct GenerateVideoRequest {
     /// size-derived budget.
     #[serde(default)]
     pub timeout_secs: Option<u32>,
-    #[serde(default = "default_video_frames")]
-    pub video_frames: u32,
+    #[serde(default)]
+    pub video_frames: Option<u32>,
     /// Playback rate written into the clip; sd-cli defaults to 24.
     #[serde(default)]
     pub fps: Option<u32>,
@@ -1177,6 +1171,162 @@ fn apply_manifest_args(
         command.arg(format!("--{flag}")).arg(path);
     }
     Ok(())
+}
+
+/// Combine a request's negative prompt with the model's standing one.
+///
+/// A model configured to always avoid something should keep avoiding it when a
+/// job names something else to avoid, so the two are joined rather than one
+/// replacing the other.
+fn merge_negative_prompt(
+    request: Option<&str>,
+    profile: Option<&DiffusionProfile>,
+) -> Option<String> {
+    let configured = profile
+        .and_then(|profile| profile.negative_prompt.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let requested = request.map(str::trim).filter(|value| !value.is_empty());
+    match (configured, requested) {
+        (Some(configured), Some(requested)) => Some(format!("{requested}, {configured}")),
+        (Some(only), None) | (None, Some(only)) => Some(only.to_owned()),
+        (None, None) => None,
+    }
+}
+
+/// The `<lora:name:scale>` tags sd-cli reads out of the prompt itself.
+///
+/// stable-diffusion.cpp has no flag naming a LoRA. It is given one directory to
+/// search and the prompt decides which files in it are applied and how
+/// strongly, so applying a LoRA means writing into the text the model is given.
+fn lora_tags(loras: &[crate::model_settings::ResolvedLora]) -> String {
+    loras
+        .iter()
+        .filter_map(|lora| {
+            let name = lora.path.file_stem()?.to_str()?;
+            Some(format!(" <lora:{name}:{}>", lora.scale))
+        })
+        .collect()
+}
+
+/// Apply a model's diffusion settings to an sd-cli command line.
+///
+/// Returns the prompt to use, which is the given one plus any LoRA tags. Every
+/// flag here is opt-in: a model with no profile produces the same command line
+/// it did before this existed.
+async fn apply_diffusion_profile(
+    command: &mut Command,
+    data_dir: &Path,
+    profile: Option<&DiffusionProfile>,
+    prompt: &str,
+) -> anyhow::Result<String> {
+    let Some(profile) = profile else {
+        return Ok(prompt.to_owned());
+    };
+
+    if let Some(value) = &profile.sampling_method {
+        command.arg("--sampling-method").arg(value);
+    }
+    if let Some(value) = &profile.schedule {
+        // `default` is Brazier's word for "say nothing and let sd-cli choose".
+        if value != "default" {
+            command.arg("--schedule").arg(value);
+        }
+    }
+    if let Some(value) = profile.clip_skip {
+        command.arg("--clip-skip").arg(value.to_string());
+    }
+    if let Some(value) = profile.batch_count {
+        command.arg("--batch-count").arg(value.to_string());
+    }
+    if let Some(value) = profile.strength {
+        command.arg("--strength").arg(value.to_string());
+    }
+    if let Some(value) = profile.img_cfg_scale {
+        command.arg("--img-cfg-scale").arg(value.to_string());
+    }
+    if let Some(value) = profile.eta {
+        command.arg("--eta").arg(value.to_string());
+    }
+    if let Some(value) = profile.slg_scale {
+        command.arg("--slg-scale").arg(value.to_string());
+    }
+    if let Some(value) = &profile.skip_layers {
+        command.arg("--skip-layers").arg(value);
+    }
+    if let Some(value) = profile.skip_layer_start {
+        command.arg("--skip-layer-start").arg(value.to_string());
+    }
+    if let Some(value) = profile.skip_layer_end {
+        command.arg("--skip-layer-end").arg(value.to_string());
+    }
+    if let Some(value) = profile.flow_shift {
+        command.arg("--flow-shift").arg(value.to_string());
+    }
+    if let Some(value) = profile.threads {
+        command.arg("--threads").arg(value.to_string());
+    }
+    if let Some(value) = &profile.rng {
+        command.arg("--rng").arg(value);
+    }
+    if profile.vae_tiling.unwrap_or(false) {
+        command.arg("--vae-tiling");
+    }
+    if profile.vae_on_cpu.unwrap_or(false) {
+        command.arg("--vae-on-cpu");
+    }
+    if profile.clip_on_cpu.unwrap_or(false) {
+        command.arg("--clip-on-cpu");
+    }
+    if profile.diffusion_fa.unwrap_or(false) {
+        command.arg("--diffusion-fa");
+    }
+    if profile.offload_to_cpu.unwrap_or(false) {
+        command.arg("--offload-to-cpu");
+    }
+
+    // sd-cli takes one ControlNet per invocation, so the first enabled binding
+    // is the one applied and the interface says as much.
+    if let Some((path, binding)) =
+        crate::model_settings::resolve_control_net(data_dir, &profile.control_nets)
+    {
+        command.arg("--control-net").arg(&path);
+        command
+            .arg("--control-strength")
+            .arg(binding.strength.to_string());
+        if let Some(image) = binding.image_path.as_deref().filter(|value| {
+            let exists = Path::new(value).is_file();
+            if !exists {
+                tracing::warn!(image = value, "ControlNet reference image is missing");
+            }
+            exists
+        }) {
+            command.arg("--control-image").arg(image);
+        }
+        if binding.cpu {
+            command.arg("--control-net-cpu");
+        }
+    }
+
+    let loras = crate::model_settings::resolve_loras(data_dir, &profile.loras, ENGINE);
+    let mut prompt = prompt.to_owned();
+    if !loras.is_empty() {
+        let dir = crate::adapters::stage_lora_dir(
+            data_dir,
+            &loras
+                .iter()
+                .map(|lora| lora.path.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+        command.arg("--lora-model-dir").arg(dir);
+        prompt.push_str(&lora_tags(&loras));
+    }
+
+    for arg in &profile.extra_args {
+        command.arg(arg);
+    }
+    Ok(prompt)
 }
 
 /// How many trailing output lines to keep for diagnosis.
@@ -1322,6 +1472,7 @@ pub async fn generate_image(
     data_dir: &Path,
     binary_override: Option<&str>,
     request: &GenerateImageRequest,
+    profile: Option<&DiffusionProfile>,
 ) -> anyhow::Result<GenerateResult> {
     let _permit = job_lock().try_lock().map_err(|_| BusyError)?;
 
@@ -1345,36 +1496,56 @@ pub async fn generate_image(
     let job_dir = job_output_dir(data_dir).await?;
     let output_path = job_dir.join("output.png");
 
+    let width = request
+        .width
+        .or(profile.and_then(|profile| profile.width))
+        .unwrap_or(FALLBACK_WIDTH);
+    let height = request
+        .height
+        .or(profile.and_then(|profile| profile.height))
+        .unwrap_or(FALLBACK_HEIGHT);
+    let steps = request
+        .steps
+        .or(profile.and_then(|profile| profile.steps))
+        .unwrap_or(FALLBACK_STEPS);
+    let seed = request.seed.or(profile.and_then(|profile| profile.seed));
+    let cfg_scale = request
+        .cfg_scale
+        .or(profile.and_then(|profile| profile.cfg_scale));
+    let guidance = request
+        .guidance
+        .or(profile.and_then(|profile| profile.guidance));
+    let negative = merge_negative_prompt(request.negative_prompt.as_deref(), profile);
+
     let mut command = Command::new(&binary);
-    command
-        .arg("-M")
-        .arg("img_gen")
-        .arg("-p")
-        .arg(&request.prompt);
-    if let Some(negative) = &request.negative_prompt {
+    command.arg("-M").arg("img_gen");
+    if let Some(negative) = &negative {
         command.arg("-n").arg(negative);
     }
     command
         .arg("-W")
-        .arg(request.width.to_string())
+        .arg(width.to_string())
         .arg("-H")
-        .arg(request.height.to_string())
+        .arg(height.to_string())
         .arg("--steps")
-        .arg(request.steps.to_string())
+        .arg(steps.to_string())
         .arg("-o")
         .arg(&output_path);
-    if let Some(seed) = request.seed {
+    if let Some(seed) = seed {
         command.arg("-s").arg(seed.to_string());
     }
-    if let Some(cfg_scale) = request.cfg_scale {
+    if let Some(cfg_scale) = cfg_scale {
         command.arg("--cfg-scale").arg(cfg_scale.to_string());
     }
-    if let Some(guidance) = request.guidance {
+    if let Some(guidance) = guidance {
         command.arg("--guidance").arg(guidance.to_string());
     }
     if let Some(init_image) = &request.init_image {
         command.arg("-i").arg(init_image);
     }
+    // Last, because the prompt it returns carries the LoRA tags sd-cli reads.
+    let prompt = apply_diffusion_profile(&mut command, data_dir, profile, &request.prompt).await?;
+    command.arg("-p").arg(&prompt);
     apply_manifest_args(&mut command, &model_dir, &manifest)?;
     if let Some(dir) = binary.parent() {
         prepend_library_path(&mut command, dir);
@@ -1386,7 +1557,7 @@ pub async fn generate_image(
         modality: Modality::Image,
         model_id: request.model_id.clone(),
         prompt: request.prompt.clone(),
-        negative_prompt: request.negative_prompt.clone(),
+        negative_prompt: negative.clone(),
         init_image_blob: request.init_image_blob.clone(),
         origin: request.origin,
         elapsed_secs: 0,
@@ -1403,13 +1574,13 @@ pub async fn generate_image(
         output_path,
         metadata: serde_json::json!({
             "model_id": request.model_id,
-            "prompt": request.prompt,
-            "negative_prompt": request.negative_prompt,
-            "width": request.width,
-            "height": request.height,
-            "steps": request.steps,
-            "seed": request.seed,
-            "cfg_scale": request.cfg_scale,
+            "prompt": prompt,
+            "negative_prompt": negative,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "seed": seed,
+            "cfg_scale": cfg_scale,
         }),
     })
 }
@@ -1420,6 +1591,7 @@ pub async fn generate_video(
     data_dir: &Path,
     binary_override: Option<&str>,
     request: &GenerateVideoRequest,
+    profile: Option<&DiffusionProfile>,
 ) -> anyhow::Result<GenerateResult> {
     let _permit = job_lock().try_lock().map_err(|_| BusyError)?;
 
@@ -1443,56 +1615,77 @@ pub async fn generate_video(
     let job_dir = job_output_dir(data_dir).await?;
     let output_path = job_dir.join("output.mp4");
 
+    let width = request
+        .width
+        .or(profile.and_then(|profile| profile.width))
+        .unwrap_or(FALLBACK_WIDTH);
+    let height = request
+        .height
+        .or(profile.and_then(|profile| profile.height))
+        .unwrap_or(FALLBACK_HEIGHT);
+    let steps = request
+        .steps
+        .or(profile.and_then(|profile| profile.steps))
+        .unwrap_or(FALLBACK_STEPS);
+    let video_frames = request
+        .video_frames
+        .or(profile.and_then(|profile| profile.video_frames))
+        .unwrap_or(FALLBACK_VIDEO_FRAMES);
+    let fps = request.fps.or(profile.and_then(|profile| profile.fps));
+    let seed = request.seed.or(profile.and_then(|profile| profile.seed));
+    let cfg_scale = request
+        .cfg_scale
+        .or(profile.and_then(|profile| profile.cfg_scale));
+    let guidance = request
+        .guidance
+        .or(profile.and_then(|profile| profile.guidance));
+    let negative = merge_negative_prompt(request.negative_prompt.as_deref(), profile);
+
     let mut command = Command::new(&binary);
-    command
-        .arg("-M")
-        .arg("vid_gen")
-        .arg("-p")
-        .arg(&request.prompt);
-    if let Some(negative) = &request.negative_prompt {
+    command.arg("-M").arg("vid_gen");
+    if let Some(negative) = &negative {
         command.arg("-n").arg(negative);
     }
     command
         .arg("-W")
-        .arg(request.width.to_string())
+        .arg(width.to_string())
         .arg("-H")
-        .arg(request.height.to_string())
+        .arg(height.to_string())
         .arg("--steps")
-        .arg(request.steps.to_string())
+        .arg(steps.to_string())
         .arg("--video-frames")
-        .arg(request.video_frames.to_string())
+        .arg(video_frames.to_string())
         .arg("-o")
         .arg(&output_path);
-    if let Some(seed) = request.seed {
+    if let Some(seed) = seed {
         command.arg("-s").arg(seed.to_string());
     }
-    if let Some(cfg_scale) = request.cfg_scale {
+    if let Some(cfg_scale) = cfg_scale {
         command.arg("--cfg-scale").arg(cfg_scale.to_string());
     }
-    if let Some(guidance) = request.guidance {
+    if let Some(guidance) = guidance {
         command.arg("--guidance").arg(guidance.to_string());
     }
-    if let Some(fps) = request.fps {
+    if let Some(fps) = fps {
         command.arg("--fps").arg(fps.to_string());
     }
     if let Some(init_image) = &request.init_image {
         command.arg("-i").arg(init_image);
     }
+    let prompt = apply_diffusion_profile(&mut command, data_dir, profile, &request.prompt).await?;
+    command.arg("-p").arg(&prompt);
     apply_manifest_args(&mut command, &model_dir, &manifest)?;
     if let Some(dir) = binary.parent() {
         prepend_library_path(&mut command, dir);
     }
 
-    let timeout = effective_timeout(
-        video_timeout(request.steps, request.video_frames),
-        request.timeout_secs,
-    );
+    let timeout = effective_timeout(video_timeout(steps, video_frames), request.timeout_secs);
     let job = JobRegistration::open(ActiveGeneration {
         id: uuid::Uuid::new_v4().simple().to_string(),
         modality: Modality::Video,
         model_id: request.model_id.clone(),
         prompt: request.prompt.clone(),
-        negative_prompt: request.negative_prompt.clone(),
+        negative_prompt: negative.clone(),
         init_image_blob: request.init_image_blob.clone(),
         origin: request.origin,
         elapsed_secs: 0,
@@ -1509,14 +1702,14 @@ pub async fn generate_video(
         output_path,
         metadata: serde_json::json!({
             "model_id": request.model_id,
-            "prompt": request.prompt,
-            "negative_prompt": request.negative_prompt,
-            "width": request.width,
-            "height": request.height,
-            "steps": request.steps,
-            "seed": request.seed,
-            "cfg_scale": request.cfg_scale,
-            "video_frames": request.video_frames,
+            "prompt": prompt,
+            "negative_prompt": negative,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "seed": seed,
+            "cfg_scale": cfg_scale,
+            "video_frames": video_frames,
         }),
     })
 }

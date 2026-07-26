@@ -17,6 +17,7 @@ use tokio::{
 };
 
 use crate::{
+    model_settings::TextProfile,
     progress::{ProgressCallback, ProgressEvent},
     runtime_settings::{RuntimeSettings, RuntimeTarget},
     types::{ChatCompletionRequest, OpenAiMessage},
@@ -199,40 +200,157 @@ pub fn discover_binary(data_dir: &Path, path_env: Option<&str>) -> Option<PathBu
         .find(|path| path.is_file())
 }
 
+/// Which sampler names the endpoint on the other end understands.
+///
+/// llama.cpp exposes a much larger sampler set than OpenAI describes, and MLX a
+/// different subset again. Sending a key a server does not know is not always
+/// ignored — some reject the request outright — so the extended samplers are
+/// only written for a server known to read them, and a remote endpoint gets the
+/// standard fields alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplerDialect {
+    LlamaCpp,
+    Mlx,
+    OpenAi,
+}
+
+/// Everything outside the request itself that shapes the body sent to a server.
+#[derive(Clone, Copy)]
+pub struct ChatContext<'a> {
+    pub settings: &'a RuntimeSettings,
+    /// The selected model's overrides, when it has any.
+    pub profile: Option<&'a TextProfile>,
+    pub dialect: SamplerDialect,
+    pub model_alias: &'a str,
+    pub stream: bool,
+}
+
+impl<'a> ChatContext<'a> {
+    /// A context for a local llama-server with no per-model overrides.
+    pub fn local(settings: &'a RuntimeSettings, model_alias: &'a str, stream: bool) -> Self {
+        Self {
+            settings,
+            profile: None,
+            dialect: SamplerDialect::LlamaCpp,
+            model_alias,
+            stream,
+        }
+    }
+}
+
+/// Write `value` under `key` when it is set.
+fn put<T: Into<serde_json::Value>>(body: &mut serde_json::Value, key: &str, value: Option<T>) {
+    if let Some(value) = value {
+        body[key] = value.into();
+    }
+}
+
 /// Translate a Brazier chat request into the JSON body expected by llama-server.
 pub fn translate_chat_request(
     request: &ChatCompletionRequest,
-    settings: &RuntimeSettings,
-    model_alias: &str,
-    stream: bool,
+    context: ChatContext<'_>,
 ) -> serde_json::Value {
-    let messages: Vec<serde_json::Value> = request
+    let ChatContext {
+        settings,
+        profile,
+        dialect,
+        model_alias,
+        stream,
+    } = context;
+    let mut messages: Vec<serde_json::Value> = request
         .messages
         .iter()
         .map(message_to_openai_json)
         .collect();
+    // A model's own system prompt leads the conversation rather than replacing
+    // whatever the caller sent, which may be a tool preamble it still needs.
+    if let Some(prompt) = profile
+        .and_then(|profile| profile.system_prompt.as_deref())
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        messages.insert(
+            0,
+            serde_json::json!({ "role": "system", "content": prompt }),
+        );
+    }
+
+    let temperature = request
+        .temperature
+        .or(profile.and_then(|profile| profile.temperature))
+        .unwrap_or(settings.temperature);
+    let top_p = request
+        .top_p
+        .or(profile.and_then(|profile| profile.top_p))
+        .unwrap_or(settings.top_p);
+    let reasoning = request
+        .enable_reasoning
+        .or(profile.and_then(|profile| profile.enable_reasoning))
+        .unwrap_or(settings.enable_reasoning);
     let mut body = serde_json::json!({
         "model": model_alias,
         "messages": messages,
         "stream": stream,
-        "temperature": request.temperature.unwrap_or(settings.temperature),
-        "top_p": request.top_p.unwrap_or(settings.top_p),
-        "chat_template_kwargs": {
-            "enable_thinking": request.enable_reasoning.unwrap_or(settings.enable_reasoning)
-        }
+        "temperature": temperature,
+        "top_p": top_p,
+        "chat_template_kwargs": { "enable_thinking": reasoning }
     });
     if let Some(budget) = request
         .reasoning_budget_tokens
+        .or(profile.and_then(|profile| profile.reasoning_budget_tokens))
         .or(settings.reasoning_budget_tokens)
     {
         body["thinking_budget_tokens"] = serde_json::json!(budget);
     }
-    if let Some(value) = request.max_tokens.or(settings.max_tokens) {
-        body["max_tokens"] = serde_json::json!(value);
+    put(
+        &mut body,
+        "max_tokens",
+        request
+            .max_tokens
+            .or(profile.and_then(|profile| profile.max_tokens))
+            .or(settings.max_tokens),
+    );
+    put(
+        &mut body,
+        "seed",
+        request.seed.or(profile.and_then(|profile| profile.seed)),
+    );
+
+    if let Some(profile) = profile {
+        if !profile.stop.is_empty() {
+            body["stop"] = serde_json::json!(profile.stop);
+        }
+        // Penalties OpenAI itself defines travel everywhere.
+        put(&mut body, "presence_penalty", profile.presence_penalty);
+        put(&mut body, "frequency_penalty", profile.frequency_penalty);
+        match dialect {
+            SamplerDialect::LlamaCpp => {
+                put(&mut body, "top_k", profile.top_k);
+                put(&mut body, "min_p", profile.min_p);
+                put(&mut body, "typical_p", profile.typical_p);
+                put(&mut body, "repeat_penalty", profile.repeat_penalty);
+                put(&mut body, "repeat_last_n", profile.repeat_last_n);
+                put(&mut body, "dry_multiplier", profile.dry_multiplier);
+                put(&mut body, "dry_base", profile.dry_base);
+                put(&mut body, "dry_allowed_length", profile.dry_allowed_length);
+                put(&mut body, "mirostat", profile.mirostat);
+                put(&mut body, "mirostat_tau", profile.mirostat_tau);
+                put(&mut body, "mirostat_eta", profile.mirostat_eta);
+            }
+            SamplerDialect::Mlx => {
+                put(&mut body, "top_k", profile.top_k);
+                put(&mut body, "min_p", profile.min_p);
+                put(&mut body, "repetition_penalty", profile.repeat_penalty);
+                put(
+                    &mut body,
+                    "repetition_context_size",
+                    profile.repeat_last_n.filter(|value| *value > 0),
+                );
+            }
+            SamplerDialect::OpenAi => {}
+        }
     }
-    if let Some(value) = request.seed {
-        body["seed"] = serde_json::json!(value);
-    }
+
     if let Some(value) = &request.tools {
         body["tools"] = value.clone();
     }
@@ -870,6 +988,216 @@ pub struct LlamaServer {
     pub model_path: PathBuf,
     pub projector_path: Option<PathBuf>,
     pub binary: PathBuf,
+    /// The launch settings this process was started with.
+    ///
+    /// Everything below is fixed at spawn time — a context size or a LoRA
+    /// cannot be changed on a running server — so a request whose model is
+    /// already loaded still has to check that it is loaded the way the model is
+    /// now configured, and restart it when it is not.
+    pub launch_key: String,
+}
+
+/// What llama-server is actually started with, once the model's overrides have
+/// been laid over the global settings.
+struct LaunchPlan {
+    context_size: u32,
+    batch_size: u32,
+    ubatch_size: Option<u32>,
+    threads: Option<u16>,
+    gpu_layers: i32,
+    flash_attention: bool,
+    kv_cache_type_k: String,
+    kv_cache_type_v: String,
+    jinja: bool,
+    mlock: bool,
+    no_mmap: bool,
+    rope_scaling: Option<String>,
+    rope_freq_base: Option<f32>,
+    rope_freq_scale: Option<f32>,
+    yarn_orig_ctx: Option<u32>,
+    n_cpu_moe: Option<u32>,
+    main_gpu: Option<u32>,
+    tensor_split: Option<String>,
+    split_mode: Option<String>,
+    cache_reuse: Option<u32>,
+    defrag_threshold: Option<f32>,
+    loras: Vec<(PathBuf, f32)>,
+    extra_args: Vec<String>,
+}
+
+impl LaunchPlan {
+    fn resolve(
+        settings: &RuntimeSettings,
+        profile: Option<&TextProfile>,
+        loras: Vec<(PathBuf, f32)>,
+        effective_target: RuntimeTarget,
+    ) -> Self {
+        let field = |get: &dyn Fn(&TextProfile) -> Option<u32>, fallback: u32| {
+            profile.and_then(|profile| get(profile)).unwrap_or(fallback)
+        };
+        Self {
+            context_size: field(&|profile| profile.context_size, settings.context_size),
+            batch_size: field(&|profile| profile.batch_size, settings.batch_size),
+            ubatch_size: profile.and_then(|profile| profile.ubatch_size),
+            threads: profile
+                .and_then(|profile| profile.threads)
+                .or(settings.threads),
+            gpu_layers: if effective_target == RuntimeTarget::Cpu {
+                0
+            } else {
+                profile
+                    .and_then(|profile| profile.gpu_layers)
+                    .unwrap_or(settings.gpu_layers)
+            },
+            flash_attention: profile
+                .and_then(|profile| profile.flash_attention)
+                .unwrap_or(settings.flash_attention),
+            kv_cache_type_k: profile
+                .and_then(|profile| profile.kv_cache_type_k.clone())
+                .unwrap_or_else(|| settings.kv_cache_type_k.clone()),
+            kv_cache_type_v: profile
+                .and_then(|profile| profile.kv_cache_type_v.clone())
+                .unwrap_or_else(|| settings.kv_cache_type_v.clone()),
+            jinja: profile
+                .and_then(|profile| profile.jinja)
+                .unwrap_or(settings.jinja),
+            mlock: profile.and_then(|profile| profile.mlock).unwrap_or(false),
+            no_mmap: profile.and_then(|profile| profile.no_mmap).unwrap_or(false),
+            rope_scaling: profile.and_then(|profile| profile.rope_scaling.clone()),
+            rope_freq_base: profile.and_then(|profile| profile.rope_freq_base),
+            rope_freq_scale: profile.and_then(|profile| profile.rope_freq_scale),
+            yarn_orig_ctx: profile.and_then(|profile| profile.yarn_orig_ctx),
+            n_cpu_moe: profile.and_then(|profile| profile.n_cpu_moe),
+            main_gpu: profile.and_then(|profile| profile.main_gpu),
+            tensor_split: profile.and_then(|profile| profile.tensor_split.clone()),
+            split_mode: profile.and_then(|profile| profile.split_mode.clone()),
+            cache_reuse: profile.and_then(|profile| profile.cache_reuse),
+            defrag_threshold: profile.and_then(|profile| profile.defrag_threshold),
+            loras,
+            extra_args: profile
+                .map(|profile| profile.extra_args.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// A fingerprint of everything that can only be applied at spawn time.
+    fn key(&self, harmony: bool) -> String {
+        format!(
+            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+            self.context_size,
+            self.batch_size,
+            self.ubatch_size,
+            self.threads,
+            self.gpu_layers,
+            self.flash_attention,
+            self.kv_cache_type_k,
+            self.kv_cache_type_v,
+            self.jinja,
+            self.mlock,
+            self.no_mmap,
+            self.rope_scaling,
+            self.rope_freq_base,
+            self.rope_freq_scale,
+            self.yarn_orig_ctx,
+            self.n_cpu_moe,
+            self.main_gpu,
+            self.tensor_split,
+            self.split_mode,
+            self.cache_reuse,
+            self.defrag_threshold,
+            self.loras,
+            harmony,
+        ) + &self.extra_args.join(" ")
+    }
+
+    fn apply(&self, command: &mut Command, harmony: bool) {
+        command
+            .arg("--ctx-size")
+            .arg(self.context_size.to_string())
+            .arg("--batch-size")
+            .arg(self.batch_size.to_string())
+            .arg("--n-gpu-layers")
+            .arg(self.gpu_layers.to_string())
+            .arg("--flash-attn")
+            .arg(if self.flash_attention { "on" } else { "off" })
+            .arg("--cache-type-k")
+            .arg(&self.kv_cache_type_k)
+            .arg("--cache-type-v")
+            .arg(&self.kv_cache_type_v);
+        if let Some(value) = self.ubatch_size {
+            command.arg("--ubatch-size").arg(value.to_string());
+        }
+        if let Some(threads) = self.threads {
+            command.arg("--threads").arg(threads.to_string());
+        }
+        if self.jinja || harmony {
+            command.arg("--jinja");
+        }
+        if self.mlock {
+            command.arg("--mlock");
+        }
+        if self.no_mmap {
+            command.arg("--no-mmap");
+        }
+        if let Some(value) = &self.rope_scaling {
+            command.arg("--rope-scaling").arg(value);
+        }
+        if let Some(value) = self.rope_freq_base {
+            command.arg("--rope-freq-base").arg(value.to_string());
+        }
+        if let Some(value) = self.rope_freq_scale {
+            command.arg("--rope-freq-scale").arg(value.to_string());
+        }
+        if let Some(value) = self.yarn_orig_ctx {
+            command.arg("--yarn-orig-ctx").arg(value.to_string());
+        }
+        if let Some(value) = self.n_cpu_moe {
+            command.arg("--n-cpu-moe").arg(value.to_string());
+        }
+        if let Some(value) = self.main_gpu {
+            command.arg("--main-gpu").arg(value.to_string());
+        }
+        if let Some(value) = &self.tensor_split {
+            command.arg("--tensor-split").arg(value);
+        }
+        if let Some(value) = &self.split_mode {
+            command.arg("--split-mode").arg(value);
+        }
+        if let Some(value) = self.cache_reuse {
+            command.arg("--cache-reuse").arg(value.to_string());
+        }
+        if let Some(value) = self.defrag_threshold {
+            command.arg("--defrag-thold").arg(value.to_string());
+        }
+        for (path, scale) in &self.loras {
+            command
+                .arg("--lora-scaled")
+                .arg(path)
+                .arg(scale.to_string());
+        }
+        for arg in &self.extra_args {
+            command.arg(arg);
+        }
+    }
+}
+
+/// The fingerprint a server started with these inputs would carry.
+///
+/// Asked before a request is served, so a model whose configuration changed
+/// since it was loaded is reloaded rather than answered from a process that no
+/// longer reflects it.
+pub fn launch_key(
+    settings: &RuntimeSettings,
+    profile: Option<&TextProfile>,
+    loras: Vec<(PathBuf, f32)>,
+    harmony: bool,
+) -> String {
+    let effective_target = if settings.target == RuntimeTarget::Auto {
+        crate::hardware::detect().recommended_target
+    } else {
+        settings.target
+    };
+    LaunchPlan::resolve(settings, profile, loras, effective_target).key(harmony)
 }
 
 impl LlamaServer {
@@ -879,6 +1207,18 @@ impl LlamaServer {
         model_path: &Path,
         settings: &RuntimeSettings,
         harmony: bool,
+    ) -> anyhow::Result<Self> {
+        Self::start_with_profile(binary, model_path, settings, harmony, None, Vec::new()).await
+    }
+
+    /// Spawn llama-server with a model's own launch overrides and LoRAs.
+    pub async fn start_with_profile(
+        binary: &Path,
+        model_path: &Path,
+        settings: &RuntimeSettings,
+        harmony: bool,
+        profile: Option<&TextProfile>,
+        loras: Vec<(PathBuf, f32)>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             binary.is_file(),
@@ -904,10 +1244,6 @@ impl LlamaServer {
             .arg("127.0.0.1")
             .arg("--port")
             .arg(port.to_string())
-            .arg("--ctx-size")
-            .arg(settings.context_size.to_string())
-            .arg("--batch-size")
-            .arg(settings.batch_size.to_string())
             .arg("--parallel")
             .arg("1")
             .stdin(Stdio::null())
@@ -923,32 +1259,9 @@ impl LlamaServer {
         } else {
             settings.target
         };
-        command
-            .arg("--n-gpu-layers")
-            .arg(
-                if effective_target == RuntimeTarget::Cpu {
-                    0
-                } else {
-                    settings.gpu_layers
-                }
-                .to_string(),
-            )
-            .arg("--flash-attn")
-            .arg(if settings.flash_attention {
-                "on"
-            } else {
-                "off"
-            })
-            .arg("--cache-type-k")
-            .arg(&settings.kv_cache_type_k)
-            .arg("--cache-type-v")
-            .arg(&settings.kv_cache_type_v);
-        if let Some(threads) = settings.threads {
-            command.arg("--threads").arg(threads.to_string());
-        }
-        if settings.jinja || harmony {
-            command.arg("--jinja");
-        }
+        let plan = LaunchPlan::resolve(settings, profile, loras, effective_target);
+        let launch_key = plan.key(harmony);
+        plan.apply(&mut command, harmony);
         if harmony {
             command
                 .arg("--reasoning-format")
@@ -997,6 +1310,7 @@ impl LlamaServer {
             model_path: model_path.to_path_buf(),
             projector_path,
             binary: binary.to_path_buf(),
+            launch_key,
         })
     }
 
@@ -1259,7 +1573,7 @@ mod tests {
             builtin_tool_names: None,
         };
         let settings = RuntimeSettings::default();
-        let body = translate_chat_request(&request, &settings, "local", false);
+        let body = translate_chat_request(&request, ChatContext::local(&settings, "local", false));
         assert_eq!(body["model"], "local");
         assert!(!body["stream"].as_bool().unwrap());
         assert_eq!(body["messages"][0]["content"][0]["text"], "Describe");
@@ -1269,8 +1583,195 @@ mod tests {
             body["messages"][0]["content"][2]["input_audio"]["format"],
             "wav"
         );
-        let streamed = translate_chat_request(&request, &settings, "local", true);
+        let streamed =
+            translate_chat_request(&request, ChatContext::local(&settings, "local", true));
         assert!(streamed["stream"].as_bool().unwrap());
+    }
+
+    /// Floats make the round trip through JSON as doubles, so they are read
+    /// back at the precision they were written with.
+    fn as_f32(value: &serde_json::Value) -> f32 {
+        value.as_f64().expect("a number") as f32
+    }
+
+    fn plain_request() -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "gguf:acme/model.gguf".into(),
+            messages: vec![OpenAiMessage {
+                role: "user".into(),
+                content: json!("Hello"),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            stream: false,
+            tools: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            seed: None,
+            enable_reasoning: None,
+            reasoning_budget_tokens: None,
+            tool_choice: None,
+            builtin_tools: None,
+            builtin_tool_names: None,
+        }
+    }
+
+    /// A model's own sampling settings stand in for the global ones, and the
+    /// extended llama.cpp samplers travel with them.
+    #[test]
+    fn a_model_profile_overrides_the_global_sampling() {
+        let settings = RuntimeSettings::default();
+        let profile = TextProfile {
+            temperature: Some(0.2),
+            top_k: Some(40),
+            min_p: Some(0.05),
+            repeat_penalty: Some(1.1),
+            stop: vec!["<|end|>".into()],
+            ..TextProfile::default()
+        };
+        let body = translate_chat_request(
+            &plain_request(),
+            ChatContext {
+                settings: &settings,
+                profile: Some(&profile),
+                dialect: SamplerDialect::LlamaCpp,
+                model_alias: "local",
+                stream: false,
+            },
+        );
+        assert_eq!(as_f32(&body["temperature"]), 0.2);
+        assert_eq!(body["top_k"], 40);
+        assert_eq!(as_f32(&body["min_p"]), 0.05);
+        assert_eq!(as_f32(&body["repeat_penalty"]), 1.1);
+        assert_eq!(body["stop"][0], "<|end|>");
+        // Untouched fields still come from the global settings.
+        assert_eq!(as_f32(&body["top_p"]), settings.top_p);
+    }
+
+    /// Someone else's server is not llama.cpp: sending it llama.cpp's sampler
+    /// names risks a rejected request over a setting it was never going to
+    /// honour anyway.
+    #[test]
+    fn llama_only_samplers_are_withheld_from_a_remote_server() {
+        let settings = RuntimeSettings::default();
+        let profile = TextProfile {
+            top_k: Some(40),
+            mirostat: Some(2),
+            presence_penalty: Some(0.5),
+            ..TextProfile::default()
+        };
+        let body = translate_chat_request(
+            &plain_request(),
+            ChatContext {
+                settings: &settings,
+                profile: Some(&profile),
+                dialect: SamplerDialect::OpenAi,
+                model_alias: "gpt-oss",
+                stream: false,
+            },
+        );
+        assert!(body.get("top_k").is_none());
+        assert!(body.get("mirostat").is_none());
+        // The penalties OpenAI itself defines still go.
+        assert_eq!(as_f32(&body["presence_penalty"]), 0.5);
+    }
+
+    /// MLX takes a few of the same ideas under different names.
+    #[test]
+    fn mlx_gets_its_own_names_for_the_penalties() {
+        let settings = RuntimeSettings::default();
+        let profile = TextProfile {
+            repeat_penalty: Some(1.15),
+            repeat_last_n: Some(64),
+            ..TextProfile::default()
+        };
+        let body = translate_chat_request(
+            &plain_request(),
+            ChatContext {
+                settings: &settings,
+                profile: Some(&profile),
+                dialect: SamplerDialect::Mlx,
+                model_alias: "local",
+                stream: false,
+            },
+        );
+        assert_eq!(as_f32(&body["repetition_penalty"]), 1.15);
+        assert_eq!(body["repetition_context_size"], 64);
+        assert!(body.get("repeat_penalty").is_none());
+    }
+
+    /// A request that names a temperature outranks the model's default, which
+    /// is what makes a per-request override still mean something.
+    #[test]
+    fn the_request_still_wins_over_the_profile() {
+        let settings = RuntimeSettings::default();
+        let profile = TextProfile {
+            temperature: Some(0.2),
+            ..TextProfile::default()
+        };
+        let mut request = plain_request();
+        request.temperature = Some(1.4);
+        let body = translate_chat_request(
+            &request,
+            ChatContext {
+                settings: &settings,
+                profile: Some(&profile),
+                dialect: SamplerDialect::LlamaCpp,
+                model_alias: "local",
+                stream: false,
+            },
+        );
+        assert_eq!(as_f32(&body["temperature"]), 1.4);
+    }
+
+    #[test]
+    fn a_configured_system_prompt_leads_the_conversation() {
+        let settings = RuntimeSettings::default();
+        let profile = TextProfile {
+            system_prompt: Some("  Answer in French.  ".into()),
+            ..TextProfile::default()
+        };
+        let body = translate_chat_request(
+            &plain_request(),
+            ChatContext {
+                settings: &settings,
+                profile: Some(&profile),
+                dialect: SamplerDialect::LlamaCpp,
+                model_alias: "local",
+                stream: false,
+            },
+        );
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "Answer in French.");
+        assert_eq!(body["messages"][1]["content"], "Hello");
+    }
+
+    /// Every launch setting is fixed when the process starts, so a change to one
+    /// has to be visible as a different fingerprint or the running server is
+    /// mistaken for a current one.
+    #[test]
+    fn the_launch_key_changes_with_anything_applied_at_spawn() {
+        let settings = RuntimeSettings::default();
+        let base = launch_key(&settings, None, Vec::new(), false);
+        let resized = launch_key(
+            &settings,
+            Some(&TextProfile {
+                context_size: Some(16_384),
+                ..TextProfile::default()
+            }),
+            Vec::new(),
+            false,
+        );
+        let with_lora = launch_key(
+            &settings,
+            None,
+            vec![(PathBuf::from("/adapters/style.gguf"), 0.8)],
+            false,
+        );
+        assert_ne!(base, resized);
+        assert_ne!(base, with_lora);
+        assert_eq!(base, launch_key(&settings, None, Vec::new(), false));
     }
 
     #[test]

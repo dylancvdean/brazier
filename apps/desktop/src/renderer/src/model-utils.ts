@@ -1,4 +1,4 @@
-import type { LocalModel, RuntimeEntry } from './api'
+import type { LocalModel, ModelKind, RuntimeEntry } from './api'
 
 export function modelEngine(model: LocalModel | undefined): string {
   if (!model) return ''
@@ -75,6 +75,22 @@ export function isVideoGenModel(model: LocalModel | undefined): boolean {
 
 export function isVoiceModel(model: LocalModel | undefined): boolean {
   return Boolean(model?.id.startsWith('personaplex:'))
+}
+
+/**
+ * Which family of advanced settings a model takes.
+ *
+ * Mirrors the daemon's own classification, which is the one that decides what
+ * a stored profile is allowed to contain.
+ */
+export function modelKindFor(modelId: string): ModelKind {
+  if (modelId.startsWith('sdcpp-image:')) return 'image'
+  if (modelId.startsWith('sdcpp-video:')) return 'video'
+  if (modelId.startsWith('whisper:') || modelId.startsWith('streaming-asr:')) {
+    return 'transcription'
+  }
+  if (modelId.startsWith('personaplex:')) return 'voice'
+  return 'text'
 }
 
 export function modelLibraryKey(modelId: string): string {

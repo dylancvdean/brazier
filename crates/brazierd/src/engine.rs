@@ -109,6 +109,17 @@ enum ActiveBackend {
     },
 }
 
+/// Everything settled before a request can be sent: which backend holds the
+/// model, the settings it was loaded under, the model's own overrides, and the
+/// request once its media has been prepared.
+struct Prepared {
+    backend: ActiveBackend,
+    settings: RuntimeSettings,
+    /// The selected model's advanced configuration, when it has any.
+    profile: Option<crate::model_settings::TextProfile>,
+    request: ChatCompletionRequest,
+}
+
 /// Where a prepared request is sent, and what it authenticates with.
 struct Endpoint {
     base_url: String,
@@ -119,6 +130,9 @@ struct Endpoint {
     /// called; a remote server holds several and needs its own name for the one
     /// being asked, which is not the id Brazier stores.
     model_alias: String,
+    /// Which sampler names this server understands. Someone else's server gets
+    /// the standard fields alone.
+    dialect: llama::SamplerDialect,
 }
 
 /// What a locally launched server calls whichever model it has loaded.
@@ -930,7 +944,7 @@ impl Runtime {
         &self,
         request: &ChatCompletionRequest,
         load_tx: LoadNotifier,
-    ) -> anyhow::Result<(ActiveBackend, RuntimeSettings, ChatCompletionRequest)> {
+    ) -> anyhow::Result<Prepared> {
         self.apply_model_binding(&request.model).await?;
         match self.prepare_generation(request, load_tx.clone()).await {
             Ok(value) => Ok(value),
@@ -1151,7 +1165,37 @@ impl Runtime {
     }
 
     async fn ensure_server_for_model(&self, model_path: &std::path::Path) -> anyhow::Result<()> {
+        self.ensure_server_for_model_with_profile(model_path, None)
+            .await
+    }
+
+    /// Start llama-server for a model, or confirm the running one was started
+    /// the way that model is configured now.
+    ///
+    /// Context size, KV cache type, and LoRAs are all fixed when the process
+    /// starts, so a model whose configuration changed since it loaded has to be
+    /// reloaded — otherwise the settings say one thing and the server does
+    /// another until something else happens to restart it.
+    async fn ensure_server_for_model_with_profile(
+        &self,
+        model_path: &std::path::Path,
+        profile: Option<&crate::model_settings::TextProfile>,
+    ) -> anyhow::Result<()> {
         let settings = self.settings.lock().await.clone();
+        let harmony = crate::harmony::is_harmony_model(&model_path.to_string_lossy());
+        let loras: Vec<(PathBuf, f32)> = profile
+            .map(|profile| {
+                crate::model_settings::resolve_loras(
+                    &self.data_dir,
+                    &profile.loras,
+                    runtimes::ENGINE,
+                )
+                .into_iter()
+                .map(|lora| (lora.path, lora.scale))
+                .collect()
+            })
+            .unwrap_or_default();
+        let wanted_key = llama::launch_key(&settings, profile, loras.clone(), harmony);
         let binary = {
             let guard = self.llama.lock().await;
             if let Some(path) = &guard.binary
@@ -1168,6 +1212,7 @@ impl Runtime {
         if let Some(server) = guard.server.as_mut() {
             if server.model_path == model_path
                 && server.projector_path == models_store::projector_for_model(model_path)
+                && server.launch_key == wanted_key
                 && server.is_running()
             {
                 return Ok(());
@@ -1176,11 +1221,8 @@ impl Runtime {
             guard.server = None;
         }
 
-        let server = LlamaServer::start(
-            &binary,
-            model_path,
-            &settings,
-            crate::harmony::is_harmony_model(&model_path.to_string_lossy()),
+        let server = LlamaServer::start_with_profile(
+            &binary, model_path, &settings, harmony, profile, loras,
         )
         .await?;
         guard.server = Some(server);
@@ -1192,8 +1234,17 @@ impl Runtime {
         &self,
         model_id: &str,
         kind: MlxKind,
+        profile: Option<&crate::model_settings::TextProfile>,
     ) -> anyhow::Result<()> {
         let settings = self.settings.lock().await.clone();
+        // mlx-lm loads one adapter directory, so the first LoRA it can read is
+        // the one served and the rest are left to the interface to explain.
+        let adapter = profile.and_then(|profile| {
+            crate::model_settings::resolve_loras(&self.data_dir, &profile.loras, kind.engine_id())
+                .into_iter()
+                .next()
+                .map(|lora| lora.path)
+        });
         let python = {
             let guard = self.mlx.lock().await;
             let selected = match kind {
@@ -1213,11 +1264,13 @@ impl Runtime {
         let extra = self.extra_library_paths().await;
         let model_ref = models_store::mlx_server_model_ref(&self.data_dir, model_id, &extra)?;
 
+        let wanted_key = mlx::launch_key(&settings, profile, adapter.as_deref());
         let mut guard = self.mlx.lock().await;
         if let Some(server) = guard.server.as_mut() {
             if server.kind == kind
                 && server.model_ref == model_ref
                 && server.python == python
+                && server.launch_key == wanted_key
                 && server.is_running()
             {
                 return Ok(());
@@ -1226,7 +1279,15 @@ impl Runtime {
             guard.server = None;
         }
 
-        let server = MlxServer::start(&python, kind, &model_ref, &settings).await?;
+        let server = MlxServer::start_with_profile(
+            &python,
+            kind,
+            &model_ref,
+            &settings,
+            profile,
+            adapter.as_deref(),
+        )
+        .await?;
         guard.server = Some(server);
         match kind {
             MlxKind::Lm => guard.lm_python = Some(python),
@@ -1293,7 +1354,7 @@ impl Runtime {
         &self,
         request: &ChatCompletionRequest,
         load_tx: LoadNotifier,
-    ) -> anyhow::Result<(ActiveBackend, RuntimeSettings, ChatCompletionRequest)> {
+    ) -> anyhow::Result<Prepared> {
         async fn emit(load_tx: &LoadNotifier, phase: &str, message: &str) {
             if let Some(tx) = load_tx {
                 let _ = tx
@@ -1308,6 +1369,9 @@ impl Runtime {
         emit(&load_tx, "resolve", "Locating model files…").await;
         let extra = self.extra_library_paths().await;
         let (backend, model_id) = self.resolve_model(&request.model, &extra)?;
+        let profile = crate::model_settings::load(&self.data_dir)
+            .text(&model_id)
+            .cloned();
         match &backend {
             // Nothing to start: the server is someone else's, already running or
             // not, and the request will say which.
@@ -1318,7 +1382,10 @@ impl Runtime {
                 emit(&load_tx, "server", "Starting llama.cpp server…").await;
                 emit(&load_tx, "load", "Loading GGUF weights into memory…").await;
                 if let Err(error) = self
-                    .ensure_server_for_model(std::path::Path::new(model_path))
+                    .ensure_server_for_model_with_profile(
+                        std::path::Path::new(model_path),
+                        profile.as_ref(),
+                    )
                     .await
                 {
                     let mut guard = self.llama.lock().await;
@@ -1341,7 +1408,10 @@ impl Runtime {
                 if let Some(notice) = mismatch {
                     tracing::warn!("{notice}");
                 }
-                if let Err(error) = self.ensure_mlx_server_for_model(&model_id, kind).await {
+                if let Err(error) = self
+                    .ensure_mlx_server_for_model(&model_id, kind, profile.as_ref())
+                    .await
+                {
                     let mut guard = self.mlx.lock().await;
                     guard.server = None;
                     return Err(fork_hints::load_error_with_hints(
@@ -1396,6 +1466,7 @@ impl Runtime {
             whisper_binary,
             whisper_model,
             whisper_model_pref: settings.whisper_model.as_deref(),
+            whisper_profile: self.transcription_profile(&settings),
         };
         let progress = if load_tx.is_some() {
             let tx = load_tx.clone();
@@ -1413,7 +1484,32 @@ impl Runtime {
         if let Some(merged) = tool_registry::merge_definitions(&self.data_dir, &request, harmony) {
             request.tools = Some(merged);
         }
-        Ok((backend, settings, request))
+        Ok(Prepared {
+            backend,
+            settings,
+            profile,
+            request,
+        })
+    }
+
+    /// Decoding options for whichever ASR model transcription will use.
+    ///
+    /// Looked up by the preference when one is set, and otherwise by the id of
+    /// the model that resolution actually lands on — a profile attached to the
+    /// model Brazier picks automatically should still be the one applied.
+    fn transcription_profile(
+        &self,
+        settings: &RuntimeSettings,
+    ) -> Option<crate::model_settings::TranscriptionProfile> {
+        let store = crate::model_settings::load(&self.data_dir);
+        if let Some(preferred) = settings.whisper_model.as_deref()
+            && let Some(profile) = store.transcription(preferred)
+        {
+            return Some(profile.clone());
+        }
+        let path = whisper::resolve_model_path(&self.data_dir, settings.whisper_model.as_deref())?;
+        let id = whisper::model_id_for_path(&whisper::whisper_root(&self.data_dir), &path).ok()?;
+        store.transcription(&id).cloned()
     }
 
     /// When the chat engine rejects native `input_audio`, rewrite to Whisper
@@ -1462,6 +1558,7 @@ impl Runtime {
             whisper_binary,
             whisper_model,
             whisper_model_pref: settings.whisper_model.as_deref(),
+            whisper_profile: self.transcription_profile(&settings),
         };
         let progress = if load_tx.is_some() {
             let tx = load_tx.clone();
@@ -1494,6 +1591,7 @@ impl Runtime {
                     base_url: server.base_url.clone(),
                     api_key: None,
                     model_alias: LOCAL_MODEL_ALIAS.to_owned(),
+                    dialect: llama::SamplerDialect::LlamaCpp,
                 })
             }
             ActiveBackend::Mlx(_) => {
@@ -1505,6 +1603,7 @@ impl Runtime {
                     base_url: server.base_url.clone(),
                     api_key: None,
                     model_alias: LOCAL_MODEL_ALIAS.to_owned(),
+                    dialect: llama::SamplerDialect::Mlx,
                 })
             }
             ActiveBackend::Remote {
@@ -1515,6 +1614,7 @@ impl Runtime {
                 base_url: base_url.clone(),
                 api_key: api_key.clone(),
                 model_alias: model.clone(),
+                dialect: llama::SamplerDialect::OpenAi,
             }),
         }
     }
@@ -1549,7 +1649,12 @@ impl Runtime {
             let prepared = runtime
                 .prepare_with_recovery(&request, Some(tx.clone()))
                 .await;
-            let (backend, settings, request) = match prepared {
+            let Prepared {
+                backend,
+                settings,
+                profile,
+                request,
+            } = match prepared {
                 Ok(value) => value,
                 Err(error) => {
                     let _ = tx.send(Err(error)).await;
@@ -1568,8 +1673,16 @@ impl Runtime {
                 &request,
                 crate::harmony::is_harmony_model(&request.model),
             );
-            if let Err(error) =
-                stream_tool_rounds(&runtime, &endpoint, request, settings, tools_active, &tx).await
+            if let Err(error) = stream_tool_rounds(
+                &runtime,
+                &endpoint,
+                request,
+                settings,
+                profile,
+                tools_active,
+                &tx,
+            )
+            .await
             {
                 let _ = tx.send(Err(error)).await;
             }
@@ -1640,7 +1753,12 @@ impl Engine for Runtime {
     }
 
     async fn generate(&self, request: &ChatCompletionRequest) -> anyhow::Result<Generation> {
-        let (backend, settings, mut request) = self.prepare_generation(request, None).await?;
+        let Prepared {
+            backend,
+            settings,
+            profile,
+            request: mut request,
+        } = self.prepare_generation(request, None).await?;
         let endpoint = self.backend_endpoint(&backend).await?;
         let tools_active = tool_registry::tools_enabled(
             &self.data_dir,
@@ -1658,8 +1776,16 @@ impl Engine for Runtime {
         let mut audio_fallback_attempted = false;
         for round in 0..MAX_TOOL_ROUNDS {
             let last_round = round + 1 == MAX_TOOL_ROUNDS;
-            let mut body =
-                llama::translate_chat_request(&request, &settings, &endpoint.model_alias, false);
+            let mut body = llama::translate_chat_request(
+                &request,
+                llama::ChatContext {
+                    settings: &settings,
+                    profile: profile.as_ref(),
+                    dialect: endpoint.dialect,
+                    model_alias: &endpoint.model_alias,
+                    stream: false,
+                },
+            );
             if last_round && let Some(object) = body.as_object_mut() {
                 object.remove("tools");
             }
@@ -1896,6 +2022,7 @@ async fn stream_tool_rounds(
     endpoint: &Endpoint,
     mut request: ChatCompletionRequest,
     settings: RuntimeSettings,
+    profile: Option<crate::model_settings::TextProfile>,
     tools_active: bool,
     tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
 ) -> anyhow::Result<()> {
@@ -1908,8 +2035,16 @@ async fn stream_tool_rounds(
     let mut audio_fallback_attempted = false;
     for round in 0..MAX_TOOL_ROUNDS {
         let last_round = round + 1 == MAX_TOOL_ROUNDS;
-        let mut body =
-            llama::translate_chat_request(&request, &settings, &endpoint.model_alias, true);
+        let mut body = llama::translate_chat_request(
+            &request,
+            llama::ChatContext {
+                settings: &settings,
+                profile: profile.as_ref(),
+                dialect: endpoint.dialect,
+                model_alias: &endpoint.model_alias,
+                stream: true,
+            },
+        );
         if last_round && let Some(object) = body.as_object_mut() {
             object.remove("tools");
         }

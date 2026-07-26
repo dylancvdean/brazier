@@ -906,6 +906,76 @@ pub async fn download_streaming_asr_snapshot_with_progress(
 /// and both text encoders from two other repos — so files are fetched
 /// individually rather than as one snapshot, and the manifest is written last
 /// so a cancelled install leaves nothing the model list would pick up.
+/// Download one LoRA or ControlNet file into the adapter library.
+///
+/// A single file rather than a snapshot: adapters are published one weight file
+/// per variant, and pulling the whole repository would fetch every variant of
+/// something meant to be a few hundred megabytes.
+pub async fn download_adapter_with_progress(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    kind: crate::adapters::AdapterKind,
+    repo_id: &str,
+    revision: &str,
+    filename: &str,
+    mut progress: ProgressCallback,
+    cancel: Option<Arc<StopFlag>>,
+) -> anyhow::Result<DownloadResult> {
+    validate_repo_id(repo_id)?;
+    anyhow::ensure!(
+        !revision.is_empty()
+            && revision.len() <= 200
+            && revision
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')),
+        "invalid revision"
+    );
+    let destination = crate::adapters::download_destination(data_dir, kind, repo_id, filename)?;
+    progress(ProgressEvent::phase(
+        "start",
+        format!("Downloading {filename} from {repo_id}"),
+    ));
+    let expected =
+        crate::hf::paths_info(client, data_dir, repo_id, revision, &[filename.to_owned()])
+            .await
+            .ok()
+            .and_then(|infos| infos.into_iter().next())
+            .and_then(|info| info.size);
+    let bytes = download_file_to_with_opts(
+        client,
+        data_dir,
+        repo_id,
+        revision,
+        filename,
+        &destination,
+        &mut progress,
+        None,
+        cancel.as_ref(),
+        expected,
+        None,
+    )
+    .await?;
+    let sha256 = hash_file(&destination).await?;
+    let result = DownloadResult {
+        model_id: format!(
+            "{}:{repo_id}/{}",
+            kind.as_str(),
+            destination
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ),
+        path: destination.display().to_string(),
+        bytes,
+        sha256,
+        resumed: false,
+        engine: None,
+        notice: None,
+    };
+    progress(ProgressEvent::done(serde_json::to_value(&result)?));
+    Ok(result)
+}
+
 pub async fn install_sdcpp_bundle_with_progress(
     client: &reqwest::Client,
     data_dir: &Path,

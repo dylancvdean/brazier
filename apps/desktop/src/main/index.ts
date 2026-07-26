@@ -454,6 +454,29 @@ app.whenReady().then(async () => {
     }
     return result.filePaths[0] ?? null
   })
+  // Choosing a LoRA, a ControlNet, or a reference image already on disk.
+  // Adapters are usually shared with another tool, so they are pointed at
+  // where they live rather than copied into the application's own library.
+  ipcMain.handle(
+    'brazier:select-file',
+    async (event, title: string, filters: Electron.FileFilter[]) => {
+      const window = BrowserWindow.fromWebContents(event.sender)
+      const options = {
+        // A directory is a valid MLX adapter, so both are selectable and the
+        // daemon decides which engines can read whichever was chosen.
+        properties: ['openFile', 'openDirectory'] as ('openFile' | 'openDirectory')[],
+        title,
+        filters
+      }
+      const result = window
+        ? await dialog.showOpenDialog(window, options)
+        : await dialog.showOpenDialog(options)
+      if (result.canceled || result.filePaths.length === 0) {
+        return null
+      }
+      return result.filePaths[0] ?? null
+    }
+  )
   // Saving generated media. The renderer holds the bytes already, so this only
   // has to ask where they go — writing from the main process keeps the renderer
   // without filesystem access.

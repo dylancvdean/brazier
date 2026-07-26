@@ -1,13 +1,33 @@
-import { LoaderCircle } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
-import type { LocalModel, RuntimeSettings } from '../api'
+import { ChevronDown, ChevronRight, LoaderCircle } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  listAdapters,
+  saveModelProfile,
+  type Adapter,
+  type LocalModel,
+  type ModelProfile,
+  type RuntimeSettings
+} from '../api'
+import { modelEngine, modelKindFor } from '../model-utils'
+import { ModelSettingsFields, emptyProfile } from './ModelSettingsFields'
 
 type InferenceMenuProps = {
   settings: RuntimeSettings | null
   selectedModel: string
   models: LocalModel[]
   saving: boolean
+  /**
+   * Model the advanced section configures. The bar shows a different model per
+   * mode — a diffusion model in Generate, a voice model in Voice — and advanced
+   * settings should follow what is on screen rather than the chat model behind
+   * it. The sampling controls above stay global either way.
+   */
+  advancedModelId?: string
+  /** That model's stored overrides, when it has any. */
+  profile?: ModelProfile
   onApply: (settings: RuntimeSettings) => void
+  /** Persist the model's own overrides, which are separate from the defaults. */
+  onProfileSaved: (models: Record<string, ModelProfile>) => void
   onClose: () => void
 }
 
@@ -88,12 +108,20 @@ export function InferenceMenu({
   selectedModel,
   models,
   saving,
+  advancedModelId,
+  profile,
   onApply,
+  onProfileSaved,
   onClose
 }: InferenceMenuProps): React.JSX.Element {
   const [draft, setDraft] = useState<RuntimeSettings | null>(settings)
   const [reasoningMode, setReasoningMode] = useState<ReasoningMode>('on')
   const [reasoningBudget, setReasoningBudget] = useState(1024)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [adapters, setAdapters] = useState<Adapter[]>([])
+  const [profileDraft, setProfileDraft] = useState<ModelProfile | null>(null)
+  const [profileError, setProfileError] = useState<string | null>(null)
+  const [savingProfile, setSavingProfile] = useState(false)
 
   const model = useMemo(
     () => models.find((entry) => entry.id === selectedModel),
@@ -118,10 +146,56 @@ export function InferenceMenu({
   const dirty =
     draft != null && settings != null && JSON.stringify(draft) !== JSON.stringify(settings)
 
+  const advancedModel = advancedModelId ?? selectedModel
+  const advancedEntry = models.find((entry) => entry.id === advancedModel)
+  const modelKind = advancedModel ? modelKindFor(advancedModel) : null
+  const storedProfile = useMemo(
+    () => profile ?? (modelKind ? emptyProfile(modelKind) : null),
+    [profile, modelKind]
+  )
+  const effectiveProfile = profileDraft ?? storedProfile
+  const profileDirty =
+    profileDraft != null &&
+    storedProfile != null &&
+    JSON.stringify(profileDraft) !== JSON.stringify(storedProfile)
+
+  // A different model has a different profile; whatever was half-edited for the
+  // last one is not an override for this one.
+  useEffect(() => {
+    setProfileDraft(null)
+    setProfileError(null)
+  }, [advancedModel])
+
+  const refreshAdapters = useCallback(() => {
+    void listAdapters()
+      .then(setAdapters)
+      .catch(() => {
+        // Non-fatal: the adapter pickers just show an empty library.
+      })
+  }, [])
+
+  useEffect(() => {
+    if (advancedOpen) refreshAdapters()
+  }, [advancedOpen, refreshAdapters])
+
   function updateReasoningMode(mode: ReasoningMode): void {
     if (!draft) return
     setReasoningMode(mode)
     setDraft(applyReasoningMode(draft, mode, reasoningBudget))
+  }
+
+  async function saveProfile(): Promise<void> {
+    if (!profileDraft || !advancedModel) return
+    setSavingProfile(true)
+    setProfileError(null)
+    try {
+      onProfileSaved(await saveModelProfile(advancedModel, profileDraft))
+      setProfileDraft(null)
+    } catch (cause) {
+      setProfileError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSavingProfile(false)
+    }
   }
 
   return (
@@ -266,6 +340,59 @@ export function InferenceMenu({
               {saving ? <LoaderCircle className="spin" size={14} /> : null}
               {dirty ? 'Apply' : 'Up to date'}
             </button>
+
+            {/* Everything above is the default for every model. Everything
+                below belongs to the one selected, and outranks it. */}
+            {modelKind && effectiveProfile && advancedEntry ? (
+              <div className="inference-advanced">
+                <button
+                  type="button"
+                  className="inference-advanced-toggle"
+                  aria-expanded={advancedOpen}
+                  onClick={() => setAdvancedOpen((open) => !open)}
+                >
+                  {advancedOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  Show advanced
+                </button>
+                {advancedOpen ? (
+                  <>
+                    <p className="inference-help">
+                      These apply to <strong>{advancedEntry.id}</strong> alone and override the defaults
+                      above. Anything left blank follows them.
+                    </p>
+                    {profileError ? <div className="error-banner">{profileError}</div> : null}
+                    <ModelSettingsFields
+                      modelId={advancedModel}
+                      kind={modelKind}
+                      engine={modelEngine(advancedEntry)}
+                      profile={effectiveProfile}
+                      adapters={adapters}
+                      inherited={{
+                        contextSize: draft.context_size,
+                        batchSize: draft.batch_size,
+                        temperature: draft.temperature,
+                        topP: draft.top_p,
+                        flashAttention: draft.flash_attention,
+                        kvCacheTypeK: draft.kv_cache_type_k,
+                        kvCacheTypeV: draft.kv_cache_type_v,
+                        maxTokens: draft.max_tokens
+                      }}
+                      onChange={setProfileDraft}
+                      onAdapterAdded={refreshAdapters}
+                      onError={setProfileError}
+                    />
+                    <button
+                      className="popover-apply"
+                      disabled={!profileDirty || savingProfile}
+                      onClick={() => void saveProfile()}
+                    >
+                      {savingProfile ? <LoaderCircle className="spin" size={14} /> : null}
+                      {profileDirty ? 'Save model settings' : 'Model settings saved'}
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
           </>
         )}
       </div>

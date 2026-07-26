@@ -20,6 +20,11 @@ declare global {
       selectDirectory(): Promise<string | null>
       /** Folder picker for an agent workspace. */
       selectWorkspace(): Promise<string | null>
+      /** Pick a file — or an adapter directory — already on disk. */
+      selectFile(
+        title: string,
+        filters: Array<{ name: string; extensions: string[] }>
+      ): Promise<string | null>
       /** Save bytes somewhere the user chooses; null when they dismiss it. */
       saveFile(suggestedName: string, data: ArrayBuffer): Promise<string | null>
       revealFile(path: string): Promise<void>

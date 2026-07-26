@@ -91,6 +91,8 @@ pub struct MediaContext<'a> {
     pub whisper_model: Option<PathBuf>,
     /// Preferred model id / WhisperKit variant (`base`, `whisperkit:tiny`, …).
     pub whisper_model_pref: Option<&'a str>,
+    /// Decoding options configured for the ASR model in use.
+    pub whisper_profile: Option<crate::model_settings::TranscriptionProfile>,
 }
 
 pub type ProgressFn = Box<dyn Fn(String, String) + Send + Sync>;
@@ -547,6 +549,7 @@ async fn transcribe_blob(
             binary,
             model,
             audio: &audio,
+            profile: ctx.whisper_profile.as_ref(),
         },
         Some(TranscribeContext {
             data_dir: ctx.data_dir,
@@ -737,6 +740,7 @@ async fn extract_and_transcribe_audio(
             binary,
             model,
             audio: &audio,
+            profile: ctx.whisper_profile.as_ref(),
         },
         Some(TranscribeContext {
             data_dir: ctx.data_dir,
@@ -848,6 +852,7 @@ mod tests {
             whisper_binary: None,
             whisper_model: None,
             whisper_model_pref: None,
+            whisper_profile: None,
         };
         let mut messages = vec![OpenAiMessage {
             role: "user".into(),
@@ -896,6 +901,7 @@ mod tests {
             whisper_binary: None,
             whisper_model: None,
             whisper_model_pref: None,
+            whisper_profile: None,
         };
         let mut messages = vec![OpenAiMessage {
             role: "user".into(),

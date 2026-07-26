@@ -3,10 +3,12 @@ import { type FormEvent, useEffect, useState } from 'react'
 import {
   cancelGeneration,
   fetchBlobObjectUrl,
+  fetchModelSettings,
   generateImage,
   generateVideo,
   listSdcppBundles,
   saveBlobToDisk,
+  type DiffusionProfile,
   type GenerateBlobResult,
   type LocalModel,
   type RuntimeSettings,
@@ -54,6 +56,7 @@ export function GenerateMode(props: Props) {
   const [results, setResults] = useState<GenerateBlobResult[]>([])
   const [urls, setUrls] = useState<Record<string, string>>({})
   const [defaultsByModel, setDefaultsByModel] = useState<Record<string, SdcppDefaults>>({})
+  const [configuredByModel, setConfiguredByModel] = useState<Record<string, DiffusionProfile>>({})
 
   useEffect(() => {
     let cancelled = false
@@ -77,6 +80,27 @@ export function GenerateMode(props: Props) {
     }
   }, [results])
 
+  // What this model has been configured with, which outranks the curated
+  // defaults below: a size or step count chosen for a model is a decision, and
+  // the panel should open showing it.
+  useEffect(() => {
+    void fetchModelSettings()
+      .then((response) =>
+        setConfiguredByModel(
+          Object.fromEntries(
+            Object.entries(response.models).flatMap(([modelId, profile]) =>
+              profile.kind === 'image' || profile.kind === 'video'
+                ? [[modelId, profile as DiffusionProfile]]
+                : []
+            )
+          )
+        )
+      )
+      .catch(() => {
+        // Non-fatal: the panel keeps the curated defaults.
+      })
+  }, [])
+
   // Curated models carry the settings they expect — most importantly CFG,
   // which has to be 1.0 for distilled models like Flux schnell.
   useEffect(() => {
@@ -95,16 +119,24 @@ export function GenerateMode(props: Props) {
   const selected = props.modelId
 
   useEffect(() => {
-    const defaults = defaultsByModel[selected]
-    if (!defaults) return
-    if (defaults.width) setWidth(defaults.width)
-    if (defaults.height) setHeight(defaults.height)
-    if (defaults.steps) setSteps(defaults.steps)
-    if (defaults.cfg_scale != null) setCfgScale(defaults.cfg_scale)
-    setGuidance(defaults.guidance != null ? String(defaults.guidance) : '')
-    if (defaults.video_frames) setFrames(defaults.video_frames)
-    if (defaults.fps) setFps(defaults.fps)
-  }, [selected, defaultsByModel])
+    const curated = defaultsByModel[selected]
+    const configured = configuredByModel[selected]
+    if (!curated && !configured) return
+    const width = configured?.width ?? curated?.width
+    const height = configured?.height ?? curated?.height
+    const steps = configured?.steps ?? curated?.steps
+    const cfg = configured?.cfg_scale ?? curated?.cfg_scale
+    const guidance = configured?.guidance ?? curated?.guidance
+    const frames = configured?.video_frames ?? curated?.video_frames
+    const fps = configured?.fps ?? curated?.fps
+    if (width) setWidth(width)
+    if (height) setHeight(height)
+    if (steps) setSteps(steps)
+    if (cfg != null) setCfgScale(cfg)
+    setGuidance(guidance != null ? String(guidance) : '')
+    if (frames) setFrames(frames)
+    if (fps) setFps(fps)
+  }, [selected, defaultsByModel, configuredByModel])
 
   async function onSubmit(event: FormEvent): Promise<void> {
     event.preventDefault()

@@ -9,18 +9,35 @@
  * session about to start is only noise.
  */
 
-import { AlertTriangle, Check, FolderOpen, ShieldAlert, ShieldCheck, Wrench } from 'lucide-react'
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  FolderOpen,
+  LoaderCircle,
+  ShieldAlert,
+  ShieldCheck,
+  Wrench
+} from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 
 import {
   activateRuntime,
+  fetchModelSettings,
+  listAdapters,
   listRuntimes,
+  saveModelProfile,
   saveRuntimeSettings,
+  type Adapter,
   type BundledTool,
   type LocalModel,
+  type ModelProfile,
   type RuntimeEntry,
   type RuntimeSettings
 } from '../api'
+import { modelEngine, modelKindFor } from '../model-utils'
+import { ModelSettingsFields, emptyProfile } from './ModelSettingsFields'
 import {
   createAgentSession,
   fetchAgentCapabilities,
@@ -38,6 +55,8 @@ import { modelDisplayName } from '../model-utils'
 type Props = {
   target: VoiceSessionTarget
   models: LocalModel[]
+  /** PersonaPlex model chosen in the top bar. */
+  voiceModelId: string
   /** Chat model, shared with the rest of the app. */
   chatModelId: string
   onChatModelChange: (modelId: string) => void
@@ -100,6 +119,83 @@ export type PendingAgentSetup = {
   permissionMode: AgentPermissionMode
 }
 
+/**
+ * Advanced settings for one of the models a voice session uses.
+ *
+ * A voice session is not one model but three — the one that speaks, the one
+ * that transcribes, and the one that answers — so each is configured on its own
+ * rather than through a single menu that would have to guess which was meant.
+ */
+function AdvancedModelPanel(props: {
+  role: string
+  model: LocalModel
+  settings: RuntimeSettings | null
+  profile: ModelProfile | undefined
+  adapters: Adapter[]
+  onSaved: (models: Record<string, ModelProfile>) => void
+  onAdapterAdded: () => void
+  onError: (message: string | null) => void
+}): React.JSX.Element {
+  const kind = modelKindFor(props.model.id)
+  const stored = props.profile ?? emptyProfile(kind)
+  const [draft, setDraft] = useState<ModelProfile | null>(null)
+  const [saving, setSaving] = useState(false)
+  const effective = draft ?? stored
+  const dirty = draft != null && JSON.stringify(draft) !== JSON.stringify(stored)
+
+  async function save(): Promise<void> {
+    if (!draft) return
+    setSaving(true)
+    props.onError(null)
+    try {
+      props.onSaved(await saveModelProfile(props.model.id, draft))
+      setDraft(null)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <details className="voice-advanced-model">
+      <summary>
+        <span>{props.role}</span>
+        <small>{modelDisplayName(props.model.id, props.model).title}</small>
+      </summary>
+      <ModelSettingsFields
+        modelId={props.model.id}
+        kind={kind}
+        engine={modelEngine(props.model)}
+        profile={effective}
+        adapters={props.adapters}
+        inherited={{
+          contextSize: props.settings?.context_size,
+          batchSize: props.settings?.batch_size,
+          temperature: props.settings?.temperature,
+          topP: props.settings?.top_p,
+          flashAttention: props.settings?.flash_attention,
+          kvCacheTypeK: props.settings?.kv_cache_type_k,
+          kvCacheTypeV: props.settings?.kv_cache_type_v,
+          maxTokens: props.settings?.max_tokens ?? null
+        }}
+        onChange={setDraft}
+        onAdapterAdded={props.onAdapterAdded}
+        onError={props.onError}
+      />
+      <button
+        type="button"
+        className="popover-apply"
+        disabled={!dirty || saving}
+        onClick={() => void save()}
+      >
+        {saving ? <LoaderCircle className="spin" size={14} /> : null}
+        {dirty ? 'Save' : 'Saved'}
+      </button>
+    </details>
+  )
+}
+
 export function VoiceSessionConfig(props: Props): React.JSX.Element {
   const { onError } = props
   const [runtimes, setRuntimes] = useState<RuntimeEntry[]>([])
@@ -111,6 +207,9 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
   })
   const [busy, setBusy] = useState(false)
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([])
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [profiles, setProfiles] = useState<Record<string, ModelProfile>>({})
+  const [adapters, setAdapters] = useState<Adapter[]>([])
 
   const needsTranscripts = props.target !== 'neither'
   const voiceModels = props.models.filter((model) => model.id.startsWith('personaplex:'))
@@ -163,6 +262,24 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
   useEffect(() => {
     void refreshRuntimes()
   }, [refreshRuntimes])
+
+  const refreshAdapters = useCallback(() => {
+    void listAdapters()
+      .then(setAdapters)
+      .catch(() => {
+        // Non-fatal: the adapter pickers just show an empty library.
+      })
+  }, [])
+
+  // Loaded when the section is opened rather than on mount: most sessions start
+  // without ever needing it.
+  useEffect(() => {
+    if (!advancedOpen) return
+    refreshAdapters()
+    void fetchModelSettings()
+      .then((response) => setProfiles(response.models))
+      .catch((cause: unknown) => onError(errorText(cause)))
+  }, [advancedOpen, refreshAdapters, onError])
 
   useEffect(() => {
     if (props.target !== 'agent') return
@@ -239,6 +356,23 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
   // Resolved by the same function the session uses, so what is shown is what
   // will happen rather than a second opinion about it.
   const resolved = resolveAsrEngine(props.asrPreference, props.asrAvailable)
+
+  // The models this session will actually put to work, in the order the session
+  // uses them. A model that is not part of this target is left out.
+  const transcriptionModelId =
+    resolved === 'streaming-asr'
+      ? (props.settings?.streaming_asr_model ?? streamingModels[0]?.id)
+      : (props.settings?.whisper_model ?? whisperModels[0]?.id)
+  const advancedModels = (
+    [
+      ['Voice', props.voiceModelId],
+      ...(needsTranscripts ? [['Transcription', transcriptionModelId] as const] : []),
+      ...(props.target === 'chat' ? [['Chat', props.chatModelId] as const] : [])
+    ] as Array<readonly [string, string | undefined]>
+  ).flatMap(([role, modelId]) => {
+    const model = modelId ? props.models.find((entry) => entry.id === modelId) : undefined
+    return model ? [{ role, model }] : []
+  })
   const workspace = agentSession?.workspace_path ?? pending.workspacePath
   const permissionMode: AgentPermissionMode =
     agentSession?.permission_mode ?? pending.permissionMode
@@ -517,6 +651,49 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
           ) : null}
         </section>
       ) : null}
+
+      {/* Advanced settings live at the foot of the setup screen rather than in
+          the top bar's inference menu: a session runs several models at once,
+          and that menu can only speak for one. Once a session starts this
+          screen is replaced anyway, so there is room to be thorough here. */}
+      <section className="voice-config-group voice-advanced">
+        <button
+          type="button"
+          className="voice-advanced-toggle"
+          aria-expanded={advancedOpen}
+          onClick={() => setAdvancedOpen((open) => !open)}
+        >
+          {advancedOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          Show advanced options
+        </button>
+        {advancedOpen ? (
+          <>
+            <p className="voice-notice">
+              Defaults for each model this session uses. They apply wherever the model is used,
+              not only here.
+            </p>
+            {advancedModels.length === 0 ? (
+              <p className="voice-notice">
+                Nothing to configure until a model is chosen above.
+              </p>
+            ) : (
+              advancedModels.map(({ role, model }) => (
+                <AdvancedModelPanel
+                  key={model.id}
+                  role={role}
+                  model={model}
+                  settings={props.settings}
+                  profile={profiles[model.id]}
+                  adapters={adapters}
+                  onSaved={setProfiles}
+                  onAdapterAdded={refreshAdapters}
+                  onError={onError}
+                />
+              ))
+            )}
+          </>
+        ) : null}
+      </section>
     </div>
   )
 }

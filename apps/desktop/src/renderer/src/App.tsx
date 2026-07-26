@@ -30,6 +30,7 @@ import {
   engineStatus,
   fetchCapabilities,
   fetchModelBindings,
+  fetchModelSettings,
   health,
   exportConversation,
   importConversation,
@@ -46,6 +47,7 @@ import {
   type ConversationExport,
   type HardwareInfo,
   type LocalModel,
+  type ModelProfile,
   type PipelineFeatures,
   type RunSnapshot,
   type RuntimeEntry,
@@ -65,6 +67,8 @@ import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
 import { ModelMenu } from './components/ModelMenu'
+import { profileCount } from './components/ModelSettingsFields'
+import { ModelSettingsModal } from './components/ModelSettingsModal'
 import { ToolsMenu } from './components/ToolsMenu'
 import { VoiceMode } from './components/VoiceMode'
 import { WelcomeScreen } from './components/WelcomeScreen'
@@ -77,6 +81,7 @@ import {
   isVideoGenModel,
   isVoiceModel,
   modelDisplayName,
+  modelKindFor,
   runtimeNoticeForModel,
   visionCapabilityTitle
 } from './model-utils'
@@ -316,6 +321,10 @@ export function App(): React.JSX.Element {
 
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [inferenceMenuOpen, setInferenceMenuOpen] = useState(false)
+  // Advanced per-model configuration, held here because three surfaces open it:
+  // the model picker, the library, and the inference menu.
+  const [modelProfiles, setModelProfiles] = useState<Record<string, ModelProfile>>({})
+  const [configuringModel, setConfiguringModel] = useState<string | null>(null)
   const [manageOpen, setManageOpen] = useState(false)
   const [manageSection, setManageSection] = useState<ManageSection>('library')
   const [runSnapshots, setRunSnapshots] = useState<RunSnapshot[]>([])
@@ -513,6 +522,21 @@ export function App(): React.JSX.Element {
     selectedModel,
     selectModel
   ])
+
+  const configuredModelEntry = useMemo(
+    () => localModels.find((model) => model.id === configuringModel) ?? null,
+    [localModels, configuringModel]
+  )
+  const profileCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(modelProfiles).map(([modelId, profile]) => [
+          modelId,
+          profileCount(profile)
+        ])
+      ),
+    [modelProfiles]
+  )
 
   const selectedMeta = useMemo(() => {
     if (modelsLoading && localModels.length === 0) {
@@ -769,6 +793,11 @@ export function App(): React.JSX.Element {
     void prefetchRuntimes()
     void refreshTools()
     void fetchModelBindings().then(setModelBindings).catch(() => {})
+    // Advanced per-model settings, so the picker can say which models carry any
+    // before one of them is opened.
+    void fetchModelSettings()
+      .then((response) => setModelProfiles(response.models))
+      .catch(() => {})
     void refreshRuntime().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
@@ -1760,6 +1789,8 @@ export function App(): React.JSX.Element {
           loading={modelsLoading}
           videoPipeline={Boolean(pipelineFeatures.video_preprocess)}
           onSelect={modeModel.select}
+          onConfigure={setConfiguringModel}
+          configuredCounts={profileCounts}
           onManage={() => openManage(modelsLoadFailed || localModels.length === 0 ? 'discover' : 'library')}
           onClose={() => setModelMenuOpen(false)}
         />
@@ -1770,8 +1801,21 @@ export function App(): React.JSX.Element {
           selectedModel={selectedModel}
           models={localModels}
           saving={savingInference}
+          advancedModelId={modeModel.selected}
+          profile={modelProfiles[modeModel.selected]}
           onApply={(next) => void applyInferenceSettings(next)}
+          onProfileSaved={setModelProfiles}
           onClose={() => setInferenceMenuOpen(false)}
+        />
+      )}
+      {configuringModel && configuredModelEntry && (
+        <ModelSettingsModal
+          model={configuredModelEntry}
+          kind={modelKindFor(configuringModel)}
+          profile={modelProfiles[configuringModel]}
+          settings={runtime}
+          onSaved={setModelProfiles}
+          onClose={() => setConfiguringModel(null)}
         />
       )}
       <DownloadTray onChanged={() => void refreshLocalModels().catch(() => {})} />
@@ -1798,6 +1842,8 @@ export function App(): React.JSX.Element {
           settings={runtime}
           onSettingsSaved={setRuntime}
           hardware={hardware}
+          onConfigureModel={setConfiguringModel}
+          profileCounts={profileCounts}
         />
       )}
     </main>

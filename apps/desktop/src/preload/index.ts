@@ -49,6 +49,11 @@ contextBridge.exposeInMainWorld('brazier', {
   platform: process.platform,
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-directory'),
   selectWorkspace: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-workspace'),
+  /** Pick a file (or an adapter directory) already on disk. Null when dismissed. */
+  selectFile: (
+    title: string,
+    filters: Array<{ name: string; extensions: string[] }>
+  ): Promise<string | null> => ipcRenderer.invoke('brazier:select-file', title, filters),
   /** Ask where to put a file and write it. Resolves null when dismissed. */
   saveFile: (suggestedName: string, data: ArrayBuffer): Promise<string | null> =>
     ipcRenderer.invoke('brazier:save-file', suggestedName, data),

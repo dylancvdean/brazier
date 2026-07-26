@@ -15,6 +15,7 @@ import {
   Search,
   Settings2,
   ShieldAlert,
+  SlidersHorizontal,
   Trash2,
   X
 } from 'lucide-react'
@@ -212,6 +213,10 @@ type ManagePanelProps = {
   settings: RuntimeSettings | null
   onSettingsSaved: (settings: RuntimeSettings) => void
   hardware: HardwareInfo | null
+  /** Open a model's advanced configuration. */
+  onConfigureModel?: (modelId: string) => void
+  /** How many settings each model already carries. */
+  profileCounts?: Record<string, number>
   pendingBuild?: { engine: BuildEngine; repository: string } | null
   onPendingBuildConsumed?: () => void
 }
@@ -710,6 +715,14 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                 </div>
               </div>
               <div className="library-card-actions">
+                <button
+                  className="chip-button subtle"
+                  title="Advanced settings for this model"
+                  onClick={() => props.onConfigureModel?.(model.id)}
+                >
+                  <SlidersHorizontal size={13} />
+                  {(props.profileCounts?.[model.id] ?? 0) > 0 ? 'Configured' : 'Configure'}
+                </button>
                 {engine === 'whisper.cpp' || engine === 'streaming-asr' ? (
                   <button
                     className="chip-button selected"

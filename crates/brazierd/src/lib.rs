@@ -1,4 +1,5 @@
 pub mod active_downloads;
+pub mod adapters;
 pub mod agent_exec;
 pub mod agent_policy;
 pub mod agent_sandbox;
@@ -27,6 +28,7 @@ pub mod message_format;
 pub mod mlx;
 pub mod model_bindings;
 pub mod model_library;
+pub mod model_settings;
 pub mod models_store;
 pub mod progress;
 pub mod remote;

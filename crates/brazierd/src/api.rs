@@ -24,7 +24,7 @@ use tower_http::{
 use uuid::Uuid;
 
 use crate::{
-    AppState, blob_store,
+    AppState, adapters, blob_store,
     build_recipe::{self, BuildPlanRequest},
     builds,
     db::ConversationExport,
@@ -33,7 +33,7 @@ use crate::{
     engine::{Engine, StreamEvent},
     fork_hints::{self, ModelLoadError, RuntimeForkHint},
     hf::{self, SearchQuery},
-    hf_auth, llama, mcp, media, model_bindings, models_store,
+    hf_auth, llama, mcp, media, model_bindings, model_settings, models_store,
     progress::ProgressEvent,
     remote, runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry,
     toolchain_hints,
@@ -405,6 +405,16 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/models/bindings",
             get(model_bindings_list).put(update_model_binding),
         )
+        .route(
+            "/api/v1/models/settings",
+            get(model_settings_list).put(update_model_settings),
+        )
+        .route("/api/v1/models/settings/reset", post(reset_model_settings))
+        .route("/api/v1/adapters", get(list_adapters))
+        .route("/api/v1/adapters/register", post(register_adapter))
+        .route("/api/v1/adapters/forget", post(forget_adapter))
+        .route("/api/v1/adapters/delete", post(delete_adapter))
+        .route("/api/v1/adapters/download", post(download_adapter))
         .route("/api/v1/models/prepare", post(prepare_model))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -1313,6 +1323,184 @@ async fn update_model_binding(
     })))
 }
 
+/// Advanced configuration for every model that has any, plus the kind each
+/// installed model takes so the interface knows which fields to offer.
+async fn model_settings_list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let store = model_settings::load(&state.data_dir);
+    let kinds: std::collections::BTreeMap<String, &str> = state
+        .runtime
+        .models()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|model| {
+            let kind = model_settings::kind_for(&model.id);
+            (model.id, kind.as_str())
+        })
+        .collect();
+    Ok(Json(json!({ "models": store.models, "kinds": kinds })))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateModelSettingsRequest {
+    model_id: String,
+    profile: model_settings::ModelProfile,
+}
+
+/// Store one model's overrides.
+///
+/// A profile with nothing set is removed rather than saved, so "reset" and
+/// "clear every field" reach the same state.
+async fn update_model_settings(
+    State(state): State<AppState>,
+    Json(request): Json<UpdateModelSettingsRequest>,
+) -> ApiResult<Json<Value>> {
+    let store = model_settings::set_profile(&state.data_dir, &request.model_id, request.profile)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "model_id": request.model_id,
+        "models": store.models,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetModelSettingsRequest {
+    model_id: String,
+}
+
+async fn reset_model_settings(
+    State(state): State<AppState>,
+    Json(request): Json<ResetModelSettingsRequest>,
+) -> ApiResult<Json<Value>> {
+    let store = model_settings::clear_profile(&state.data_dir, &request.model_id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "model_id": request.model_id,
+        "models": store.models,
+    })))
+}
+
+async fn list_adapters(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "data": adapters::list(&state.data_dir) }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterAdapterRequest {
+    kind: String,
+    path: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Point Brazier at an adapter already on disk, without copying it.
+async fn register_adapter(
+    State(state): State<AppState>,
+    Json(request): Json<RegisterAdapterRequest>,
+) -> ApiResult<Json<Value>> {
+    let kind = adapters::AdapterKind::parse(&request.kind)
+        .ok_or_else(|| ApiError::bad_request(format!("unknown adapter kind `{}`", request.kind)))?;
+    let adapter = adapters::register(
+        &state.data_dir,
+        kind,
+        std::path::Path::new(&request.path),
+        request.name,
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "adapter": adapter })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AdapterIdRequest {
+    id: String,
+}
+
+async fn forget_adapter(
+    State(state): State<AppState>,
+    Json(request): Json<AdapterIdRequest>,
+) -> ApiResult<Json<Value>> {
+    adapters::forget(&state.data_dir, &request.id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "id": request.id, "forgotten": true })))
+}
+
+async fn delete_adapter(
+    State(state): State<AppState>,
+    Json(request): Json<AdapterIdRequest>,
+) -> ApiResult<Json<Value>> {
+    adapters::delete(&state.data_dir, &request.id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "id": request.id, "deleted": true })))
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadAdapterRequest {
+    kind: String,
+    repo_id: String,
+    filename: String,
+    #[serde(default = "default_revision")]
+    revision: String,
+}
+
+fn default_revision() -> String {
+    "main".to_owned()
+}
+
+async fn download_adapter(
+    State(state): State<AppState>,
+    Query(query): Query<StreamQuery>,
+    Json(request): Json<DownloadAdapterRequest>,
+) -> Response {
+    let Some(kind) = adapters::AdapterKind::parse(&request.kind) else {
+        return ApiError::bad_request(format!("unknown adapter kind `{}`", request.kind))
+            .into_response();
+    };
+
+    if !query.stream {
+        let result = download::download_adapter_with_progress(
+            &state.http,
+            &state.data_dir,
+            kind,
+            &request.repo_id,
+            &request.revision,
+            &request.filename,
+            Box::new(|_| {}),
+            None,
+        )
+        .await;
+        return match result {
+            Ok(result) => (StatusCode::OK, Json(json!(result))).into_response(),
+            Err(error) => ApiError::bad_request(error).into_response(),
+        };
+    }
+
+    let (tx, rx) = progress_channel();
+    let http = state.http.clone();
+    let data_dir = state.data_dir.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let result = download::download_adapter_with_progress(
+            &http,
+            &data_dir,
+            kind,
+            &request.repo_id,
+            &request.revision,
+            &request.filename,
+            Box::new(move |event| push_progress(&progress_tx, event)),
+            None,
+        )
+        .await;
+        if let Err(error) = result {
+            push_progress(&tx, ProgressEvent::error(error.to_string()));
+        }
+    });
+    progress_sse(rx)
+}
+
 #[derive(Debug, Deserialize)]
 struct PrepareModelRequest {
     model_id: String,
@@ -1801,13 +1989,15 @@ async fn generate_image(
         None
     };
     let gen_bytes = generation_model_bytes(&state.data_dir, &model_id);
+    let profiles = model_settings::load(&state.data_dir);
+    let profile = profiles.diffusion(&model_id).cloned();
     let job = sdcpp::GenerateImageRequest {
         prompt: request.prompt,
         model_id,
         negative_prompt: request.negative_prompt,
-        width: request.width.unwrap_or(512),
-        height: request.height.unwrap_or(512),
-        steps: request.steps.unwrap_or(20),
+        width: request.width,
+        height: request.height,
+        steps: request.steps,
         seed: request.seed,
         cfg_scale: request.cfg_scale,
         guidance: request.guidance,
@@ -1817,8 +2007,13 @@ async fn generate_image(
         timeout_secs: Some(settings.generation_timeout_secs),
     };
     let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
-    let generated =
-        sdcpp::generate_image(&state.data_dir, settings.sdcpp_binary.as_deref(), &job).await;
+    let generated = sdcpp::generate_image(
+        &state.data_dir,
+        settings.sdcpp_binary.as_deref(),
+        &job,
+        profile.as_ref(),
+    )
+    .await;
     state.runtime.restore_after_generation(memory_plan).await;
     let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
@@ -1875,13 +2070,15 @@ async fn generate_video(
         None
     };
     let gen_bytes = generation_model_bytes(&state.data_dir, &model_id);
+    let profiles = model_settings::load(&state.data_dir);
+    let profile = profiles.diffusion(&model_id).cloned();
     let job = sdcpp::GenerateVideoRequest {
         prompt: request.prompt,
         model_id,
         negative_prompt: request.negative_prompt,
-        width: request.width.unwrap_or(512),
-        height: request.height.unwrap_or(512),
-        steps: request.steps.unwrap_or(20),
+        width: request.width,
+        height: request.height,
+        steps: request.steps,
         seed: request.seed,
         cfg_scale: request.cfg_scale,
         guidance: request.guidance,
@@ -1889,12 +2086,17 @@ async fn generate_video(
         init_image_blob: request.init_image_blob.clone(),
         origin: sdcpp::GenerationOrigin::User,
         timeout_secs: Some(settings.generation_timeout_secs),
-        video_frames: request.video_frames.unwrap_or(16),
+        video_frames: request.video_frames,
         fps: request.fps,
     };
     let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
-    let generated =
-        sdcpp::generate_video(&state.data_dir, settings.sdcpp_binary.as_deref(), &job).await;
+    let generated = sdcpp::generate_video(
+        &state.data_dir,
+        settings.sdcpp_binary.as_deref(),
+        &job,
+        profile.as_ref(),
+    )
+    .await;
     state.runtime.restore_after_generation(memory_plan).await;
     let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
@@ -1974,6 +2176,17 @@ async fn create_voice_session(
         .unwrap_or_else(|| "You are a helpful assistant.".into());
     let voice_prompt = request.voice_prompt_path.map(PathBuf::from);
     let hf_token = crate::hf_auth::load_token(&state.data_dir);
+    // The voice model's own configuration fills in whatever the session did not
+    // name — its persona, its voice, and how heavily it is quantised.
+    let voice_profile = request
+        .model_id
+        .as_deref()
+        .or(settings.default_voice_model.as_deref())
+        .and_then(|model_id| {
+            model_settings::load(&state.data_dir)
+                .voice(model_id)
+                .cloned()
+        });
     let voice_state = state.runtime.voice_state().await;
     let session = voice_state
         .sessions
@@ -1983,6 +2196,7 @@ async fn create_voice_session(
             persona.clone(),
             voice_prompt.clone(),
             hf_token,
+            voice_profile.as_ref(),
         )
         .await
         .map_err(ApiError::internal)?;
@@ -2750,6 +2964,11 @@ async fn audio_transcriptions(
         whisper_binary: Some(binary),
         whisper_model: model_path,
         whisper_model_pref: model_pref,
+        whisper_profile: model_pref.and_then(|id| {
+            model_settings::load(&state.data_dir)
+                .transcription(id)
+                .cloned()
+        }),
     };
     media::prepare_messages(&ctx, &mut messages, None)
         .await

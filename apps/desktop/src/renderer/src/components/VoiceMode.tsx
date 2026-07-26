@@ -438,6 +438,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
             <VoiceSessionConfig
               target={config.voiceSessionTarget}
               models={props.models}
+              voiceModelId={props.modelId}
               chatModelId={props.chatModelId}
               onChatModelChange={props.onChatModelChange}
               tools={props.tools}

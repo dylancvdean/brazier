@@ -1050,6 +1050,246 @@ export async function cancelGeneration(): Promise<boolean> {
   return payload.cancelled
 }
 
+// ---------------------------------------------------------------------------
+// Adapters and per-model configuration
+// ---------------------------------------------------------------------------
+
+export type AdapterKind = 'lora' | 'controlnet'
+
+/** One installed LoRA or ControlNet, with the engines that can load it. */
+export type Adapter = {
+  id: string
+  kind: AdapterKind
+  name: string
+  path: string
+  size_bytes?: number
+  /** `llama.cpp`, `mlx-lm`, `mlx-vlm`, or `stable-diffusion.cpp`. */
+  engines: string[]
+  /** Registered from outside the library, so Brazier will not delete it. */
+  external: boolean
+  source_repo?: string
+}
+
+export type LoraBinding = {
+  adapter_id: string
+  path?: string | null
+  scale: number
+  enabled: boolean
+}
+
+export type ControlNetBinding = {
+  adapter_id: string
+  path?: string | null
+  strength: number
+  image_path?: string | null
+  /** Run the ControlNet on the CPU, keeping VRAM for the main model. */
+  cpu: boolean
+  enabled: boolean
+}
+
+/** Which family of settings a model takes. */
+export type ModelKind = 'text' | 'image' | 'video' | 'transcription' | 'voice'
+
+/**
+ * Every field is optional and means *override*: left unset, a setting falls
+ * through to the global inference defaults and then to the engine's own.
+ */
+export type TextProfile = {
+  context_size?: number | null
+  batch_size?: number | null
+  ubatch_size?: number | null
+  threads?: number | null
+  gpu_layers?: number | null
+  flash_attention?: boolean | null
+  kv_cache_type_k?: string | null
+  kv_cache_type_v?: string | null
+  jinja?: boolean | null
+  mlock?: boolean | null
+  no_mmap?: boolean | null
+  rope_scaling?: string | null
+  rope_freq_base?: number | null
+  rope_freq_scale?: number | null
+  yarn_orig_ctx?: number | null
+  n_cpu_moe?: number | null
+  main_gpu?: number | null
+  tensor_split?: string | null
+  split_mode?: string | null
+  cache_reuse?: number | null
+  defrag_threshold?: number | null
+  temperature?: number | null
+  top_p?: number | null
+  top_k?: number | null
+  min_p?: number | null
+  typical_p?: number | null
+  repeat_penalty?: number | null
+  repeat_last_n?: number | null
+  presence_penalty?: number | null
+  frequency_penalty?: number | null
+  dry_multiplier?: number | null
+  dry_base?: number | null
+  dry_allowed_length?: number | null
+  mirostat?: number | null
+  mirostat_tau?: number | null
+  mirostat_eta?: number | null
+  seed?: number | null
+  max_tokens?: number | null
+  stop?: string[]
+  enable_reasoning?: boolean | null
+  reasoning_budget_tokens?: number | null
+  system_prompt?: string | null
+  loras?: LoraBinding[]
+  extra_args?: string[]
+}
+
+export type DiffusionProfile = {
+  width?: number | null
+  height?: number | null
+  steps?: number | null
+  cfg_scale?: number | null
+  guidance?: number | null
+  img_cfg_scale?: number | null
+  sampling_method?: string | null
+  schedule?: string | null
+  clip_skip?: number | null
+  seed?: number | null
+  batch_count?: number | null
+  strength?: number | null
+  eta?: number | null
+  slg_scale?: number | null
+  skip_layers?: string | null
+  skip_layer_start?: number | null
+  skip_layer_end?: number | null
+  flow_shift?: number | null
+  threads?: number | null
+  vae_tiling?: boolean | null
+  vae_on_cpu?: boolean | null
+  clip_on_cpu?: boolean | null
+  diffusion_fa?: boolean | null
+  offload_to_cpu?: boolean | null
+  rng?: string | null
+  negative_prompt?: string | null
+  video_frames?: number | null
+  fps?: number | null
+  loras?: LoraBinding[]
+  control_nets?: ControlNetBinding[]
+  extra_args?: string[]
+}
+
+export type TranscriptionProfile = {
+  language?: string | null
+  translate?: boolean | null
+  beam_size?: number | null
+  best_of?: number | null
+  temperature?: number | null
+  max_context?: number | null
+  max_len?: number | null
+  split_on_word?: boolean | null
+  word_threshold?: number | null
+  entropy_threshold?: number | null
+  logprob_threshold?: number | null
+  no_speech_threshold?: number | null
+  no_fallback?: boolean | null
+  suppress_nst?: boolean | null
+  threads?: number | null
+  flash_attention?: boolean | null
+  initial_prompt?: string | null
+  lookahead?: number | null
+  extra_args?: string[]
+}
+
+export type VoiceProfile = {
+  persona_text?: string | null
+  voice_id?: string | null
+  voice_prompt_path?: string | null
+  quantization?: number | null
+  extra_args?: string[]
+}
+
+/** A model's overrides, tagged with the kind of model they apply to. */
+export type ModelProfile =
+  | ({ kind: 'text' } & TextProfile)
+  | ({ kind: 'image' } & DiffusionProfile)
+  | ({ kind: 'video' } & DiffusionProfile)
+  | ({ kind: 'transcription' } & TranscriptionProfile)
+  | ({ kind: 'voice' } & VoiceProfile)
+
+export type ModelSettingsResponse = {
+  models: Record<string, ModelProfile>
+  /** The kind each installed model takes, so the right fields are offered. */
+  kinds: Record<string, ModelKind>
+}
+
+export function fetchModelSettings(): Promise<ModelSettingsResponse> {
+  return request('/api/v1/models/settings')
+}
+
+export async function saveModelProfile(
+  modelId: string,
+  profile: ModelProfile
+): Promise<Record<string, ModelProfile>> {
+  const response = await request<{ models: Record<string, ModelProfile> }>(
+    '/api/v1/models/settings',
+    { method: 'PUT', body: JSON.stringify({ model_id: modelId, profile }) }
+  )
+  return response.models
+}
+
+export async function resetModelProfile(
+  modelId: string
+): Promise<Record<string, ModelProfile>> {
+  const response = await request<{ models: Record<string, ModelProfile> }>(
+    '/api/v1/models/settings/reset',
+    { method: 'POST', body: JSON.stringify({ model_id: modelId }) }
+  )
+  return response.models
+}
+
+export async function listAdapters(): Promise<Adapter[]> {
+  return (await request<{ data: Adapter[] }>('/api/v1/adapters')).data
+}
+
+export async function registerAdapter(
+  kind: AdapterKind,
+  path: string,
+  name?: string
+): Promise<Adapter> {
+  const response = await request<{ adapter: Adapter }>('/api/v1/adapters/register', {
+    method: 'POST',
+    body: JSON.stringify({ kind, path, name })
+  })
+  return response.adapter
+}
+
+export async function forgetAdapter(id: string): Promise<void> {
+  await request('/api/v1/adapters/forget', {
+    method: 'POST',
+    body: JSON.stringify({ id })
+  })
+}
+
+export async function deleteAdapter(id: string): Promise<void> {
+  await request('/api/v1/adapters/delete', {
+    method: 'POST',
+    body: JSON.stringify({ id })
+  })
+}
+
+export async function downloadAdapter(
+  kind: AdapterKind,
+  repoId: string,
+  filename: string,
+  onProgress?: (event: ProgressEvent) => void
+): Promise<{ path: string; bytes: number }> {
+  const final = await readProgressSse(
+    '/api/v1/adapters/download?stream=true',
+    { method: 'POST', body: JSON.stringify({ kind, repo_id: repoId, filename }) },
+    onProgress ?? (() => {})
+  )
+  const result = final.result as { path?: string; bytes?: number } | undefined
+  if (!result?.path) throw new Error('The adapter download finished without a file.')
+  return { path: result.path, bytes: result.bytes ?? 0 }
+}
+
 /** Generation settings that suit a curated model, used to prefill the panel. */
 export type SdcppDefaults = {
   width?: number

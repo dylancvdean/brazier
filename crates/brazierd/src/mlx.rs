@@ -92,6 +92,24 @@ pub struct MlxServer {
     pub model_ref: String,
     pub python: PathBuf,
     pub kind: MlxKind,
+    /// What this process was launched with, so a model reconfigured since it
+    /// loaded is restarted rather than served stale.
+    pub launch_key: String,
+}
+
+/// The fingerprint a server started with these inputs would carry.
+pub fn launch_key(
+    settings: &RuntimeSettings,
+    profile: Option<&crate::model_settings::TextProfile>,
+    adapter: Option<&Path>,
+) -> String {
+    let max_tokens = profile
+        .and_then(|profile| profile.max_tokens)
+        .or(settings.max_tokens);
+    let extra = profile
+        .map(|profile| profile.extra_args.join(" "))
+        .unwrap_or_default();
+    format!("{max_tokens:?}|{adapter:?}|{extra}")
 }
 
 impl MlxServer {
@@ -100,6 +118,22 @@ impl MlxServer {
         kind: MlxKind,
         model_ref: &str,
         settings: &RuntimeSettings,
+    ) -> anyhow::Result<Self> {
+        Self::start_with_profile(python, kind, model_ref, settings, None, None).await
+    }
+
+    /// Start an MLX server with a model's own launch overrides.
+    ///
+    /// `adapter` is a directory of LoRA weights fine-tuned against this model.
+    /// mlx-lm loads one at a time (`--adapter-path`), so a model configured with
+    /// several is served by the first its engine can read.
+    pub async fn start_with_profile(
+        python: &Path,
+        kind: MlxKind,
+        model_ref: &str,
+        settings: &RuntimeSettings,
+        profile: Option<&crate::model_settings::TextProfile>,
+        adapter: Option<&Path>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             python.is_file(),
@@ -135,11 +169,21 @@ impl MlxServer {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        if settings.max_tokens.is_some() {
-            // mlx-lm uses --max-tokens as a server default when provided.
-            if let Some(max_tokens) = settings.max_tokens {
-                command.arg("--max-tokens").arg(max_tokens.to_string());
-            }
+        // mlx-lm uses --max-tokens as a server default when provided.
+        if let Some(max_tokens) = profile
+            .and_then(|profile| profile.max_tokens)
+            .or(settings.max_tokens)
+        {
+            command.arg("--max-tokens").arg(max_tokens.to_string());
+        }
+        if let Some(adapter) = adapter {
+            command.arg("--adapter-path").arg(adapter);
+        }
+        for arg in profile
+            .map(|profile| profile.extra_args.as_slice())
+            .unwrap_or_default()
+        {
+            command.arg(arg);
         }
         let mut child = command
             .spawn()
@@ -180,6 +224,7 @@ impl MlxServer {
             model_ref: model_ref.to_owned(),
             python: python.to_path_buf(),
             kind,
+            launch_key: launch_key(settings, profile, adapter),
         })
     }
 

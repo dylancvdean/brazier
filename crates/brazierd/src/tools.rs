@@ -507,21 +507,11 @@ async fn generate_image_tool(
             .get("negative_prompt")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
-        width: args
-            .get("width")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32)
-            .unwrap_or(512),
-        height: args
-            .get("height")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32)
-            .unwrap_or(512),
-        steps: args
-            .get("steps")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32)
-            .unwrap_or(20),
+        // Left unset when the model says nothing, so the size and step count
+        // this generation model was configured for are what it runs at.
+        width: args.get("width").and_then(Value::as_u64).map(|v| v as u32),
+        height: args.get("height").and_then(Value::as_u64).map(|v| v as u32),
+        steps: args.get("steps").and_then(Value::as_u64).map(|v| v as u32),
         seed: args.get("seed").and_then(Value::as_i64),
         cfg_scale: args
             .get("cfg_scale")
@@ -536,9 +526,15 @@ async fn generate_image_tool(
         origin: crate::sdcpp::GenerationOrigin::Model,
         timeout_secs: Some(settings.generation_timeout_secs),
     };
-    let result = crate::sdcpp::generate_image(data_dir, settings.sdcpp_binary.as_deref(), &request)
-        .await
-        .map_err(describe_generation_failure)?;
+    let profiles = crate::model_settings::load(data_dir);
+    let result = crate::sdcpp::generate_image(
+        data_dir,
+        settings.sdcpp_binary.as_deref(),
+        &request,
+        profiles.diffusion(&request.model_id),
+    )
+    .await
+    .map_err(describe_generation_failure)?;
     let bytes = tokio::fs::read(&result.output_path)
         .await
         .context("read generated image")?;
@@ -585,21 +581,9 @@ async fn generate_video_tool(
             .get("negative_prompt")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
-        width: args
-            .get("width")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32)
-            .unwrap_or(512),
-        height: args
-            .get("height")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32)
-            .unwrap_or(512),
-        steps: args
-            .get("steps")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32)
-            .unwrap_or(20),
+        width: args.get("width").and_then(Value::as_u64).map(|v| v as u32),
+        height: args.get("height").and_then(Value::as_u64).map(|v| v as u32),
+        steps: args.get("steps").and_then(Value::as_u64).map(|v| v as u32),
         seed: args.get("seed").and_then(Value::as_i64),
         cfg_scale: args
             .get("cfg_scale")
@@ -616,13 +600,18 @@ async fn generate_video_tool(
         video_frames: args
             .get("video_frames")
             .and_then(Value::as_u64)
-            .map(|v| v as u32)
-            .unwrap_or(16),
+            .map(|v| v as u32),
         fps: args.get("fps").and_then(Value::as_u64).map(|v| v as u32),
     };
-    let result = crate::sdcpp::generate_video(data_dir, settings.sdcpp_binary.as_deref(), &request)
-        .await
-        .map_err(describe_generation_failure)?;
+    let profiles = crate::model_settings::load(data_dir);
+    let result = crate::sdcpp::generate_video(
+        data_dir,
+        settings.sdcpp_binary.as_deref(),
+        &request,
+        profiles.diffusion(&request.model_id),
+    )
+    .await
+    .map_err(describe_generation_failure)?;
     let bytes = tokio::fs::read(&result.output_path)
         .await
         .context("read generated video")?;
