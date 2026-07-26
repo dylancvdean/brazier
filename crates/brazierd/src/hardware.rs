@@ -20,6 +20,18 @@ pub struct HardwareInfo {
     pub architecture: &'static str,
     pub logical_cpus: usize,
     pub memory_bytes: Option<u64>,
+    /// Dedicated video memory on a discrete GPU, when there is one.
+    ///
+    /// Absent on unified-memory machines (Apple Silicon, APUs), where the GPU
+    /// draws on system memory and reporting a separate figure would be a
+    /// fiction.
+    pub vram_bytes: Option<u64>,
+    /// The memory a model actually has to fit in: video memory on a discrete
+    /// GPU, system memory otherwise.
+    ///
+    /// This is what model recommendations are sized against, so the answer
+    /// lives here rather than being re-derived by each caller.
+    pub usable_model_memory_bytes: Option<u64>,
     pub gpu: Option<String>,
     pub gpu_arch: Option<String>,
     pub targets: Vec<RuntimeTargetInfo>,
@@ -160,6 +172,12 @@ pub fn amd_gfx_arches() -> Vec<String> {
     amd_gpus().into_iter().map(|gpu| gpu.arch).collect()
 }
 
+/// Total system memory.
+///
+/// Every platform is covered rather than Linux alone: model recommendations are
+/// chosen by how much memory a machine has, and a machine that reports none
+/// gets no recommendation at all — which on macOS and Windows would have been
+/// every machine.
 fn memory_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -173,10 +191,103 @@ fn memory_bytes() -> Option<u64> {
             .ok()?;
         Some(kib * 1024)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        run_first_line("sysctl", &["-n", "hw.memsize"])?
+            .trim()
+            .parse()
+            .ok()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // No Windows API crate is linked, so this asks the OS the way the rest
+        // of the module shells out for GPU facts.
+        let output = run_first_line(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+            ],
+        )?;
+        output.trim().parse().ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         None
     }
+}
+
+/// Run a command and return its first non-empty line of output.
+#[allow(dead_code)]
+fn run_first_line(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Dedicated video memory on a discrete GPU.
+///
+/// Unified-memory machines deliberately report `None`: on Apple Silicon and on
+/// APUs the GPU allocates out of system memory, so a separate VRAM figure would
+/// either double-count it or understate what a model can use.
+fn vram_bytes() -> Option<u64> {
+    if let Some(line) = run_first_line(
+        "nvidia-smi",
+        &[
+            "--query-gpu=memory.total",
+            "--format=csv,noheader,nounits",
+            "-i",
+            "0",
+        ],
+    ) {
+        // nvidia-smi reports mebibytes.
+        if let Ok(mib) = line.trim().parse::<u64>()
+            && mib > 0
+        {
+            return Some(mib * 1024 * 1024);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // AMD and Intel expose it through the DRM sysfs nodes. The largest card
+        // wins, since that is the one a model would be loaded onto.
+        let mut best = 0_u64;
+        for entry in std::fs::read_dir("/sys/class/drm")
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let total = entry.path().join("device").join("mem_info_vram_total");
+            if let Ok(text) = std::fs::read_to_string(total)
+                && let Ok(bytes) = text.trim().parse::<u64>()
+            {
+                best = best.max(bytes);
+            }
+        }
+        if best > 0 {
+            return Some(best);
+        }
+    }
+    None
+}
+
+/// Memory a model has to fit inside on this machine.
+///
+/// A discrete GPU's own memory is the binding constraint when there is one;
+/// otherwise the model shares system memory, and that is the figure that
+/// matters. Recommendations are sized against this.
+pub fn usable_model_memory_bytes(vram: Option<u64>, system: Option<u64>) -> Option<u64> {
+    vram.or(system)
 }
 
 /// Where an installed managed ROCm llama.cpp build puts its binaries.
@@ -359,13 +470,17 @@ fn detect_uncached() -> HardwareInfo {
             },
         ));
     }
+    let system_memory = memory_bytes();
+    let vram = vram_bytes();
     HardwareInfo {
         os: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
         logical_cpus: std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1),
-        memory_bytes: memory_bytes(),
+        memory_bytes: system_memory,
+        vram_bytes: vram,
+        usable_model_memory_bytes: usable_model_memory_bytes(vram, system_memory),
         gpu: gpu_name.or_else(|| {
             nvidia
                 .then(|| "NVIDIA GPU".to_owned())
@@ -396,6 +511,18 @@ mod tests {
     #[test]
     fn ignores_the_cpu_topology_node() {
         assert_eq!(gfx_arch_name(0), None);
+    }
+
+    /// A discrete GPU's own memory is what a model has to fit inside; without
+    /// one the model shares system memory, and that is the figure to size
+    /// against.
+    #[test]
+    fn usable_memory_prefers_video_memory_when_there_is_some() {
+        let system = Some(64 * 1024 * 1024 * 1024);
+        let vram = Some(24 * 1024 * 1024 * 1024);
+        assert_eq!(usable_model_memory_bytes(vram, system), vram);
+        assert_eq!(usable_model_memory_bytes(None, system), system);
+        assert_eq!(usable_model_memory_bytes(None, None), None);
     }
 
     #[test]

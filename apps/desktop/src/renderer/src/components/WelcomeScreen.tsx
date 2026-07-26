@@ -1,4 +1,6 @@
 import {
+  ArrowLeft,
+  ArrowRight,
   Check,
   CircleAlert,
   LoaderCircle,
@@ -7,17 +9,35 @@ import {
   Wrench
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
+import brazierLogo from '../assets/brazier-logo.png'
 import {
+  fetchRecommendations,
   fetchToolchainStatus,
   hardwareInfo,
   type HardwareInfo,
+  type RecommendationCategory,
+  type Recommendations,
   type ToolchainStatus,
   type ToolchainTool
 } from '../api'
+import { CATEGORY_LABELS, RecommendedModels } from './RecommendedModels'
 
 type WelcomeScreenProps = {
   onContinue: () => void
   onOpenRuntimes: () => void
+  /** Refresh the model list after the flow installs anything. */
+  onModelsChanged?: () => void
+}
+
+/** The order features are offered and then walked through. */
+const FEATURES: RecommendationCategory[] = ['text', 'agent', 'image', 'video', 'voice']
+
+const FEATURE_BLURBS: Record<RecommendationCategory, string> = {
+  text: 'Ask questions, write, and think out loud with a model running on this machine.',
+  agent: 'Let a model edit files and run commands inside a folder you choose.',
+  image: 'Generate pictures from a description.',
+  video: 'Generate short clips from a description.',
+  voice: 'Talk to a model and be answered out loud, in real time.'
 }
 
 function platformLines(hardware: HardwareInfo | null, toolchain: ToolchainStatus | null): string[] {
@@ -61,11 +81,45 @@ function ToolRow({ tool }: { tool: ToolchainTool }) {
   )
 }
 
+/**
+ * The first-launch walkthrough.
+ *
+ * Three stages: check this machine has the tools each engine needs, ask what
+ * you actually want to do with it, then show one recommended model per thing
+ * you chose. The middle stage is the point — someone who has never run a local
+ * model does not know that image generation and chat are different downloads,
+ * or that voice needs two of them.
+ */
 export function WelcomeScreen(props: WelcomeScreenProps) {
   const [toolchain, setToolchain] = useState<ToolchainStatus | null>(null)
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [stage, setStage] = useState<'checklist' | 'features' | 'models'>('checklist')
+  const [wanted, setWanted] = useState<RecommendationCategory[]>(['text'])
+  const [recommendations, setRecommendations] = useState<Recommendations | null>(null)
+  const [loadingRecommendations, setLoadingRecommendations] = useState(false)
+
+  // Fetched when the model stage is reached rather than on mount: it costs a
+  // round trip to Hugging Face per recommended model, to size the download.
+  useEffect(() => {
+    if (stage !== 'models' || recommendations) return
+    setLoadingRecommendations(true)
+    void fetchRecommendations()
+      .then(setRecommendations)
+      .catch((cause: unknown) =>
+        setError(cause instanceof Error ? cause.message : String(cause))
+      )
+      .finally(() => setLoadingRecommendations(false))
+  }, [stage, recommendations])
+
+  function toggleFeature(feature: RecommendationCategory): void {
+    setWanted((current) =>
+      current.includes(feature)
+        ? current.filter((entry) => entry !== feature)
+        : [...current, feature]
+    )
+  }
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -92,12 +146,124 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
   const readyCount = toolchain?.tools.filter((tool) => tool.available).length ?? 0
   const total = toolchain?.tools.length ?? 0
 
+  if (stage === 'features') {
+    return (
+      <div className="first-run">
+        <div className="first-run-card">
+          <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
+          <p className="first-run-eyebrow">
+            <Sparkles size={13} /> Step 2 of 3
+          </p>
+          <h1>What do you want to do?</h1>
+          <p className="first-run-lede">
+            Each has different model or runtime requirements, so Brazier only downloads what you
+            will use. Chat and Agent can share a model when the same one is the best fit.
+          </p>
+
+          <div className="welcome-feature-list" role="group" aria-label="Features to set up">
+            {FEATURES.map((feature) => {
+              const on = wanted.includes(feature)
+              return (
+                <button
+                  key={feature}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={on}
+                  className={on ? 'welcome-feature active' : 'welcome-feature'}
+                  onClick={() => toggleFeature(feature)}
+                >
+                  <span className="welcome-feature-check">{on ? <Check size={13} /> : null}</span>
+                  <span>
+                    <strong>{CATEGORY_LABELS[feature]}</strong>
+                    <small>{FEATURE_BLURBS[feature]}</small>
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="first-run-actions">
+            <button
+              type="button"
+              className="chip-button subtle"
+              onClick={() => setStage('checklist')}
+            >
+              <ArrowLeft size={15} /> Back
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={wanted.length === 0}
+              onClick={() => setStage('models')}
+            >
+              See what fits this machine <ArrowRight size={15} />
+            </button>
+          </div>
+          <p className="first-run-footnote">
+            Choosing nothing is allowed — skip ahead and pick models yourself from Discover.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  if (stage === 'models') {
+    return (
+      <div className="first-run">
+        <div className="first-run-card wide">
+          <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
+          <p className="first-run-eyebrow">
+            <Sparkles size={13} /> Step 3 of 3
+          </p>
+          <h1>Recommended for this machine</h1>
+          <p className="first-run-lede">
+            One model per thing you chose, at the largest quantisation this machine can hold
+            comfortably. Downloads continue in the background — you do not have to wait here.
+          </p>
+
+          {error && <div className="runtime-notice">{error}</div>}
+
+          {loadingRecommendations || !recommendations ? (
+            <div className="manage-placeholder compact">
+              <LoaderCircle className="spin" size={16} />
+              Sizing these against your memory…
+            </div>
+          ) : (
+            <RecommendedModels
+              recommendations={recommendations}
+              categories={wanted}
+              onInstalled={props.onModelsChanged}
+              onError={setError}
+              onOpenRuntimes={props.onOpenRuntimes}
+            />
+          )}
+
+          <div className="first-run-actions">
+            <button
+              type="button"
+              className="chip-button subtle"
+              onClick={() => setStage('features')}
+            >
+              <ArrowLeft size={15} /> Back
+            </button>
+            <button type="button" className="primary-button" onClick={props.onContinue}>
+              Continue to Brazier
+            </button>
+          </div>
+          <p className="first-run-footnote">
+            Reopen this from Manage → Recommended models whenever you want the others.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="first-run">
       <div className="first-run-card">
-        <div className="welcome-mark">B</div>
+        <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
         <p className="first-run-eyebrow">
-          <Sparkles size={13} /> First launch
+          <Sparkles size={13} /> Step 1 of 3
         </p>
         <h1>Welcome to Brazier</h1>
         <p className="first-run-lede">
@@ -156,26 +322,12 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
           </>
         )}
 
-        <div className="first-run-next">
-          <h2>What to do next</h2>
-          <ol>
-            <li>Install any missing tools above, then hit Recheck.</li>
-            <li>
-              Open <strong>Runtimes</strong> to install llama.cpp (and whisper.cpp / streaming ASR /
-              MLX as you need them).
-            </li>
-            <li>
-              Open <strong>Discover</strong> to download a model, then start chatting.
-            </li>
-          </ol>
-        </div>
-
         <div className="first-run-actions">
           <button type="button" className="chip-button" onClick={props.onOpenRuntimes}>
             Open Runtimes
           </button>
-          <button type="button" className="primary-button" onClick={props.onContinue}>
-            Continue to Brazier
+          <button type="button" className="primary-button" onClick={() => setStage('features')}>
+            Choose what to set up <ArrowRight size={15} />
           </button>
         </div>
         <p className="first-run-footnote">

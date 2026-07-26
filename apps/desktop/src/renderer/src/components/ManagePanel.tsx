@@ -15,11 +15,12 @@ import {
   Search,
   Settings2,
   ShieldAlert,
+  Sparkles,
   SlidersHorizontal,
   Trash2,
   X
 } from 'lucide-react'
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   activateRuntime,
   buildRuntime,
@@ -39,6 +40,7 @@ import {
   ensureSdcppEngine,
   ensureWhisperEngine,
   fetchModelDescription,
+  fetchRecommendations,
   fetchManagedSdcppStatus,
   fetchManagedWhisperStatus,
   fetchManagedLlamaStatus,
@@ -75,18 +77,21 @@ import {
   modelLibraryPathSuggestions,
   type ModelLibraryPathSuggestion,
   type ProgressEvent,
+  type Recommendations,
   type RuntimeEntry,
   type RuntimeSettings,
   type RuntimeTarget,
   saveRuntimeSettings,
   searchHub,
   setHuggingFaceToken,
+  updateRecommendationState,
   queueModelDownload,
   refreshMcpServer,
   updateMcpServer,
   type SdcppBundle,
   type SdcppProposal
 } from '../api'
+import { RecommendedModels } from './RecommendedModels'
 import { CapabilityIcons, capabilityFlags, hubCapabilityFlags } from './CapabilityIcons'
 import {
   engineBadgeClass,
@@ -196,7 +201,14 @@ function defaultDiscoverEngine(hardware: HardwareInfo | null): DiscoverEngine {
   return 'llama.cpp'
 }
 
-export type ManageSection = 'library' | 'discover' | 'runtimes' | 'engine' | 'mcp' | 'remote'
+export type ManageSection =
+  | 'library'
+  | 'recommended'
+  | 'discover'
+  | 'runtimes'
+  | 'engine'
+  | 'mcp'
+  | 'remote'
 
 type ManagePanelProps = {
   section: ManageSection
@@ -223,6 +235,7 @@ type ManagePanelProps = {
 
 const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Element }> = [
   { id: 'library', label: 'Model library', icon: <Box size={15} /> },
+  { id: 'recommended', label: 'Recommended models', icon: <Sparkles size={15} /> },
   { id: 'discover', label: 'Download models', icon: <Download size={15} /> },
   { id: 'runtimes', label: 'Runtimes', icon: <Cpu size={15} /> },
   { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
@@ -404,6 +417,9 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
               </div>
             )}
             {props.section === 'library' && <LibrarySection {...props} onError={setError} />}
+            {props.section === 'recommended' && (
+              <RecommendedSection {...props} onError={setError} />
+            )}
             {props.section === 'discover' && <DiscoverSection {...props} onError={setError} />}
             {props.section === 'runtimes' && <RuntimesSection {...props} onError={setError} />}
             {props.section === 'mcp' && <McpSection {...props} onError={setError} />}
@@ -434,6 +450,89 @@ function modelCountSummary(ggufCount: number, mlxCount: number): string {
 
 function isExternalModel(model: LocalModel): boolean {
   return Boolean(model.read_only) || model.id.includes('-ext:')
+}
+
+/**
+ * The first-run recommendations, revisited.
+ *
+ * The welcome flow only offers the categories you picked at the time, and a
+ * machine's memory does not change but its owner's mind does — so the whole set
+ * is available here, permanently, rather than only in the ten seconds after
+ * installing.
+ */
+function RecommendedSection(props: SectionProps): React.JSX.Element {
+  const [recommendations, setRecommendations] = useState<Recommendations | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    try {
+      setRecommendations(await fetchRecommendations())
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setLoading(false)
+    }
+  }, [props])
+
+  useEffect(() => {
+    void refresh()
+    // Refreshed only on mount: sizing these costs a Hub request per model.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>Recommended models</h2>
+        <p>
+          One model per thing you might want to do, chosen for how much memory this machine has
+          and at the largest quantisation it can hold comfortably.
+        </p>
+      </header>
+
+      {loading && !recommendations ? (
+        <div className="manage-placeholder">
+          <LoaderCircle className="spin" size={18} />
+          Sizing recommendations against your memory…
+        </div>
+      ) : recommendations ? (
+        <>
+          <RecommendedModels
+            recommendations={recommendations}
+            onInstalled={() => void props.refreshModels()}
+            onError={props.onError}
+            onOpenRuntimes={() => props.onSectionChange('runtimes')}
+          />
+          <div className="settings-group">
+            <label className="engine-toggle">
+              <input
+                type="checkbox"
+                checked={recommendations.state.suppressed}
+                onChange={(event) => {
+                  const suppressed = event.target.checked
+                  void updateRecommendationState({ suppressed })
+                    .then((state) =>
+                      setRecommendations((current) =>
+                        current ? { ...current, state } : current
+                      )
+                    )
+                    .catch((cause: unknown) => props.onError(errorText(cause)))
+                }}
+              />
+              <span>
+                Don&apos;t tell me when a recommendation changes
+                <small>
+                  Brazier otherwise mentions it on startup when a category you set up here has a
+                  newer suggestion.
+                </small>
+              </span>
+            </label>
+          </div>
+        </>
+      ) : null}
+    </section>
+  )
 }
 
 function LibrarySection(props: SectionProps): React.JSX.Element {
