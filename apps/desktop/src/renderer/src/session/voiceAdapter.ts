@@ -82,6 +82,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     sampleCount: number
     audioSeconds: number
     startedAt: number
+    abort: AbortController
     done: Promise<{ text: string; engine: string; engineMs: number | null; roundTripMs: number }>
   } | null = null
   private captureFrames = 0
@@ -290,7 +291,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     this.speaking = null
     this.segmenter?.flush()
     this.segmenter = null
-    this.speculative = null
+    this.abandonSpeculative()
     await this.stream?.stop()
     this.stream = null
     if (sessionId) await endVoiceSession(sessionId).catch(() => undefined)
@@ -366,6 +367,11 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     sampleRate: number
     voicedFrames: number
   }): void {
+    // A snapshot from earlier in the same sentence is now known to be a
+    // fragment. Left running it would hold the daemon's one ASR worker, and the
+    // transcription that decides the turn would queue behind work already known
+    // to be useless.
+    this.abandonSpeculative()
     const pending = this.startTranscription(snapshot.samples, snapshot.sampleRate)
     this.speculative = {
       utteranceId: snapshot.id,
@@ -393,26 +399,35 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       })
   }
 
+  /** Drop the speculative transcription in flight, and stop paying for it. */
+  private abandonSpeculative(): void {
+    this.speculative?.abort.abort()
+    this.speculative = null
+  }
+
   /** Send audio for transcription, timing the round trip. */
   private startTranscription(
     samples: Float32Array,
     sampleRate: number
   ): {
     startedAt: number
+    abort: AbortController
     done: Promise<{ text: string; engine: string; engineMs: number | null; roundTripMs: number }>
   } {
     const startedAt = Date.now()
+    const abort = new AbortController()
     // Padded so the decoder flushes its last words rather than dropping them.
     const audio = padTrailingSilence(samples, sampleRate)
     const done = transcribeAudio(encodeWav(audio, sampleRate), {
-      engine: this.options.asrEngine?.()
+      engine: this.options.asrEngine?.(),
+      signal: abort.signal
     }).then((result) => ({
       text: result.text,
       engine: result.engine,
       engineMs: result.durationMs,
       roundTripMs: Date.now() - startedAt
     }))
-    return { startedAt, done }
+    return { startedAt, abort, done }
   }
 
   private async transcribe(utterance: {
@@ -433,7 +448,8 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       voicedFrames: utterance.voicedFrames,
       sampleCount: utterance.samples.length
     })
-    this.speculative = null
+    if (reused) this.speculative = null
+    else this.abandonSpeculative()
     try {
       const pending =
         reused && speculative
