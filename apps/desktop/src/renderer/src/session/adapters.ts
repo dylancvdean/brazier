@@ -75,6 +75,23 @@ export type AgentAdapterEvent =
       outcome: string
     }
   | { type: 'toolFailed'; correlationId: string; toolCallId: string; tool: string; error: string }
+  /**
+   * The permission broker is holding a call until someone allows it.
+   *
+   * Normalized out of the agent's approval record because the coordinator has to
+   * read it out loud: the summary is what gets spoken, the risk and environment
+   * decide how firmly, and nothing else travels.
+   */
+  | {
+      type: 'approvalRequired'
+      correlationId: string
+      approvalId: string
+      tool: string
+      summary: string
+      risk: string
+      environment: 'sandbox' | 'host'
+    }
+  | { type: 'approvalResolved'; correlationId: string; approvalId: string }
   | { type: 'runFailed'; correlationId: string; error: string }
   | { type: 'runCancelled'; correlationId: string }
 
@@ -85,6 +102,12 @@ export interface AgentAdapter {
   attachedSessionId(): string | null
   submitTurn(request: AgentTurnRequest): Promise<void>
   cancelRun(correlationId: string): Promise<void>
+  /**
+   * Answer a held call. The coordinator only ever passes on a decision someone
+   * made — it never decides on their behalf, and there is no timeout that turns
+   * silence into consent.
+   */
+  decideApproval(approvalId: string, decision: 'approve' | 'deny', note?: string): Promise<void>
   getStatus(correlationId: string): AgentRunStatusReport | null
   subscribe(listener: (event: AgentAdapterEvent) => void): () => void
 }
@@ -108,9 +131,46 @@ export type VoiceAdapterEvent =
    * all, and frames too quiet to count as speech — and they are not otherwise
    * distinguishable from outside.
    */
-  | { type: 'captureLevel'; frames: number; peak: number; status: string }
+  | {
+      type: 'captureLevel'
+      frames: number
+      peak: number
+      status: string
+      /** The level a frame currently has to clear, which moves with the room. */
+      gate: number
+      /** What the room is estimated to sound like when nobody is talking. */
+      noiseFloor: number
+    }
   /** A finished utterance is being transcribed. */
   | { type: 'transcriptionStarted'; utteranceId: string }
+  /**
+   * What transcribing one utterance cost, and which interface served it.
+   *
+   * Reported for every outcome, including an empty transcript, because the
+   * choice between batch whisper and a resident streaming worker is an open
+   * question that only measurement on real hardware can settle — and because a
+   * session that has become slow should be able to say so rather than feeling
+   * vaguely sluggish.
+   */
+  | {
+      type: 'transcriptionMeasured'
+      utteranceId: string
+      engine: string
+      /** Wall clock from sending the audio to holding the text. */
+      roundTripMs: number
+      /**
+       * How long the turn waited after the utterance closed. This is the part
+       * a person feels, and it is not the same as the round trip: a
+       * transcription started at a pause has usually finished by then.
+       */
+      waitedMs: number
+      /** What the daemon reports spending on the audio, when it says. */
+      engineMs: number | null
+      /** Audio length, so cost per second of speech is recoverable. */
+      audioSeconds: number
+      /** Whether this transcription began before the user stopped talking. */
+      startedAtPause: boolean
+    }
   /**
    * Transcription returned nothing. Reported rather than dropped: silence is
    * indistinguishable from a pipeline that stopped working.

@@ -12,9 +12,19 @@
  * is in frames so the behaviour is testable without audio hardware.
  */
 
+import { NoiseFloorTracker } from './noiseFloor'
+
 export type UtteranceSegmenterOptions = {
-  /** RMS above which a frame counts as speech. */
+  /**
+   * RMS above which a frame counts as speech, in a quiet room. The gate never
+   * goes below this and rises above it as the room gets noisier.
+   */
   threshold?: number
+  /**
+   * Track the room and raise the gate above it. Off restores the fixed floor,
+   * which is what every parameter here was tuned against.
+   */
+  adaptive?: boolean
   /** Consecutive speech frames before an utterance opens. */
   framesToOpen?: number
   /**
@@ -31,8 +41,27 @@ export type UtteranceSegmenterOptions = {
   guardedFactor?: number
   /** Consecutive silent frames that close it. */
   framesToClose?: number
+  /**
+   * Silent frames after which the audio so far is offered for transcription,
+   * without closing the utterance.
+   *
+   * The turn cannot begin until the close window has elapsed, and then it waits
+   * again while the words are decoded. This makes the second wait happen inside
+   * the first: most pauses of this length are the end of the sentence, and when
+   * they are not the speculative transcript is thrown away.
+   */
+  framesToPause?: number
+  /** Voiced frames that must accumulate before another pause is offered. */
+  framesBetweenPauses?: number
   /** Utterances with less voiced audio than this are noise, not turns. */
   minimumFrames?: number
+  /**
+   * Utterances whose voiced audio does not average this many times the noise
+   * floor are the room, not a turn. Applied at close, so an utterance the gate
+   * opened before the room was learned is still thrown away rather than
+   * transcribed.
+   */
+  minimumSpeechToNoise?: number
   /** Hard cap so a stuck-open gate cannot grow without bound. */
   maximumFrames?: number
 }
@@ -46,8 +75,28 @@ export type UtteranceSegmenterHandlers = {
    * interrupts.
    */
   onSustainedSpeech?: (utteranceId: string) => void
+  /**
+   * The utterance so far, at a pause that has not yet closed it.
+   *
+   * Byte-for-byte what `onUtterance` will deliver if the pause turns out to be
+   * the end of the turn, so a transcript made from it can be used as the final
+   * one. `voicedFrames` is how the caller tells: unchanged at close means no
+   * more speech arrived, and the speculative transcript still describes all of
+   * the audio.
+   */
+  onPause?: (snapshot: {
+    id: string
+    samples: Float32Array
+    sampleRate: number
+    voicedFrames: number
+  }) => void
   /** A finished utterance, as mono PCM at `sampleRate`. */
-  onUtterance?: (utterance: { id: string; samples: Float32Array; sampleRate: number }) => void
+  onUtterance?: (utterance: {
+    id: string
+    samples: Float32Array
+    sampleRate: number
+    voicedFrames: number
+  }) => void
   /**
    * An utterance opened and was then thrown away. Reported because it is
    * otherwise indistinguishable from speech never having been detected.
@@ -63,6 +112,7 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   // some working setups entirely, and a gate that never opens produces no
   // utterance, no transcript, and no error — the session simply ignores you.
   threshold: SPEECH_THRESHOLD,
+  adaptive: true,
   // At 20 ms per frame: 60 ms to open, 700 ms of silence to close, 200 ms of
   // voiced audio to count as a turn, 30 s cap.
   framesToOpen: 3,
@@ -72,7 +122,17 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   framesToSustain: 15,
   guardedFactor: 4,
   framesToClose: 35,
+  // 300 ms of silence: long enough not to fire between words, short enough that
+  // the transcription overlaps most of the 700 ms close window.
+  framesToPause: 15,
+  // 250 ms of new speech before the next offer, so a hesitant sentence does not
+  // queue a transcription per gap.
+  framesBetweenPauses: 12,
   minimumFrames: 10,
+  // Two: half the margin the gate itself demands. The gate decides whether to
+  // start listening, which should be eager; this decides whether what was heard
+  // was ever speech, and the audio is in hand by then.
+  minimumSpeechToNoise: 2,
   maximumFrames: 1500
 }
 
@@ -101,6 +161,11 @@ export class UtteranceSegmenter {
   private open = false
   private sustained = false
   private guarded = false
+  private readonly noiseFloor = new NoiseFloorTracker()
+  /** Sum of the voiced frames' levels, for the speech-to-noise test at close. */
+  private voicedLevelSum = 0
+  /** Voiced-frame count at the last pause offered, so gaps are not re-offered. */
+  private pausedAtVoicedFrames: number | null = null
   private currentId: string | null = null
   private counter = 0
 
@@ -120,13 +185,35 @@ export class UtteranceSegmenter {
     this.guarded = guarded
   }
 
+  /**
+   * The level a frame currently has to clear, so the UI can say what it is.
+   *
+   * Worth showing rather than the constant: in a noisy room the number people
+   * are being measured against is not the one in the source.
+   */
+  currentGate(): number {
+    const base = this.options.adaptive
+      ? this.noiseFloor.gate(this.options.threshold)
+      : this.options.threshold
+    return this.guarded ? base * this.options.guardedFactor : base
+  }
+
+  /** The room's estimated level, or the fixed floor when not adapting. */
+  noiseLevel(): number {
+    return this.options.adaptive ? this.noiseFloor.level : 0
+  }
+
   /** Feed one captured frame. */
   push(samples: Float32Array, sampleRate: number): void {
     this.sampleRate = sampleRate
-    const gate = this.guarded
-      ? this.options.threshold * this.options.guardedFactor
-      : this.options.threshold
-    const loud = rms(samples) >= gate
+    const level = rms(samples)
+    // The assistant's own voice through the speakers is not the room, so it
+    // must not teach the tracker what the room sounds like.
+    if (this.options.adaptive && !this.guarded) this.noiseFloor.push(level)
+    const gate = this.currentGate()
+    const loud = level >= gate
+
+    if (this.open && loud) this.voicedLevelSum += level
 
     if (!this.open) {
       this.speechRun = loud ? this.speechRun + 1 : 0
@@ -137,6 +224,9 @@ export class UtteranceSegmenter {
         this.open = true
         this.silenceRun = 0
         this.voicedFrames = this.speechRun
+        // The frames that opened it were all above the gate; this frame's level
+        // stands in for them, which is close enough for a ratio test.
+        this.voicedLevelSum = level * this.speechRun
         this.counter += 1
         this.currentId = `utt-${this.counter}-${Date.now().toString(36)}`
         this.handlers.onSpeechStart?.(this.currentId)
@@ -155,7 +245,33 @@ export class UtteranceSegmenter {
       this.close()
       return
     }
+    if (this.silenceRun === this.options.framesToPause) this.offerPause()
     if (this.frames.length >= this.options.maximumFrames) this.close()
+  }
+
+  /**
+   * Hand out the utterance so far, once per pause.
+   *
+   * Trimmed exactly as `close` trims, so if this pause turns out to be the end
+   * of the turn the caller already holds a transcript of the whole utterance and
+   * the turn does not have to wait for one.
+   */
+  private offerPause(): void {
+    if (!this.currentId || !this.handlers.onPause) return
+    if (this.voicedFrames < this.options.minimumFrames) return
+    if (
+      this.pausedAtVoicedFrames !== null &&
+      this.voicedFrames - this.pausedAtVoicedFrames < this.options.framesBetweenPauses
+    ) {
+      return
+    }
+    this.pausedAtVoicedFrames = this.voicedFrames
+    this.handlers.onPause({
+      id: this.currentId,
+      samples: this.collect(this.keptFrames()),
+      sampleRate: this.sampleRate,
+      voicedFrames: this.voicedFrames
+    })
   }
 
   /** Force the current utterance closed, e.g. when the microphone is muted. */
@@ -164,12 +280,29 @@ export class UtteranceSegmenter {
     this.reset()
   }
 
+  /** The frames that belong to the utterance: everything but the closing pause. */
+  private keptFrames(): Float32Array[] {
+    // Long trailing silence is what closed the utterance, not part of it.
+    const trailing = Math.max(0, this.silenceRun - TRAILING_SILENCE_FRAMES)
+    return this.frames.slice(0, Math.max(0, this.frames.length - trailing))
+  }
+
+  private collect(frames: Float32Array[]): Float32Array {
+    const total = frames.reduce((sum, frame) => sum + frame.length, 0)
+    const samples = new Float32Array(total)
+    let offset = 0
+    for (const frame of frames) {
+      samples.set(frame, offset)
+      offset += frame.length
+    }
+    return samples
+  }
+
   private close(): void {
     const id = this.currentId
     const voiced = this.voicedFrames
-    // Long trailing silence is what closed the utterance, not part of it.
-    const trailing = Math.max(0, this.silenceRun - TRAILING_SILENCE_FRAMES)
-    const frames = this.frames.slice(0, Math.max(0, this.frames.length - trailing))
+    const voicedLevel = this.voicedLevelSum
+    const frames = this.keptFrames()
     this.reset()
     if (!id) return
     if (voiced < this.options.minimumFrames) {
@@ -179,14 +312,26 @@ export class UtteranceSegmenter {
       )
       return
     }
-    const total = frames.reduce((sum, frame) => sum + frame.length, 0)
-    const samples = new Float32Array(total)
-    let offset = 0
-    for (const frame of frames) {
-      samples.set(frame, offset)
-      offset += frame.length
+    // Steady noise opens the gate until the tracker has caught up with it. By
+    // the time it closes the room is known, so ask again whether this was ever
+    // speech rather than sending a fan to be transcribed.
+    if (this.options.adaptive && voiced > 0) {
+      const mean = voicedLevel / voiced
+      const floor = this.noiseFloor.level
+      if (mean < floor * this.options.minimumSpeechToNoise) {
+        this.handlers.onDiscarded?.(
+          id,
+          `averaged ${mean.toFixed(4)} against a room at ${floor.toFixed(4)}`
+        )
+        return
+      }
     }
-    this.handlers.onUtterance?.({ id, samples, sampleRate: this.sampleRate })
+    this.handlers.onUtterance?.({
+      id,
+      samples: this.collect(frames),
+      sampleRate: this.sampleRate,
+      voicedFrames: voiced
+    })
   }
 
   private reset(): void {
@@ -194,9 +339,11 @@ export class UtteranceSegmenter {
     this.speechRun = 0
     this.silenceRun = 0
     this.voicedFrames = 0
+    this.voicedLevelSum = 0
     this.open = false
     this.sustained = false
     this.currentId = null
+    this.pausedAtVoicedFrames = null
   }
 }
 

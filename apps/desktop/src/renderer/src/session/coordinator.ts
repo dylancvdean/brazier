@@ -26,6 +26,7 @@ import type {
   VoiceAdapterEvent
 } from './adapters'
 import { DEFAULT_INTEGRATION_CONFIG, type IntegrationConfig } from './config'
+import { classifyConfirmation } from './confirmation'
 import { SessionEventLog } from './eventLog'
 import { isTooThinToSubmit } from './echoGuard'
 import { classifyUtterance, isControlIntent, type UtteranceIntent } from './interruption'
@@ -88,7 +89,23 @@ export type CoordinatorSnapshot = {
    * graph is not running; frames with a peak under the gate means the room or
    * the gain is too quiet.
    */
-  capture: { frames: number; peak: number; status: string }
+  capture: { frames: number; peak: number; status: string; gate: number; noiseFloor: number }
+  /**
+   * What transcription is costing, per interface that has served an utterance
+   * this session. Which one should transcribe a spoken turn is an open
+   * question — a whisper.cpp invocation per utterance against a resident
+   * Nemotron worker — and this is the number that answers it, on the machine
+   * the answer has to hold for.
+   */
+  transcription: TranscriptionCost[]
+  /**
+   * A tool call the permission broker is holding, and what was said about it.
+   *
+   * Present in the snapshot so the voice pane can show what is waiting: the
+   * approval itself lives in the agent panel, which the person talking is very
+   * likely not looking at.
+   */
+  pendingApproval: PendingApproval | null
   /**
    * The last thing the coordinator wanted to tell the user: agent status, or a
    * failure that did not stop the session. It is in the snapshot as well as on
@@ -96,6 +113,42 @@ export type CoordinatorSnapshot = {
    * otherwise drop it, and a turn failing silently looks like nothing happened.
    */
   notice: string | null
+}
+
+/** A held tool call awaiting a spoken or clicked answer. */
+export type PendingApproval = {
+  approvalId: string
+  correlationId: string
+  tool: string
+  summary: string
+  risk: string
+  environment: 'sandbox' | 'host'
+  /** Whether the question was read out, so the UI does not repeat it silently. */
+  spoken: boolean
+  askedAt: number
+}
+
+/** Rolling transcription cost for one ASR interface. */
+export type TranscriptionCost = {
+  engine: string
+  utterances: number
+  /** Most recent round trip, in milliseconds. */
+  lastMs: number
+  /** Mean round trip over the session. */
+  averageMs: number
+  /**
+   * Mean wait after the user stopped talking — the part of the round trip a
+   * person actually sits through. Far below `averageMs` means transcription is
+   * mostly finishing inside the silence window rather than after it.
+   */
+  averageWaitMs: number
+  /** Utterances whose transcription began at a pause, before the close. */
+  startedAtPause: number
+  /**
+   * Mean round trip divided by the length of the audio. Below 1 the interface
+   * transcribes faster than people speak, which is what a conversation needs.
+   */
+  realTimeFactor: number
 }
 
 export type CoordinatorDeps = {
@@ -156,7 +209,26 @@ export class SessionCoordinator {
   private speakingCorrelationId: string | null = null
   private notice: string | null = null
   private hearing: CoordinatorSnapshot['hearing'] = 'idle'
-  private capture: CoordinatorSnapshot['capture'] = { frames: 0, peak: 0, status: '' }
+  private capture: CoordinatorSnapshot['capture'] = {
+    frames: 0,
+    peak: 0,
+    status: '',
+    gate: 0,
+    noiseFloor: 0
+  }
+  /** Per-engine transcription totals; see `CoordinatorSnapshot.transcription`. */
+  private readonly transcription = new Map<
+    string,
+    {
+      utterances: number
+      lastMs: number
+      totalMs: number
+      totalWaitedMs: number
+      totalAudioSeconds: number
+      startedAtPause: number
+    }
+  >()
+  private pendingApproval: PendingApproval | null = null
   private pendingRenewal: string | null = null
   private backchanneling = new Set<string>()
   private statusCued = new Set<string>()
@@ -164,13 +236,17 @@ export class SessionCoordinator {
 
   private readonly listeners = new Set<(snapshot: CoordinatorSnapshot) => void>()
   private readonly metricsState: SessionMetrics = {
+    transcriptWaitMs: [],
     transcriptToAgentStartMs: [],
     responseToSpeechStartMs: [],
     interruptToSpeechStopMs: [],
     duplicateEventsIgnored: 0,
     voiceSessionRenewals: 0,
     agentTasksCancelledByInterruption: 0,
-    voiceClaimsRejected: 0
+    voiceClaimsRejected: 0,
+    approvalsSpokenApproved: 0,
+    approvalsSpokenDenied: 0,
+    approvalsUnclear: 0
   }
   /** Utterance final timestamps, for the transcript-to-agent-start metric. */
   private readonly turnStartedAt = new Map<string, number>()
@@ -292,6 +368,17 @@ export class SessionCoordinator {
       speakingCorrelationId: this.speakingCorrelationId,
       hearing: this.hearing,
       capture: this.capture,
+      pendingApproval: this.pendingApproval,
+      transcription: [...this.transcription.entries()].map(([engine, totals]) => ({
+        engine,
+        utterances: totals.utterances,
+        lastMs: totals.lastMs,
+        averageMs: Math.round(totals.totalMs / Math.max(1, totals.utterances)),
+        averageWaitMs: Math.round(totals.totalWaitedMs / Math.max(1, totals.utterances)),
+        startedAtPause: totals.startedAtPause,
+        realTimeFactor:
+          totals.totalAudioSeconds > 0 ? totals.totalMs / 1000 / totals.totalAudioSeconds : 0
+      })),
       notice: this.notice
     }
   }
@@ -567,6 +654,32 @@ export class SessionCoordinator {
         this.track(this.deliverFinal(event.correlationId, event.text), 'Storing the answer')
         return
       }
+      case 'approvalRequired': {
+        this.pendingApproval = {
+          approvalId: event.approvalId,
+          correlationId: event.correlationId,
+          tool: event.tool,
+          summary: event.summary,
+          risk: event.risk,
+          environment: event.environment,
+          spoken: false,
+          askedAt: this.now()
+        }
+        this.emit('APPROVAL_REQUIRED', event.correlationId, 'agent', {
+          approvalId: event.approvalId,
+          tool: event.tool,
+          risk: event.risk,
+          environment: event.environment
+        })
+        this.track(this.askForApproval(), 'Reading back what it wants to do')
+        this.publish()
+        return
+      }
+      case 'approvalResolved': {
+        if (this.pendingApproval?.approvalId === event.approvalId) this.pendingApproval = null
+        this.publish()
+        return
+      }
       case 'toolStarted': {
         if (this.task?.correlationId === event.correlationId) {
           this.task = { ...this.task, activeTool: event.tool, updatedAt: this.now() }
@@ -731,7 +844,13 @@ export class SessionCoordinator {
         return
       }
       case 'captureLevel': {
-        this.capture = { frames: event.frames, peak: event.peak, status: event.status }
+        this.capture = {
+          frames: event.frames,
+          peak: event.peak,
+          status: event.status,
+          gate: event.gate,
+          noiseFloor: event.noiseFloor
+        }
         console.debug(
           `[voice] ${this.id} sees ${event.frames} frames, peak ${event.peak.toFixed(3)}`
         )
@@ -740,6 +859,34 @@ export class SessionCoordinator {
       }
       case 'transcriptionStarted': {
         this.hearing = 'transcribing'
+        this.publish()
+        return
+      }
+      case 'transcriptionMeasured': {
+        const totals = this.transcription.get(event.engine) ?? {
+          utterances: 0,
+          lastMs: 0,
+          totalMs: 0,
+          totalWaitedMs: 0,
+          totalAudioSeconds: 0,
+          startedAtPause: 0
+        }
+        totals.utterances += 1
+        totals.lastMs = event.roundTripMs
+        totals.totalMs += event.roundTripMs
+        totals.totalWaitedMs += event.waitedMs
+        totals.totalAudioSeconds += event.audioSeconds
+        if (event.startedAtPause) totals.startedAtPause += 1
+        this.transcription.set(event.engine, totals)
+        this.metricsState.transcriptWaitMs.push(event.waitedMs)
+        this.emit('USER_VOICE_TRANSCRIBED', event.utteranceId, 'voice', {
+          engine: event.engine,
+          roundTripMs: event.roundTripMs,
+          waitedMs: event.waitedMs,
+          engineMs: event.engineMs,
+          audioSeconds: Number(event.audioSeconds.toFixed(2)),
+          startedAtPause: event.startedAtPause
+        })
         this.publish()
         return
       }
@@ -837,6 +984,14 @@ export class SessionCoordinator {
     this.hearing = 'idle'
     this.partialTranscript = ''
     if (!trimmed) return
+    // A held tool call takes the next thing said. Anything else would submit a
+    // new request to an agent that is stopped mid-action, and would leave the
+    // question that was just asked out loud unanswered.
+    if (this.pendingApproval) {
+      await this.answerApproval(trimmed)
+      this.publish()
+      return
+    }
     // One utterance is one turn even if the transcript is delivered twice.
     const published = this.emit(
       'USER_VOICE_FINAL',
@@ -883,6 +1038,124 @@ export class SessionCoordinator {
       source: 'user_voice',
       supersedes: intent === 'correction' ? (this.activeCorrelationId ?? undefined) : undefined
     })
+  }
+
+  // --- Approvals ------------------------------------------------------------
+
+  /**
+   * Read back what the agent wants to do, before it does it.
+   *
+   * The permission broker already judges every call, which is what keeps a
+   * voice-driven agent unwise rather than dangerous. What it cannot judge is
+   * that the request it is acting on came from a microphone, an energy gate, and
+   * a speech recogniser. So a held call is spoken aloud and the person is asked
+   * in words, rather than being expected to notice a card in a panel they are
+   * not looking at.
+   */
+  private async askForApproval(): Promise<void> {
+    const pending = this.pendingApproval
+    if (!pending) return
+    const response = this.responses.get(pending.correlationId)
+    // Only for turns that came from speech. A typed request is answered where it
+    // was made, and speaking over it would interrupt reading.
+    if (!response || response.originSource !== 'user_voice') return
+    if (!this.shouldSpeak(response)) {
+      this.report(`Waiting for you to allow: ${pending.summary}`)
+      return
+    }
+    // Audio still playing would talk over the question.
+    await this.deps.voice.stopSpeaking().catch(() => undefined)
+    this.pendingApproval = { ...pending, spoken: true }
+    const where = pending.environment === 'host' ? 'on your machine, outside the sandbox' : ''
+    await this.speakRequest({
+      correlationId: pending.correlationId,
+      text: `Before I do this${where ? ` ${where}` : ''}: ${pending.summary}. Say yes to allow it, or no to stop.`,
+      kind: 'status',
+      brevityTargetChars: 240
+    })
+  }
+
+  /**
+   * Take a spoken answer to a held call.
+   *
+   * Only an unmistakable yes allows it. Anything else is not a decision: the
+   * call stays held and the question stands, because the cost of mishearing a
+   * refusal as consent is a command that has already run.
+   */
+  private async answerApproval(text: string): Promise<void> {
+    const pending = this.pendingApproval
+    if (!pending) return
+    const verdict = classifyConfirmation(text)
+    if (verdict === 'unclear') {
+      this.metricsState.approvalsUnclear += 1
+      this.emit('APPROVAL_UNCLEAR', pending.correlationId, 'voice', { text })
+      const message = `That was not a yes or a no, so nothing has run. ${pending.summary}. Say yes to allow it, or no to stop.`
+      const response = this.responses.get(pending.correlationId)
+      if (response && this.shouldSpeak(response)) {
+        await this.speakRequest({
+          correlationId: pending.correlationId,
+          text: message,
+          kind: 'status',
+          brevityTargetChars: 240
+        })
+      } else {
+        this.report(message)
+      }
+      return
+    }
+    const decision = verdict === 'affirmative' ? 'approve' : 'deny'
+    this.pendingApproval = null
+    if (decision === 'approve') this.metricsState.approvalsSpokenApproved += 1
+    else this.metricsState.approvalsSpokenDenied += 1
+    this.emit('APPROVAL_DECIDED', pending.correlationId, 'voice', {
+      approvalId: pending.approvalId,
+      decision,
+      text
+    })
+    if (this.conversationId) {
+      // Written down: an action allowed by voice should be as visible afterwards
+      // as one allowed by clicking.
+      const note = await this.chat.appendMessage({
+        role: 'system',
+        source: 'system',
+        content:
+          decision === 'approve'
+            ? `Allowed by voice (“${text}”): ${pending.summary}`
+            : `Refused by voice (“${text}”): ${pending.summary}`,
+        correlationId: pending.correlationId,
+        status: 'final'
+      })
+      this.recordMessage(note)
+    }
+    await this.decideApproval(pending, decision, `Spoken answer: “${text}”`)
+  }
+
+  /**
+   * Answer a held call from the UI. Same path as the spoken answer, so the
+   * conversation records both the same way.
+   */
+  async resolveApproval(decision: 'approve' | 'deny'): Promise<void> {
+    const pending = this.pendingApproval
+    if (!pending) return
+    this.pendingApproval = null
+    await this.decideApproval(pending, decision)
+    this.publish()
+  }
+
+  private async decideApproval(
+    pending: PendingApproval,
+    decision: 'approve' | 'deny',
+    note?: string
+  ): Promise<void> {
+    try {
+      await this.deps.agent.decideApproval(pending.approvalId, decision, note)
+    } catch (cause) {
+      // The call is still held; say so rather than letting the session look
+      // like it went ahead.
+      this.pendingApproval = pending
+      this.report(`Could not record that decision: ${errorText(cause)}`)
+    }
+    this.publish()
   }
 
   /** Spoken controls. Recorded, but never submitted as questions. */

@@ -22,6 +22,8 @@ export function engineLabel(engine: string): string {
       return 'Gen · sd.cpp'
     case 'personaplex':
       return 'Voice · PersonaPlex'
+    case 'remote':
+      return 'Remote'
     default:
       return engine
   }
@@ -43,6 +45,8 @@ export function engineBadgeClass(engine: string): string {
       return 'engine-badge gguf'
     case 'personaplex':
       return 'engine-badge mlx-lm'
+    case 'remote':
+      return 'engine-badge remote'
     default:
       return 'engine-badge'
   }

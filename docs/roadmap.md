@@ -89,58 +89,120 @@
 The nearest-term track. Voice, chat, and the agent share one conversation now;
 what is left is mostly the difference between working and trustworthy.
 
-- **Whisper as the alternative transcription path.** The interface and the
-  preference already exist (`auto`, `whisper.cpp`, `streaming-asr`) and pick
-  whichever is installed. What is untested is batch whisper driving a spoken
-  turn, and whether one binary invocation beats a resident Python worker per
-  utterance — plausible, since it has no interpreter to start.
-- **Turn latency.** Transcription is about 0.18 s once the worker is warm, but a
-  turn does not begin until 700 ms of silence has closed the utterance, so the
-  wait is mostly that window. Shortening it trades directly against cutting
-  people off mid-sentence; feeding the streaming endpoint continuously and
-  taking real partial transcripts is the better answer, and the coordinator
-  already accepts partials it never receives.
-- **Voice activity detection that adapts to the room.** The gate is a fixed RMS
-  floor chosen to suit a quiet microphone. A noise-floor tracker was written and
-  backed out: it only learned from frames below the gate, so steady noise above
-  it was heard as speech forever. Tuning that needs real audio rather than
-  synthesised frames.
-- **Spoken confirmation before destructive agent actions.** Nothing reads an
-  instruction back before it becomes one. The permission broker still judges
-  every call, which is what keeps voice-driven agents unwise rather than
-  dangerous, but it judges a call derived from the least reliable input in the
-  application. This is the gap between the experimental warning in Voice mode
-  and something that could lose it.
-- **Handing PersonaPlex the answer to speak.** Its audio is gated off today and
-  the platform synthesizer speaks instead, because the persona is a process
-  launch flag and the socket carries audio only — so the voice identity is lost
-  for exactly the sentences that matter. Constrained rendering needs a text
-  frame in the runtime, which means owning a patch to the recipe rather than
-  consuming it.
+- **Whisper as the alternative transcription path.** *Unblocked and measured;
+  the verdict needs a machine with both installed.* Batch whisper could not
+  transcribe a spoken turn at all: capture runs at 24 kHz, whisper.cpp reads
+  only 16 kHz and refuses rather than resamples, and a `.wav` extension was
+  taken as proof the audio was already right. WAVs are now inspected and
+  converted in process (downmix, decode, windowed-sinc resample) with no ffmpeg
+  in the way of a microphone. Every utterance is timed and attributed to the
+  interface that actually served it, and the live pane shows what each is
+  costing — last, average, and multiple of real time — so whether one binary
+  invocation beats a resident Python worker is now a reading rather than an
+  argument.
+- **Turn latency.** *Transcription moved inside the silence window; the window
+  itself is unchanged.* A turn used to wait for 700 ms of silence and then wait
+  again while the audio decoded. Transcription now starts at the first 300 ms
+  pause, and when that pause turns out to be the end of the turn — which is most
+  of them — the transcript is already in hand when the gate closes, so the
+  second wait is gone. The audio is byte-identical to what closing delivers, so
+  the early transcript can be the final one; when speech resumes instead, it is
+  shown as a partial and discarded, which is what the coordinator's unused
+  partial path was for. What each utterance waited for is measured beside what
+  it cost. Still open: continuous feeding of the streaming endpoint, which needs
+  a session protocol in the Python worker rather than a file per request, and
+  would give word-incremental partials and let the close window itself shrink.
+- **Voice activity detection that adapts to the room.** *Structure in place;
+  the constants still want real rooms.* The gate now sits above a tracked noise
+  floor instead of at a fixed level. The earlier attempt failed by learning only
+  from frames below the gate — the audio a fan never produces — so this learns
+  from every frame and decides by shape instead: the estimate falls freely and
+  rises only while the last second looks flat, because room noise is steady and
+  speech is not. It is bounded below by the level quiet rooms already worked at
+  and above by where ordinary speech lives, so a very noisy room becomes
+  unreliable rather than deaf. An utterance that opened before the room was
+  learned is re-judged against it at close rather than sent to be transcribed.
+  The gate and the room's level are shown live in the voice pane, and
+  `adaptive: false` restores the fixed floor exactly. What is still owed is
+  measurement against recorded rooms: fall and rise rates, the flatness
+  threshold, and the speech-to-noise bar are reasoned about, not fitted.
+- **Spoken confirmation before destructive agent actions.** *Held calls are read
+  back and answered in words; the warning stays.* A call the permission broker
+  holds is now spoken aloud — what it will do, and whether it is inside the
+  sandbox — and the next thing said answers it: an unmistakable yes allows it,
+  a no refuses it, and anything else leaves it held and says so, because a
+  qualified answer is not consent and the transcript comes from a microphone, an
+  energy gate, and a recogniser. Decisions are one-shot and written into the
+  conversation, and the voice pane shows the held call with buttons, since
+  speech should be the convenient path and not the only one. What this does not
+  do is cover a session set to skip permissions: nothing is held there, so
+  nothing is read back. Removing the warning would also need the transcript
+  itself to be trustworthy, which is the VAD and latency work above.
+- **Handing PersonaPlex the answer to speak.** *Still open; the voice is at
+  least chosen now.* Its audio is gated off and the platform synthesizer speaks
+  instead, because the persona is a process launch flag and the socket carries
+  audio only — so the voice identity is lost for exactly the sentences that
+  matter. The synthesizer's voice and speaking rate are now picked, previewed,
+  and remembered rather than being whatever the operating system defaulted to,
+  which narrows the gap without closing it. Constrained rendering still needs a
+  client-to-server text frame in the runtime, which means owning a patch to the
+  recipe rather than consuming it, and testing it needs the upstream tree and a
+  GPU — neither is guesswork worth committing blind.
 
 ## Engine workshop
 
-- Detect and install user-scoped toolchains; guide users through platform SDKs
-  and drivers without silent elevation.
-- Add Linux vLLM, remote OpenAI-compatible connections, engine diagnostics, and
+- **Toolchain detection** now looks where user-scoped installs actually go —
+  `~/.local/bin`, `~/.cargo/bin`, Homebrew, Linuxbrew, Flatpak exports, Windows
+  Apps — instead of only the `PATH` a windowed application inherits, which on
+  macOS is four system directories and nothing else. What it finds is what gets
+  run: ffmpeg is invoked at its resolved path rather than by name. The Runtimes
+  build form lists each prerequisite with where it was found or the install
+  command for the detected package manager; nothing is installed or elevated on
+  the user's behalf. Still open: installing a user-scoped toolchain from inside
+  the application, and guiding through GPU SDKs and drivers beyond the
+  per-target hints that already exist.
+- **Remote OpenAI-compatible connections** are in: named connections (base URL,
+  optional key, on/off), their models listed as `remote:{connection}/{model}`
+  beside local ones, chat and tool rounds routed to them with the model name the
+  server itself uses, and keys stored with restricted file permissions and never
+  returned by the API. A server that is asleep contributes nothing to the model
+  list rather than emptying it. Not attempted: probing what a remote can
+  actually do — capabilities are advertised as plain text in, text out, since
+  the protocol says nothing and claiming vision would fail at the server.
+- Add Linux vLLM (buildable today, not yet servable), engine diagnostics, and
   hardware-specific compatibility tests.
 - Optional mlx-whisper and bundled ffmpeg for stronger offline media prep.
-- Moshi MLX (Apple Silicon) flavor for realtime voice; interruption UX polish;
-  Nemotron VoiceChat if open self-host packaging lands.
+- Interruption UX polish; Nemotron VoiceChat if open self-host packaging lands.
+  (Moshi MLX for Apple Silicon shipped: the `personaplex-mlx` recipe, the
+  `local_web` backend, and activation are in place.)
 - Broader generation families beyond sd.cpp (e.g. Diffusers for Hunyuan/CogVideoX)
   if needed.
 
 ## Agent mode follow-ons
 
-- Verify Agent mode inside a packaged build: the worker is an ESM bundle that
-  imports Pi from `node_modules`, so `asarUnpack` coverage needs checking on all
-  three platforms.
+- **`asarUnpack` coverage is fixed and enforced**, though a packaged build on
+  each platform has still not been run. The worker keeps every import external,
+  so what it needs at run time is Pi *and its whole dependency closure* — 94
+  packages, mostly provider SDKs — while only `@earendil-works/**` was unpacked.
+  `node_modules/**` is now unpacked rather than an enumerated list that would
+  rot on the next upgrade, and a test walks the real closure and fails with the
+  names of anything a narrower glob would miss. What remains is running the
+  packaged application on macOS, Linux, and Windows and starting an agent
+  session in it.
 - Windows sandboxing. There is no backend today, so the daemon reports
   `isolated: false` and command execution is treated as host execution.
 - Live output streaming for `shell_run` (long commands currently report at
   completion; `shell_start` plus `shell_output` covers the interactive case).
-- Model-generated compaction summaries; V1 builds the digest deterministically
-  from the transcript and the tool ledger.
+- **Model-generated compaction summaries** are in, alongside the deterministic
+  digest rather than instead of it: the session's own model writes what was
+  attempted and why an approach was abandoned, and the machine-built facts —
+  files changed, commands run, unresolved failures — are appended verbatim
+  underneath, so a model that forgets a file cannot erase it from the session.
+  Every failure of the request (unreachable, slow, empty, malformed) falls back
+  to the digest alone, because compaction usually runs when the context is
+  already full and that is the worst moment to fail. Which half produced a
+  summary is recorded on the session, and the narrative is cut at a sentence
+  boundary if a model answers an eight-sentence instruction with an essay.
 - Optional MCP tools inside agent sessions, reusing the existing MCP client
   behind the same policy broker.
 
@@ -149,6 +211,15 @@ what is left is mostly the difference between working and trustworthy.
 - Add the permission broker, optional browser automation, WASI code runtimes,
   and optional OCI execution (safe built-in tools and bounded web retrieval
   are implemented).
-- Add API-key management, configurable external binding and CORS, redacted
-  support bundles, SBOMs, signed updates, notarization, and release packaging.
+- **Configurable CORS** is in: `--allowed-origin` (repeatable, or
+  comma-separated in `BRAZIER_ALLOWED_ORIGINS`) names extra browser origins
+  beside the packaged UI and the dev server, validated at startup so a typo
+  fails at the command line rather than at the first request. A wildcard is
+  refused outright — this daemon holds a machine's conversations and can execute
+  tools, so widening it stays deliberate and visible in the launch command.
+  External binding already exists (`--host`, with keyless non-loopback access
+  requiring `--allow-insecure-remote`).
+- Add API-key management (rotation and per-client keys; today there is one key,
+  generated at startup or supplied), redacted support bundles, SBOMs, signed
+  updates, notarization, and release packaging.
 - Complete public naming review before stable application identifiers ship.

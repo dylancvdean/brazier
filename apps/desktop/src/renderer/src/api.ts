@@ -166,6 +166,8 @@ export type ToolchainTool = {
   label: string
   available: boolean
   required_for: string
+  /** Where the tool was found, which is not always where it was expected. */
+  path?: string | null
   install_hint: string | null
 }
 
@@ -473,22 +475,41 @@ export function updateConversation(
  * whisper.cpp or WhisperKit. The utterance is already complete either way, so
  * this asks for the collected text rather than an SSE stream.
  */
+export type Transcription = {
+  text: string
+  /**
+   * Which ASR interface actually served this, which is not always the one asked
+   * for: `auto` sends no preference and the daemon picks. Reported so a session
+   * can say what transcribed it rather than what it hoped would.
+   */
+  engine: string
+  /** How long the daemon spent on the audio: decode, convert, and engine. */
+  durationMs: number | null
+}
+
 export async function transcribeAudio(
   wav: Uint8Array,
   options: { signal?: AbortSignal; engine?: string } = {}
-): Promise<string> {
+): Promise<Transcription> {
   let binary = ''
   for (let index = 0; index < wav.length; index += 1) binary += String.fromCharCode(wav[index])
-  const payload = await request<{ text?: string }>('/v1/audio/transcriptions', {
-    method: 'POST',
-    signal: options.signal,
-    body: JSON.stringify({
-      file_base64: btoa(binary),
-      mime_type: 'audio/wav',
-      ...(options.engine ? { engine: options.engine } : {})
-    })
-  })
-  return (payload.text ?? '').trim()
+  const payload = await request<{ text?: string; engine?: string; duration_ms?: number }>(
+    '/v1/audio/transcriptions',
+    {
+      method: 'POST',
+      signal: options.signal,
+      body: JSON.stringify({
+        file_base64: btoa(binary),
+        mime_type: 'audio/wav',
+        ...(options.engine ? { engine: options.engine } : {})
+      })
+    }
+  )
+  return {
+    text: (payload.text ?? '').trim(),
+    engine: payload.engine ?? options.engine ?? 'unknown',
+    durationMs: typeof payload.duration_ms === 'number' ? payload.duration_ms : null
+  }
 }
 
 export type ClientToolCall = {
@@ -1367,6 +1388,55 @@ export type McpServer = {
   args: string[]
   enabled: boolean
   tools: BundledTool[]
+}
+
+/**
+ * An OpenAI-compatible server someone else is running.
+ *
+ * `has_api_key` rather than the key: the daemon never sends one back, so the UI
+ * can say a key is set without ever holding it.
+ */
+export type RemoteConnection = {
+  id: string
+  label: string
+  base_url: string
+  enabled: boolean
+  has_api_key: boolean
+}
+
+export async function listRemoteConnections(): Promise<RemoteConnection[]> {
+  return (await request<{ data: RemoteConnection[] }>('/api/v1/remote/connections')).data
+}
+
+export async function saveRemoteConnection(connection: {
+  id: string
+  label: string
+  base_url: string
+  /** Omit to keep the stored key; empty string clears it. */
+  api_key?: string
+  enabled: boolean
+}): Promise<RemoteConnection[]> {
+  return (
+    await request<{ data: RemoteConnection[] }>('/api/v1/remote/connections', {
+      method: 'PUT',
+      body: JSON.stringify(connection)
+    })
+  ).data
+}
+
+export async function deleteRemoteConnection(id: string): Promise<RemoteConnection[]> {
+  return (
+    await request<{ data: RemoteConnection[] }>(
+      `/api/v1/remote/connections/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    )
+  ).data
+}
+
+export async function testRemoteConnection(
+  id: string
+): Promise<{ reachable: boolean; models: string[]; error?: string }> {
+  return request(`/api/v1/remote/connections/${encodeURIComponent(id)}/test`, { method: 'POST' })
 }
 
 export async function listTools(): Promise<BundledTool[]> {

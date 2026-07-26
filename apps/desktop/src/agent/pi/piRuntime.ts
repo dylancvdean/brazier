@@ -22,6 +22,7 @@ import type {
 import { streamSimple } from '@earendil-works/pi-ai/api/openai-completions'
 
 import type { BrokerClient } from '../core/brokerClient'
+import { mergeSummary, renderTranscript, requestModelSummary } from '../core/compaction'
 import { repairToolArguments } from '../core/modelCompat'
 import { accumulate, describeSummary, emptySummary } from '../core/runSummary'
 import { AgentToolExecutor, EventSequencer } from '../core/toolExecutor'
@@ -533,7 +534,21 @@ class PiAgentSession implements AgentSession {
     const messages = this.state.messages
     const keep = messages.slice(-COMPACTION_KEEP_TAIL)
     const dropped = messages.slice(0, Math.max(0, messages.length - COMPACTION_KEEP_TAIL))
-    const summaryText = buildCompactionSummary(dropped, this.state)
+    const facts = buildCompactionSummary(dropped, this.state)
+    // The model writes what the digest cannot: what was being attempted, and
+    // why an approach was abandoned. Its failure is not compaction's failure —
+    // the facts are a complete summary on their own.
+    const prose =
+      dropped.length > 0
+        ? await requestModelSummary({
+            baseUrl: this.broker.openAiBaseUrl(),
+            apiKey: this.broker.apiKey(),
+            model: this.state.model.id,
+            transcript: renderTranscript(dropped),
+            facts
+          })
+        : null
+    const summaryText = mergeSummary(prose, facts)
     const summaryMessage: AgentMessage = {
       role: 'system',
       text: summaryText,
@@ -549,7 +564,8 @@ class PiAgentSession implements AgentSession {
     const compaction: AgentCompactionState = {
       compactedAt: new Date().toISOString(),
       removedMessages: dropped.length,
-      summary: summaryText
+      summary: summaryText,
+      summarySource: prose ? 'model' : 'deterministic'
     }
     this.state = { ...this.state, compactionState: compaction }
     await this.broker

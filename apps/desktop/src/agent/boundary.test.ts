@@ -33,9 +33,11 @@ describe('runtime adapter boundary', () => {
       const relativePath = relative(AGENT_ROOT, file)
       const topLevel = relativePath.split('/')[0]
       if (ADAPTER_DIRECTORIES.includes(topLevel ?? '')) return false
-      // This test names the packages it guards against, so it must not flag
-      // itself.
-      if (relativePath === 'boundary.test.ts') return false
+      // Two tests name the packages as data rather than importing them: this
+      // one guards against them, and the packaging test walks their dependency
+      // closure. Naming both explicitly keeps the exemption from widening into
+      // "any test file".
+      if (relativePath === 'boundary.test.ts' || relativePath === 'packaging.test.ts') return false
       return PI_PACKAGE_PATTERN.test(readFileSync(file, 'utf8'))
     })
     expect(offenders.map((file) => relative(AGENT_ROOT, file))).toEqual([])

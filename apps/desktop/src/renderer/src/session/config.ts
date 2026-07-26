@@ -10,6 +10,8 @@
  * Each names one destination on purpose. A setting that could route to either
  * place left no way to tell which had answered, or to aim the next turn.
  */
+import { DEFAULT_SPEECH_RATE } from './speechRenderer'
+
 export type VoiceSessionTarget = 'agent' | 'chat' | 'neither'
 
 /**
@@ -42,6 +44,16 @@ export type IntegrationConfig = {
   interruptCancelsAgent: boolean
   /** Soft brevity target handed to the speech renderer. */
   spokenBrevityTargetChars: number
+  /**
+   * Which platform voice speaks authoritative answers, by `voiceURI`. Empty
+   * takes the host default.
+   *
+   * Not the persona's voice — PersonaPlex cannot be handed a sentence to say —
+   * but a chosen one rather than whatever the operating system defaults to.
+   */
+  spokenVoiceUri: string
+  /** Speaking rate for that voice, where 1 is the platform's normal pace. */
+  spokenRate: number
 }
 
 export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
@@ -57,7 +69,9 @@ export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
   voiceContextSummaryLimitChars: 1200,
   interruptStopsSpeech: true,
   interruptCancelsAgent: false,
-  spokenBrevityTargetChars: 480
+  spokenBrevityTargetChars: 480,
+  spokenVoiceUri: '',
+  spokenRate: DEFAULT_SPEECH_RATE
 }
 
 /**

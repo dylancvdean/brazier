@@ -1,5 +1,6 @@
 use std::{convert::Infallible, path::PathBuf, time::Duration};
 
+use anyhow::Context as _;
 use async_stream::stream;
 use axum::http::header;
 use axum::{
@@ -34,7 +35,8 @@ use crate::{
     hf::{self, SearchQuery},
     hf_auth, llama, mcp, media, model_bindings, models_store,
     progress::ProgressEvent,
-    runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry, toolchain_hints,
+    remote, runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry,
+    toolchain_hints,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
         text_from_content,
@@ -129,7 +131,64 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Origins the browser UI is served from during development.
+///
+/// `null` is the origin of a `file://` page, which is what the packaged
+/// renderer is; the two localhost ports are `electron-vite dev`.
+const DEFAULT_ORIGINS: [&str; 3] = ["null", "http://localhost:5173", "http://127.0.0.1:5173"];
+
+/// Turn configured origin strings into header values, refusing what cannot work.
+///
+/// A wildcard is refused rather than translated: this daemon holds a machine's
+/// conversations and can execute tools, and "any page may call it" is not a
+/// thing to enable by typing `*` into a flag. Named origins are the only way to
+/// widen it, so widening is always deliberate and always visible in the launch
+/// command.
+pub fn parse_origins(origins: &[String]) -> anyhow::Result<Vec<HeaderValue>> {
+    let mut values = Vec::new();
+    for origin in DEFAULT_ORIGINS
+        .iter()
+        .map(|origin| (*origin).to_owned())
+        .chain(
+            origins
+                .iter()
+                .flat_map(|value| value.split(','))
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+        )
+    {
+        anyhow::ensure!(
+            origin != "*",
+            "a wildcard CORS origin is not accepted; name the origins that may call this daemon"
+        );
+        if origin != "null" {
+            anyhow::ensure!(
+                origin.starts_with("http://") || origin.starts_with("https://"),
+                "`{origin}` is not an origin: it must start with http:// or https://"
+            );
+            anyhow::ensure!(
+                !origin.ends_with('/') && origin.matches('/').count() == 2,
+                "`{origin}` is not an origin: it must have no path or trailing slash"
+            );
+        }
+        let value = HeaderValue::from_str(&origin)
+            .with_context(|| format!("`{origin}` cannot be sent as a header"))?;
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    Ok(values)
+}
+
 pub fn router(state: AppState) -> Router {
+    router_with_origins(
+        state,
+        parse_origins(&[]).expect("built-in origins are valid"),
+    )
+}
+
+/// The router, with the set of browser origins allowed to call it.
+pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router {
     let protected = Router::new()
         .route("/api/v1/capabilities", get(capabilities))
         .route(
@@ -164,6 +223,18 @@ pub fn router(state: AppState) -> Router {
             get(huggingface_token_status)
                 .put(set_huggingface_token)
                 .delete(clear_huggingface_token),
+        )
+        .route(
+            "/api/v1/remote/connections",
+            get(list_remote_connections).put(save_remote_connection),
+        )
+        .route(
+            "/api/v1/remote/connections/{id}",
+            delete(delete_remote_connection),
+        )
+        .route(
+            "/api/v1/remote/connections/{id}/test",
+            post(test_remote_connection),
         )
         .route("/api/v1/huggingface/models", get(search_hugging_face))
         .route(
@@ -347,11 +418,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
         .layer(
             CorsLayer::new()
-                .allow_origin([
-                    HeaderValue::from_static("null"),
-                    HeaderValue::from_static("http://localhost:5173"),
-                    HeaderValue::from_static("http://127.0.0.1:5173"),
-                ])
+                .allow_origin(origins)
                 .allow_headers(Any)
                 .allow_methods(Any),
         )
@@ -732,6 +799,84 @@ async fn clear_huggingface_token(State(state): State<AppState>) -> ApiResult<Jso
     Ok(Json(
         json!({ "configured": hf_auth::token_configured(&state.data_dir) }),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteConnectionRequest {
+    id: String,
+    #[serde(default)]
+    label: String,
+    base_url: String,
+    /// Omitted keeps whatever key is stored; an empty string clears it.
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+async fn list_remote_connections(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let connections: Vec<remote::PublicConnection> = remote::load(&state.data_dir)
+        .iter()
+        .map(remote::PublicConnection::from)
+        .collect();
+    Ok(Json(json!({ "object": "list", "data": connections })))
+}
+
+async fn save_remote_connection(
+    State(state): State<AppState>,
+    Json(request): Json<RemoteConnectionRequest>,
+) -> ApiResult<Json<Value>> {
+    remote::upsert(
+        &state.data_dir,
+        remote::StoredConnection {
+            id: request.id,
+            label: request.label,
+            base_url: request.base_url,
+            api_key: request.api_key,
+            enabled: request.enabled,
+        },
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
+    // The model list now has different contents; nothing else knows that.
+    state.invalidate_models_cache().await;
+    list_remote_connections(State(state)).await
+}
+
+async fn delete_remote_connection(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    remote::remove(&state.data_dir, &id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    state.invalidate_models_cache().await;
+    list_remote_connections(State(state)).await
+}
+
+/// Contact a configured server and report what it says it can serve.
+///
+/// Separate from saving on purpose: a connection that cannot be reached is
+/// still worth keeping — the machine may be off — so failing to reach it is a
+/// report, not a refusal to store it.
+async fn test_remote_connection(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let connection = remote::find(&state.data_dir, &id)
+        .ok_or_else(|| ApiError::bad_request(format!("no remote connection `{id}`")))?;
+    match remote::fetch_model_names(&state.http, &connection).await {
+        Ok(models) => Ok(Json(json!({ "reachable": true, "models": models }))),
+        Err(error) => Ok(Json(json!({
+            "reachable": false,
+            "error": error.to_string(),
+            "models": [],
+        }))),
+    }
 }
 
 async fn search_hugging_face(
@@ -2437,6 +2582,12 @@ async fn audio_transcriptions(
     State(state): State<AppState>,
     Json(request): Json<TranscriptionRequest>,
 ) -> ApiResult<Response> {
+    // Timed and reported, because which interface should transcribe a spoken
+    // turn is an open question with two plausible answers — one binary
+    // invocation against a resident Python worker — and it cannot be settled by
+    // reasoning about them. `duration_ms` covers everything the daemon does with
+    // the audio: decode, convert, and run the engine.
+    let started = std::time::Instant::now();
     let settings = state.runtime.settings().await;
     let prefer_streaming = request.stream
         || request
@@ -2491,10 +2642,12 @@ async fn audio_transcriptions(
                 .map_err(ApiError::internal)?
                 .map_err(ApiError::bad_request)?;
             let _ = tokio::fs::remove_file(&wav).await;
-            return Ok(
-                Json(json!({ "text": text.trim(), "engine": streaming_asr::ENGINE }))
-                    .into_response(),
-            );
+            return Ok(Json(json!({
+                "text": text.trim(),
+                "engine": streaming_asr::ENGINE,
+                "duration_ms": started.elapsed().as_millis() as u64,
+            }))
+            .into_response());
         }
         let stream_events = stream! {
             while let Some(item) = events.recv().await {
@@ -2524,6 +2677,7 @@ async fn audio_transcriptions(
                                 "type": "transcription.done",
                                 "text": text,
                                 "engine": streaming_asr::ENGINE,
+                                "duration_ms": started.elapsed().as_millis() as u64,
                             }).to_string()));
                     }
                     Ok(streaming_asr::WorkerEvent::Error { message }) => {
@@ -2616,7 +2770,12 @@ async fn audio_transcriptions(
         .join("\n")
         .trim()
         .to_owned();
-    Ok(Json(json!({ "text": text, "engine": "whisper.cpp" })).into_response())
+    Ok(Json(json!({
+        "text": text,
+        "engine": whisper::ENGINE,
+        "duration_ms": started.elapsed().as_millis() as u64,
+    }))
+    .into_response())
 }
 
 async fn download_streaming_asr_model(
@@ -3698,6 +3857,48 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::Mutex;
     use tower::ServiceExt;
+
+    #[test]
+    fn allows_the_ui_and_whatever_else_was_named() {
+        let origins = parse_origins(&["https://studio.example.com".into()]).unwrap();
+        let rendered: Vec<&str> = origins
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        // The packaged renderer is a file:// page, whose origin is `null`.
+        assert!(rendered.contains(&"null"));
+        assert!(rendered.contains(&"http://localhost:5173"));
+        assert!(rendered.contains(&"https://studio.example.com"));
+
+        // Comma-separated, for the environment variable form.
+        let from_env = parse_origins(&["http://a.example:8080, http://b.example".into()]).unwrap();
+        assert_eq!(from_env.len(), DEFAULT_ORIGINS.len() + 2);
+        // Naming an origin twice does not repeat it in the header.
+        assert_eq!(
+            parse_origins(&["null".into(), "http://localhost:5173".into()])
+                .unwrap()
+                .len(),
+            DEFAULT_ORIGINS.len()
+        );
+    }
+
+    /// The daemon holds a machine's conversations and can execute tools. "Any
+    /// page may call it" is not something a typo should be able to turn on.
+    #[test]
+    fn refuses_a_wildcard_and_things_that_are_not_origins() {
+        for bad in [
+            "*",
+            "example.com",
+            "https://example.com/",
+            "https://example.com/path",
+            "ftp://example.com",
+        ] {
+            assert!(
+                parse_origins(&[bad.to_owned()]).is_err(),
+                "{bad} must be refused"
+            );
+        }
+    }
 
     #[test]
     fn converts_responses_string_input() {

@@ -32,9 +32,11 @@ Four mismatches shaped the implementation.
    the existing stack. Resolved by tapping the capture worklet inside
    `VoiceStream`, segmenting utterances with an energy/silence detector, and
    transcribing each finished utterance through the ASR endpoint the repo
-   already exposes. Partial transcripts are therefore per-utterance-final
-   rather than word-incremental; the coordinator already refuses to invoke the
-   agent from partials, so this costs nothing in V1.
+   already exposes. Partials come from transcribing at a pause before the
+   utterance has closed, so they are per-pause rather than word-incremental; the
+   coordinator refuses to invoke the agent from partials, and the one taken at
+   the pause that turns out to end the turn is promoted to the final transcript
+   because it covers exactly the same audio.
 
 2. **PersonaPlex cannot be told what to say.** The persona is a process launch
    flag (`--text-prompt`); the wire protocol accepts audio only. Constrained

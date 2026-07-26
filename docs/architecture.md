@@ -85,11 +85,27 @@ collapse them into a single Audio badge meaning.
    utterances are padded with silence before transcription; without it
    "which test is failing" comes back as "which test".
 
+   Audio arrives from the capture graph at 24 kHz, and whisper.cpp reads only
+   16 kHz — it refuses rather than resamples — so WAVs are inspected and, when
+   they need it, converted in the daemon (`wav.rs`) rather than through ffmpeg:
+   a microphone should not need a system media toolchain to be heard. Every
+   transcription response carries the engine that served it and the
+   milliseconds it took, which is how a machine with both interfaces installed
+   answers which one it should use.
+
 4. **Realtime voice / PersonaPlex-class** — Full-duplex speech-to-speech with
    persona control over the Moshi WebSocket protocol (NVIDIA PersonaPlex
    primary flavor). Dedicated Voice workspace mode and
    `/api/v1/voice/sessions` — not file-attach chat. Apple Silicon Moshi/MLX
    is a planned follow-on.
+
+**Remote servers.** A configured OpenAI-compatible endpoint is a fourth source
+of chat models beside llama.cpp, MLX, and the local catalogue. Connections are
+explicit — base URL, optional key, on/off — and their models appear as
+`remote:{connection}/{model}`, so a conversation records where its answers came
+from. Nothing is discovered on the network, requests carry the model name the
+remote uses rather than Brazier's id, and keys live in `remote/connections.json`
+with restricted permissions and are never returned by the API.
 
 **Vision** attachments hydrate to `image_url` data URLs when the chat model
 advertises `image`. **Video** uses system ffmpeg to sample frames into that
@@ -183,6 +199,14 @@ application. The permission layer still judges every call, which is what stops
 this being dangerous rather than merely unwise, but nothing yet confirms a
 spoken instruction before it becomes one.
 
+A tool call the permission broker holds during a spoken turn is read back before
+it runs — what it will do and whether it is inside the sandbox — and the next
+utterance answers it. Only an unmistakable yes allows it; anything qualified
+leaves the call held, because the request came from a microphone and a
+recogniser, and mishearing a refusal as consent runs a command that cannot be
+taken back. Decisions are one-shot, recorded in the conversation, and equally
+available as buttons.
+
 Three cancellations stay separate, because they are different decisions:
 stopping the audio, dropping the current answer, and abandoning the agent task.
 Talking over the assistant does the first only — a long task survives a
@@ -194,6 +218,20 @@ adapter supplies them:
 - **User transcripts.** The socket's text frames are the model's own speech, so
   the user's words come from segmenting the captured microphone stream and
   transcribing each finished utterance through `/v1/audio/transcriptions`.
+  Transcription starts at the first 300 ms pause rather than waiting for the
+  700 ms that closes the utterance, so the decoding happens inside the silence
+  window instead of after it. If the speaker carries on, the early transcript is
+  shown as a partial and discarded; if they were done, it *is* the final one,
+  byte-identical audio, and the turn starts without a second wait.
+
+  The gate that decides what counts as speech tracks the room rather than
+  sitting at a fixed level: the floor estimate falls freely and rises only while
+  the last second of audio looks flat, since room noise is steady and speech is
+  not. It is bounded below by the level a quiet room already worked at and above
+  by where ordinary speech lives, so a noisy room degrades to unreliable rather
+  than deaf. What the gate and the room currently read is shown in the voice
+  pane, because a session that has stopped hearing you should be able to say
+  why.
 - **Speaking specific text.** PersonaPlex takes its persona as a launch flag and
   accepts audio only, so an authoritative answer is spoken verbatim through the
   platform synthesizer. Since PersonaPlex answers on its own and cannot be told

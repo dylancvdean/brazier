@@ -102,6 +102,8 @@ export type TaskState = {
 export type SessionEventType =
   | 'USER_TEXT_SUBMITTED'
   | 'USER_VOICE_PARTIAL'
+  /** One utterance transcribed: which interface served it, and what it cost. */
+  | 'USER_VOICE_TRANSCRIBED'
   | 'USER_VOICE_FINAL'
   | 'AGENT_REQUESTED'
   | 'AGENT_STARTED'
@@ -119,6 +121,11 @@ export type SessionEventType =
   | 'RESPONSE_CANCEL_REQUESTED'
   | 'SESSION_SUMMARY_UPDATED'
   | 'VOICE_SESSION_RENEWED'
+  /** A tool call is held until someone allows it. */
+  | 'APPROVAL_REQUIRED'
+  | 'APPROVAL_DECIDED'
+  /** Something was said in answer, and it was not a yes or a no. */
+  | 'APPROVAL_UNCLEAR'
 
 export type EventSource = 'chat' | 'voice' | 'agent' | 'coordinator'
 
@@ -177,6 +184,11 @@ export type DiagnosticRecord = {
 }
 
 export type SessionMetrics = {
+  /**
+   * Utterance close to transcript in hand: the silence between someone
+   * finishing a sentence and anything at all happening.
+   */
+  transcriptWaitMs: number[]
   /** Final transcript to agent start. */
   transcriptToAgentStartMs: number[]
   /** Agent final response to speech start. */
@@ -189,4 +201,13 @@ export type SessionMetrics = {
   agentTasksCancelledByInterruption: number
   /** Voice output discarded for having no authoritative backing. */
   voiceClaimsRejected: number
+  /** Held tool calls allowed by a spoken yes. */
+  approvalsSpokenApproved: number
+  /** Held tool calls refused by a spoken no. */
+  approvalsSpokenDenied: number
+  /**
+   * Answers to a held call that were neither. Worth counting on its own: a
+   * confirmation nobody can give in words is a design problem, not a user error.
+   */
+  approvalsUnclear: number
 }

@@ -6,7 +6,9 @@ import {
   Mic,
   MicOff,
   PhoneOff,
+  ShieldAlert,
   Square,
+  Timer,
   Volume2,
   VolumeX
 } from 'lucide-react'
@@ -47,6 +49,12 @@ type Props = {
   /** The shared conversation. Voice turns land in it beside typed ones. */
   session: SessionCoordinatorHandle
   onError: (message: string | null) => void
+}
+
+/** Engine ids as the daemon reports them, in the words the UI uses elsewhere. */
+const ASR_LABELS: Record<string, string> = {
+  'whisper.cpp': 'Whisper',
+  'streaming-asr': 'Nemotron streaming'
 }
 
 function errorText(cause: unknown): string {
@@ -132,15 +140,18 @@ export function VoiceMode(props: Props): React.JSX.Element {
 
   /**
    * Shown wherever the agent destination is in force. Speech reaching an agent
-   * means a misheard word can edit files and run commands, and the pieces that
-   * make it safe to say that casually — a reliable transcript, a confirmation
-   * step — are not built yet.
+   * means a misheard word can edit files and run commands. A call the permission
+   * broker holds is now read back and needs a spoken yes, which is the piece
+   * that was missing — but the broker only holds what its mode says to hold, and
+   * the transcript is still the least reliable input in the application.
    */
   const agentWarning = (
     <p className="voice-danger">
       <AlertTriangle size={14} />
       <span>
-        Voice control for agents is extremely experimental. Please don't use it on anything you care
+        Voice control for agents is extremely experimental. Anything the permission broker holds is
+        read back to you and needs a spoken yes — but only what its mode holds, so a session set to
+        skip permissions acts on what it thought it heard. Please don't use it on anything you care
         about, and even then only if you know what you're doing.
       </span>
     </p>
@@ -250,6 +261,41 @@ export function VoiceMode(props: Props): React.JSX.Element {
 
       {live && config.voiceSessionTarget === 'agent' ? agentWarning : null}
 
+      {/* A held call is otherwise only visible in the agent panel, which the
+          person talking is very likely not looking at. Buttons as well as
+          words: a spoken yes is the convenience, not the only way through. */}
+      {live && snapshot.pendingApproval ? (
+        <div
+          className={`voice-approval ${snapshot.pendingApproval.environment === 'host' ? 'host' : ''}`}
+        >
+          <ShieldAlert size={16} />
+          <div className="voice-approval-body">
+            <strong>{snapshot.pendingApproval.summary}</strong>
+            <span>
+              {snapshot.pendingApproval.tool} · {snapshot.pendingApproval.risk} ·{' '}
+              {snapshot.pendingApproval.environment === 'host'
+                ? 'on your machine, outside the sandbox'
+                : 'in the sandbox'}
+              {snapshot.pendingApproval.spoken ? ' · read out to you' : ''}
+            </span>
+            <span className="voice-approval-hint">
+              Say <strong>yes</strong> to allow it or <strong>no</strong> to stop. Anything else
+              leaves it held.
+            </span>
+          </div>
+          <button type="button" onClick={() => void guard(() => session.resolveApproval('deny'))}>
+            Refuse
+          </button>
+          <button
+            type="button"
+            className="danger"
+            onClick={() => void guard(() => session.resolveApproval('approve'))}
+          >
+            Allow once
+          </button>
+        </div>
+      ) : null}
+
       {live ? (
         <div className="voice-conversation">
           {snapshot.messages.length === 0 && !snapshot.streamingText ? (
@@ -270,7 +316,11 @@ export function VoiceMode(props: Props): React.JSX.Element {
                     }.`
                   : `Microphone: ${snapshot.capture.frames} frames, loudest recent ${snapshot.capture.peak.toFixed(
                       3
-                    )} — speech has to clear ${SPEECH_THRESHOLD}. ${snapshot.capture.status}`}
+                    )} — speech has to clear ${(
+                      snapshot.capture.gate || SPEECH_THRESHOLD
+                    ).toFixed(3)}, the room reads ${snapshot.capture.noiseFloor.toFixed(4)}. ${
+                      snapshot.capture.status
+                    }`}
               </p>
             </>
           ) : (
@@ -401,6 +451,12 @@ export function VoiceMode(props: Props): React.JSX.Element {
               onAsrPreferenceChange={(asrPreference) =>
                 session.setConfig({ ...config, asrPreference })
               }
+              spokenVoiceUri={config.spokenVoiceUri}
+              onSpokenVoiceChange={(spokenVoiceUri) =>
+                session.setConfig({ ...config, spokenVoiceUri })
+              }
+              spokenRate={config.spokenRate}
+              onSpokenRateChange={(spokenRate) => session.setConfig({ ...config, spokenRate })}
               agentSessionId={snapshot.agentSessionId}
               onAgentSessionBound={props.onAgentSessionBound}
               onError={props.onError}
@@ -448,6 +504,23 @@ export function VoiceMode(props: Props): React.JSX.Element {
           </div>
         </div>
       )}
+
+      {/* Which interface should transcribe a spoken turn is an open question,
+          and the honest answer is whichever is faster on this machine. Say what
+          each one is actually costing rather than leaving it to be felt. */}
+      {live && snapshot.transcription.length > 0 ? (
+        <p className="voice-asr-cost">
+          <Timer size={12} />
+          {snapshot.transcription.map((cost) => (
+            <span key={cost.engine}>
+              {ASR_LABELS[cost.engine] ?? cost.engine}: {(cost.averageMs / 1000).toFixed(2)}s per
+              utterance ({cost.realTimeFactor.toFixed(2)}× real time), of which{' '}
+              {(cost.averageWaitMs / 1000).toFixed(2)}s waited for — {cost.startedAtPause} of{' '}
+              {cost.utterances} started at a pause
+            </span>
+          ))}
+        </p>
+      ) : null}
 
       {live && config.showVoiceTranscripts && snapshot.voiceModelText ? (
         <details className="voice-model-text">

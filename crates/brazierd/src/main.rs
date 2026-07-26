@@ -32,6 +32,11 @@ struct Args {
     allow_insecure_remote: bool,
     #[arg(long, env = "BRAZIER_DATA_DIR")]
     data_dir: Option<PathBuf>,
+    /// Extra browser origin allowed to call the API. Repeatable, or
+    /// comma-separated in `BRAZIER_ALLOWED_ORIGINS`. The packaged UI and the dev
+    /// server are always allowed; a wildcard is not accepted.
+    #[arg(long = "allowed-origin", env = "BRAZIER_ALLOWED_ORIGINS")]
+    allowed_origins: Vec<String>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -70,6 +75,16 @@ async fn main() -> anyhow::Result<()> {
     );
     if !args.host.is_loopback() && args.no_auth {
         tracing::warn!("daemon is exposed beyond loopback without authentication");
+    }
+
+    // Parsed before anything is opened: a typo in an origin should fail at the
+    // command line, not after a database and a model cache are warm.
+    let allowed_origins = api::parse_origins(&args.allowed_origins)?;
+    if !args.allowed_origins.is_empty() {
+        tracing::info!(
+            origins = ?args.allowed_origins,
+            "allowing extra browser origins to call the API"
+        );
     }
 
     let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
@@ -128,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
         }))?
     );
     tracing::info!(%address, data_dir = %data_dir.display(), "brazier daemon ready");
-    axum::serve(listener, api::router(state))
+    axum::serve(listener, api::router_with_origins(state, allowed_origins))
         .with_graceful_shutdown(shutdown_signal(runtime))
         .await
         .context("serve daemon")

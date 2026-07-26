@@ -32,6 +32,7 @@ import {
 } from '../agentApi'
 import type { AgentPermissionMode } from '../../../agent/core/types'
 import { resolveAsrEngine, type AsrPreference, type VoiceSessionTarget } from '../session/config'
+import { selectVoice } from '../session/speechRenderer'
 import { modelDisplayName } from '../model-utils'
 
 type Props = {
@@ -49,6 +50,11 @@ type Props = {
   asrAvailable: { batch: boolean; streaming: boolean }
   asrPreference: AsrPreference
   onAsrPreferenceChange: (preference: AsrPreference) => void
+  /** Platform voice for spoken answers, by `voiceURI`; empty is the host default. */
+  spokenVoiceUri: string
+  onSpokenVoiceChange: (voiceUri: string) => void
+  spokenRate: number
+  onSpokenRateChange: (rate: number) => void
   /** Re-read host capabilities after activating a runtime. */
   onRuntimeActivated?: () => void
   /** Agent session bound to this conversation, when there is one. */
@@ -104,6 +110,7 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
     permissionMode: 'ask'
   })
   const [busy, setBusy] = useState(false)
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([])
 
   const needsTranscripts = props.target !== 'neither'
   const voiceModels = props.models.filter((model) => model.id.startsWith('personaplex:'))
@@ -116,6 +123,33 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
   )
   const whisperModels = props.models.filter((model) => model.id.startsWith('whisper:'))
   const streamingModels = props.models.filter((model) => model.id.startsWith('streaming-asr:'))
+
+  // Voices arrive asynchronously on some platforms: the first call returns an
+  // empty list and `voiceschanged` fills it in. Reading it once would show a
+  // host with voices as a host with none.
+  useEffect(() => {
+    if (typeof speechSynthesis === 'undefined') return
+    const read = (): void => setVoices(speechSynthesis.getVoices())
+    read()
+    speechSynthesis.addEventListener('voiceschanged', read)
+    return () => speechSynthesis.removeEventListener('voiceschanged', read)
+  }, [])
+
+  /** Say one sentence in the chosen voice, so the choice can be heard. */
+  function preview(): void {
+    if (typeof speechSynthesis === 'undefined') return
+    speechSynthesis.cancel()
+    const utterance = new SpeechSynthesisUtterance(
+      'This is the voice that will read answers back to you.'
+    )
+    const voice = selectVoice(voices, props.spokenVoiceUri || undefined)
+    if (voice) {
+      utterance.voice = voice
+      utterance.lang = voice.lang
+    }
+    utterance.rate = props.spokenRate
+    speechSynthesis.speak(utterance)
+  }
 
   const refreshRuntimes = useCallback(async () => {
     try {
@@ -328,6 +362,54 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
               under Manage → Runtimes, or download a Whisper or Nemotron ASR model from Discover.
             </p>
           ) : null}
+        </section>
+      ) : null}
+
+      {needsTranscripts ? (
+        <section className="voice-config-group">
+          <span className="section-label">Spoken answers</span>
+          <p className="voice-notice">
+            Answers are spoken by the platform synthesizer, not by PersonaPlex — its protocol
+            carries audio only, so it cannot be handed a sentence to say. The voice is at least
+            yours to choose.
+          </p>
+          {voices.length === 0 ? (
+            <p className="voice-notice">
+              <AlertTriangle size={13} /> This host reports no installed voices, so answers will be
+              shown rather than spoken.
+            </p>
+          ) : (
+            <>
+              <label className="voice-field">
+                <span>Voice</span>
+                <select
+                  value={props.spokenVoiceUri}
+                  onChange={(event) => props.onSpokenVoiceChange(event.target.value)}
+                >
+                  <option value="">Host default</option>
+                  {voices.map((voice) => (
+                    <option key={voice.voiceURI} value={voice.voiceURI}>
+                      {voice.name} ({voice.lang})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="voice-field">
+                <span>Speed · {props.spokenRate.toFixed(2)}×</span>
+                <input
+                  type="range"
+                  min={0.6}
+                  max={1.6}
+                  step={0.05}
+                  value={props.spokenRate}
+                  onChange={(event) => props.onSpokenRateChange(Number(event.target.value))}
+                />
+              </label>
+              <button type="button" onClick={preview}>
+                Hear it
+              </button>
+            </>
+          )}
         </section>
       ) : null}
 

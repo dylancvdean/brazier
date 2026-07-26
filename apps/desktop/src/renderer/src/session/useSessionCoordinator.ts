@@ -20,6 +20,7 @@ import {
   type IntegrationConfig
 } from './config'
 import { SessionCoordinator, type CoordinatorSnapshot } from './coordinator'
+import { PlatformSpeechRenderer } from './speechRenderer'
 import { PersonaPlexVoiceAdapter } from './voiceAdapter'
 import type { ChatResponder } from './adapters'
 
@@ -62,6 +63,8 @@ export type SessionCoordinatorHandle = {
   stopSpeaking: () => Promise<void>
   cancelResponse: () => Promise<void>
   cancelAgentTask: () => Promise<void>
+  /** Answer a held tool call from the UI, rather than by speaking. */
+  resolveApproval: (decision: 'approve' | 'deny') => Promise<void>
   /** Bind an agent session so voice and text turns share it. */
   bindAgentSession: (agentSessionId: string | null) => Promise<void>
 }
@@ -87,6 +90,10 @@ export function useSessionCoordinator(
       modelId: () => latest.current.voiceModelId,
       asrEngine: () =>
         resolveAsrEngine(configRef.current.asrPreference, latest.current.asrAvailable),
+      renderer: new PlatformSpeechRenderer({
+        rate: () => configRef.current.spokenRate,
+        voice: () => configRef.current.spokenVoiceUri || undefined
+      }),
       onInputLevel: setInputLevel,
       onOutputLevel: setOutputLevel
     })
@@ -209,6 +216,12 @@ export function useSessionCoordinator(
     cancelAgentTask: useCallback(async () => {
       await coordinator.cancelAgentTask()
     }, [coordinator]),
+    resolveApproval: useCallback(
+      async (decision: 'approve' | 'deny') => {
+        await coordinator.resolveApproval(decision)
+      },
+      [coordinator]
+    ),
     bindAgentSession: useCallback(
       async (agentSessionId: string | null) => {
         await adapters.agent.bindSession(agentSessionId)

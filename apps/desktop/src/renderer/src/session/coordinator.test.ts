@@ -737,6 +737,121 @@ describe('trust boundary', () => {
   })
 })
 
+describe('spoken confirmation', () => {
+  /** Hold a call the way the permission broker does, mid-run. */
+  async function holdACall(overrides: Partial<IntegrationConfig> = {}) {
+    const context = await live(overrides)
+    speak(context.voice, 'utt-1', 'Clean up the build directory.')
+    await Promise.resolve()
+    const correlationId = context.agent.submitted[0].correlationId
+    context.agent.emit({ type: 'runStarted', correlationId })
+    context.agent.emit({
+      type: 'approvalRequired',
+      correlationId,
+      approvalId: 'apv-1',
+      tool: 'shell_run',
+      summary: 'Run rm -rf build in /work/brazier',
+      risk: 'destructive',
+      environment: 'host'
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    return { ...context, correlationId }
+  }
+
+  it('reads the action back before it happens', async () => {
+    const { coordinator, voice } = await holdACall()
+    const asked = voice.spoken.at(-1)
+    expect(asked?.text).toContain('Run rm -rf build')
+    expect(asked?.text).toContain('outside the sandbox')
+    expect(asked?.text.toLowerCase()).toContain('say yes')
+    expect(coordinator.snapshot().pendingApproval?.approvalId).toBe('apv-1')
+  })
+
+  it('allows it on an unmistakable yes, and says so in the conversation', async () => {
+    const { coordinator, agent, chat, voice } = await holdACall()
+    speak(voice, 'utt-2', 'Yes')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(agent.decisions).toEqual([
+      { approvalId: 'apv-1', decision: 'approve', note: 'Spoken answer: “Yes”' }
+    ])
+    expect(coordinator.snapshot().pendingApproval).toBeNull()
+    expect(chat.messages.at(-1)?.content).toContain('Allowed by voice')
+    expect(coordinator.metrics().approvalsSpokenApproved).toBe(1)
+  })
+
+  it('refuses it on a no', async () => {
+    const { agent, chat, voice, coordinator } = await holdACall()
+    speak(voice, 'utt-2', 'No, stop.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(agent.decisions[0].decision).toBe('deny')
+    expect(chat.messages.at(-1)?.content).toContain('Refused by voice')
+    expect(coordinator.metrics().approvalsSpokenDenied).toBe(1)
+  })
+
+  /**
+   * The point of the whole feature: the transcript comes from a microphone, an
+   * energy gate, and a recogniser, so anything short of a clean yes has to leave
+   * the call held rather than guess which way the sentence was leaning.
+   */
+  it('treats a qualified answer as no answer at all', async () => {
+    const { coordinator, agent, voice } = await holdACall()
+    speak(voice, 'utt-2', 'yes but only the temp files')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(agent.decisions).toHaveLength(0)
+    expect(coordinator.snapshot().pendingApproval?.approvalId).toBe('apv-1')
+    expect(voice.spoken.at(-1)?.text).toContain('not a yes or a no')
+    expect(coordinator.metrics().approvalsUnclear).toBe(1)
+  })
+
+  it('does not submit the answer as a new request', async () => {
+    const { agent, voice } = await holdACall()
+    speak(voice, 'utt-2', 'Yes')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // One turn: the original request. "Yes" answered the question, it did not
+    // ask a new one of an agent that is stopped mid-action.
+    expect(agent.submitted).toHaveLength(1)
+  })
+
+  it('keeps the call held when the decision cannot be recorded', async () => {
+    const { coordinator, agent, voice } = await holdACall()
+    agent.failDecision = 'daemon unreachable'
+    speak(voice, 'utt-2', 'Yes')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(coordinator.snapshot().pendingApproval?.approvalId).toBe('apv-1')
+    expect(coordinator.snapshot().notice).toContain('daemon unreachable')
+  })
+
+  it('can be answered by hand instead', async () => {
+    const { coordinator, agent } = await holdACall()
+    await coordinator.resolveApproval('deny')
+    expect(agent.decisions).toEqual([
+      { approvalId: 'apv-1', decision: 'deny', note: undefined }
+    ])
+    expect(coordinator.snapshot().pendingApproval).toBeNull()
+  })
+
+  it('does not speak over a typed request, but still shows what is held', async () => {
+    const { coordinator, agent, voice } = await live()
+    await coordinator.submitText('Clean up the build directory.')
+    const correlationId = agent.submitted[0].correlationId
+    const before = voice.spoken.length
+    agent.emit({
+      type: 'approvalRequired',
+      correlationId,
+      approvalId: 'apv-2',
+      tool: 'shell_run',
+      summary: 'Run rm -rf build',
+      risk: 'destructive',
+      environment: 'host'
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(voice.spoken).toHaveLength(before)
+    expect(coordinator.snapshot().pendingApproval?.approvalId).toBe('apv-2')
+  })
+})
+
 describe('observability', () => {
   it('measures the latencies the integration is judged on', async () => {
     const { coordinator, agent, voice, clock } = await live()
@@ -759,5 +874,68 @@ describe('observability', () => {
     clock.advance(15)
     voice.emit({ type: 'speechInterrupted', correlationId })
     expect(coordinator.metrics().interruptToSpeechStopMs).toEqual([15])
+  })
+
+  /**
+   * Whether batch whisper or the resident streaming worker should transcribe a
+   * spoken turn is a question about this machine, and the session is the only
+   * thing in a position to answer it.
+   */
+  it('keeps what each transcription interface costs, separately', async () => {
+    const { coordinator, voice } = await live()
+    voice.emit({
+      type: 'transcriptionMeasured',
+      utteranceId: 'utt-1',
+      engine: 'whisper.cpp',
+      roundTripMs: 400,
+      waitedMs: 20,
+      engineMs: 380,
+      audioSeconds: 2,
+      startedAtPause: true
+    })
+    voice.emit({
+      type: 'transcriptionMeasured',
+      utteranceId: 'utt-2',
+      engine: 'whisper.cpp',
+      roundTripMs: 600,
+      waitedMs: 600,
+      engineMs: 560,
+      audioSeconds: 2,
+      startedAtPause: false
+    })
+    voice.emit({
+      type: 'transcriptionMeasured',
+      utteranceId: 'utt-3',
+      engine: 'streaming-asr',
+      roundTripMs: 180,
+      waitedMs: 180,
+      engineMs: 150,
+      audioSeconds: 2,
+      startedAtPause: false
+    })
+
+    const costs = coordinator.snapshot().transcription
+    expect(costs).toEqual([
+      {
+        engine: 'whisper.cpp',
+        utterances: 2,
+        lastMs: 600,
+        averageMs: 500,
+        averageWaitMs: 310,
+        startedAtPause: 1,
+        realTimeFactor: 0.25
+      },
+      {
+        engine: 'streaming-asr',
+        utterances: 1,
+        lastMs: 180,
+        averageMs: 180,
+        averageWaitMs: 180,
+        startedAtPause: 0,
+        realTimeFactor: 0.09
+      }
+    ])
+    // What the turn waited is the number the latency work is judged on.
+    expect(coordinator.metrics().transcriptWaitMs).toEqual([20, 600, 180])
   })
 })

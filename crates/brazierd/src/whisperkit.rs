@@ -197,10 +197,7 @@ pub async fn transcribe(request: TranscribeRequest<'_>) -> anyhow::Result<String
         .context("spawn whisperkit-cli")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "whisperkit-cli failed with {}: {stderr}",
-            output.status
-        );
+        anyhow::bail!("whisperkit-cli failed with {}: {stderr}", output.status);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);

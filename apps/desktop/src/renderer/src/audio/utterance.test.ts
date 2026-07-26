@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { UtteranceSegmenter, encodeWav, padTrailingSilence } from './utterance'
+import {
+  SPEECH_THRESHOLD,
+  UtteranceSegmenter,
+  encodeWav,
+  padTrailingSilence
+} from './utterance'
 
 const SAMPLE_RATE = 24000
 const FRAME = 480
@@ -91,6 +96,76 @@ describe('UtteranceSegmenter', () => {
     expect(lengths[0]).toBeLessThanOrEqual(50 * FRAME)
   })
 
+  /**
+   * The pause snapshot exists so transcription can happen inside the silence
+   * window instead of after it. That only works if the audio offered at the
+   * pause is what the closed utterance turns out to be — otherwise the
+   * transcript describes something the user did not finish saying.
+   */
+  it('offers the utterance at a pause, identical to what closing delivers', () => {
+    const pauses: Array<{ id: string; samples: Float32Array; voicedFrames: number }> = []
+    const utterances: Array<{ id: string; samples: Float32Array; voicedFrames: number }> = []
+    const segmenter = new UtteranceSegmenter({
+      onPause: (snapshot) => pauses.push(snapshot),
+      onUtterance: (utterance) => utterances.push(utterance)
+    })
+
+    feed(segmenter, 0.5, 25)
+    expect(pauses).toHaveLength(0)
+    feed(segmenter, 0.001, 15) // framesToPause
+    expect(pauses).toHaveLength(1)
+    expect(utterances).toHaveLength(0)
+
+    feed(segmenter, 0.001, 20) // on to framesToClose
+    expect(utterances).toHaveLength(1)
+    expect(utterances[0].id).toBe(pauses[0].id)
+    expect(utterances[0].voicedFrames).toBe(pauses[0].voicedFrames)
+    expect(Array.from(utterances[0].samples)).toEqual(Array.from(pauses[0].samples))
+  })
+
+  it('says how much speech there was, so a stale snapshot is recognisable', () => {
+    const pauses: number[] = []
+    const utterances: number[] = []
+    const segmenter = new UtteranceSegmenter({
+      onPause: ({ voicedFrames }) => pauses.push(voicedFrames),
+      onUtterance: ({ voicedFrames }) => utterances.push(voicedFrames)
+    })
+
+    feed(segmenter, 0.5, 25)
+    feed(segmenter, 0.001, 15)
+    expect(pauses).toHaveLength(1)
+    // Speech resumes: the snapshot no longer covers the whole utterance.
+    feed(segmenter, 0.5, 25)
+    feed(segmenter, 0.001, 40)
+    expect(utterances[0]).toBeGreaterThan(pauses[0])
+  })
+
+  it('does not offer a pause for every gap in a hesitant sentence', () => {
+    const pauses: number[] = []
+    const segmenter = new UtteranceSegmenter({ onPause: () => pauses.push(1) })
+    feed(segmenter, 0.5, 25)
+    feed(segmenter, 0.001, 15)
+    expect(pauses).toHaveLength(1)
+    for (let round = 0; round < 2; round += 1) {
+      feed(segmenter, 0.5, 4) // a word, under framesBetweenPauses
+      feed(segmenter, 0.001, 15)
+    }
+    expect(pauses).toHaveLength(1)
+
+    // Enough new speech, though, and the snapshot is worth taking again.
+    feed(segmenter, 0.5, 12)
+    feed(segmenter, 0.001, 15)
+    expect(pauses).toHaveLength(2)
+  })
+
+  it('offers nothing for a sound too short to be a turn', () => {
+    const pauses: unknown[] = []
+    const segmenter = new UtteranceSegmenter({ onPause: (value) => pauses.push(value) })
+    feed(segmenter, 0.6, 4)
+    feed(segmenter, 0.001, 20)
+    expect(pauses).toHaveLength(0)
+  })
+
   it('flushes a partial utterance on demand', () => {
     const utterances: unknown[] = []
     const segmenter = new UtteranceSegmenter({ onUtterance: (value) => utterances.push(value) })
@@ -100,6 +175,63 @@ describe('UtteranceSegmenter', () => {
     // Flushing twice must not emit the same audio again.
     segmenter.flush()
     expect(utterances).toHaveLength(1)
+  })
+})
+
+describe('a room that is not quiet', () => {
+  /**
+   * The complaint this is for: a fan, a street, or an air conditioner sits above
+   * a gate chosen for a quiet microphone, so the gate opens and never closes and
+   * the session transcribes the room. The earlier attempt at this learned only
+   * from frames below the gate, which is exactly the audio a fan never produces.
+   */
+  it('stops hearing steady noise as speech', () => {
+    const utterances: unknown[] = []
+    const discarded: string[] = []
+    const segmenter = new UtteranceSegmenter({
+      onUtterance: (value) => utterances.push(value),
+      onDiscarded: (_id, reason) => discarded.push(reason)
+    })
+
+    // Ten seconds of fan, well above the fixed gate.
+    feed(segmenter, 0.02, 500)
+    expect(utterances).toHaveLength(0)
+    expect(discarded.length).toBeGreaterThan(0)
+    expect(segmenter.currentGate()).toBeGreaterThan(0.02)
+  })
+
+  it('still hears someone talking over it', () => {
+    const utterances: unknown[] = []
+    const segmenter = new UtteranceSegmenter({ onUtterance: (value) => utterances.push(value) })
+    feed(segmenter, 0.02, 500) // learn the room
+    feed(segmenter, 0.4, 25) // someone speaks over the fan
+    feed(segmenter, 0.02, 40) // and stops
+    expect(utterances).toHaveLength(1)
+  })
+
+  it('leaves a quiet room exactly as it was', () => {
+    const segmenter = new UtteranceSegmenter({})
+    feed(segmenter, 0.0004, 300)
+    expect(segmenter.currentGate()).toBeCloseTo(SPEECH_THRESHOLD, 4)
+  })
+
+  it('does not raise the bar on a long answer to a long question', () => {
+    const utterances: unknown[] = []
+    const segmenter = new UtteranceSegmenter({ onUtterance: (value) => utterances.push(value) })
+    // Fifteen seconds of speech with the ordinary gaps in it.
+    for (let round = 0; round < 30; round += 1) {
+      feed(segmenter, 0.3, 20)
+      feed(segmenter, 0.0005, 5)
+    }
+    feed(segmenter, 0.0005, 40)
+    expect(segmenter.currentGate()).toBeCloseTo(SPEECH_THRESHOLD, 4)
+    expect(utterances).toHaveLength(1)
+  })
+
+  it('can be switched back to the fixed gate', () => {
+    const segmenter = new UtteranceSegmenter({}, { adaptive: false })
+    feed(segmenter, 0.02, 500)
+    expect(segmenter.currentGate()).toBe(SPEECH_THRESHOLD)
   })
 })
 
