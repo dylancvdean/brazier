@@ -55,6 +55,17 @@
 - **Realtime voice (PersonaPlex / Moshi protocol)** — engine recipe, session
   API, Voice workspace mode with persona text; Apple Silicon Moshi/MLX and
   deeper duplex polish remain follow-ons.
+- **Voice, chat, and agent in one conversation** — a session coordinator between
+  the three, with the daemon's message graph as the only store: messages record
+  which surface produced them, which turn they belong to, and what became of
+  them. Response ownership is explicit, PersonaPlex owns nothing and is treated
+  as untrusted output, and stopping speech, dropping an answer, and cancelling a
+  task stay three separate controls. Voice supplies the two things the Moshi
+  protocol lacks: user transcripts, by segmenting the microphone and
+  transcribing each utterance, and spoken answers, rendered verbatim through the
+  platform synthesizer with the model's own audio gated off so one question
+  never gets two replies. The streaming ASR worker keeps its model loaded
+  between utterances (3.1 s to 0.18 s a turn).
 - **Agent mode** — interactive coding and system agent as a fourth workspace
   mode. Pi (`@earendil-works/pi-*`, MIT) is the first runtime, installed as a
   pinned dependency and reachable only through an adapter whose boundary a test
@@ -72,6 +83,40 @@
 
 - Alpha scope is complete on macOS Apple Silicon (MLX) and cross-platform for
   llama.cpp. Remaining engine work moves to the workshop track below.
+
+## Voice follow-ons
+
+The nearest-term track. Voice, chat, and the agent share one conversation now;
+what is left is mostly the difference between working and trustworthy.
+
+- **Whisper as the alternative transcription path.** The interface and the
+  preference already exist (`auto`, `whisper.cpp`, `streaming-asr`) and pick
+  whichever is installed. What is untested is batch whisper driving a spoken
+  turn, and whether one binary invocation beats a resident Python worker per
+  utterance — plausible, since it has no interpreter to start.
+- **Turn latency.** Transcription is about 0.18 s once the worker is warm, but a
+  turn does not begin until 700 ms of silence has closed the utterance, so the
+  wait is mostly that window. Shortening it trades directly against cutting
+  people off mid-sentence; feeding the streaming endpoint continuously and
+  taking real partial transcripts is the better answer, and the coordinator
+  already accepts partials it never receives.
+- **Voice activity detection that adapts to the room.** The gate is a fixed RMS
+  floor chosen to suit a quiet microphone. A noise-floor tracker was written and
+  backed out: it only learned from frames below the gate, so steady noise above
+  it was heard as speech forever. Tuning that needs real audio rather than
+  synthesised frames.
+- **Spoken confirmation before destructive agent actions.** Nothing reads an
+  instruction back before it becomes one. The permission broker still judges
+  every call, which is what keeps voice-driven agents unwise rather than
+  dangerous, but it judges a call derived from the least reliable input in the
+  application. This is the gap between the experimental warning in Voice mode
+  and something that could lose it.
+- **Handing PersonaPlex the answer to speak.** Its audio is gated off today and
+  the platform synthesizer speaks instead, because the persona is a process
+  launch flag and the socket carries audio only — so the voice identity is lost
+  for exactly the sentences that matter. Constrained rendering needs a text
+  frame in the runtime, which means owning a patch to the recipe rather than
+  consuming it.
 
 ## Engine workshop
 
