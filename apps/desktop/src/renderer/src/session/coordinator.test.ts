@@ -590,6 +590,22 @@ describe('failure flows', () => {
     expect(chat.messages.at(-1)?.status).toBe('failed')
   })
 
+  /**
+   * The transcript arrives on an adapter callback, which cannot await, so a
+   * failure storing it was an unhandled rejection: indistinguishable from a
+   * transcript that never arrived.
+   */
+  it('reports a transcript it could not store', async () => {
+    const { coordinator, chat, voice } = await live()
+    chat.appendMessage = () => Promise.reject(new Error('conversation is gone'))
+
+    speak(voice, 'utt-1', 'Store this somewhere.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(coordinator.snapshot().notice).toContain('conversation is gone')
+    expect(coordinator.snapshot().notice).toContain('Submitting what you said')
+  })
+
   it('clears the notice once a turn succeeds', async () => {
     const { coordinator, agent, voice } = await live()
     voice.emit({ type: 'sessionError', error: 'A passing glitch.', fatal: false })

@@ -272,6 +272,22 @@ export class SessionCoordinator {
    * error produced no visible sign at all: the session sat there looking live
    * while every utterance quietly went nowhere.
    */
+  /**
+   * Run work started from an event handler, reporting a failure rather than
+   * leaving it as an unhandled rejection.
+   *
+   * None of these paths can be awaited by their caller — they hang off adapter
+   * callbacks — and a rejection in one was invisible. A transcript that failed
+   * to store looked exactly like a transcript that never arrived.
+   */
+  private track(work: Promise<unknown>, label: string): void {
+    void work.catch((cause: unknown) => {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      console.warn(`[voice] ${label} failed: ${message}`)
+      this.report(`${label} failed: ${message}`)
+    })
+  }
+
   private report(status: string | null): void {
     this.notice = status
     this.chat.showStatus(status)
@@ -478,7 +494,7 @@ export class SessionCoordinator {
           updatedAt: this.now()
         }
         this.emit('AGENT_STARTED', event.correlationId, 'agent', {})
-        void this.acknowledge(event.correlationId)
+        this.track(this.acknowledge(event.correlationId), 'Acknowledgement')
         this.publish()
         return
       }
@@ -516,7 +532,7 @@ export class SessionCoordinator {
           this.diagnose('DUPLICATE_IGNORED', event.correlationId, 'agent')
           return
         }
-        void this.deliverFinal(event.correlationId, event.text)
+        this.track(this.deliverFinal(event.correlationId, event.text), 'Storing the answer')
         return
       }
       case 'toolStarted': {
@@ -524,7 +540,10 @@ export class SessionCoordinator {
           this.task = { ...this.task, activeTool: event.tool, updatedAt: this.now() }
         }
         this.emit('TOOL_STARTED', event.correlationId, 'agent', { tool: event.tool })
-        void this.cueStatus(event.correlationId, `Still working — running ${event.tool}.`)
+        this.track(
+          this.cueStatus(event.correlationId, `Still working — running ${event.tool}.`),
+          'Status cue'
+        )
         this.publish()
         return
       }
@@ -650,7 +669,7 @@ export class SessionCoordinator {
   private finishActive(correlationId: string): void {
     if (this.activeCorrelationId !== correlationId) return
     this.activeCorrelationId = null
-    void this.drainQueue()
+    this.track(this.drainQueue(), 'Starting the next turn')
   }
 
   private async drainQueue(): Promise<void> {
@@ -676,11 +695,14 @@ export class SessionCoordinator {
       case 'userSpeechStarted': {
         this.hearing = 'speaking'
         this.publish()
-        void this.onBargeIn()
+        this.track(this.onBargeIn(), 'Interrupting speech')
         return
       }
       case 'captureLevel': {
         this.capture = { frames: event.frames, peak: event.peak, status: event.status }
+        console.debug(
+          `[voice] coordinator sees ${event.frames} frames, peak ${event.peak.toFixed(3)}`
+        )
         this.publish()
         return
       }
@@ -707,7 +729,7 @@ export class SessionCoordinator {
         return
       }
       case 'userTranscriptFinal': {
-        void this.onTranscriptFinal(event.utteranceId, event.text)
+        this.track(this.onTranscriptFinal(event.utteranceId, event.text), 'Submitting what you said')
         return
       }
       case 'speechStarted': {
@@ -727,7 +749,7 @@ export class SessionCoordinator {
         if (response && response.spokenStatus !== 'interrupted') response.spokenStatus = 'completed'
         this.backchanneling.delete(event.correlationId)
         this.emit('VOICE_RESPONSE_COMPLETED', event.correlationId, 'voice', {})
-        void this.runPendingRenewal()
+        this.track(this.runPendingRenewal(), 'Renewing the voice session')
         this.publish()
         return
       }
@@ -752,7 +774,7 @@ export class SessionCoordinator {
         return
       }
       case 'sessionLimitApproaching': {
-        void this.requestRenewal(event.reason)
+        this.track(this.requestRenewal(event.reason), 'Renewing the voice session')
         return
       }
       default:
