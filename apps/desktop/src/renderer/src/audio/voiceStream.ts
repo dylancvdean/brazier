@@ -247,11 +247,30 @@ export class VoiceStream {
 
     const source = context.createMediaStreamSource(this.media!)
     const node = new AudioWorkletNode(context, 'brazier-capture', {
-      numberOfOutputs: 0,
+      outputChannelCount: [1],
       processorOptions: { frameSize: FRAME_SAMPLES }
     })
     node.port.onmessage = (event) => this.encodeFrame(event.data as Float32Array<ArrayBuffer>)
     source.connect(node)
+    // The processor writes no output; the silent sink is only there to put the
+    // node in the graph that reaches the destination, which is what guarantees
+    // it is rendered at all. A capture-only node with nowhere to go depends on
+    // the implementation choosing to pull it.
+    const sink = context.createGain()
+    sink.gain.value = 0
+    node.connect(sink)
+    sink.connect(context.destination)
+
+    // A suspended context renders nothing: no frames, no meter, and no audio
+    // reaching the model, which looks exactly like a microphone that works
+    // while the model talks to itself. Playback already resumed; capture did
+    // not, so it never ran.
+    await context.resume().catch(() => {})
+    if (context.state !== 'running') {
+      this.handlers.onError?.(
+        `The audio input did not start (context is ${context.state}). Check the microphone permission.`
+      )
+    }
   }
 
   private encodeFrame(samples: Float32Array<ArrayBuffer>): void {

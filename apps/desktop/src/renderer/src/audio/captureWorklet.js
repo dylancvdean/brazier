@@ -15,6 +15,12 @@ class CaptureProcessor extends AudioWorkletProcessor {
     this.filled = 0
   }
 
+  /**
+   * Reads the microphone and writes nothing. The node has an output only so it
+   * can be connected onward through a silent gain: a node that reaches the
+   * destination is guaranteed to be rendered, where one with nowhere to go
+   * relies on the implementation pulling it anyway.
+   */
   process(inputs) {
     const input = inputs[0] && inputs[0][0]
     if (!input) return true
