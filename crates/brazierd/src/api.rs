@@ -46,6 +46,31 @@ use crate::{
 
 type ApiResult<T> = Result<T, ApiError>;
 
+/// A streamed download still needs a durable job row: the HTTP stream is only
+/// how the current screen receives live progress, while the download tray is
+/// what lets the work remain visible after that screen goes away.
+async fn track_streamed_download(
+    state: &AppState,
+    work: &crate::download_queue::QueuedWork,
+) -> ApiResult<(String, std::sync::Arc<crate::active_downloads::StopFlag>)> {
+    let payload = serde_json::to_string(work).map_err(ApiError::internal)?;
+    let job = state
+        .db
+        .create_queued_download_job(
+            &work.repo_id(),
+            &work.filename(),
+            &work.revision(),
+            work.kind(),
+            Some(&payload),
+            Some(&work.label()),
+            "downloading",
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    let cancel = state.active_downloads.register(&job.id);
+    Ok((job.id, cancel))
+}
+
 #[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
@@ -2808,9 +2833,21 @@ async fn download_mlx_model(
     let (tx, rx) = progress_channel();
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
+    let tracked = match track_streamed_download(
+        &state,
+        &crate::download_queue::QueuedWork::Mlx(request.clone()),
+    )
+    .await
+    {
+        Ok(tracked) => tracked,
+        Err(error) => return error.into_response(),
+    };
+    let db = state.db.clone();
+    let active_downloads = state.active_downloads.clone();
     let cache_state = state.clone();
     tokio::spawn(async move {
         let progress_tx = tx.clone();
+        let (job_id, cancel) = tracked;
         let result = download::download_mlx_snapshot_with_progress(
             &http,
             &data_dir,
@@ -2818,10 +2855,25 @@ async fn download_mlx_model(
             Box::new(move |event| {
                 push_progress(&progress_tx, event);
             }),
-            None,
-            None,
+            Some((db.clone(), job_id.clone())),
+            Some(cancel),
         )
         .await;
+        let stop = active_downloads.stop_reason(&job_id);
+        active_downloads.finish(&job_id);
+        if let Err(error) = &result {
+            match stop {
+                Some(crate::active_downloads::StopReason::Pause) => {
+                    let _ = db.pause_download_job(&job_id).await;
+                }
+                Some(crate::active_downloads::StopReason::Cancel) => {
+                    let _ = db.cancel_download_job(&job_id).await;
+                }
+                None => {
+                    let _ = db.fail_download_job(&job_id, &error.to_string()).await;
+                }
+            }
+        }
         match result {
             Ok(download_result) => {
                 cache_state.invalidate_models_cache().await;
@@ -3352,9 +3404,21 @@ async fn download_streaming_asr_model(
     let (tx, rx) = progress_channel();
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
+    let tracked = match track_streamed_download(
+        &state,
+        &crate::download_queue::QueuedWork::StreamingAsr(request.clone()),
+    )
+    .await
+    {
+        Ok(tracked) => tracked,
+        Err(error) => return error.into_response(),
+    };
+    let db = state.db.clone();
+    let active_downloads = state.active_downloads.clone();
     let cache_state = state.clone();
     tokio::spawn(async move {
         let progress_tx = tx.clone();
+        let (job_id, cancel) = tracked;
         let result = download::download_streaming_asr_snapshot_with_progress(
             &http,
             &data_dir,
@@ -3362,10 +3426,25 @@ async fn download_streaming_asr_model(
             Box::new(move |event| {
                 push_progress(&progress_tx, event);
             }),
-            None,
-            None,
+            Some((db.clone(), job_id.clone())),
+            Some(cancel),
         )
         .await;
+        let stop = active_downloads.stop_reason(&job_id);
+        active_downloads.finish(&job_id);
+        if let Err(error) = &result {
+            match stop {
+                Some(crate::active_downloads::StopReason::Pause) => {
+                    let _ = db.pause_download_job(&job_id).await;
+                }
+                Some(crate::active_downloads::StopReason::Cancel) => {
+                    let _ = db.cancel_download_job(&job_id).await;
+                }
+                None => {
+                    let _ = db.fail_download_job(&job_id, &error.to_string()).await;
+                }
+            }
+        }
         match result {
             Ok(download_result) => {
                 cache_state.invalidate_models_cache().await;
@@ -3411,9 +3490,21 @@ async fn download_personaplex_model(
     let (tx, rx) = progress_channel();
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
+    let tracked = match track_streamed_download(
+        &state,
+        &crate::download_queue::QueuedWork::Personaplex(request.clone()),
+    )
+    .await
+    {
+        Ok(tracked) => tracked,
+        Err(error) => return error.into_response(),
+    };
+    let db = state.db.clone();
+    let active_downloads = state.active_downloads.clone();
     let cache_state = state.clone();
     tokio::spawn(async move {
         let progress_tx = tx.clone();
+        let (job_id, cancel) = tracked;
         let result = download::download_personaplex_snapshot_with_progress(
             &http,
             &data_dir,
@@ -3421,10 +3512,25 @@ async fn download_personaplex_model(
             Box::new(move |event| {
                 push_progress(&progress_tx, event);
             }),
-            None,
-            None,
+            Some((db.clone(), job_id.clone())),
+            Some(cancel),
         )
         .await;
+        let stop = active_downloads.stop_reason(&job_id);
+        active_downloads.finish(&job_id);
+        if let Err(error) = &result {
+            match stop {
+                Some(crate::active_downloads::StopReason::Pause) => {
+                    let _ = db.pause_download_job(&job_id).await;
+                }
+                Some(crate::active_downloads::StopReason::Cancel) => {
+                    let _ = db.cancel_download_job(&job_id).await;
+                }
+                None => {
+                    let _ = db.fail_download_job(&job_id, &error.to_string()).await;
+                }
+            }
+        }
         match result {
             Ok(download_result) => {
                 cache_state.invalidate_models_cache().await;
@@ -3593,9 +3699,21 @@ async fn install_sdcpp_bundle(
     let (tx, rx) = progress_channel();
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
+    let tracked = match track_streamed_download(
+        &state,
+        &crate::download_queue::QueuedWork::SdcppBundle(bundle.clone()),
+    )
+    .await
+    {
+        Ok(tracked) => tracked,
+        Err(error) => return error.into_response(),
+    };
+    let db = state.db.clone();
+    let active_downloads = state.active_downloads.clone();
     let cache_state = state.clone();
     tokio::spawn(async move {
         let progress_tx = tx.clone();
+        let (job_id, cancel) = tracked;
         let result = download::install_sdcpp_bundle_with_progress(
             &http,
             &data_dir,
@@ -3603,10 +3721,25 @@ async fn install_sdcpp_bundle(
             Box::new(move |event| {
                 push_progress(&progress_tx, event);
             }),
-            None,
-            None,
+            Some((db.clone(), job_id.clone())),
+            Some(cancel),
         )
         .await;
+        let stop = active_downloads.stop_reason(&job_id);
+        active_downloads.finish(&job_id);
+        if let Err(error) = &result {
+            match stop {
+                Some(crate::active_downloads::StopReason::Pause) => {
+                    let _ = db.pause_download_job(&job_id).await;
+                }
+                Some(crate::active_downloads::StopReason::Cancel) => {
+                    let _ = db.cancel_download_job(&job_id).await;
+                }
+                None => {
+                    let _ = db.fail_download_job(&job_id, &error.to_string()).await;
+                }
+            }
+        }
         match result {
             Ok(install) => {
                 cache_state.invalidate_models_cache().await;

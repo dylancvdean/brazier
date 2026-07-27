@@ -58,7 +58,9 @@ function errorText(cause: unknown): string {
 function progressText(event: ProgressEvent | null): string {
   if (!event) return 'Starting…'
   if (event.phase === 'download' && event.total) {
-    const percent = event.percent ?? Math.round(((event.bytes ?? 0) / event.total) * 100)
+    const percent = Math.round(
+      event.percent ?? ((event.bytes ?? 0) / event.total) * 100
+    )
     return `Downloading — ${percent}%`
   }
   return event.message ?? 'Working…'
