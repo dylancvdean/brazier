@@ -320,6 +320,7 @@ dependencies = [
  "brazier-runtime",
  "brazier-storage",
  "clap",
+ "futures",
  "http-body-util",
  "reqwest",
  "serde",

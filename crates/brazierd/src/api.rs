@@ -367,6 +367,7 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             get(agent_system_prompt),
         )
         .route("/api/v1/agent/exec", post(agent_exec_tool))
+        .route("/api/v1/agent/exec/stream", post(agent_exec_tool_stream))
         .route(
             "/api/v1/agent/approvals/{id}",
             get(get_agent_approval).post(decide_agent_approval),
@@ -4382,6 +4383,70 @@ async fn agent_exec_tool(
         .await
         .map_err(ApiError::from_anyhow)?;
     Ok(Json(response))
+}
+
+/// Stream foreground tool output while preserving the normal final response.
+///
+/// Each SSE `output` event contains one display chunk. The terminal `result`
+/// event contains the same response `/exec` would return, including persisted
+/// execution and artifact identifiers.
+async fn agent_exec_tool_stream(
+    State(state): State<AppState>,
+    Json(request): Json<crate::agent_types::ToolExecRequest>,
+) -> ApiResult<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>> {
+    let session = state
+        .db
+        .agent_session(&request.session_id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    if let Some(enabled) = &session.enabled_tools
+        && !enabled.iter().any(|name| name == &request.tool)
+    {
+        return Err(ApiError::bad_request(format!(
+            "tool `{}` is not enabled for this session",
+            request.tool
+        )));
+    }
+
+    let events = stream! {
+        let context = crate::agent_exec::BrokerContext {
+            broker: state.agent_broker.as_ref(),
+            db: &state.db,
+            data_dir: &state.data_dir,
+            session: &session,
+        };
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let execution = crate::agent_exec::execute_streaming(&context, &request, output_tx);
+        tokio::pin!(execution);
+        loop {
+            tokio::select! {
+                biased;
+                Some(chunk) = output_rx.recv() => {
+                    yield Ok(Event::default()
+                        .event("output")
+                        .data(json!({ "chunk": chunk }).to_string()));
+                }
+                result = &mut execution => {
+                    match result {
+                        Ok(response) => {
+                            yield Ok(Event::default()
+                                .event("result")
+                                .data(serde_json::to_string(&response).unwrap_or_else(|error| {
+                                    json!({ "error": error.to_string() }).to_string()
+                                })));
+                        }
+                        Err(error) => {
+                            yield Ok(Event::default()
+                                .event("error")
+                                .data(json!({ "message": error.to_string() }).to_string()));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    };
+    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
 }
 
 #[derive(Debug, Deserialize)]

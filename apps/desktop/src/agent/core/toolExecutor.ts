@@ -177,19 +177,29 @@ export class AgentToolExecutor {
       }
       let response: ToolExecResponse
       try {
-        response = await this.broker.execTool(
-          {
-            sessionId: this.sessionId,
-            runId: request.runId,
-            toolCallId: request.toolCallId,
-            tool: request.tool,
-            arguments: request.args,
-            environment: requestedEnvironment,
-            reason: request.reason,
-            approvalId
-          },
-          request.signal
-        )
+        const brokerRequest = {
+          sessionId: this.sessionId,
+          runId: request.runId,
+          toolCallId: request.toolCallId,
+          tool: request.tool,
+          arguments: request.args,
+          environment: requestedEnvironment,
+          reason: request.reason,
+          approvalId
+        }
+        response =
+          request.tool === 'shell_run'
+            ? await this.broker.execToolStreaming(
+                brokerRequest,
+                (chunk) =>
+                  this.event(request.runId, 'tool-output', {
+                    toolCallId: request.toolCallId,
+                    tool: request.tool,
+                    chunk
+                  }),
+                request.signal
+              )
+            : await this.broker.execTool(brokerRequest, request.signal)
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause)
         return this.fail(request, message, false, 0)

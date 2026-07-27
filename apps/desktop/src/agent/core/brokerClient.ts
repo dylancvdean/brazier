@@ -265,6 +265,94 @@ export class BrokerClient {
     })
   }
 
+  /** Execute a foreground tool and receive output before the process exits. */
+  async execToolStreaming(
+    request: {
+      sessionId: string
+      runId?: string
+      toolCallId?: string
+      tool: string
+      arguments: Record<string, unknown>
+      environment?: AgentEnvironment
+      reason?: string
+      approvalId?: string
+    },
+    onOutput: (chunk: string) => void,
+    signal?: AbortSignal
+  ): Promise<ToolExecResponse> {
+    const headers = new Headers({ 'content-type': 'application/json' })
+    if (this.connection.apiKey) {
+      headers.set('authorization', `Bearer ${this.connection.apiKey}`)
+    }
+    const response = await fetch(`${this.connection.address}/api/v1/agent/exec/stream`, {
+      method: 'POST',
+      headers,
+      signal,
+      body: JSON.stringify({
+        session_id: request.sessionId,
+        run_id: request.runId,
+        tool_call_id: request.toolCallId,
+        tool: request.tool,
+        arguments: request.arguments,
+        environment: request.environment,
+        reason: request.reason,
+        approval_id: request.approvalId
+      })
+    })
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as {
+        error?: { message?: string }
+      } | null
+      throw new BrokerError(
+        payload?.error?.message ?? `Request failed with status ${response.status}.`,
+        response.status
+      )
+    }
+    if (!response.body) throw new BrokerError('The tool output stream had no body.', 502)
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let result: ToolExecResponse | undefined
+
+    const consume = (block: string): void => {
+      let event = 'message'
+      const data: string[] = []
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith('event:')) event = line.slice(6).trim()
+        if (line.startsWith('data:')) data.push(line.slice(5).trimStart())
+      }
+      if (data.length === 0) return
+      const payload = JSON.parse(data.join('\n')) as {
+        chunk?: string
+        message?: string
+      }
+      if (event === 'output' && typeof payload.chunk === 'string') {
+        onOutput(payload.chunk)
+      } else if (event === 'result') {
+        result = payload as ToolExecResponse
+      } else if (event === 'error') {
+        throw new BrokerError(payload.message ?? 'Tool execution failed.', 500)
+      }
+    }
+
+    while (true) {
+      const { value, done } = await reader.read()
+      buffer += decoder.decode(value, { stream: !done })
+      let boundary = buffer.search(/\r?\n\r?\n/)
+      while (boundary >= 0) {
+        const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)?.[0] ?? '\n\n'
+        consume(buffer.slice(0, boundary))
+        buffer = buffer.slice(boundary + separator.length)
+        boundary = buffer.search(/\r?\n\r?\n/)
+      }
+      if (done) break
+    }
+    if (buffer.trim()) consume(buffer)
+    if (!result) throw new BrokerError('The tool output stream ended before its result.', 502)
+    return result
+  }
+
   /**
    * Block until the user answers, or until `waitMs` elapses. The daemon holds
    * the request open, so no polling loop is needed here.
