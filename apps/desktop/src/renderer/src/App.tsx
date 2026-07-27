@@ -1723,11 +1723,12 @@ export function App(): React.JSX.Element {
             </div>
           )}
           {/* One composer, for the modes that take typed input. Voice owns its
-              whole screen and has no text box: with speech already aimed at a
-              destination, a second input would be a second, unlabelled one. */}
+              whole screen and has no text box, and Generate carries its own
+              prompt form: in both cases a second input would be a second,
+              unlabelled one. */}
           <form
             className="composer"
-            hidden={appMode === 'voice'}
+            hidden={appMode === 'voice' || appMode === 'generate'}
             onSubmit={(event) => void submit(event)}
           >
             <textarea
@@ -1863,7 +1864,7 @@ export function App(): React.JSX.Element {
               )}
             </div>
           </form>
-          <p className="composer-hint" hidden={appMode === 'voice'}>
+          <p className="composer-hint" hidden={appMode === 'voice' || appMode === 'generate'}>
             {agentMode ? (
               'The agent edits files and runs commands in the workspace above. Each action is judged by its permission mode.'
             ) : (

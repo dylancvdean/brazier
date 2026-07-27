@@ -302,8 +302,10 @@ async function createWindow(): Promise<void> {
   const window = new BrowserWindow({
     width: 1280,
     height: 820,
-    minWidth: 880,
-    minHeight: 620,
+    // Small enough for a half-screen snap on a 13" display; the renderer's
+    // narrow-width breakpoints keep the chrome usable down to this size.
+    minWidth: 560,
+    minHeight: 540,
     show: false,
     backgroundColor: '#000000',
     autoHideMenuBar: true,

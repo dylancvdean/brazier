@@ -58,6 +58,12 @@ code {
   -webkit-user-select: text;
 }
 
+/* The renderer leans on the `hidden` attribute to switch modes; without this
+   guard any element that also sets `display` in CSS ignores it. */
+[hidden] {
+  display: none !important;
+}
+
 .app-shell {
   display: flex;
   height: 100vh;
@@ -231,6 +237,7 @@ code {
   right: 16px;
   bottom: 16px;
   width: min(340px, calc(100vw - 32px));
+  animation: rise-in 180ms ease;
   border: 1px solid #3a3a3a;
   border-radius: 12px;
   background: rgba(8, 8, 9, 0.96);
@@ -576,6 +583,7 @@ code {
   border-radius: 8px;
   color: var(--muted);
   background: transparent;
+  transition: color 120ms ease, background 120ms ease;
 }
 
 .icon-button:hover {
@@ -593,6 +601,31 @@ code {
   text-align: left;
   background: transparent;
   cursor: pointer;
+  transition: background 120ms ease;
+}
+
+/* The picker is the one topbar item allowed to give up space: everything
+   else keeps its size and long model names ellipsize instead of pushing the
+   settings button off-screen. */
+.model-picker > div {
+  /* Can ellipsize, but never vanish into an unclickable sliver. */
+  min-width: 52px;
+}
+
+.model-picker strong,
+.model-picker span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-icon {
+  flex-shrink: 0;
+}
+
+.topbar > .icon-button,
+.topbar > .mode-switch {
+  flex-shrink: 0;
 }
 
 .model-picker:hover {
@@ -920,6 +953,13 @@ code {
   color: var(--accent);
   background: #0d0907;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  animation: rise-in 180ms ease;
+}
+
+/* Both the swap notice and the download tray anchor bottom-right; when the
+   notice is up, the tray steps above it instead of the two overlapping. */
+.app-shell:has(.recommendation-swap-notice) .download-tray {
+  bottom: 104px;
 }
 
 .recommendation-swap-notice > div {
@@ -1549,6 +1589,7 @@ code {
   justify-content: flex-end;
   background: rgba(0, 0, 0, 0.58);
   backdrop-filter: blur(3px);
+  animation: fade-in 160ms ease;
 }
 
 /* --- Manage panel ---------------------------------------------------- */
@@ -1562,6 +1603,7 @@ code {
   border-left: 1px solid #343434;
   background: #070707;
   box-shadow: -24px 0 70px rgba(0, 0, 0, 0.34);
+  animation: slide-in-right 220ms cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 
 .manage-header {
@@ -1647,6 +1689,38 @@ code {
   min-width: 0;
   padding: 20px 24px;
   overflow-y: auto;
+}
+
+/* Small windows: the drawer takes the full width and its side nav folds into
+   a horizontally scrollable strip so the content keeps a usable column. */
+@media (max-width: 720px) {
+  .manage-panel {
+    width: 100vw;
+    border-left: 0;
+  }
+
+  .manage-body {
+    flex-direction: column;
+  }
+
+  .manage-nav {
+    flex-direction: row;
+    width: auto;
+    flex: 0 0 auto;
+    padding: 8px 10px;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .manage-nav button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .manage-content {
+    padding: 16px;
+  }
 }
 
 .manage-content section {
@@ -2265,12 +2339,27 @@ a.inline-link {
   box-shadow: 0 22px 60px rgba(0, 0, 0, 0.45);
 }
 
+.popover {
+  animation: drop-in 140ms ease;
+}
+
 .popover.model-menu {
   left: clamp(16px, 300px, calc(100vw - 360px));
 }
 
 .popover.inference-menu {
   left: clamp(16px, 356px, calc(100vw - 360px));
+}
+
+/* The preferred left offsets above assume the 258px sidebar is open; when it
+   is collapsed the popovers hug their topbar anchors instead of floating in
+   the middle of the transcript. */
+.sidebar:not(.open) ~ .menu-backdrop .popover.model-menu {
+  left: clamp(16px, 52px, calc(100vw - 360px));
+}
+
+.sidebar:not(.open) ~ .menu-backdrop .popover.inference-menu {
+  left: clamp(16px, 108px, calc(100vw - 360px));
 }
 
 .popover-title {
@@ -3376,11 +3465,28 @@ a.inline-link {
     display: none;
   }
 
-  .sidebar {
+  .sidebar,
+  .platform-darwin .sidebar.open {
     position: absolute;
     z-index: 5;
     height: 100%;
     box-shadow: 14px 0 40px rgba(0, 0, 0, 0.25);
+  }
+}
+
+/* Half-screen snap territory: drop the model subtitle and tighten spacing
+   before anything is forced to overflow. */
+@media (max-width: 860px) {
+  .topbar {
+    gap: 8px;
+  }
+
+  .model-picker span {
+    display: none;
+  }
+
+  .mode-switch button {
+    padding: 6px 9px;
   }
 }
 
@@ -3394,7 +3500,17 @@ a.inline-link {
     grid-template-columns: 1fr;
   }
 
-  .model-picker span {
+  .topbar {
+    padding: 0 10px;
+    gap: 6px;
+  }
+
+  .mode-switch button {
+    padding: 6px 7px;
+    font-size: 11px;
+  }
+
+  .model-icon {
     display: none;
   }
 }
@@ -3417,6 +3533,7 @@ a.inline-link {
   background: transparent;
   font-size: 12px;
   cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
 }
 
 .mode-switch button.active {
@@ -5817,4 +5934,46 @@ label.span-2 {
 
 .model-menu-item-configure.set {
   color: #f78a42;
+}
+
+/* --- Motion ----------------------------------------------------------- */
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes drop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(40px);
+    opacity: 0;
+  }
+}
+
+.model-settings-modal {
+  animation: drop-in 160ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
