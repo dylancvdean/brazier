@@ -93,6 +93,7 @@ import {
   visionCapabilityTitle
 } from './model-utils'
 import { childCounts, messageChain } from './graph'
+import { buildChatDisplayItems } from './chatDisplay'
 import {
   readCachedConversations,
   readCachedModels,
@@ -130,11 +131,6 @@ function contentText(message: Message): string {
     .filter((part): part is Extract<ContentPart, { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
     .join('\n')
-}
-
-function reasoningText(message: Message): string {
-  const value = message.metadata?.reasoning_content
-  return typeof value === 'string' ? value : ''
 }
 
 function contentMedia(message: Message): Array<'image' | 'audio' | 'video'> {
@@ -184,29 +180,6 @@ function turnLabel(message: Message): 'queued' | 'cancelled' | 'superseded' | 'f
   if (metadata.cancelled === true) return 'cancelled'
   if (metadata.failed === true) return 'failed'
   return null
-}
-
-/** Tool records for UI display from native or legacy tool messages. */
-function toolRecordsFromMessage(message: Message): ToolCallRecord[] | null {
-  if (message.role !== 'tool') return null
-  if (message.tool_call_id && typeof message.content === 'string') {
-    return [
-      {
-        call_id: message.tool_call_id,
-        name: 'tool',
-        arguments: '',
-        output: message.content,
-        is_error: false
-      }
-    ]
-  }
-  if (typeof message.content !== 'string') return null
-  try {
-    const parsed = JSON.parse(message.content) as { brazier_tool_calls?: ToolCallRecord[] }
-    return Array.isArray(parsed.brazier_tool_calls) ? parsed.brazier_tool_calls : null
-  } catch {
-    return null
-  }
 }
 
 async function fileToAttachment(file: File): Promise<Attachment> {
@@ -265,6 +238,33 @@ function ToolChips({
   )
 }
 
+function StreamingTurnSegments({
+  text,
+  records,
+  offsets,
+  onError
+}: {
+  text: string
+  records: ToolCallRecord[]
+  offsets: number[]
+  onError?: (message: string) => void
+}): React.JSX.Element {
+  const segments: React.JSX.Element[] = []
+  let cursor = 0
+  records.forEach((record, index) => {
+    const offset = Math.max(cursor, Math.min(offsets[index] ?? cursor, text.length))
+    if (offset > cursor) {
+      segments.push(<Markdown key={`text-before-tool-${index}`}>{text.slice(cursor, offset)}</Markdown>)
+    }
+    segments.push(<ToolChips key={`stream-tool-${index}`} records={[record]} onError={onError} />)
+    cursor = offset
+  })
+  if (cursor < text.length) {
+    segments.push(<Markdown key="text-after-tools">{text.slice(cursor)}</Markdown>)
+  }
+  return <>{segments}</>
+}
+
 function RunHistory({
   runs,
   expandedId,
@@ -319,6 +319,7 @@ export function App(): React.JSX.Element {
   const [streamingText, setStreamingText] = useState('')
   const [streamingReasoning, setStreamingReasoning] = useState('')
   const [streamingTools, setStreamingTools] = useState<ToolCallRecord[]>([])
+  const [streamingToolOffsets, setStreamingToolOffsets] = useState<number[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [forkHints, setForkHints] = useState<RuntimeForkHint[]>([])
@@ -392,6 +393,7 @@ export function App(): React.JSX.Element {
   const scrollAnchor = useRef<HTMLDivElement>(null)
 
   const chain = useMemo(() => messageChain(messages, tipId), [messages, tipId])
+  const chatDisplayItems = useMemo(() => buildChatDisplayItems(chain), [chain])
   const branches = useMemo(() => childCounts(messages), [messages])
   const canChat = Boolean(selectedModel) && modelPrepareState === 'ready'
   const selectedCapabilities = localModels.find((model) => model.id === selectedModel)?.capabilities
@@ -1031,6 +1033,7 @@ export function App(): React.JSX.Element {
     setStreamingText('')
     setStreamingReasoning('')
     setStreamingTools([])
+    setStreamingToolOffsets([])
     const controller = new AbortController()
     abortRef.current = controller
 
@@ -1061,6 +1064,7 @@ export function App(): React.JSX.Element {
       let responseText = ''
       let responseReasoning = ''
       const toolRecords: ToolCallRecord[] = []
+      const toolOffsets: number[] = []
       const maxClientRounds = 4
       for (let round = 0; round < maxClientRounds; round += 1) {
         setStreamingReasoning('')
@@ -1086,7 +1090,9 @@ export function App(): React.JSX.Element {
             },
             onToolCall: (record) => {
               toolRecords.push(record)
+              toolOffsets.push(responseText.length)
               setStreamingTools([...toolRecords])
+              setStreamingToolOffsets([...toolOffsets])
             }
           }
         )
@@ -1167,6 +1173,7 @@ export function App(): React.JSX.Element {
       setStreamingText('')
       setStreamingReasoning('')
       setStreamingTools([])
+      setStreamingToolOffsets([])
       setModelLoadStatus(null)
       await refreshMessages(activeConversationId, finalTipId)
       await refreshConversations()
@@ -1565,43 +1572,77 @@ export function App(): React.JSX.Element {
             </div>
           ) : (
             <div className="messages">
-              {chain.map((message) => {
-                const toolRecords = toolRecordsFromMessage(message)
-                if (toolRecords) {
+              {chatDisplayItems.map((item) => {
+                if (item.kind === 'assistant') {
+                  const status =
+                    item.status === 'cancelled' ||
+                    item.status === 'superseded' ||
+                    item.status === 'failed'
+                      ? item.status
+                      : null
                   return (
-                    <article className="message tool" key={message.id}>
-                      <div className="avatar tool-avatar">
-                        <Wrench size={15} />
+                    <article className="message assistant" key={item.id}>
+                      <div className="avatar">
+                        <Bot />
                       </div>
                       <div className="message-body">
                         <div className="message-meta">
-                          <strong>Tools</strong>
+                          <strong>{item.source === 'assistant_agent' ? 'Agent' : 'Brazier'}</strong>
+                          {status ? (
+                            <span className={`turn-badge ${status}`}>{status}</span>
+                          ) : null}
+                          {branches.get(item.branchId) && branches.get(item.branchId)! > 1 ? (
+                            <span className="branch-count">
+                              <GitBranch size={12} /> {branches.get(item.branchId)} branches
+                            </span>
+                          ) : null}
                         </div>
-                        <ToolChips records={toolRecords} onError={setError} />
+                        <ReasoningDisclosure text={item.reasoning} />
+                        {item.segments.map((segment) => {
+                          if (segment.kind === 'tool') {
+                            return (
+                              <ToolChips
+                                key={segment.key}
+                                records={segment.records}
+                                onError={setError}
+                              />
+                            )
+                          }
+                          if (segment.kind === 'media') {
+                            return (
+                              <MessageMedia
+                                key={segment.key}
+                                blobs={segment.blobs}
+                                onError={setError}
+                              />
+                            )
+                          }
+                          return (
+                            <Markdown key={segment.key}>{segment.text}</Markdown>
+                          )
+                        })}
+                        <button
+                          className="fork-button"
+                          title="Continue a new branch from this message"
+                          onClick={() => setTipId(item.branchId)}
+                        >
+                          <GitBranch size={13} /> Branch here
+                        </button>
                       </div>
                     </article>
                   )
                 }
-                if (message.role === 'tool') return null
-                // System context—including the model-facing copy of generated
-                // media—is plumbing. The separate assistant display message
-                // below contains only what the person should see.
-                if (message.role === 'system') return null
+
+                const message = item.message
                 const media = contentMedia(message)
                 const spoken = message.source === 'user_voice'
                 const turn = turnLabel(message)
                 return (
                   <article className={`message ${message.role}`} key={message.id}>
-                    <div className="avatar">{message.role === 'assistant' ? <Bot /> : 'You'}</div>
+                    <div className="avatar">You</div>
                     <div className="message-body">
                       <div className="message-meta">
-                        <strong>
-                          {message.role === 'assistant'
-                            ? message.source === 'assistant_agent'
-                              ? 'Agent'
-                              : 'Brazier'
-                            : 'You'}
-                        </strong>
+                        <strong>You</strong>
                         {spoken ? (
                           <span className="message-source" title="Spoken, transcribed into chat">
                             <Mic size={11} /> voice
@@ -1627,9 +1668,6 @@ export function App(): React.JSX.Element {
                         </div>
                       )}
                       <MessageMedia blobs={contentBlobs(message)} onError={setError} />
-                      {message.role === 'assistant' ? (
-                        <ReasoningDisclosure text={reasoningText(message)} />
-                      ) : null}
                       <Markdown>{contentText(message)}</Markdown>
                       <button
                         className="fork-button"
@@ -1652,11 +1690,13 @@ export function App(): React.JSX.Element {
                       <strong>{session.snapshot.streamingText ? 'Agent' : 'Brazier'}</strong>
                       {busy ? <LoaderCircle className="spin" size={14} /> : null}
                     </div>
-                    {streamingTools.length > 0 && (
-                      <ToolChips records={streamingTools} onError={setError} />
-                    )}
                     <ReasoningDisclosure text={streamingReasoning} defaultOpen />
-                    {liveText ? <Markdown>{liveText}</Markdown> : null}
+                    <StreamingTurnSegments
+                      text={liveText}
+                      records={streamingTools}
+                      offsets={streamingToolOffsets}
+                      onError={setError}
+                    />
                   </div>
                 </article>
               )}

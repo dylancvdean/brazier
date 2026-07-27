@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { messagesForCompletion } from './api'
+import { messagesForCompletion, reasoningAfterTranscriptBoundary } from './api'
 import type { Message } from './types'
 
 function message(overrides: Partial<Message>): Message {
@@ -85,5 +85,23 @@ describe('messagesForCompletion', () => {
       reasoning_content: 'Need a calculator.'
     })
     expect(payload[1]).toMatchObject({ role: 'tool', tool_call_id: 'call_1' })
+  })
+})
+
+describe('reasoningAfterTranscriptBoundary', () => {
+  it('commits reasoning at an assistant tool-round boundary without clearing it for tool plumbing', () => {
+    expect(
+      reasoningAfterTranscriptBoundary('first-round reasoning', {
+        role: 'assistant',
+        content: '',
+        tool_calls: []
+      })
+    ).toBe('')
+    expect(
+      reasoningAfterTranscriptBoundary('final-round reasoning', {
+        role: 'system',
+        content: 'generated media context'
+      })
+    ).toBe('final-round reasoning')
   })
 })

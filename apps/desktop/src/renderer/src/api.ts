@@ -541,6 +541,13 @@ export type TranscriptMessagePayload = {
   reasoning_content?: string | null
 }
 
+export function reasoningAfterTranscriptBoundary(
+  reasoning: string,
+  message: TranscriptMessagePayload
+): string {
+  return message.role === 'assistant' ? '' : reasoning
+}
+
 export type StreamCompletionResult = {
   responseText: string
   reasoningText: string
@@ -695,6 +702,14 @@ export async function streamCompletion(
       }
       if (chunk.brazier?.transcript_message) {
         transcript.push(chunk.brazier.transcript_message)
+        // An assistant transcript message commits the reasoning accumulated for
+        // that internal tool round. Keep only subsequent reasoning for the
+        // eventual final assistant message instead of saving every earlier
+        // round a second time on the final response.
+        reasoningText = reasoningAfterTranscriptBoundary(
+          reasoningText,
+          chunk.brazier.transcript_message
+        )
       }
       const finishReason = chunk.choices?.[0]?.finish_reason
       const toolCalls = chunk.choices?.[0]?.delta?.tool_calls
