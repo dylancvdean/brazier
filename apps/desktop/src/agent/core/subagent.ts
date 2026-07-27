@@ -33,6 +33,22 @@ export function resolveMaxSubagents(profile: SubagentProfileDefaults | null | un
   return DEFAULT_MAX_SUBAGENTS
 }
 
+/** Collect task prompts from a spawn_subagent argument object. */
+export function collectSpawnPrompts(args: Record<string, unknown>): string[] {
+  if (Array.isArray(args.prompts)) {
+    const many = args.prompts
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+    if (many.length > 0) return many
+  }
+  if (typeof args.prompt === 'string') {
+    const one = args.prompt.trim()
+    if (one.length > 0) return [one]
+  }
+  return []
+}
+
 /**
  * Tool arg → profile `subagent_model` → parent model.
  */

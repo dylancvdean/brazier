@@ -26,6 +26,50 @@ use crate::{
 const GITHUB_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
 const USER_AGENT: &str = "brazier-llama-manager";
 
+/// Cap stderr we surface so an OOM dump does not flood the UI.
+const STARTUP_STDERR_LIMIT: usize = 4_000;
+
+/// Build a user-facing error when a local inference server dies during launch.
+///
+/// OOMs and allocation failures get an explicit remediation hint; other exits
+/// keep a truncated stderr excerpt so the failure is diagnosable without
+/// burying the daemon in a generic 500.
+pub fn describe_server_startup_failure(server: &str, status: impl std::fmt::Display, stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    let excerpt = if trimmed.is_empty() {
+        "(no stderr)".to_owned()
+    } else if trimmed.len() <= STARTUP_STDERR_LIMIT {
+        trimmed.to_owned()
+    } else {
+        format!("{}…", &trimmed[..STARTUP_STDERR_LIMIT])
+    };
+    if startup_looks_like_oom(trimmed) {
+        format!(
+            "{server} ran out of memory while starting ({status}). \
+             Lower context size, turn off Parallel subagents, reduce GPU layers, \
+             or close other apps, then try again.\n\n{excerpt}"
+        )
+    } else {
+        format!("{server} exited during startup with {status}:\n{excerpt}")
+    }
+}
+
+/// Whether stderr / status text points at an out-of-memory launch failure.
+pub fn startup_looks_like_oom(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("out of memory")
+        || lower.contains("out-of-memory")
+        || lower.contains("cuda_error_out_of_memory")
+        || lower.contains("hip_error_out_of_memory")
+        || lower.contains("cannot allocate")
+        || lower.contains("failed to allocate")
+        || lower.contains("std::bad_alloc")
+        || lower.contains("metal: failed to create buffer")
+        || lower.contains("insufficient memory")
+        || (lower.contains("killed") && lower.contains("memory"))
+        || lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|token| token == "oom")
+}
+
 /// Managed install prefix under the application data directory.
 pub fn managed_engine_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("engines").join("llama.cpp")
@@ -1058,6 +1102,8 @@ struct LaunchPlan {
     split_mode: Option<String>,
     cache_reuse: Option<u32>,
     defrag_threshold: Option<f32>,
+    /// llama-server `--parallel` slot count.
+    parallel: u32,
     loras: Vec<(PathBuf, f32)>,
     extra_args: Vec<String>,
     /// Custom Jinja chat template; written to a temp file at spawn.
@@ -1112,6 +1158,7 @@ impl LaunchPlan {
             split_mode: profile.and_then(|profile| profile.split_mode.clone()),
             cache_reuse: profile.and_then(|profile| profile.cache_reuse),
             defrag_threshold: profile.and_then(|profile| profile.defrag_threshold),
+            parallel: crate::model_settings::llama_parallel_slots(profile),
             loras,
             extra_args: profile
                 .map(|profile| profile.extra_args.clone())
@@ -1139,7 +1186,7 @@ impl LaunchPlan {
             })
             .unwrap_or_default();
         format!(
-            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|jinja|rf={}|tpl={}|{}",
+            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|{}|jinja|rf={}|tpl={}|{}",
             self.context_size,
             self.batch_size,
             self.ubatch_size,
@@ -1162,6 +1209,7 @@ impl LaunchPlan {
             self.cache_reuse,
             self.defrag_threshold,
             self.loras,
+            self.parallel,
             harmony,
             reasoning_format,
             template_fp,
@@ -1175,6 +1223,8 @@ impl LaunchPlan {
             .arg(self.context_size.to_string())
             .arg("--batch-size")
             .arg(self.batch_size.to_string())
+            .arg("--parallel")
+            .arg(self.parallel.to_string())
             .arg("--n-gpu-layers")
             .arg(self.gpu_layers.to_string())
             .arg("--flash-attn")
@@ -1319,8 +1369,6 @@ impl LlamaServer {
             .arg("127.0.0.1")
             .arg("--port")
             .arg(port.to_string())
-            .arg("--parallel")
-            .arg("1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -1371,7 +1419,11 @@ impl LlamaServer {
                     let _ = pipe.read_to_end(&mut buf).await;
                     stderr = String::from_utf8_lossy(&buf).into_owned();
                 }
-                anyhow::bail!("llama-server exited during startup with {status}: {stderr}");
+                anyhow::bail!(describe_server_startup_failure(
+                    "llama-server",
+                    status,
+                    &stderr
+                ));
             }
             match client.get(&health_url).send().await {
                 Ok(response) if response.status().is_success() => break,
@@ -1865,6 +1917,33 @@ mod tests {
         assert_ne!(base, with_lora);
         assert_ne!(base, with_template);
         assert_eq!(base, launch_key(&settings, None, Vec::new(), false));
+
+        let with_parallel = launch_key(
+            &settings,
+            Some(&TextProfile {
+                parallel_subagents: Some(true),
+                max_subagents: Some(2),
+                ..TextProfile::default()
+            }),
+            Vec::new(),
+            false,
+        );
+        assert_ne!(base, with_parallel);
+    }
+
+    #[test]
+    fn startup_oom_detection_covers_common_backends() {
+        assert!(startup_looks_like_oom("CUDA error: out of memory"));
+        assert!(startup_looks_like_oom("ggml_metal: failed to allocate"));
+        assert!(startup_looks_like_oom("std::bad_alloc"));
+        assert!(!startup_looks_like_oom("model file not found"));
+        let message = describe_server_startup_failure(
+            "llama-server",
+            "exit status: 1",
+            "CUDA_ERROR_OUT_OF_MEMORY\nmore detail",
+        );
+        assert!(message.contains("ran out of memory"));
+        assert!(message.contains("Parallel subagents"));
     }
 
     #[test]

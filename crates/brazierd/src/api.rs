@@ -117,6 +117,16 @@ impl ApiError {
         if let Some(load) = error.downcast_ref::<ModelLoadError>() {
             return Self::model_load(load.cause.clone(), load.fork_hints.clone());
         }
+        let message = error.to_string();
+        // Local engine launch failures (OOM, bad flags, missing weights) are only
+        // useful if the person sees what the server said.
+        if crate::llama::startup_looks_like_oom(&message)
+            || message.contains("exited during startup")
+            || message.contains("ran out of memory while starting")
+            || message.contains("health check timed out")
+        {
+            return Self::engine_failure(message);
+        }
         Self::internal(error)
     }
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildSubagentMetadata,
   childEnabledTools,
+  collectSpawnPrompts,
   DEFAULT_MAX_SUBAGENTS,
   isSubagentSession,
   resolveMaxSubagents,
@@ -54,6 +55,13 @@ describe('subagent helpers', () => {
     })
   })
 
+  it('collects a single prompt or a concurrent prompts list', () => {
+    expect(collectSpawnPrompts({ prompt: ' one ' })).toEqual(['one'])
+    expect(collectSpawnPrompts({ prompts: ['a', '  ', 'b'] })).toEqual(['a', 'b'])
+    expect(collectSpawnPrompts({ prompt: 'ignored', prompts: ['x', 'y'] })).toEqual(['x', 'y'])
+    expect(collectSpawnPrompts({})).toEqual([])
+  })
+
   it('summarizes the last assistant reply', () => {
     expect(
       summarizeSubagentResult([
@@ -61,8 +69,8 @@ describe('subagent helpers', () => {
         { role: 'assistant', text: '  All done.  ' }
       ])
     ).toBe('All done.')
-    expect(
-      summarizeSubagentResult([], { failed: true, error: 'boom' })
-    ).toBe('Subagent failed: boom')
+    expect(summarizeSubagentResult([], { failed: true, error: 'boom' })).toBe(
+      'Subagent failed: boom'
+    )
   })
 })

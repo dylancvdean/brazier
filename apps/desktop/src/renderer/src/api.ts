@@ -1285,6 +1285,11 @@ export type TextProfile = {
   subagent_model?: string | null
   /** Max concurrent subagents. Null inherits the default of 2. */
   max_subagents?: number | null
+  /**
+   * When true, llama.cpp starts with enough `--parallel` slots for concurrent
+   * subagent generation. Reloads the server; shares the context KV budget.
+   */
+  parallel_subagents?: boolean | null
   loras?: LoraBinding[]
   extra_args?: string[]
 }

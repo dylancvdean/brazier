@@ -285,6 +285,7 @@ export type AgentCompactedEvent = EventBase & {
 }
 export type AgentSubagentStartedEvent = EventBase & {
   type: 'subagent-started'
+  /** Parent `spawn_subagent` tool call id. */
   toolCallId: string
   childSessionId: string
   model: string
@@ -297,6 +298,20 @@ export type AgentSubagentCompletedEvent = EventBase & {
   model: string
   status: 'completed' | 'failed' | 'cancelled'
   summary: string
+}
+/** Live nested work from a child session, for the parent's timeline pill. */
+export type AgentSubagentProgressEvent = EventBase & {
+  type: 'subagent-progress'
+  toolCallId: string
+  childSessionId: string
+  activity: {
+    id: string
+    tool?: string
+    args?: Record<string, unknown>
+    status: 'running' | 'completed' | 'failed' | 'denied' | 'awaiting-approval'
+    detail?: string
+    environment?: AgentEnvironment
+  }
 }
 
 export type AgentEvent =
@@ -316,6 +331,7 @@ export type AgentEvent =
   | AgentCompactedEvent
   | AgentSubagentStartedEvent
   | AgentSubagentCompletedEvent
+  | AgentSubagentProgressEvent
 
 /** End-of-run report the UI renders. */
 export type AgentRunSummary = {

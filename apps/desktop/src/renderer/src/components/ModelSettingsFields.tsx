@@ -700,8 +700,12 @@ function AgentFields(props: {
   profile: TextProfile
   onChange: <K extends keyof TextProfile>(key: K, value: TextProfile[K]) => void
   excludeModelId: string
+  /** Parallel slots only apply to llama.cpp launches. */
+  isLlama: boolean
 }): React.JSX.Element {
   const [chatModels, setChatModels] = useState<LocalModel[]>([])
+  const maxSubagents = props.profile.max_subagents ?? 2
+  const parallelSlots = 1 + maxSubagents
 
   useEffect(() => {
     let cancelled = false
@@ -756,6 +760,15 @@ function AgentFields(props: {
         value={props.profile.max_subagents}
         onChange={(value) => props.onChange('max_subagents', value)}
       />
+      {props.isLlama ? (
+        <ToggleField
+          label="Parallel subagents"
+          hint={`Off keeps one llama.cpp slot (safest on memory). On starts the server with --parallel ${parallelSlots} (1 + max subagents) so concurrent children can continuous-batch. The context KV budget is shared across those slots, so each stream may get less headroom, and a reload is required. Turn off or lower context if launch runs out of memory.`}
+          inherited={false}
+          value={props.profile.parallel_subagents}
+          onChange={(value) => props.onChange('parallel_subagents', value)}
+        />
+      ) : null}
     </FieldGroup>
   )
 }
@@ -962,7 +975,12 @@ function TextFields(props: SectionProps<TextProfile>): React.JSX.Element {
         />
       </FieldGroup>
 
-      <AgentFields profile={profile} onChange={set} excludeModelId={props.modelId} />
+      <AgentFields
+        profile={profile}
+        onChange={set}
+        excludeModelId={props.modelId}
+        isLlama={isLlama}
+      />
 
       {isLlama ? (
         <FieldGroup title="Loading" summary="Restarts the model when changed">

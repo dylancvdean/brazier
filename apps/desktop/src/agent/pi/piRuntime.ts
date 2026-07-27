@@ -28,6 +28,7 @@ import { accumulate, describeSummary, emptySummary } from '../core/runSummary'
 import {
   buildSubagentMetadata,
   childEnabledTools,
+  collectSpawnPrompts,
   isSubagentSession,
   resolveMaxSubagents,
   resolveSubagentModel,
@@ -383,7 +384,14 @@ class PiAgentSession implements AgentSession {
           // Schema and coerces primitives before calling execute.
           parameters: definition.inputSchema as unknown as TSchema,
           prepareArguments: (args) => repairToolArguments(args, definition),
-          executionMode: definition.executes ? 'sequential' : undefined,
+          // Shell/process tools stay sequential. spawn_subagent must NOT — otherwise
+          // concurrent children serialize even when the model emits several calls.
+          executionMode:
+            definition.name === SPAWN_SUBAGENT_TOOL
+              ? undefined
+              : definition.executes
+                ? 'sequential'
+                : undefined,
           execute: async (toolCallId, params, signal) => {
             const runId = this.currentRunId ?? 'run'
             this.toolsThisTurn += 1
@@ -744,9 +752,9 @@ export class PiAgentRuntime implements AgentRuntime {
   }
 
   /**
-   * Create a depth-1 child Pi session, run the prompt, and return its summary
-   * as the parent's tool result. Approvals from the child are forwarded onto
-   * the parent's event stream so the UI can answer them while waiting.
+   * Create depth-1 child Pi session(s), run prompts (concurrently when several),
+   * and return their summaries as the parent's tool result. Approvals from
+   * children are forwarded onto the parent's event stream.
    */
   async spawnSubagent(
     parent: PiAgentSession,
@@ -770,9 +778,10 @@ export class PiAgentRuntime implements AgentRuntime {
       return fail('Subagents cannot spawn further subagents.')
     }
 
-    const prompt =
-      typeof request.args.prompt === 'string' ? request.args.prompt.trim() : ''
-    if (!prompt) return fail('`prompt` is required.')
+    const prompts = collectSpawnPrompts(request.args)
+    if (prompts.length === 0) {
+      return fail('Provide `prompt` or a non-empty `prompts` array.')
+    }
 
     let profile
     try {
@@ -782,9 +791,11 @@ export class PiAgentRuntime implements AgentRuntime {
     }
     const max = resolveMaxSubagents(profile)
     const inFlight = this.childrenByParent.get(parent.id)?.size ?? 0
-    if (inFlight >= max) {
+    if (inFlight + prompts.length > max) {
       return fail(
-        `Already running ${inFlight} subagent(s); max concurrent is ${max}. Wait for one to finish.`
+        `This would run ${inFlight + prompts.length} subagent(s); max concurrent is ${max}` +
+          (inFlight > 0 ? ` (${inFlight} already running)` : '') +
+          '. Shrink `prompts` or wait for a child to finish.'
       )
     }
 
@@ -793,6 +804,61 @@ export class PiAgentRuntime implements AgentRuntime {
     const parentToolNames =
       parentState.enabledTools ?? catalog.map((tool) => tool.name)
     const enabled = childEnabledTools(parentToolNames)
+    const childTools = catalog.filter((tool) => enabled.includes(tool.name))
+    const { inferModelCapabilities } = await import('../core/modelCompat')
+    const capabilities = inferModelCapabilities(modelId)
+
+    const results = await Promise.all(
+      prompts.map((prompt, index) =>
+        this.runOneSubagent({
+          parent,
+          request,
+          prompt,
+          index,
+          total: prompts.length,
+          modelId,
+          enabled,
+          childTools,
+          capabilities
+        })
+      )
+    )
+
+    const output =
+      results.length === 1
+        ? results[0]!.summary
+        : results
+            .map((result, index) => {
+              const label = prompts[index]!.length > 60 ? `${prompts[index]!.slice(0, 60)}…` : prompts[index]
+              return `### Subagent ${index + 1}: ${label}\nStatus: ${result.status}\n${result.summary}`
+            })
+            .join('\n\n')
+
+    return {
+      output,
+      isError: results.some((result) => result.status !== 'completed'),
+      denied: false,
+      environment: 'sandbox',
+      sandbox,
+      changedPaths: [],
+      truncated: false,
+      durationMs: Date.now() - started
+    }
+  }
+
+  private async runOneSubagent(options: {
+    parent: PiAgentSession
+    request: ExecuteToolRequest
+    prompt: string
+    index: number
+    total: number
+    modelId: string
+    enabled: string[]
+    childTools: AgentToolDefinition[]
+    capabilities: CreateAgentSessionOptions['capabilities']
+  }): Promise<{ status: 'completed' | 'failed' | 'cancelled'; summary: string }> {
+    const { parent, request, prompt, modelId } = options
+    const parentState = parent.getState()
 
     let childRecord
     try {
@@ -802,7 +868,7 @@ export class PiAgentRuntime implements AgentRuntime {
         model: modelId,
         permission_mode: parentState.permissionMode,
         permission_settings: parentState.permissionSettings,
-        enabled_tools: enabled
+        enabled_tools: options.enabled
       })
       const metadata = buildSubagentMetadata(
         parent.id,
@@ -812,7 +878,13 @@ export class PiAgentRuntime implements AgentRuntime {
         runtime_metadata: metadata
       })
     } catch (cause) {
-      return fail(cause instanceof Error ? cause.message : String(cause))
+      return {
+        status: 'failed',
+        summary: summarizeSubagentResult([], {
+          failed: true,
+          error: cause instanceof Error ? cause.message : String(cause)
+        })
+      }
     }
 
     this.trackChild(parent.id, childRecord.id)
@@ -837,15 +909,13 @@ export class PiAgentRuntime implements AgentRuntime {
         await this.broker.cancel(childRecord.id).catch(() => undefined)
       } else {
         const promptPayload = await this.broker.systemPrompt(childRecord.id)
-        const childTools = catalog.filter((tool) => enabled.includes(tool.name))
-        const { inferModelCapabilities } = await import('../core/modelCompat')
         const childSession = (await this.createSession({
           sessionId: childRecord.id,
           model: { id: modelId, name: modelId },
           systemPrompt: promptPayload.system_prompt,
-          tools: childTools,
+          tools: options.childTools,
           messages: [],
-          capabilities: inferModelCapabilities(modelId)
+          capabilities: options.capabilities
         })) as PiAgentSession
 
         const abortChild = (): void => {
@@ -854,14 +924,16 @@ export class PiAgentRuntime implements AgentRuntime {
         request.signal?.addEventListener('abort', abortChild, { once: true })
         try {
           for await (const event of childSession.run({ text: prompt })) {
-            if (
-              event.type === 'approval-required' ||
-              event.type === 'elevation-requested'
-            ) {
-              // Keep child session id on the event so approvals stay keyed correctly,
-              // but deliver on the parent's stream while the parent tool is waiting.
+            if (event.type === 'approval-required' || event.type === 'elevation-requested') {
               parent.forwardEvent(event)
             }
+            const progress = subagentProgressFromChildEvent(
+              event,
+              request.toolCallId,
+              childRecord.id,
+              request.runId
+            )
+            if (progress) parent.forwardEvent(progress)
           }
         } finally {
           request.signal?.removeEventListener('abort', abortChild)
@@ -904,16 +976,7 @@ export class PiAgentRuntime implements AgentRuntime {
       summary
     })
 
-    return {
-      output: summary,
-      isError: status !== 'completed',
-      denied: false,
-      environment: 'sandbox',
-      sandbox,
-      changedPaths: [],
-      truncated: false,
-      durationMs: Date.now() - started
-    }
+    return { status, summary }
   }
 
   async createSession(options: CreateAgentSessionOptions): Promise<AgentSession> {
@@ -978,5 +1041,86 @@ export class PiAgentRuntime implements AgentRuntime {
     }
     this.sessions.clear()
     this.childrenByParent.clear()
+  }
+}
+
+/** Map a child-session event into a parent-scoped progress update for the UI. */
+function subagentProgressFromChildEvent(
+  event: AgentEvent,
+  parentToolCallId: string,
+  childSessionId: string,
+  runId: string
+): Extract<AgentEvent, { type: 'subagent-progress' }> | null {
+  const base = {
+    type: 'subagent-progress' as const,
+    sessionId: event.sessionId,
+    runId,
+    timestamp: event.timestamp,
+    sequence: event.sequence,
+    toolCallId: parentToolCallId,
+    childSessionId
+  }
+  switch (event.type) {
+    case 'tool-started':
+      return {
+        ...base,
+        sessionId: event.sessionId,
+        activity: {
+          id: event.toolCallId,
+          tool: event.tool,
+          args: event.args,
+          status: 'running',
+          environment: event.environment
+        }
+      }
+    case 'tool-completed':
+      return {
+        ...base,
+        activity: {
+          id: event.toolCallId,
+          tool: event.tool,
+          status: 'completed',
+          detail: event.output.slice(0, 500),
+          environment: event.environment
+        }
+      }
+    case 'tool-failed':
+      return {
+        ...base,
+        activity: {
+          id: event.toolCallId,
+          tool: event.tool,
+          status: event.denied ? 'denied' : 'failed',
+          detail: event.error.slice(0, 500),
+          environment: event.environment
+        }
+      }
+    case 'approval-required':
+      return {
+        ...base,
+        activity: {
+          id: event.toolCallId,
+          tool: event.approval.tool,
+          args: event.approval.arguments,
+          status: 'awaiting-approval',
+          detail: event.approval.summary,
+          environment: event.approval.environment
+        }
+      }
+    case 'message-committed': {
+      if (event.message.role !== 'assistant') return null
+      const text = event.message.text?.trim()
+      if (!text || text === 'null') return null
+      return {
+        ...base,
+        activity: {
+          id: `msg-${event.sequence}`,
+          status: 'completed',
+          detail: text.length > 400 ? `${text.slice(0, 400)}…` : text
+        }
+      }
+    }
+    default:
+      return null
   }
 }

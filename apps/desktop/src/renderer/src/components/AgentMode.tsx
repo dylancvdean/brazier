@@ -92,6 +92,15 @@ type Props = {
 }
 
 /** One row of the activity timeline. */
+type SubagentActivity = {
+  id: string
+  tool?: string
+  args?: Record<string, unknown>
+  status: 'running' | 'completed' | 'failed' | 'denied' | 'awaiting-approval'
+  detail?: string
+  environment?: 'sandbox' | 'host'
+}
+
 type TimelineEntry = {
   toolCallId: string
   tool: string
@@ -113,6 +122,8 @@ type TimelineEntry = {
     childSessionId: string
     model: string
     status: 'running' | 'completed' | 'failed' | 'cancelled'
+    prompt: string
+    activity: SubagentActivity[]
   }
 }
 
@@ -184,9 +195,14 @@ export function groupAgentSessionsByDirectory(
 }
 
 function argsPreview(tool: string, args: Record<string, unknown>): string {
-  if (tool === 'spawn_subagent' && typeof args.prompt === 'string') {
-    const prompt = args.prompt.trim()
-    return prompt.length > 80 ? `${prompt.slice(0, 80)}…` : prompt
+  if (tool === 'spawn_subagent') {
+    if (typeof args.prompt === 'string') {
+      const prompt = args.prompt.trim()
+      return prompt.length > 80 ? `${prompt.slice(0, 80)}…` : prompt
+    }
+    if (Array.isArray(args.prompts) && args.prompts.length > 0) {
+      return `${args.prompts.length} tasks`
+    }
   }
   if (typeof args.command === 'string') return args.command
   if (typeof args.path === 'string') return args.path
@@ -197,6 +213,17 @@ function argsPreview(tool: string, args: Record<string, unknown>): string {
   if (typeof args.process_id === 'string') return args.process_id
   const json = JSON.stringify(args)
   return json === '{}' ? tool : json.slice(0, 120)
+}
+
+function activityPreview(activity: SubagentActivity): string {
+  if (activity.tool && activity.args) {
+    return `${activity.tool} · ${argsPreview(activity.tool, activity.args)}`
+  }
+  if (activity.tool) return activity.tool
+  if (activity.detail) {
+    return activity.detail.length > 100 ? `${activity.detail.slice(0, 100)}…` : activity.detail
+  }
+  return activity.status
 }
 
 /** Timeline rows rebuilt from what the daemon persisted, for a restored session. */
@@ -472,10 +499,15 @@ function TimelineRow({
             ? 'refused'
             : entry.status
   const title = entry.subagent
-    ? `Subagent · ${entry.subagent.model}`
+    ? `Subagent · ${shortModelLabel(entry.subagent.model)}`
     : entry.tool
+  const preview = entry.subagent
+    ? entry.subagent.prompt.length > 80
+      ? `${entry.subagent.prompt.slice(0, 80)}…`
+      : entry.subagent.prompt
+    : argsPreview(entry.tool, entry.args)
   return (
-    <details className={`agent-tool ${entry.status}`}>
+    <details className={`agent-tool ${entry.status}${entry.subagent ? ' agent-tool-subagent' : ''}`}>
       <summary>
         {entry.status === 'running' || entry.subagent?.status === 'running' ? (
           <LoaderCircle className="spin" size={13} />
@@ -487,13 +519,26 @@ function TimelineRow({
           <X size={13} />
         )}
         <strong>{title}</strong>
-        <span className="agent-tool-args">{argsPreview(entry.tool, entry.args)}</span>
+        <span className="agent-tool-args">{preview}</span>
         <span className={`agent-env ${entry.environment}`}>
           {entry.environment === 'host' ? 'host' : 'sandbox'}
         </span>
         <span className="agent-tool-status">{statusLabel}</span>
       </summary>
       <div className="agent-tool-body">
+        {entry.subagent && entry.subagent.activity.length > 0 ? (
+          <ul className="agent-subagent-activity">
+            {entry.subagent.activity.map((item) => (
+              <li key={item.id} className={`agent-subagent-activity-item ${item.status}`}>
+                <span className="agent-subagent-activity-status">{item.status}</span>
+                <span className="agent-subagent-activity-preview">{activityPreview(item)}</span>
+                {item.detail && item.tool ? (
+                  <pre className="agent-subagent-activity-detail">{item.detail}</pre>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        ) : null}
         {entry.sandbox && !entry.sandbox.isolated && entry.status !== 'awaiting-approval' && (
           <p className="agent-tool-caveat">
             <AlertTriangle size={12} /> Ran without OS isolation. {entry.sandbox.detail}
@@ -502,7 +547,7 @@ function TimelineRow({
         {entry.changedPaths && entry.changedPaths.length > 0 && (
           <p className="agent-tool-changed">Changed: {entry.changedPaths.join(', ')}</p>
         )}
-        <pre>{entry.error ?? entry.output ?? '(no output yet)'}</pre>
+        <pre>{entry.error ?? entry.output ?? (entry.subagent ? '(working…)' : '(no output yet)')}</pre>
         {entry.truncated && entry.artifactId && (
           <button type="button" onClick={() => onShowFull(entry.artifactId!)}>
             Show full output
@@ -515,6 +560,11 @@ function TimelineRow({
       </div>
     </details>
   )
+}
+
+function shortModelLabel(modelId: string): string {
+  const leaf = modelId.split('/').at(-1) ?? modelId
+  return leaf.length > 28 ? `${leaf.slice(0, 28)}…` : leaf
 }
 
 export function AgentMode(props: Props): React.JSX.Element {
@@ -593,6 +643,9 @@ export function AgentMode(props: Props): React.JSX.Element {
         return
       }
       case 'tool-started': {
+        // Individual child pills come from subagent-started; skip the aggregate
+        // spawn_subagent row so "2 tasks" never collapses into one pill.
+        if (event.tool === 'spawn_subagent') return
         setTimeline((current) => [
           ...current.filter((entry) => entry.toolCallId !== event.toolCallId),
           {
@@ -614,15 +667,36 @@ export function AgentMode(props: Props): React.JSX.Element {
             : [...current, event.approval]
         )
         setTimeline((current) =>
-          current.map((entry) =>
-            entry.toolCallId === event.toolCallId
-              ? { ...entry, status: 'awaiting-approval', environment: event.approval.environment }
-              : entry
-          )
+          current.map((entry) => {
+            if (entry.toolCallId === event.toolCallId) {
+              return {
+                ...entry,
+                status: 'awaiting-approval',
+                environment: event.approval.environment
+              }
+            }
+            if (!entry.subagent) return entry
+            const activity = entry.subagent.activity
+            const hit = activity.some((item) => item.id === event.toolCallId)
+            if (!hit) return entry
+            return {
+              ...entry,
+              status: 'awaiting-approval',
+              subagent: {
+                ...entry.subagent,
+                activity: activity.map((item) =>
+                  item.id === event.toolCallId
+                    ? { ...item, status: 'awaiting-approval' as const }
+                    : item
+                )
+              }
+            }
+          })
         )
         return
       }
       case 'tool-completed': {
+        if (event.tool === 'spawn_subagent') return
         setTimeline((current) =>
           current.map((entry) =>
             entry.toolCallId === event.toolCallId
@@ -644,6 +718,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         return
       }
       case 'tool-failed': {
+        if (event.tool === 'spawn_subagent') return
         setTimeline((current) =>
           current.map((entry) =>
             entry.toolCallId === event.toolCallId
@@ -661,27 +736,57 @@ export function AgentMode(props: Props): React.JSX.Element {
         return
       }
       case 'subagent-started': {
+        setTimeline((current) => [
+          ...current.filter(
+            (entry) =>
+              entry.toolCallId !== event.childSessionId &&
+              !(entry.tool === 'spawn_subagent' && !entry.subagent && entry.toolCallId === event.toolCallId)
+          ),
+          {
+            toolCallId: event.childSessionId,
+            tool: 'spawn_subagent',
+            args: { prompt: event.prompt },
+            environment: 'sandbox',
+            status: 'running',
+            timestamp: event.timestamp,
+            subagent: {
+              childSessionId: event.childSessionId,
+              model: event.model,
+              status: 'running',
+              prompt: event.prompt,
+              activity: []
+            }
+          }
+        ])
+        return
+      }
+      case 'subagent-progress': {
         setTimeline((current) =>
-          current.map((entry) =>
-            entry.toolCallId === event.toolCallId
-              ? {
-                  ...entry,
-                  status: 'running',
-                  subagent: {
-                    childSessionId: event.childSessionId,
-                    model: event.model,
-                    status: 'running'
-                  }
-                }
-              : entry
-          )
+          current.map((entry) => {
+            if (entry.subagent?.childSessionId !== event.childSessionId) return entry
+            const activity = [...entry.subagent.activity]
+            const index = activity.findIndex((item) => item.id === event.activity.id)
+            if (index >= 0) activity[index] = { ...activity[index], ...event.activity }
+            else activity.push(event.activity)
+            const waiting = event.activity.status === 'awaiting-approval'
+            const nextStatus = waiting
+              ? 'awaiting-approval'
+              : entry.status === 'awaiting-approval'
+                ? 'running'
+                : entry.status
+            return {
+              ...entry,
+              status: nextStatus,
+              subagent: { ...entry.subagent, activity }
+            }
+          })
         )
         return
       }
       case 'subagent-completed': {
         setTimeline((current) =>
           current.map((entry) =>
-            entry.toolCallId === event.toolCallId
+            entry.subagent?.childSessionId === event.childSessionId
               ? {
                   ...entry,
                   status:
@@ -693,7 +798,7 @@ export function AgentMode(props: Props): React.JSX.Element {
                   output: event.summary,
                   error: event.status === 'completed' ? undefined : event.summary,
                   subagent: {
-                    childSessionId: event.childSessionId,
+                    ...entry.subagent,
                     model: event.model,
                     status: event.status
                   }

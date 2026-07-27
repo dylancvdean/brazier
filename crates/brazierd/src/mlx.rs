@@ -204,7 +204,11 @@ impl MlxServer {
                     let _ = pipe.read_to_end(&mut buf).await;
                     stderr = String::from_utf8_lossy(&buf).into_owned();
                 }
-                anyhow::bail!("MLX server exited during startup with {status}: {stderr}");
+                anyhow::bail!(crate::llama::describe_server_startup_failure(
+                    "MLX server",
+                    status,
+                    &stderr
+                ));
             }
             match client.get(&health_url).send().await {
                 Ok(response) if response.status().is_success() => break,

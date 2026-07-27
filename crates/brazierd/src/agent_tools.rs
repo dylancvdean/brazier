@@ -330,22 +330,30 @@ fn raw_definitions() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "spawn_subagent",
-            "Start a sandboxed child agent on a focused subtask and wait for its final answer. \
-             Use for parallel investigation or isolated work that should not clutter this \
-             transcript. Pass a clear prompt; optionally override the model. Nested subagents \
-             are not allowed.",
+            "Start one or more sandboxed child agents and wait for their answers. For \
+             independent work, pass several tasks in `prompts` in a single call (or emit \
+             multiple spawn_subagent tool calls in the same turn) so they run concurrently — \
+             do not wait for one child before starting the next. Nested subagents are not \
+             allowed.",
             object_with_reason(
                 json!({
                     "prompt": {
                         "type": "string",
-                        "description": "Task for the child agent. Be specific about files, checks, and the expected result."
+                        "description": "Task for a single child agent. Prefer `prompts` when you have several independent tasks."
+                    },
+                    "prompts": {
+                        "type": "array",
+                        "description": "Independent tasks to run concurrently in this one call, up to the session max. Prefer this over calling spawn_subagent once per task across turns.",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": 8
                     },
                     "model": {
                         "type": "string",
                         "description": "Optional Brazier model id. Defaults to the parent profile's subagent model, then this model."
                     }
                 }),
-                vec!["prompt"],
+                vec![],
             ),
         ),
     ]
@@ -403,8 +411,9 @@ pub fn system_prompt(
     };
 
     let spawn_line = if tool_names.iter().any(|name| name == "spawn_subagent") {
-        "- Use spawn_subagent for focused parallel work; pass a complete prompt and wait for its \
-           summary. Do not nest further subagents.\n"
+        "- Use spawn_subagent for focused parallel work. When tasks are independent, pass them \
+           together in `prompts` (or issue several spawn_subagent calls in the same turn) so \
+           children run concurrently — do not serialize one child after another across turns.\n"
     } else {
         ""
     };

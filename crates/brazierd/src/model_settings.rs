@@ -186,6 +186,10 @@ pub struct TextProfile {
     pub subagent_model: Option<String>,
     /// Max concurrent subagents a parent may run. Default 2 when unset.
     pub max_subagents: Option<u32>,
+    /// When true, llama-server starts with `--parallel = 1 + max_subagents` so
+    /// concurrent subagent generations can continuous-batch. Off by default
+    /// because the context budget is shared across slots.
+    pub parallel_subagents: Option<bool>,
 
     // --- adapters ---
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -527,6 +531,27 @@ fn validate_text(profile: &TextProfile) -> anyhow::Result<()> {
     ensure_range(profile.max_subagents, 1, 8, "max subagents")?;
     validate_loras(&profile.loras)?;
     validate_extra_args(&profile.extra_args)
+}
+
+/// Default `max_subagents` when the profile leaves it unset.
+pub const DEFAULT_MAX_SUBAGENTS: u32 = 2;
+
+/// llama-server `--parallel` slots for a text profile.
+///
+/// Off (default): 1. On: `1 + max_subagents` so the parent plus concurrent
+/// children can share continuous batching.
+pub fn llama_parallel_slots(profile: Option<&TextProfile>) -> u32 {
+    let enabled = profile
+        .and_then(|profile| profile.parallel_subagents)
+        .unwrap_or(false);
+    if !enabled {
+        return 1;
+    }
+    let max = profile
+        .and_then(|profile| profile.max_subagents)
+        .unwrap_or(DEFAULT_MAX_SUBAGENTS)
+        .clamp(1, 8);
+    1 + max
 }
 
 fn validate_diffusion(profile: &DiffusionProfile) -> anyhow::Result<()> {
@@ -963,6 +988,34 @@ mod tests {
             })
             .validate("gguf:acme/model.gguf")
             .is_err()
+        );
+    }
+
+    #[test]
+    fn llama_parallel_slots_follow_the_toggle_and_max() {
+        assert_eq!(llama_parallel_slots(None), 1);
+        assert_eq!(
+            llama_parallel_slots(Some(&TextProfile {
+                parallel_subagents: Some(false),
+                max_subagents: Some(4),
+                ..TextProfile::default()
+            })),
+            1
+        );
+        assert_eq!(
+            llama_parallel_slots(Some(&TextProfile {
+                parallel_subagents: Some(true),
+                ..TextProfile::default()
+            })),
+            1 + DEFAULT_MAX_SUBAGENTS
+        );
+        assert_eq!(
+            llama_parallel_slots(Some(&TextProfile {
+                parallel_subagents: Some(true),
+                max_subagents: Some(4),
+                ..TextProfile::default()
+            })),
+            5
         );
     }
 
