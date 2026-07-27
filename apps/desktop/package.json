@@ -19,14 +19,18 @@
     "@earendil-works/pi-ai": "0.82.1",
     "@fontsource-variable/inter": "^5.2.8",
     "@ricky0123/vad-web": "0.0.30",
+    "katex": "^0.18.1",
     "lucide-react": "^0.468.0",
     "onnxruntime-web": "1.27.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
+    "@types/katex": "^0.16.8",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",

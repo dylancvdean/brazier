@@ -1374,6 +1374,21 @@ code {
   margin-right: 6px;
 }
 
+.markdown-body .katex {
+  font-size: 1.05em;
+}
+
+.markdown-body .katex-display {
+  margin: 12px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+
+.markdown-body .katex-error {
+  color: #e8a0a0;
+}
+
 .media-row {
   display: flex;
   flex-wrap: wrap;
