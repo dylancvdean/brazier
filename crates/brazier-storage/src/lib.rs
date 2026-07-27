@@ -1,0 +1,5 @@
+//! Persistent repositories and content-addressed media storage.
+
+pub mod agent_store;
+pub mod blob_store;
+pub mod db;

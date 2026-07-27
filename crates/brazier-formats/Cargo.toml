@@ -1,0 +1,13 @@
+[package]
+name = "brazier-formats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Binary model and media format utilities used by Brazier"
+
+[dependencies]
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20"

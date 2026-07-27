@@ -228,7 +228,40 @@ dependencies = [
 ]
 
 [[package]]
-name = "brazierd"
+name = "brazier-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "brazier-protocol",
+ "brazier-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "brazier-formats"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
+]
+
+[[package]]
+name = "brazier-protocol"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+]
+
+[[package]]
+name = "brazier-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -236,27 +269,68 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
- "clap",
+ "brazier-formats",
+ "brazier-protocol",
+ "brazier-storage",
  "flate2",
  "futures",
  "hex",
- "http-body-util",
  "reqwest",
  "rquickjs",
  "serde",
  "serde_json",
  "sha2",
- "sqlx",
  "tar",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zip",
+]
+
+[[package]]
+name = "brazier-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "brazier-protocol",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "brazierd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "base64",
+ "brazier-agent",
+ "brazier-formats",
+ "brazier-protocol",
+ "brazier-runtime",
+ "brazier-storage",
+ "clap",
+ "http-body-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
- "zip",
 ]
 
 [[package]]

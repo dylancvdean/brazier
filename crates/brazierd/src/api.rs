@@ -56,15 +56,15 @@ async fn track_streamed_download(
     let payload = serde_json::to_string(work).map_err(ApiError::internal)?;
     let job = state
         .db
-        .create_queued_download_job(
-            &work.repo_id(),
-            &work.filename(),
-            &work.revision(),
-            work.kind(),
-            Some(&payload),
-            Some(&work.label()),
-            "downloading",
-        )
+        .create_queued_download_job(crate::db::QueuedDownloadJobInput {
+            repo_id: &work.repo_id(),
+            filename: &work.filename(),
+            revision: &work.revision(),
+            kind: work.kind(),
+            payload: Some(&payload),
+            label: Some(&work.label()),
+            status: "downloading",
+        })
         .await
         .map_err(ApiError::internal)?;
     let cancel = state.active_downloads.register(&job.id);
@@ -1813,13 +1813,15 @@ async fn download_adapter(
     if !query.stream {
         let result = download::download_adapter_with_progress(
             &state.http,
-            &state.data_dir,
-            kind,
-            &request.repo_id,
-            &request.revision,
-            &request.filename,
+            download::AdapterDownload {
+                data_dir: &state.data_dir,
+                kind,
+                repo_id: &request.repo_id,
+                revision: &request.revision,
+                filename: &request.filename,
+                cancel: None,
+            },
             Box::new(|_| {}),
-            None,
         )
         .await;
         return match result {
@@ -1835,13 +1837,15 @@ async fn download_adapter(
         let progress_tx = tx.clone();
         let result = download::download_adapter_with_progress(
             &http,
-            &data_dir,
-            kind,
-            &request.repo_id,
-            &request.revision,
-            &request.filename,
+            download::AdapterDownload {
+                data_dir: &data_dir,
+                kind,
+                repo_id: &request.repo_id,
+                revision: &request.revision,
+                filename: &request.filename,
+                cancel: None,
+            },
             Box::new(move |event| push_progress(&progress_tx, event)),
-            None,
         )
         .await;
         if let Err(error) = result {
@@ -2924,15 +2928,15 @@ async fn enqueue_work(
     let payload = serde_json::to_string(&work).map_err(ApiError::internal)?;
     let job = state
         .db
-        .create_queued_download_job(
-            &work.repo_id(),
-            &work.filename(),
-            &work.revision(),
-            work.kind(),
-            Some(&payload),
-            Some(&work.label()),
-            "pending",
-        )
+        .create_queued_download_job(crate::db::QueuedDownloadJobInput {
+            repo_id: &work.repo_id(),
+            filename: &work.filename(),
+            revision: &work.revision(),
+            kind: work.kind(),
+            payload: Some(&payload),
+            label: Some(&work.label()),
+            status: "pending",
+        })
         .await
         .map_err(ApiError::bad_request)?;
     state
@@ -3767,7 +3771,7 @@ async fn chat_completions(
             .runtime
             .generate(&request)
             .await
-            .map_err(|error| ApiError::from_anyhow(error))?;
+            .map_err(ApiError::from_anyhow)?;
         let mut message = json!({
             "role": "assistant",
             "content": if generation.text.is_empty() {
@@ -3810,7 +3814,7 @@ async fn chat_completions(
         .runtime
         .generate_stream(&request)
         .await
-        .map_err(|error| ApiError::from_anyhow(error))?;
+        .map_err(ApiError::from_anyhow)?;
     let events = stream! {
         // Set once a terminal finish_reason has been sent, so the closing chunk
         // does not overwrite `tool_calls` with `stop`. Clients that map the last
@@ -4230,13 +4234,12 @@ async fn delete_agent_session(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     state.agent_broker.terminate_session_processes(&id).await;
-    if let Ok(session) = state.db.agent_session(&id).await {
-        if let Some(info) =
+    if let Ok(session) = state.db.agent_session(&id).await
+        && let Some(info) =
             crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
-        {
-            // Best-effort cleanup: a leftover worktree is annoying, not fatal.
-            let _ = crate::agent_worktree::remove_worktree(&info).await;
-        }
+    {
+        // Best-effort cleanup: a leftover worktree is annoying, not fatal.
+        let _ = crate::agent_worktree::remove_worktree(&info).await;
     }
     state
         .db
@@ -4361,13 +4364,13 @@ async fn agent_exec_tool(
         .agent_session(&request.session_id)
         .await
         .map_err(|error| ApiError::not_found(error.to_string()))?;
-    if let Some(enabled) = &session.enabled_tools {
-        if !enabled.iter().any(|name| name == &request.tool) {
-            return Err(ApiError::bad_request(format!(
-                "tool `{}` is not enabled for this session",
-                request.tool
-            )));
-        }
+    if let Some(enabled) = &session.enabled_tools
+        && !enabled.iter().any(|name| name == &request.tool)
+    {
+        return Err(ApiError::bad_request(format!(
+            "tool `{}` is not enabled for this session",
+            request.tool
+        )));
     }
     let context = crate::agent_exec::BrokerContext {
         broker: state.agent_broker.as_ref(),
@@ -4529,16 +4532,14 @@ async fn set_worktree_confinement(
     session: crate::agent_types::AgentSessionRecord,
     enabled: bool,
 ) -> ApiResult<crate::agent_types::AgentSessionRecord> {
-    let existing =
-        crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref());
+    let existing = crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref());
     if enabled {
         if existing.is_some() {
             return Ok(session);
         }
-        let source = session
-            .workspace_path
-            .as_deref()
-            .ok_or_else(|| ApiError::bad_request("choose a workspace before confining to a worktree"))?;
+        let source = session.workspace_path.as_deref().ok_or_else(|| {
+            ApiError::bad_request("choose a workspace before confining to a worktree")
+        })?;
         let source_path = validate_workspace_path(state, source)?;
         if !crate::agent_worktree::is_git_repository(&source_path).await {
             return Err(ApiError::bad_request(
@@ -4607,12 +4608,12 @@ fn validate_workspace_path(state: &AppState, raw: &str) -> ApiResult<PathBuf> {
             )));
         }
     }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        if resolved == home {
-            return Err(ApiError::bad_request(
-                "choose a project folder rather than the whole home directory",
-            ));
-        }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+        && resolved == home
+    {
+        return Err(ApiError::bad_request(
+            "choose a project folder rather than the whole home directory",
+        ));
     }
     Ok(resolved)
 }
@@ -4839,7 +4840,7 @@ mod tests {
         assert_eq!(held["status"], "approval_required");
         assert!(!workspace.path().join("hello.txt").exists());
         let approval_id = held["approval"]["id"].as_str().unwrap().to_owned();
-        assert_eq!(held["approval"]["summary"].as_str().is_some(), true);
+        assert!(held["approval"]["summary"].as_str().is_some());
 
         // A pending approval is visible to the UI even if the run is restarted.
         let (_, pending) = get_request(

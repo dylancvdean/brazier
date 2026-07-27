@@ -1,0 +1,22 @@
+[package]
+name = "brazier-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQLite repositories and content-addressed blob storage for Brazier"
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+brazier-protocol = { path = "../brazier-protocol", features = ["sqlx"] }
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20"

@@ -1,0 +1,18 @@
+[package]
+name = "brazier-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire types and payload transformations for Brazier clients and services"
+
+[features]
+default = []
+sqlx = ["dep:sqlx"]
+
+[dependencies]
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, optional = true }
