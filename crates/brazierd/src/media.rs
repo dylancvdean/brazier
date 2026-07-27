@@ -795,6 +795,7 @@ mod tests {
             }]),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         assert!(messages_contain_input_audio(&messages));
     }
@@ -866,6 +867,7 @@ mod tests {
             ]),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         prepare_messages(&ctx, &mut messages, None).await.unwrap();
         let parts = messages[0].content.as_array().unwrap();
@@ -915,6 +917,7 @@ mod tests {
             }]),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
         let err = prepare_messages(&ctx, &mut messages, None)
             .await

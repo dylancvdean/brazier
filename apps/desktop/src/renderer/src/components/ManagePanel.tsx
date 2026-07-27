@@ -3411,7 +3411,11 @@ function EngineSection(props: SectionProps): React.JSX.Element {
         {(
           [
             ['flash_attention', 'Flash attention', 'Faster attention with supported backends'],
-            ['jinja', 'Jinja templates', 'Required for modern chat templates and tools']
+            [
+              'jinja',
+              'Jinja templates',
+              'Always enabled for llama-server so chat templates can parse tools'
+            ]
           ] as const
         ).map(([key, title, detail]) => (
           <label key={key}>

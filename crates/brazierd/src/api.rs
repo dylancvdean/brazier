@@ -3213,6 +3213,7 @@ async fn audio_transcriptions(
         }]),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }];
     let caps = crate::types::ModelCapabilities {
         input_modalities: vec!["audio".into()],
@@ -3658,6 +3659,19 @@ async fn chat_completions(
                     });
                     yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
                 }
+                Ok(StreamEvent::Reasoning(reasoning)) => {
+                    let chunk = json!({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": { "reasoning_content": reasoning },
+                            "finish_reason": null
+                        }]
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
+                }
                 Ok(StreamEvent::Tool(invocation)) => {
                     // Brazier extension chunk: harmless to standard OpenAI clients.
                     let chunk = json!({
@@ -3772,6 +3786,7 @@ fn responses_input_to_messages(input: &Value) -> Vec<OpenAiMessage> {
             content: Value::String(text.clone()),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }],
         Value::Array(items) => items
             .iter()
@@ -3784,6 +3799,7 @@ fn responses_input_to_messages(input: &Value) -> Vec<OpenAiMessage> {
                 content: item.get("content").cloned().unwrap_or_else(|| item.clone()),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             })
             .collect(),
         other => vec![OpenAiMessage {
@@ -3791,6 +3807,7 @@ fn responses_input_to_messages(input: &Value) -> Vec<OpenAiMessage> {
             content: Value::String(text_from_content(other)),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }],
     }
 }
@@ -3858,6 +3875,7 @@ async fn responses(
                         .event("response.output_text.delta")
                         .data(json!({"type": "response.output_text.delta", "delta": content}).to_string()));
                 }
+                Ok(StreamEvent::Reasoning(_)) => {}
                 Ok(StreamEvent::Tool(invocation)) => {
                     yield Ok(Event::default()
                         .event("response.brazier.tool_call")

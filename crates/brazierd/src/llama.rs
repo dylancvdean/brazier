@@ -406,6 +406,7 @@ pub struct ToolCallFragment {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamChunk {
     pub content: Option<String>,
+    pub reasoning: Option<String>,
     pub tool_calls: Vec<ToolCallFragment>,
     pub finish_reason: Option<String>,
 }
@@ -437,6 +438,18 @@ pub fn parse_stream_chunk(data: &str) -> ChunkParse {
         .and_then(serde_json::Value::as_str)
         .filter(|text| !text.is_empty())
         .map(ToOwned::to_owned);
+    let reasoning = choice
+        .pointer("/delta/reasoning_content")
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            choice
+                .pointer("/delta/reasoning")
+                .and_then(serde_json::Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+        });
     let tool_calls: Vec<ToolCallFragment> = choice
         .pointer("/delta/tool_calls")
         .and_then(serde_json::Value::as_array)
@@ -468,11 +481,16 @@ pub fn parse_stream_chunk(data: &str) -> ChunkParse {
         .get("finish_reason")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned);
-    if content.is_none() && tool_calls.is_empty() && finish_reason.is_none() {
+    if content.is_none()
+        && reasoning.is_none()
+        && tool_calls.is_empty()
+        && finish_reason.is_none()
+    {
         return ChunkParse::Skip;
     }
     ChunkParse::Chunk(StreamChunk {
         content,
+        reasoning,
         tool_calls,
         finish_reason,
     })
@@ -645,6 +663,11 @@ fn message_to_openai_json(message: &OpenAiMessage) -> serde_json::Value {
     if let Some(tool_call_id) = &message.tool_call_id {
         json["tool_call_id"] = serde_json::json!(tool_call_id);
     }
+    if let Some(reasoning) = &message.reasoning_content {
+        if !reasoning.is_empty() {
+            json["reasoning_content"] = serde_json::Value::String(reasoning.clone());
+        }
+    }
     json
 }
 
@@ -663,6 +686,20 @@ pub fn extract_assistant_text(body: &serde_json::Value) -> anyhow::Result<String
         return Ok(text.to_owned());
     }
     anyhow::bail!("llama-server response did not include assistant content")
+}
+
+/// Extract interleaved thinking from a non-streamed chat completion body.
+pub fn extract_reasoning(body: &serde_json::Value) -> Option<String> {
+    body.pointer("/choices/0/message/reasoning_content")
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            body.pointer("/choices/0/message/reasoning")
+                .and_then(serde_json::Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -1082,8 +1119,9 @@ impl LaunchPlan {
 
     /// A fingerprint of everything that can only be applied at spawn time.
     fn key(&self, harmony: bool) -> String {
+        let reasoning_format = if harmony { "auto" } else { "deepseek" };
         format!(
-            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|jinja|rf={}|{}",
             self.context_size,
             self.batch_size,
             self.ubatch_size,
@@ -1107,10 +1145,12 @@ impl LaunchPlan {
             self.defrag_threshold,
             self.loras,
             harmony,
-        ) + &self.extra_args.join(" ")
+            reasoning_format,
+            self.extra_args.join(" "),
+        )
     }
 
-    fn apply(&self, command: &mut Command, harmony: bool) {
+    fn apply(&self, command: &mut Command, _harmony: bool) {
         command
             .arg("--ctx-size")
             .arg(self.context_size.to_string())
@@ -1130,9 +1170,10 @@ impl LaunchPlan {
         if let Some(threads) = self.threads {
             command.arg("--threads").arg(threads.to_string());
         }
-        if self.jinja || harmony {
-            command.arg("--jinja");
-        }
+        // Always enable Jinja so GGUF chat templates can parse native tool-call
+        // dialects (Qwen XML, Hermes JSON, …) into OpenAI `tool_calls`.
+        let _ = self.jinja;
+        command.arg("--jinja");
         if self.mlock {
             command.arg("--mlock");
         }
@@ -1262,11 +1303,13 @@ impl LlamaServer {
         let plan = LaunchPlan::resolve(settings, profile, loras, effective_target);
         let launch_key = plan.key(harmony);
         plan.apply(&mut command, harmony);
-        if harmony {
-            command
-                .arg("--reasoning-format")
-                .arg(crate::harmony::llama_reasoning_format());
-        }
+        // Separate think tags into `reasoning_content` so Jinja can parse tool
+        // calls from the remaining content. Harmony uses its own format value.
+        command.arg("--reasoning-format").arg(if harmony {
+            crate::harmony::llama_reasoning_format()
+        } else {
+            "deepseek"
+        });
         // Managed releases ship companion .so files next to llama-server.
         if let Some(dir) = binary.parent() {
             prepend_library_path(&mut command, dir);
@@ -1559,6 +1602,7 @@ mod tests {
                 ]),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }],
             stream: false,
             tools: None,
@@ -1602,6 +1646,7 @@ mod tests {
                 content: json!("Hello"),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }],
             stream: false,
             tools: None,
@@ -1844,5 +1889,56 @@ mod tests {
         extract_release_archive(&archive_path, &bin).unwrap();
         assert!(bin.join("llama-server").is_file());
         assert!(bin.join("libllama-server-impl.so").is_file());
+    }
+
+    #[test]
+    fn parse_stream_chunk_captures_reasoning_content() {
+        let data = r#"{"choices":[{"index":0,"delta":{"reasoning_content":"Let me think"},"finish_reason":null}]}"#;
+        match parse_stream_chunk(data) {
+            ChunkParse::Chunk(chunk) => {
+                assert_eq!(chunk.reasoning.as_deref(), Some("Let me think"));
+                assert!(chunk.content.is_none());
+                assert!(chunk.tool_calls.is_empty());
+            }
+            other => panic!("expected chunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_chunk_skips_empty_reasoning_only_when_truly_empty() {
+        let data = r#"{"choices":[{"index":0,"delta":{},"finish_reason":null}]}"#;
+        assert!(matches!(parse_stream_chunk(data), ChunkParse::Skip));
+    }
+
+    #[test]
+    fn message_json_round_trips_reasoning_for_jinja() {
+        let message = OpenAiMessage {
+            role: "assistant".into(),
+            content: json!(""),
+            tool_calls: Some(json!([{
+                "id": "call_1",
+                "type": "function",
+                "function": { "name": "run_javascript", "arguments": "{\"code\":\"1+1\"}" }
+            }])),
+            tool_call_id: None,
+            reasoning_content: Some("Need to compute.".into()),
+        };
+        let encoded = message_to_openai_json(&message);
+        assert_eq!(encoded["reasoning_content"], "Need to compute.");
+        assert_eq!(encoded["tool_calls"][0]["function"]["name"], "run_javascript");
+    }
+
+    #[test]
+    fn extract_reasoning_reads_message_field() {
+        let body = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done",
+                    "reasoning_content": "step by step"
+                }
+            }]
+        });
+        assert_eq!(extract_reasoning(&body).as_deref(), Some("step by step"));
     }
 }

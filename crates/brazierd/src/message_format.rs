@@ -21,6 +21,7 @@ fn message_to_openai_pair(message: &Message) -> Vec<OpenAiMessage> {
                 content: message_content_value(&message.content),
                 tool_calls: None,
                 tool_call_id: Some(tool_call_id.clone()),
+                reasoning_content: None,
             }];
         }
         if let Some(records) = legacy_tool_records(&message.content) {
@@ -44,6 +45,7 @@ fn message_to_openai_pair(message: &Message) -> Vec<OpenAiMessage> {
                         .collect(),
                 )),
                 tool_call_id: None,
+                reasoning_content: reasoning_from_metadata(message),
             });
             for record in records {
                 out.push(OpenAiMessage {
@@ -51,6 +53,7 @@ fn message_to_openai_pair(message: &Message) -> Vec<OpenAiMessage> {
                     content: Value::String(record.output),
                     tool_calls: None,
                     tool_call_id: Some(record.call_id),
+                    reasoning_content: None,
                 });
             }
             return out;
@@ -63,11 +66,22 @@ fn message_to_openai_pair(message: &Message) -> Vec<OpenAiMessage> {
         content: message_content_value(&message.content),
         tool_calls: message.tool_calls.clone(),
         tool_call_id: message.tool_call_id.clone(),
+        reasoning_content: reasoning_from_metadata(message),
     };
     if openai.tool_calls.is_some() && matches!(openai.content, Value::Null) {
         openai.content = Value::String(String::new());
     }
     vec![openai]
+}
+
+fn reasoning_from_metadata(message: &Message) -> Option<String> {
+    message
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("reasoning_content"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn message_content_value(content: &Value) -> Value {

@@ -44,6 +44,7 @@ import {
 import type { LocalModel } from '../api'
 import { modelDisplayName } from '../model-utils'
 import { Markdown } from './Markdown'
+import { ReasoningDisclosure } from './ReasoningDisclosure'
 
 /**
  * What the shared composer needs to drive a run. Agent mode has no input of its
@@ -1138,12 +1139,9 @@ export function AgentMode(props: Props): React.JSX.Element {
             <article className={`agent-message ${message.role}`} key={`${message.role}-${index}`}>
               <div className="avatar">{message.role === 'assistant' ? <Bot size={16} /> : 'You'}</div>
               <div className="agent-message-body">
-                {message.role === 'assistant' && message.reasoning && (
-                  <details className="agent-reasoning">
-                    <summary>Reasoning</summary>
-                    <pre>{message.reasoning}</pre>
-                  </details>
-                )}
+                {message.role === 'assistant' && message.reasoning ? (
+                  <ReasoningDisclosure text={message.reasoning} />
+                ) : null}
                 {bodyText ? <Markdown>{bodyText}</Markdown> : null}
                 {message.role === 'assistant' && message.error && (
                   <p className="agent-message-error">{message.error}</p>
@@ -1163,12 +1161,7 @@ export function AgentMode(props: Props): React.JSX.Element {
               <Bot size={16} />
             </div>
             <div className="agent-message-body">
-              {reasoning && (
-                <details className="agent-reasoning" open>
-                  <summary>Reasoning</summary>
-                  <pre>{reasoning}</pre>
-                </details>
-              )}
+              <ReasoningDisclosure text={reasoning} defaultOpen />
               {streaming ? <Markdown>{streaming}</Markdown> : null}
             </div>
           </article>

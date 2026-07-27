@@ -171,10 +171,14 @@ pub struct ModelDescriptor {
 pub struct OpenAiMessage {
     pub role: String,
     pub content: Value,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Interleaved thinking trace (Qwen 3.5+, DeepSeek, …). Must be passed back
+    /// on later turns so Jinja/llama.cpp keep parsing native tool-call dialects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

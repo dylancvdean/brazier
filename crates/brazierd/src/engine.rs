@@ -40,6 +40,8 @@ pub enum StreamEvent {
     Load { phase: String, message: String },
     /// Assistant content delta.
     Content(String),
+    /// Interleaved thinking / reasoning delta (`reasoning_content`).
+    Reasoning(String),
     /// A bundled or MCP tool was executed server-side.
     Tool(tools::ToolInvocation),
     /// Tool calls returned to the client for execution.
@@ -1703,6 +1705,7 @@ impl Runtime {
                 content: serde_json::json!(""),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             }],
             stream: false,
             tools: None,
@@ -1817,10 +1820,11 @@ impl Engine for Runtime {
                 }
             };
             let calls = llama::extract_tool_calls(&response);
+            let round_reasoning = llama::extract_reasoning(&response);
             if !tools_active || calls.is_empty() {
                 return Ok(Generation {
                     text: llama::extract_assistant_text(&response).unwrap_or_default(),
-                    reasoning: None,
+                    reasoning: round_reasoning,
                     tool_invocations: invocations,
                     client_tool_calls: Vec::new(),
                     transcript,
@@ -1830,6 +1834,7 @@ impl Engine for Runtime {
             match append_tool_round(
                 &mut request.messages,
                 round_text,
+                round_reasoning,
                 &calls,
                 &ctx,
                 &model_caps,
@@ -1880,6 +1885,7 @@ enum AppendRoundOutcome {
 async fn append_tool_round(
     messages: &mut Vec<OpenAiMessage>,
     round_text: String,
+    round_reasoning: Option<String>,
     calls: &[llama::AccumulatedToolCall],
     ctx: &ToolContext<'_>,
     model_caps: &crate::types::ModelCapabilities,
@@ -1893,6 +1899,7 @@ async fn append_tool_round(
         content: serde_json::Value::String(round_text),
         tool_calls: Some(llama::tool_calls_to_json(calls)),
         tool_call_id: None,
+        reasoning_content: round_reasoning.filter(|text| !text.is_empty()),
     };
     messages.push(assistant.clone());
     transcript.push(assistant.clone());
@@ -1916,6 +1923,7 @@ async fn append_tool_round(
             content: serde_json::Value::String(invocation.output.clone()),
             tool_calls: None,
             tool_call_id: Some(invocation.call_id.clone()),
+            reasoning_content: None,
         };
         messages.push(tool_message.clone());
         transcript.push(tool_message.clone());
@@ -2018,6 +2026,7 @@ fn generated_media_context_message(
         content: serde_json::Value::Array(parts),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     })
 }
 
@@ -2081,11 +2090,18 @@ async fn stream_tool_rounds(
         };
         let mut accumulator = llama::ToolCallAccumulator::default();
         let mut round_text = String::new();
+        let mut round_reasoning = String::new();
         while let Some(item) = chunks.recv().await {
             let chunk = item?;
             if let Some(content) = chunk.content {
                 round_text.push_str(&content);
                 if tx.send(Ok(StreamEvent::Content(content))).await.is_err() {
+                    return Ok(());
+                }
+            }
+            if let Some(reasoning) = chunk.reasoning {
+                round_reasoning.push_str(&reasoning);
+                if tx.send(Ok(StreamEvent::Reasoning(reasoning))).await.is_err() {
                     return Ok(());
                 }
             }
@@ -2107,9 +2123,15 @@ async fn stream_tool_rounds(
         }
         let mut invocations = Vec::new();
         let mut transcript = Vec::new();
+        let reasoning = if round_reasoning.is_empty() {
+            None
+        } else {
+            Some(round_reasoning)
+        };
         match append_tool_round(
             &mut request.messages,
             round_text,
+            reasoning,
             &calls,
             &ctx,
             &model_caps,
@@ -2424,6 +2446,7 @@ mod tests {
                     content: json!("hi"),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 }],
                 stream: false,
                 tools: None,
@@ -2454,6 +2477,7 @@ mod tests {
                     content: json!("hi"),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 }],
                 stream: false,
                 tools: None,

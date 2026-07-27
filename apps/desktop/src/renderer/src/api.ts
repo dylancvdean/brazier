@@ -524,10 +524,12 @@ export type TranscriptMessagePayload = {
   content: string | ContentPart[] | null
   tool_calls?: unknown[] | null
   tool_call_id?: string | null
+  reasoning_content?: string | null
 }
 
 export type StreamCompletionResult = {
   responseText: string
+  reasoningText: string
   toolRecords: ToolCallRecord[]
   clientToolCalls: ClientToolCall[]
   transcript: TranscriptMessagePayload[]
@@ -586,6 +588,7 @@ export async function streamCompletion(
     builtinToolNames?: string[]
     toolChoice?: 'auto' | 'none' | { type: 'function'; function: { name: string } }
     onToolCall?: (record: ToolCallRecord) => void
+    onReasoning?: (token: string) => void
     onLoad?: (event: { phase: string; message: string }) => void
   }
 ): Promise<StreamCompletionResult> {
@@ -632,6 +635,7 @@ export async function streamCompletion(
   const clientToolCalls: ClientToolCall[] = []
   const transcript: TranscriptMessagePayload[] = []
   let responseText = ''
+  let reasoningText = ''
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -649,6 +653,7 @@ export async function streamCompletion(
         choices?: Array<{
           delta?: {
             content?: string
+            reasoning_content?: string
             tool_calls?: Array<{
               index?: number
               id?: string
@@ -690,6 +695,11 @@ export async function streamCompletion(
           }
         }
       }
+      const reasoningToken = chunk.choices?.[0]?.delta?.reasoning_content
+      if (reasoningToken) {
+        reasoningText += reasoningToken
+        options?.onReasoning?.(reasoningToken)
+      }
       const token = chunk.choices?.[0]?.delta?.content
       if (token) {
         responseText += token
@@ -697,7 +707,7 @@ export async function streamCompletion(
       }
     }
   }
-  return { responseText, toolRecords, clientToolCalls, transcript }
+  return { responseText, reasoningText, toolRecords, clientToolCalls, transcript }
 }
 
 export async function searchHub(query: string, engine: string): Promise<HubModel[]> {
@@ -1857,10 +1867,16 @@ type OpenAiChatMessage = {
   content?: string | ContentPart[]
   tool_calls?: OpenAiToolCall[]
   tool_call_id?: string
+  reasoning_content?: string
 }
 
 function messageContentForApi(content: string | ContentPart[]): string | ContentPart[] {
   return content
+}
+
+function reasoningFromMessage(message: Message): string | undefined {
+  const value = message.metadata?.reasoning_content
+  return typeof value === 'string' && value.trim() ? value : undefined
 }
 
 export function messagesForCompletion(messages: Message[]): OpenAiChatMessage[] {
@@ -1882,13 +1898,15 @@ export function messagesForCompletion(messages: Message[]): OpenAiChatMessage[] 
       continue
     }
     if (message.role === 'assistant' && message.tool_calls?.length) {
+      const reasoning = reasoningFromMessage(message)
       payload.push({
         role: 'assistant',
         content:
           typeof message.content === 'string'
             ? message.content
             : JSON.stringify(message.content),
-        tool_calls: message.tool_calls as OpenAiToolCall[]
+        tool_calls: message.tool_calls as OpenAiToolCall[],
+        ...(reasoning ? { reasoning_content: reasoning } : {})
       })
       continue
     }
@@ -1922,9 +1940,11 @@ export function messagesForCompletion(messages: Message[]): OpenAiChatMessage[] 
         continue
       }
     }
+    const reasoning = message.role === 'assistant' ? reasoningFromMessage(message) : undefined
     payload.push({
       role: message.role,
-      content: messageContentForApi(message.content)
+      content: messageContentForApi(message.content),
+      ...(reasoning ? { reasoning_content: reasoning } : {})
     })
   }
   return payload

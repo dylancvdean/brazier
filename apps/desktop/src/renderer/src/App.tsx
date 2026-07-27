@@ -69,6 +69,7 @@ import { DownloadTray } from './components/DownloadTray'
 import { GenerationActivity } from './components/GenerationActivity'
 import { MessageMedia } from './components/MessageMedia'
 import { Markdown } from './components/Markdown'
+import { ReasoningDisclosure } from './components/ReasoningDisclosure'
 import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
@@ -129,6 +130,11 @@ function contentText(message: Message): string {
     .filter((part): part is Extract<ContentPart, { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
     .join('\n')
+}
+
+function reasoningText(message: Message): string {
+  const value = message.metadata?.reasoning_content
+  return typeof value === 'string' ? value : ''
 }
 
 function contentMedia(message: Message): Array<'image' | 'audio' | 'video'> {
@@ -311,6 +317,7 @@ export function App(): React.JSX.Element {
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [streamingText, setStreamingText] = useState('')
+  const [streamingReasoning, setStreamingReasoning] = useState('')
   const [streamingTools, setStreamingTools] = useState<ToolCallRecord[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1022,6 +1029,7 @@ export function App(): React.JSX.Element {
     setForkHints([])
     setModelLoadStatus('Preparing model…')
     setStreamingText('')
+    setStreamingReasoning('')
     setStreamingTools([])
     const controller = new AbortController()
     abortRef.current = controller
@@ -1051,9 +1059,12 @@ export function App(): React.JSX.Element {
 
       let parentId = userMessage.id
       let responseText = ''
+      let responseReasoning = ''
       const toolRecords: ToolCallRecord[] = []
       const maxClientRounds = 4
       for (let round = 0; round < maxClientRounds; round += 1) {
+        setStreamingReasoning('')
+        let roundReasoning = ''
         const result = await streamCompletion(
           requestMessages,
           selectedModel,
@@ -1068,6 +1079,11 @@ export function App(): React.JSX.Element {
             builtinToolNames: toolsEnabled ? enabledTools : undefined,
             toolChoice: toolsEnabled ? 'auto' : undefined,
             onLoad: (event) => setModelLoadStatus(event.message),
+            onReasoning: (token) => {
+              setModelLoadStatus(null)
+              roundReasoning += token
+              setStreamingReasoning(roundReasoning)
+            },
             onToolCall: (record) => {
               toolRecords.push(record)
               setStreamingTools([...toolRecords])
@@ -1075,15 +1091,21 @@ export function App(): React.JSX.Element {
           }
         )
         responseText = result.responseText
+        responseReasoning = result.reasoningText
         for (const entry of result.transcript) {
           const role = entry.role as Role
+          const entryReasoning =
+            typeof entry.reasoning_content === 'string' ? entry.reasoning_content.trim() : ''
           const created = await createMessage(activeConversationId, {
             parent_id: parentId,
             role,
             content: entry.content ?? '',
             tool_calls: entry.tool_calls ?? null,
             tool_call_id: entry.tool_call_id ?? null,
-            model: role === 'assistant' ? selectedModel : undefined
+            model: role === 'assistant' ? selectedModel : undefined,
+            ...(role === 'assistant' && entryReasoning
+              ? { metadata: { reasoning_content: entryReasoning } }
+              : {})
           })
           requestMessages = [...requestMessages, created]
           parentId = created.id
@@ -1099,7 +1121,10 @@ export function App(): React.JSX.Element {
         parent_id: parentId,
         role: 'assistant',
         content: responseText,
-        model: selectedModel
+        model: selectedModel,
+        ...(responseReasoning.trim()
+          ? { metadata: { reasoning_content: responseReasoning } }
+          : {})
       })
       let finalTipId = assistant.id
       const generatedMedia = [
@@ -1140,6 +1165,7 @@ export function App(): React.JSX.Element {
         })
       }
       setStreamingText('')
+      setStreamingReasoning('')
       setStreamingTools([])
       setModelLoadStatus(null)
       await refreshMessages(activeConversationId, finalTipId)
@@ -1158,6 +1184,7 @@ export function App(): React.JSX.Element {
     } finally {
       setBusy(false)
       setModelLoadStatus(null)
+      setStreamingReasoning('')
       abortRef.current = undefined
     }
   }
@@ -1601,6 +1628,9 @@ export function App(): React.JSX.Element {
                         </div>
                       )}
                       <MessageMedia blobs={contentBlobs(message)} onError={setError} />
+                      {message.role === 'assistant' ? (
+                        <ReasoningDisclosure text={reasoningText(message)} />
+                      ) : null}
                       <Markdown>{contentText(message)}</Markdown>
                       <button
                         className="fork-button"
@@ -1613,7 +1643,7 @@ export function App(): React.JSX.Element {
                   </article>
                 )
               })}
-              {(liveText || streamingTools.length > 0) && (
+              {(liveText || streamingReasoning || streamingTools.length > 0) && (
                 <article className="message assistant">
                   <div className="avatar">
                     <Bot />
@@ -1626,7 +1656,8 @@ export function App(): React.JSX.Element {
                     {streamingTools.length > 0 && (
                       <ToolChips records={streamingTools} onError={setError} />
                     )}
-                    <Markdown>{liveText}</Markdown>
+                    <ReasoningDisclosure text={streamingReasoning} defaultOpen />
+                    {liveText ? <Markdown>{liveText}</Markdown> : null}
                   </div>
                 </article>
               )}
@@ -1839,9 +1870,6 @@ export function App(): React.JSX.Element {
               <>
                 Local models can be inaccurate. Verify important information.
                 {toolsEnabled && canUseTools ? ' Tools are enabled (bundled + MCP).' : ''}
-                {toolsEnabled && canUseTools && runtime && !runtime.jinja
-                  ? ' Enable Jinja templates in Engine configuration for reliable tool calling.'
-                  : ''}
                 {selectedCapabilities?.harmony
                   ? ' This model uses OpenAI Harmony (gpt-oss); reasoning is routed automatically.'
                   : ''}

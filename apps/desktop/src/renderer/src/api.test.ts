@@ -58,4 +58,32 @@ describe('messagesForCompletion', () => {
     expect(payload[0]).toEqual({ role: 'system', content })
     expect(payload[1]).toEqual({ role: 'user', content: 'What should change?' })
   })
+
+  it('round-trips assistant reasoning_content so Jinja can keep parsing tools', () => {
+    const payload = messagesForCompletion([
+      message({
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'run_javascript', arguments: '{"code":"1"}' }
+          }
+        ],
+        metadata: { reasoning_content: 'Need a calculator.' }
+      }),
+      message({
+        id: 'tool-1',
+        role: 'tool',
+        tool_call_id: 'call_1',
+        content: '1'
+      })
+    ])
+
+    expect(payload[0]).toMatchObject({
+      role: 'assistant',
+      reasoning_content: 'Need a calculator.'
+    })
+    expect(payload[1]).toMatchObject({ role: 'tool', tool_call_id: 'call_1' })
+  })
 })
