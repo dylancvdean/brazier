@@ -50,8 +50,28 @@ pub const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { name: "spawn_subagent", risk: ToolRiskLevel::Execute, executes: false, needs_workspace: false },
 ];
 
+const MCP_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: "mcp/*",
+    risk: ToolRiskLevel::Execute,
+    executes: true,
+    needs_workspace: false,
+};
+
+/// MCP names have a server and tool component. The server process itself is a
+/// host executable, so MCP calls use a conservative dynamic policy spec.
+pub fn is_mcp_tool_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("mcp/") else {
+        return false;
+    };
+    rest.split_once('/')
+        .is_some_and(|(server, tool)| !server.is_empty() && !tool.is_empty())
+}
+
 pub fn tool_spec(name: &str) -> Option<&'static ToolSpec> {
-    TOOL_SPECS.iter().find(|spec| spec.name == name)
+    TOOL_SPECS
+        .iter()
+        .find(|spec| spec.name == name)
+        .or_else(|| is_mcp_tool_name(name).then_some(&MCP_TOOL_SPEC))
 }
 
 /// A path the call wants to touch, already resolved against the workspace.
@@ -127,7 +147,11 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
         };
     }
 
-    let wants_network = argument_bool(request.arguments, "network");
+    // Configured MCP servers run as host processes and may make outbound
+    // connections. Treat that capability as requested even if a particular
+    // tool schema has no `network` argument.
+    let mcp_tool = is_mcp_tool_name(request.tool);
+    let wants_network = mcp_tool || argument_bool(request.arguments, "network");
     let paths = requested_paths(
         request.tool,
         request.arguments,
@@ -147,6 +171,9 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
 
     let escapes_workspace = paths.iter().any(|path| !path.inside_workspace);
     let mut environment = request.requested_environment;
+    if mcp_tool {
+        environment = AgentEnvironment::Host;
+    }
     // Touching anything outside the workspace is host access by definition.
     if escapes_workspace {
         environment = AgentEnvironment::Host;
@@ -776,6 +803,50 @@ mod tests {
             }
             other => panic!("expected approval, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mcp_tools_are_one_shot_host_network_actions() {
+        let backend = backend();
+        let arguments = json!({ "query": "release notes" });
+        let request = base(
+            "mcp/search/web",
+            &arguments,
+            Path::new("/ws"),
+            &backend,
+            Path::new("/data"),
+            &[],
+        );
+        match decide(&request) {
+            PolicyDecision::RequireApproval {
+                environment,
+                elevation,
+                allow_session_scope,
+                scope_key,
+                summary,
+                ..
+            } => {
+                assert_eq!(environment, AgentEnvironment::Host);
+                assert!(elevation.requested_host_execution);
+                assert!(elevation.requested_network_access);
+                assert!(!allow_session_scope);
+                assert_eq!(scope_key, "run:mcp/search/web+network");
+                assert!(summary.contains("network enabled"), "{summary}");
+            }
+            other => panic!("expected approval, got {other:?}"),
+        }
+
+        assert!(matches!(
+            decide(&base(
+                "mcp/no-tool-component",
+                &arguments,
+                Path::new("/ws"),
+                &backend,
+                Path::new("/data"),
+                &[]
+            )),
+            PolicyDecision::Deny { .. }
+        ));
     }
 
     #[test]

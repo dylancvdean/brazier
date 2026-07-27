@@ -89,6 +89,7 @@ function pendingApproval(overrides: Partial<AgentApproval> = {}): AgentApproval 
 type FakeBroker = {
   client: BrokerClient
   execTool: ReturnType<typeof vi.fn>
+  execToolStreaming: ReturnType<typeof vi.fn>
   waitForApproval: ReturnType<typeof vi.fn>
 }
 
@@ -101,14 +102,23 @@ function fakeBroker(
     if (!next) throw new Error('unexpected extra exec call')
     return next
   })
+  const execToolStreaming = vi.fn(
+    async (_request: unknown, onOutput: (chunk: string) => void) => {
+      onOutput('live output\n')
+      const next = execResponses.shift()
+      if (!next) throw new Error('unexpected extra exec call')
+      return next
+    }
+  )
   const waitForApproval = vi.fn(async () => {
     const next = approvalStates.shift()
     if (!next) throw new Error('unexpected extra approval wait')
     return next
   })
   return {
-    client: { execTool, waitForApproval } as unknown as BrokerClient,
+    client: { execTool, execToolStreaming, waitForApproval } as unknown as BrokerClient,
     execTool,
+    execToolStreaming,
     waitForApproval
   }
 }
@@ -321,6 +331,10 @@ describe('AgentToolExecutor', () => {
 
     expect(outcome.environment).toBe('host')
     expect(outcome.sandbox.isolated).toBe(false)
+    expect(events.find((event) => event.type === 'tool-output')).toMatchObject({
+      type: 'tool-output',
+      chunk: 'live output\n'
+    })
     const completedEvent = events.find((event) => event.type === 'tool-completed')
     expect(completedEvent && 'sandbox' in completedEvent && completedEvent.sandbox.isolated).toBe(
       false

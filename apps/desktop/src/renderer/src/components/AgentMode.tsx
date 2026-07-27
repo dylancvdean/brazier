@@ -660,6 +660,16 @@ export function AgentMode(props: Props): React.JSX.Element {
         ])
         return
       }
+      case 'tool-output': {
+        setTimeline((current) =>
+          current.map((entry) =>
+            entry.toolCallId === event.toolCallId
+              ? { ...entry, output: (entry.output ?? '') + event.chunk }
+              : entry
+          )
+        )
+        return
+      }
       case 'approval-required': {
         setApprovals((current) =>
           current.some((entry) => entry.id === event.approval.id)

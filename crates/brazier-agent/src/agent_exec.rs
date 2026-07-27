@@ -17,9 +17,9 @@ use std::{
 use anyhow::Context;
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
-    sync::{Mutex, Notify},
+    sync::{Mutex, Notify, mpsc},
 };
 use uuid::Uuid;
 
@@ -152,6 +152,27 @@ pub async fn execute(
     context: &BrokerContext<'_>,
     request: &ToolExecRequest,
 ) -> anyhow::Result<ToolExecResponse> {
+    execute_inner(context, request, None).await
+}
+
+/// Execute a tool while forwarding incremental output when the tool supports it.
+///
+/// The final response remains authoritative and is still bounded, persisted,
+/// and recorded exactly like a non-streamed execution. At present `shell_run`
+/// is the only foreground tool that emits chunks.
+pub async fn execute_streaming(
+    context: &BrokerContext<'_>,
+    request: &ToolExecRequest,
+    output: mpsc::UnboundedSender<String>,
+) -> anyhow::Result<ToolExecResponse> {
+    execute_inner(context, request, Some(output)).await
+}
+
+async fn execute_inner(
+    context: &BrokerContext<'_>,
+    request: &ToolExecRequest,
+    output: Option<mpsc::UnboundedSender<String>>,
+) -> anyhow::Result<ToolExecResponse> {
     let started = Instant::now();
     let Some(spec) = tool_spec(&request.tool) else {
         return Ok(denied(
@@ -277,7 +298,14 @@ pub async fn execute(
         }
     };
 
-    let outcome = run_tool(context, request, &plan, workspace.as_deref()).await;
+    let outcome = run_tool(
+        context,
+        request,
+        &plan,
+        workspace.as_deref(),
+        output.as_ref(),
+    )
+    .await;
     let mut response = match outcome {
         Ok(outcome) => {
             let (output, truncated, artifact_id) = bound_output(context, &outcome.output).await?;
@@ -557,6 +585,7 @@ async fn run_tool(
     request: &ToolExecRequest,
     plan: &CallPlan,
     workspace: Option<&Path>,
+    output: Option<&mpsc::UnboundedSender<String>>,
 ) -> anyhow::Result<ToolOutcome> {
     let arguments = &request.arguments;
     match request.tool.as_str() {
@@ -571,7 +600,7 @@ async fn run_tool(
         "fs_copy" => fs_copy(context, plan, workspace, arguments).await,
         "fs_move" => fs_move(context, plan, workspace, arguments).await,
         "fs_delete" => fs_delete(context, plan, workspace, arguments).await,
-        "shell_run" => shell_run(context, plan, workspace, arguments).await,
+        "shell_run" => shell_run(context, plan, workspace, arguments, output).await,
         "shell_start" => shell_start(context, plan, workspace, arguments).await,
         "shell_output" => shell_output(context, arguments).await,
         "shell_input" => shell_input(context, arguments).await,
@@ -591,8 +620,34 @@ async fn run_tool(
         "spawn_subagent" => anyhow::bail!(
             "`spawn_subagent` runs in the agent worker, not through the daemon exec path"
         ),
+        other if agent_policy::is_mcp_tool_name(other) => {
+            mcp_tool(context, plan, other, arguments).await
+        }
         other => anyhow::bail!("no executor for tool `{other}`"),
     }
+}
+
+async fn mcp_tool(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    name: &str,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    anyhow::ensure!(
+        plan.environment == AgentEnvironment::Host,
+        "MCP servers must run as explicitly approved host processes"
+    );
+    let (server_id, tool_name) =
+        brazier_runtime::mcp::parse_tool_name(name).context("invalid MCP tool name")?;
+    let encoded = serde_json::to_string(arguments).context("encode MCP tool arguments")?;
+    let invocation =
+        brazier_runtime::mcp::call_tool(context.data_dir, &server_id, &tool_name, &encoded).await;
+    Ok(ToolOutcome {
+        output: invocation.output,
+        is_error: invocation.is_error,
+        exit_code: None,
+        changed_paths: Vec::new(),
+    })
 }
 
 /// Validate a tool-supplied path for this call, including symlink escapes.
@@ -1204,6 +1259,7 @@ async fn shell_run(
     plan: &CallPlan,
     workspace: Option<&Path>,
     arguments: &Value,
+    output: Option<&mpsc::UnboundedSender<String>>,
 ) -> anyhow::Result<ToolOutcome> {
     let command_line = arguments
         .get("command")
@@ -1221,9 +1277,23 @@ async fn shell_run(
         .with_context(|| format!("cannot start `{command_line}`"))?;
     drop(child.stdin.take());
 
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+    let stdout = child
+        .stdout
+        .take()
+        .context("cannot capture command stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("cannot capture command stderr")?;
+    let stdout_task = tokio::spawn(read_shell_pipe(stdout, output.cloned(), None));
+    let stderr_task = tokio::spawn(read_shell_pipe(stderr, output.cloned(), Some("[stderr]\n")));
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(result) => result?,
         Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
             return Ok(ToolOutcome {
                 output: format!(
                     "`{command_line}` was still running after {} ms and was terminated.",
@@ -1235,9 +1305,9 @@ async fn shell_run(
             });
         }
     };
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let code = output.status.code();
+    let stdout = String::from_utf8_lossy(&stdout_task.await??).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_task.await??).to_string();
+    let code = status.code();
     let mut body = String::new();
     if !stdout.is_empty() {
         body.push_str(&stdout);
@@ -1263,6 +1333,38 @@ async fn shell_run(
         exit_code: code,
         changed_paths: Vec::new(),
     })
+}
+
+/// Read a child pipe without waiting for process completion, forwarding chunks
+/// to the HTTP stream while retaining the exact bytes for the final result.
+async fn read_shell_pipe<R>(
+    mut pipe: R,
+    output: Option<mpsc::UnboundedSender<String>>,
+    prefix: Option<&'static str>,
+) -> anyhow::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut collected = Vec::new();
+    let mut buffer = vec![0_u8; 8 * 1024];
+    let mut sent_prefix = false;
+    loop {
+        let count = pipe.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        collected.extend_from_slice(&buffer[..count]);
+        if let Some(sender) = &output {
+            let mut chunk = String::new();
+            if !sent_prefix {
+                chunk.push_str(prefix.unwrap_or_default());
+                sent_prefix = true;
+            }
+            chunk.push_str(&String::from_utf8_lossy(&buffer[..count]));
+            let _ = sender.send(chunk);
+        }
+    }
+    Ok(collected)
 }
 
 async fn shell_start(
@@ -1485,7 +1587,7 @@ async fn git(
     if let Value::Object(map) = &mut merged {
         map.insert("command".to_owned(), Value::String(command_line.clone()));
     }
-    shell_run(context, plan, workspace, &merged).await
+    shell_run(context, plan, workspace, &merged, None).await
 }
 
 async fn git_diff(
@@ -1925,6 +2027,42 @@ mod tests {
             .await;
         assert_eq!(failure.exit_code, Some(3));
         assert!(failure.is_error);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_run_streams_output_before_returning_the_final_result() {
+        let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        let context = harness.context();
+        let workspace = workspace_root(&harness.session)
+            .expect("workspace")
+            .expect("workspace path");
+        // This test verifies streaming, not Seatbelt itself. Host execution
+        // avoids nesting macOS sandbox-exec under a sandboxed test runner.
+        let plan = CallPlan {
+            environment: AgentEnvironment::Host,
+            profile: SandboxProfile::Workspace,
+            sandbox: harness.broker.backend().describe_host(Some(&workspace)),
+            approval_id: None,
+        };
+        let arguments = json!({
+            "command": "printf first; sleep 0.2; printf second; printf problem >&2"
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let execution = shell_run(&context, &plan, Some(&workspace), &arguments, Some(&tx));
+        tokio::pin!(execution);
+
+        let first = tokio::select! {
+            chunk = rx.recv() => chunk.expect("first streamed chunk"),
+            _ = &mut execution => panic!("execution completed before streaming output"),
+        };
+        assert!(first.contains("first"), "{first}");
+
+        let outcome = execution.await.expect("streamed execution");
+        assert!(!outcome.is_error);
+        assert!(outcome.output.contains("firstsecond"), "{}", outcome.output);
+        assert!(outcome.output.contains("problem"), "{}", outcome.output);
+        assert_eq!(outcome.exit_code, Some(0));
     }
 
     #[cfg(unix)]

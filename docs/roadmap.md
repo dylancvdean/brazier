@@ -198,8 +198,11 @@ what is left is mostly the difference between working and trustworthy.
   session in it.
 - Windows sandboxing. There is no backend today, so the daemon reports
   `isolated: false` and command execution is treated as host execution.
-- Live output streaming for `shell_run` (long commands currently report at
-  completion; `shell_start` plus `shell_output` covers the interactive case).
+- **Live output streaming for `shell_run` is in.** Foreground commands now
+  publish stdout and labelled stderr chunks into the existing agent tool
+  timeline while they run; the bounded, persisted final result remains the
+  authoritative output handed back to the model. `shell_start` plus
+  `shell_output` remains the interactive-process path.
 - **Model-generated compaction summaries** are in, alongside the deterministic
   digest rather than instead of it: the session's own model writes what was
   attempted and why an approach was abandoned, and the machine-built facts —
@@ -210,8 +213,13 @@ what is left is mostly the difference between working and trustworthy.
   already full and that is the worst moment to fail. Which half produced a
   summary is recorded on the session, and the narrative is cut at a sentence
   boundary if a model answers an eight-sentence instruction with an essay.
-- Optional MCP tools inside agent sessions, reusing the existing MCP client
-  behind the same policy broker.
+- **Optional MCP tools are available inside agent sessions.** Enabled servers'
+  advertised schemas join the agent catalog and system prompt, and the worker
+  refreshes that catalog when it opens a session. Calls reuse the existing MCP
+  client but still enter through the agent execution broker: an MCP server is
+  reported honestly as a host process with network reach, Ask mode holds every
+  call for one-shot approval, Sandbox-only mode refuses it, and disabled or
+  unadvertised tools cannot be invoked.
 
 ## Tool packs and release hardening
 

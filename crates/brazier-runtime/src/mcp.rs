@@ -147,6 +147,10 @@ pub fn catalog(data_dir: &Path) -> Value {
 }
 
 struct JsonRpcClient {
+    /// Retain ownership for the full RPC exchange. `kill_on_drop` then cleans
+    /// up the server when this client is done instead of killing it at the end
+    /// of `connect`.
+    _child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
     reader: BufReader<tokio::process::ChildStdout>,
     next_id: u64,
@@ -174,6 +178,7 @@ impl JsonRpcClient {
             .take()
             .context("MCP server process has no stdout")?;
         let mut client = Self {
+            _child: child,
             stdin,
             reader: BufReader::new(stdout),
             next_id: 1,
@@ -338,6 +343,28 @@ pub async fn call_tool(
             media: Vec::new(),
         };
     };
+    if !server.enabled {
+        return ToolInvocation {
+            call_id,
+            name: openai_tool_name(server_id, tool_name),
+            arguments: arguments.to_owned(),
+            output: format!("Error: MCP server `{server_id}` is disabled"),
+            is_error: true,
+            media: Vec::new(),
+        };
+    }
+    if !server.tools.iter().any(|tool| tool.name == tool_name) {
+        return ToolInvocation {
+            call_id,
+            name: openai_tool_name(server_id, tool_name),
+            arguments: arguments.to_owned(),
+            output: format!(
+                "Error: MCP server `{server_id}` does not advertise tool `{tool_name}`"
+            ),
+            is_error: true,
+            media: Vec::new(),
+        };
+    }
     let parsed_args: Value =
         serde_json::from_str(arguments).unwrap_or_else(|_| json!({ "input": arguments }));
     match JsonRpcClient::connect(server).await {
@@ -373,6 +400,7 @@ pub async fn call_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn round_trips_namespaced_tool_names() {
@@ -381,6 +409,40 @@ mod tests {
         assert_eq!(
             parse_tool_name(&full),
             Some(("filesystem".into(), "read_file".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn calls_only_enabled_advertised_tools() {
+        let dir = tempdir().unwrap();
+        let mut config = McpConfig {
+            servers: vec![McpServerConfig {
+                id: "demo".into(),
+                name: "Demo".into(),
+                command: "/definitely/not/a/program".into(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                enabled: false,
+                tools: vec![McpToolEntry {
+                    name: "ping".into(),
+                    description: None,
+                    input_schema: json!({ "type": "object" }),
+                }],
+            }],
+        };
+        save(dir.path(), &config).await.unwrap();
+        let disabled = call_tool(dir.path(), "demo", "ping", "{}").await;
+        assert!(disabled.is_error);
+        assert!(disabled.output.contains("disabled"), "{}", disabled.output);
+
+        config.servers[0].enabled = true;
+        save(dir.path(), &config).await.unwrap();
+        let unknown = call_tool(dir.path(), "demo", "other", "{}").await;
+        assert!(unknown.is_error);
+        assert!(
+            unknown.output.contains("does not advertise"),
+            "{}",
+            unknown.output
         );
     }
 }
