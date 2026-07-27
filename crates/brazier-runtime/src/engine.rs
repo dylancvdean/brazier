@@ -1818,18 +1818,28 @@ impl Engine for Runtime {
                     return Err(error);
                 }
             };
-            let calls = llama::extract_tool_calls(&response);
-            let round_reasoning = llama::extract_reasoning(&response);
+            let mut calls = llama::extract_tool_calls(&response);
+            let mut round_reasoning = llama::extract_reasoning(&response);
+            let mut round_text = llama::extract_assistant_text(&response).unwrap_or_default();
+            if tools_active
+                && calls.is_empty()
+                && let Some((call, thought)) = llama::extract_legacy_action(&round_text)
+            {
+                calls.push(call);
+                round_text.clear();
+                if round_reasoning.is_none() {
+                    round_reasoning = thought;
+                }
+            }
             if !tools_active || calls.is_empty() {
                 return Ok(Generation {
-                    text: llama::extract_assistant_text(&response).unwrap_or_default(),
+                    text: round_text,
                     reasoning: round_reasoning,
                     tool_invocations: invocations,
                     client_tool_calls: Vec::new(),
                     transcript,
                 });
             }
-            let round_text = llama::extract_assistant_text(&response).unwrap_or_default();
             match append_tool_round(ToolRound {
                 messages: &mut request.messages,
                 round_text,
@@ -1941,13 +1951,14 @@ async fn append_tool_round(round: ToolRound<'_>) -> AppendRoundOutcome {
         transcript.push(tool_message.clone());
         invocations.push(invocation.clone());
 
-        // Persist generated media as deferred model context. It deliberately
-        // does not enter `messages`: adding it to the live tool round made the
-        // image look like a new user turn and immediately prompted another
-        // reply. The next real user request will carry this system message.
-        let generated_context = generated_media_context_message(model_caps, settings, &invocation);
+        // Give a vision model the generated media in the same tool round so it
+        // knows the result is complete and has already been shown. Persist a
+        // blob-backed equivalent rather than putting base64 into the transcript.
+        let generated_context =
+            generated_media_context_messages(ctx.data_dir, model_caps, settings, &invocation).await;
         if let Some(context) = &generated_context {
-            transcript.push(context.clone());
+            messages.push(context.live.clone());
+            transcript.push(context.persisted.clone());
         }
         if let Some(tx) = events {
             if tx.send(Ok(StreamEvent::Tool(invocation))).await.is_err() {
@@ -1962,7 +1973,7 @@ async fn append_tool_round(round: ToolRound<'_>) -> AppendRoundOutcome {
             }
             if let Some(context) = generated_context
                 && tx
-                    .send(Ok(StreamEvent::TranscriptMessage(context)))
+                    .send(Ok(StreamEvent::TranscriptMessage(context.persisted)))
                     .await
                     .is_err()
             {
@@ -1978,17 +1989,23 @@ async fn append_tool_round(round: ToolRound<'_>) -> AppendRoundOutcome {
     AppendRoundOutcome::Continue
 }
 
-/// Build deferred system context carrying whatever a tool just generated, when
-/// the model can see it and the setting allows.
+struct GeneratedMediaContext {
+    live: OpenAiMessage,
+    persisted: OpenAiMessage,
+}
+
+/// Build immediate system context carrying whatever a tool just generated,
+/// when the model can see it and the setting allows.
 ///
-/// The message keeps blob references rather than hydrated data URLs so it is
-/// cheap to persist and render. Media preparation happens with the rest of the
-/// conversation on the user's next real turn.
-fn generated_media_context_message(
+/// The live message contains engine-ready image parts. The transcript keeps
+/// blob references so the conversation remains small and can be hydrated again
+/// when it is loaded later.
+async fn generated_media_context_messages(
+    data_dir: &std::path::Path,
     model_caps: &crate::types::ModelCapabilities,
     settings: &RuntimeSettings,
     invocation: &crate::tools::ToolInvocation,
-) -> Option<OpenAiMessage> {
+) -> Option<GeneratedMediaContext> {
     if invocation.media.is_empty() || invocation.is_error {
         return None;
     }
@@ -1999,7 +2016,8 @@ fn generated_media_context_message(
     {
         return None;
     }
-    let mut parts = Vec::new();
+    let mut persisted_parts = Vec::new();
+    let mut live_parts = Vec::new();
     for media in &invocation.media {
         let allowed = if media.mime_type.starts_with("video/") {
             settings.show_generated_video_to_model
@@ -2014,7 +2032,7 @@ fn generated_media_context_message(
         } else {
             "generated-image"
         };
-        parts.push(serde_json::json!({
+        persisted_parts.push(serde_json::json!({
             "type": "brazier_blob",
             "brazier_blob": {
                 "sha256": media.sha256.clone(),
@@ -2022,23 +2040,36 @@ fn generated_media_context_message(
                 "name": name
             }
         }));
+        if let Ok(parts) =
+            media::generated_media_parts(data_dir, &media.sha256, &media.mime_type).await
+        {
+            live_parts.extend(parts);
+        }
     }
-    if parts.is_empty() {
+    if persisted_parts.is_empty() {
         return None;
     }
-    parts.insert(
-        0,
-        serde_json::json!({
-            "type": "text",
-            "text": "Generated media from the previous assistant tool call. Use it as context when answering the user's next message; do not respond to this system context by itself."
-        }),
-    );
-    Some(OpenAiMessage {
-        role: "system".to_owned(),
-        content: serde_json::Value::Array(parts),
-        tool_calls: None,
-        tool_call_id: None,
-        reasoning_content: None,
+    let status = serde_json::json!({
+        "type": "text",
+        "text": "The requested media was generated successfully and has already been displayed to the user. It is included here so you can see the completed result. Do not call a media-generation tool again unless the user explicitly asks for another version or requests a change. Briefly confirm completion."
+    });
+    persisted_parts.insert(0, status.clone());
+    live_parts.insert(0, status);
+    Some(GeneratedMediaContext {
+        live: OpenAiMessage {
+            role: "system".to_owned(),
+            content: serde_json::Value::Array(live_parts),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        },
+        persisted: OpenAiMessage {
+            role: "system".to_owned(),
+            content: serde_json::Value::Array(persisted_parts),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        },
     })
 }
 
@@ -2103,12 +2134,39 @@ async fn stream_tool_rounds(
         let mut accumulator = llama::ToolCallAccumulator::default();
         let mut round_text = String::new();
         let mut round_reasoning = String::new();
+        let mut stream_content = None;
+        let mut pending_content = String::new();
         while let Some(item) = chunks.recv().await {
             let chunk = item?;
             if let Some(content) = chunk.content {
                 round_text.push_str(&content);
-                if tx.send(Ok(StreamEvent::Content(content))).await.is_err() {
-                    return Ok(());
+                match stream_content {
+                    Some(true) => {
+                        if tx.send(Ok(StreamEvent::Content(content))).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Some(false) => {}
+                    None => {
+                        pending_content.push_str(&content);
+                        if let Some(first) = pending_content.chars().find(|ch| !ch.is_whitespace())
+                        {
+                            if first == '{' || first == '`' {
+                                stream_content = Some(false);
+                            } else {
+                                stream_content = Some(true);
+                                if tx
+                                    .send(Ok(StreamEvent::Content(std::mem::take(
+                                        &mut pending_content,
+                                    ))))
+                                    .await
+                                    .is_err()
+                                {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if let Some(reasoning) = chunk.reasoning {
@@ -2132,10 +2190,53 @@ async fn stream_tool_rounds(
             }
             accumulator.absorb(&chunk.tool_calls);
         }
-        let calls = accumulator.into_calls();
+        let mut calls = accumulator.into_calls();
+        let mut legacy_thought = None;
+        let mut legacy_call = false;
+        if tools_active
+            && calls.is_empty()
+            && let Some((call, thought)) = llama::extract_legacy_action(&round_text)
+        {
+            calls.push(call);
+            legacy_thought = thought;
+            legacy_call = true;
+            round_text.clear();
+        }
         if !tools_active || calls.is_empty() {
+            if stream_content != Some(true)
+                && !pending_content.is_empty()
+                && tx
+                    .send(Ok(StreamEvent::Content(pending_content)))
+                    .await
+                    .is_err()
+            {
+                return Ok(());
+            }
             let _ = tx.send(Ok(StreamEvent::End)).await;
             return Ok(());
+        }
+        if legacy_call {
+            if round_reasoning.is_empty()
+                && let Some(thought) = legacy_thought
+            {
+                round_reasoning = thought.clone();
+                if tx.send(Ok(StreamEvent::Reasoning(thought))).await.is_err() {
+                    return Ok(());
+                }
+            }
+            let call = &calls[0];
+            if tx
+                .send(Ok(StreamEvent::ToolCallDelta(llama::ToolCallFragment {
+                    index: 0,
+                    id: Some(call.id.clone()),
+                    name: Some(call.name.clone()),
+                    arguments: Some(call.arguments.clone()),
+                })))
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
         }
         let mut invocations = Vec::new();
         let mut transcript = Vec::new();
@@ -2179,10 +2280,18 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    #[test]
-    fn generated_media_is_deferred_system_context_with_blob_references() {
+    #[tokio::test]
+    async fn generated_media_is_immediate_and_persisted_as_a_blob_reference() {
         let dir = tempdir().unwrap();
         let settings = runtime_settings::load(dir.path());
+        let blob = crate::blob_store::store_bytes(
+            dir.path(),
+            b"test image",
+            "image/png",
+            Some("generated.png"),
+        )
+        .await
+        .unwrap();
         let caps = ModelCapabilities {
             input_modalities: vec!["text".into(), "image".into()],
             output_modalities: vec!["text".into()],
@@ -2201,26 +2310,39 @@ mod tests {
             output: "Generated image.".into(),
             is_error: false,
             media: vec![tools::ToolMedia {
-                sha256: "abc123".into(),
+                sha256: blob.sha256.clone(),
                 mime_type: "image/png".into(),
             }],
         };
 
-        let message =
-            generated_media_context_message(&caps, &settings, &invocation).expect("context");
-        assert_eq!(message.role, "system");
+        let context = generated_media_context_messages(dir.path(), &caps, &settings, &invocation)
+            .await
+            .expect("context");
+        assert_eq!(context.live.role, "system");
         assert_eq!(
-            message.content.pointer("/1/type"),
+            context.live.content.pointer("/1/type"),
+            Some(&json!("image_url"))
+        );
+        assert!(
+            context
+                .live
+                .content
+                .pointer("/0/text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| text.contains("already been displayed"))
+        );
+        assert_eq!(
+            context.persisted.content.pointer("/1/type"),
             Some(&json!("brazier_blob"))
         );
         assert_eq!(
-            message.content.pointer("/1/brazier_blob/sha256"),
-            Some(&json!("abc123"))
+            context.persisted.content.pointer("/1/brazier_blob/sha256"),
+            Some(&json!(blob.sha256))
         );
     }
 
-    #[test]
-    fn generated_media_context_requires_vision_and_the_setting() {
+    #[tokio::test]
+    async fn generated_media_context_requires_vision_and_the_setting() {
         let dir = tempdir().unwrap();
         let mut settings = runtime_settings::load(dir.path());
         let mut caps = ModelCapabilities {
@@ -2246,10 +2368,18 @@ mod tests {
             }],
         };
 
-        assert!(generated_media_context_message(&caps, &settings, &invocation).is_none());
+        assert!(
+            generated_media_context_messages(dir.path(), &caps, &settings, &invocation)
+                .await
+                .is_none()
+        );
         caps.input_modalities.push("image".into());
         settings.show_generated_images_to_model = false;
-        assert!(generated_media_context_message(&caps, &settings, &invocation).is_none());
+        assert!(
+            generated_media_context_messages(dir.path(), &caps, &settings, &invocation)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

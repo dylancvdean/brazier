@@ -1184,7 +1184,6 @@ export function App(): React.JSX.Element {
     } finally {
       setBusy(false)
       setModelLoadStatus(null)
-      setStreamingReasoning('')
       abortRef.current = undefined
     }
   }
@@ -1584,9 +1583,9 @@ export function App(): React.JSX.Element {
                   )
                 }
                 if (message.role === 'tool') return null
-                // System context—including the deferred copy of generated
-                // media—is model plumbing. The separate assistant display
-                // message below contains only what the person should see.
+                // System context—including the model-facing copy of generated
+                // media—is plumbing. The separate assistant display message
+                // below contains only what the person should see.
                 if (message.role === 'system') return null
                 const media = contentMedia(message)
                 const spoken = message.source === 'user_voice'
@@ -1651,7 +1650,7 @@ export function App(): React.JSX.Element {
                   <div className="message-body">
                     <div className="message-meta">
                       <strong>{session.snapshot.streamingText ? 'Agent' : 'Brazier'}</strong>
-                      <LoaderCircle className="spin" size={14} />
+                      {busy ? <LoaderCircle className="spin" size={14} /> : null}
                     </div>
                     {streamingTools.length > 0 && (
                       <ToolChips records={streamingTools} onError={setError} />

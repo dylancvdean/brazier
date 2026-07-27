@@ -1062,6 +1062,8 @@ export type ActiveGeneration = {
   origin: 'user' | 'model'
   elapsed_secs: number
   timeout_secs: number
+  current_step: number
+  total_steps: number
 }
 
 export async function fetchActiveGeneration(): Promise<ActiveGeneration | null> {

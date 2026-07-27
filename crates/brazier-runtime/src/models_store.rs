@@ -1119,6 +1119,22 @@ pub fn delete_model(
         prune_empty_parents(path.parent(), &crate::streaming_asr::models_root(data_dir));
         return Ok(path);
     }
+    if model_id.starts_with("sdcpp-image:") || model_id.starts_with("sdcpp-video:") {
+        // Resolve first so a missing/invalid manifest cannot turn a malformed
+        // id into a directory deletion.
+        let _ = crate::sdcpp::path_for_model_id(data_dir, model_id)?;
+        let (modality, key) = crate::sdcpp::parse_model_id(model_id)?;
+        let path = crate::sdcpp::model_dir_for_key(data_dir, modality, key)?;
+        anyhow::ensure!(path.is_dir(), "model directory not found for {model_id}");
+        std::fs::remove_dir_all(&path)
+            .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
+        let root = match modality {
+            crate::sdcpp::Modality::Image => crate::sdcpp::image_root(data_dir),
+            crate::sdcpp::Modality::Video => crate::sdcpp::video_root(data_dir),
+        };
+        prune_empty_parents(path.parent(), &root);
+        return Ok(path);
+    }
     anyhow::bail!("unknown local model id: {model_id}");
 }
 
@@ -1236,6 +1252,37 @@ mod tests {
         .unwrap();
         assert!(!first.exists());
         assert!(!second.exists());
+    }
+
+    #[test]
+    fn deletes_installed_sdcpp_bundle_directory() {
+        let dir = tempdir().unwrap();
+        let model = crate::sdcpp::model_dir_for_key(
+            dir.path(),
+            crate::sdcpp::Modality::Image,
+            "qwen/qwen-image",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("diffusion.gguf"), b"bad weights").unwrap();
+        std::fs::write(
+            model.join("manifest.json"),
+            serde_json::to_vec(&crate::sdcpp::SdcppManifest {
+                modality: crate::sdcpp::Modality::Image,
+                args: std::collections::BTreeMap::from([(
+                    "diffusion-model".to_owned(),
+                    "diffusion.gguf".to_owned(),
+                )]),
+                single_file: None,
+                supports_init_image: false,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let removed = delete_model(dir.path(), "sdcpp-image:qwen/qwen-image", &[]).unwrap();
+        assert_eq!(removed, model);
+        assert!(!removed.exists());
     }
 
     #[test]

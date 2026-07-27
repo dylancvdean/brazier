@@ -498,6 +498,7 @@ fn merge_defaults(base: GenerationDefaults, overrides: GenerationDefaults) -> Ge
         steps: overrides.steps.or(base.steps),
         cfg_scale: overrides.cfg_scale.or(base.cfg_scale),
         guidance: overrides.guidance.or(base.guidance),
+        flow_shift: overrides.flow_shift.or(base.flow_shift),
         video_frames: overrides.video_frames.or(base.video_frames),
         fps: overrides.fps.or(base.fps),
     }

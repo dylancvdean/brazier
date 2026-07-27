@@ -3803,6 +3803,21 @@ a.inline-link {
   font-variant-numeric: tabular-nums;
 }
 
+.generation-activity-progress {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #292929;
+}
+
+.generation-activity-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #f8924e;
+  transition: width 180ms ease;
+}
+
 .generation-activity-body {
   display: flex;
   gap: 10px;

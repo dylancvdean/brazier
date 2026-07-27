@@ -562,7 +562,9 @@ async fn generate_image_tool(
     let _ = tokio::fs::remove_file(&result.output_path).await;
     Ok(ToolOutput {
         text: format!(
-            "Generated image stored as brazier_blob:{} ({} bytes).",
+            "Image generation succeeded. The image has already been displayed to the user \
+             (brazier_blob:{}, {} bytes). Do not generate another image unless the user asks \
+             for another version or requests a change.",
             blob.sha256, blob.size_bytes
         ),
         media: vec![ToolMedia {
@@ -660,7 +662,9 @@ async fn generate_video_tool(
     let _ = tokio::fs::remove_file(&result.output_path).await;
     Ok(ToolOutput {
         text: format!(
-            "Generated video stored as brazier_blob:{} ({} bytes).",
+            "Video generation succeeded. The video has already been displayed to the user \
+             (brazier_blob:{}, {} bytes). Do not generate another video unless the user asks \
+             for another version or requests a change.",
             blob.sha256, blob.size_bytes
         ),
         media: vec![ToolMedia {

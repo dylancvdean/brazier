@@ -13,7 +13,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering},
     },
     time::{Duration, Instant},
 };
@@ -987,6 +987,9 @@ pub struct ActiveGeneration {
     pub elapsed_secs: u64,
     /// When this job will be given up on, so a long render is not a mystery.
     pub timeout_secs: u64,
+    /// Diffusion sampling progress reported by sd-cli.
+    pub current_step: u32,
+    pub total_steps: u32,
 }
 
 struct RunningJob {
@@ -994,6 +997,7 @@ struct RunningJob {
     started: Instant,
     cancel: Arc<AtomicBool>,
     notify: Arc<Notify>,
+    current_step: Arc<AtomicU32>,
 }
 
 static RUNNING: OnceLock<Mutex<Option<RunningJob>>> = OnceLock::new();
@@ -1008,6 +1012,7 @@ pub fn active_generation() -> Option<ActiveGeneration> {
     guard.as_ref().map(|job| {
         let mut info = job.info.clone();
         info.elapsed_secs = job.started.elapsed().as_secs();
+        info.current_step = job.current_step.load(AtomicOrdering::Relaxed);
         info
     })
 }
@@ -1030,19 +1035,29 @@ pub fn cancel_active_generation() -> bool {
 struct JobRegistration {
     cancel: Arc<AtomicBool>,
     notify: Arc<Notify>,
+    current_step: Arc<AtomicU32>,
+    total_steps: u32,
 }
 
 impl JobRegistration {
     fn open(info: ActiveGeneration) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(Notify::new());
+        let current_step = Arc::new(AtomicU32::new(info.current_step));
+        let total_steps = info.total_steps;
         *running().lock().expect("generation lock") = Some(RunningJob {
             info,
             started: Instant::now(),
             cancel: Arc::clone(&cancel),
             notify: Arc::clone(&notify),
+            current_step: Arc::clone(&current_step),
         });
-        Self { cancel, notify }
+        Self {
+            cancel,
+            notify,
+            current_step,
+            total_steps,
+        }
     }
 
     fn cancelled(&self) -> bool {
@@ -1260,9 +1275,36 @@ fn with_amd_apu_vulkan_defaults(
     Some(profile)
 }
 
+/// Apply the generation defaults shipped with a curated or locally defined
+/// bundle. The Generate panel also uses these values to prefill its fields, but
+/// engine-only settings such as Qwen-Image's flow shift must be applied here so
+/// chat tools and direct API callers get the same correct invocation.
+fn with_bundle_defaults(
+    data_dir: &Path,
+    model_id: &str,
+    profile: Option<&DiffusionProfile>,
+) -> Option<DiffusionProfile> {
+    let bundle = crate::sdcpp_catalog::catalog(data_dir)
+        .into_iter()
+        .map(|entry| entry.bundle)
+        .find(|bundle| bundle.model_id() == model_id)?;
+    let defaults = bundle.defaults;
+    let mut effective = profile.cloned().unwrap_or_default();
+    effective.width = effective.width.or(defaults.width);
+    effective.height = effective.height.or(defaults.height);
+    effective.steps = effective.steps.or(defaults.steps);
+    effective.cfg_scale = effective.cfg_scale.or(defaults.cfg_scale);
+    effective.guidance = effective.guidance.or(defaults.guidance);
+    effective.flow_shift = effective.flow_shift.or(defaults.flow_shift);
+    effective.video_frames = effective.video_frames.or(defaults.video_frames);
+    effective.fps = effective.fps.or(defaults.fps);
+    Some(effective)
+}
+
 /// Resolve the platform policy once for both image and video launch paths.
 fn effective_diffusion_profile(
     data_dir: &Path,
+    model_id: &str,
     profile: Option<&DiffusionProfile>,
     modality: Modality,
 ) -> Option<DiffusionProfile> {
@@ -1277,7 +1319,8 @@ fn effective_diffusion_profile(
     if enabled {
         tracing::info!("applying Vulkan AMD APU defaults to stable-diffusion.cpp generation");
     }
-    with_amd_apu_vulkan_defaults(profile, enabled, modality)
+    let profile = with_bundle_defaults(data_dir, model_id, profile).or_else(|| profile.cloned());
+    with_amd_apu_vulkan_defaults(profile.as_ref(), enabled, modality)
 }
 
 /// The `<lora:name:scale>` tags sd-cli reads out of the prompt itself.
@@ -1454,17 +1497,92 @@ impl OutputTail {
     }
 }
 
+fn parse_step_progress(line: &str, expected_total: u32) -> Option<u32> {
+    let bytes = line.as_bytes();
+    for slash in bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, byte)| (*byte == b'/').then_some(index))
+    {
+        let left = bytes[..slash]
+            .iter()
+            .rposition(|byte| !byte.is_ascii_digit())
+            .map_or(0, |index| index + 1);
+        let right = slash
+            + 1
+            + bytes[slash + 1..]
+                .iter()
+                .position(|byte| !byte.is_ascii_digit())
+                .unwrap_or(bytes.len() - slash - 1);
+        let current = std::str::from_utf8(&bytes[left..slash])
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+        let total = std::str::from_utf8(&bytes[slash + 1..right])
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+        if let (Some(current), Some(total)) = (current, total)
+            && total == expected_total
+            && current <= total
+        {
+            return Some(current);
+        }
+    }
+    None
+}
+
+fn record_output_segment(
+    bytes: &[u8],
+    tail: &OutputTail,
+    current_step: &AtomicU32,
+    total_steps: u32,
+) {
+    let line = String::from_utf8_lossy(bytes).trim().to_owned();
+    if line.is_empty() {
+        return;
+    }
+    if let Some(step) = parse_step_progress(&line, total_steps) {
+        current_step.fetch_max(step, AtomicOrdering::Relaxed);
+    }
+    tracing::debug!(target: "sdcpp", "{line}");
+    tail.push(line);
+}
+
 /// Drain a child pipe into the tail buffer, also echoing it to the daemon log.
-fn collect_output<R>(reader: R, tail: OutputTail) -> tokio::task::JoinHandle<()>
+///
+/// Progress bars redraw with carriage returns rather than newlines, so the
+/// reader handles both separators to publish each diffusion step promptly.
+fn collect_output<R>(
+    reader: R,
+    tail: OutputTail,
+    current_step: Arc<AtomicU32>,
+    total_steps: u32,
+) -> tokio::task::JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut lines = tokio::io::BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(target: "sdcpp", "{line}");
-            tail.push(line);
+        use tokio::io::AsyncReadExt;
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut chunk = [0_u8; 8192];
+        let mut pending = Vec::new();
+        loop {
+            let Ok(read) = reader.read(&mut chunk).await else {
+                break;
+            };
+            if read == 0 {
+                break;
+            }
+            for byte in &chunk[..read] {
+                if matches!(*byte, b'\r' | b'\n') {
+                    record_output_segment(&pending, &tail, &current_step, total_steps);
+                    pending.clear();
+                } else {
+                    pending.push(*byte);
+                }
+            }
+        }
+        if !pending.is_empty() {
+            record_output_segment(&pending, &tail, &current_step, total_steps);
         }
     })
 }
@@ -1490,10 +1608,20 @@ async fn run_sd_cli(
     let tail = OutputTail::default();
     let mut readers = Vec::new();
     if let Some(pipe) = child.stdout.take() {
-        readers.push(collect_output(pipe, tail.clone()));
+        readers.push(collect_output(
+            pipe,
+            tail.clone(),
+            Arc::clone(&job.current_step),
+            job.total_steps,
+        ));
     }
     if let Some(pipe) = child.stderr.take() {
-        readers.push(collect_output(pipe, tail.clone()));
+        readers.push(collect_output(
+            pipe,
+            tail.clone(),
+            Arc::clone(&job.current_step),
+            job.total_steps,
+        ));
     }
 
     let status = loop {
@@ -1593,7 +1721,8 @@ pub async fn generate_image(
 
     let job_dir = job_output_dir(data_dir).await?;
     let output_path = job_dir.join("output.png");
-    let profile = effective_diffusion_profile(data_dir, profile, Modality::Image);
+    let profile =
+        effective_diffusion_profile(data_dir, &request.model_id, profile, Modality::Image);
     let profile = profile.as_ref();
 
     let width = request
@@ -1662,6 +1791,8 @@ pub async fn generate_image(
         origin: request.origin,
         elapsed_secs: 0,
         timeout_secs: timeout.as_secs(),
+        current_step: 0,
+        total_steps: steps,
     });
     run_sd_cli(command, timeout, &job).await?;
     anyhow::ensure!(
@@ -1714,7 +1845,8 @@ pub async fn generate_video(
 
     let job_dir = job_output_dir(data_dir).await?;
     let output_path = job_dir.join("output.mp4");
-    let profile = effective_diffusion_profile(data_dir, profile, Modality::Video);
+    let profile =
+        effective_diffusion_profile(data_dir, &request.model_id, profile, Modality::Video);
     let profile = profile.as_ref();
 
     let width = request
@@ -1792,6 +1924,8 @@ pub async fn generate_video(
         origin: request.origin,
         elapsed_secs: 0,
         timeout_secs: timeout.as_secs(),
+        current_step: 0,
+        total_steps: steps,
     });
     run_sd_cli(command, timeout, &job).await?;
     anyhow::ensure!(
@@ -1851,6 +1985,36 @@ mod tests {
             effective_timeout(derived, Some(60)),
             Duration::from_secs(60)
         );
+    }
+
+    #[tokio::test]
+    async fn qwen_image_bundle_supplies_flow_shift_and_allows_an_override() {
+        let dir = tempdir().unwrap();
+        let model_id = "sdcpp-image:qwen/qwen-image";
+
+        let defaults = with_bundle_defaults(dir.path(), model_id, None).unwrap();
+        assert_eq!(defaults.width, Some(1024));
+        assert_eq!(defaults.height, Some(1024));
+        assert_eq!(defaults.steps, Some(20));
+        assert_eq!(defaults.cfg_scale, Some(2.5));
+        assert_eq!(defaults.flow_shift, Some(3.0));
+        let mut command = Command::new("sd-cli");
+        apply_diffusion_profile(&mut command, dir.path(), Some(&defaults), "test")
+            .await
+            .unwrap();
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|args| args == ["--flow-shift", "3"]));
+
+        let configured = DiffusionProfile {
+            flow_shift: Some(4.0),
+            ..DiffusionProfile::default()
+        };
+        let overridden = with_bundle_defaults(dir.path(), model_id, Some(&configured)).unwrap();
+        assert_eq!(overridden.flow_shift, Some(4.0));
     }
 
     #[test]
@@ -1998,6 +2162,19 @@ mod tests {
     fn stopping_nothing_is_harmless() {
         assert!(active_generation().is_none());
         assert!(!cancel_active_generation(), "nothing was running");
+    }
+
+    #[test]
+    fn parses_carriage_return_style_diffusion_progress() {
+        assert_eq!(
+            parse_step_progress("sampling:  35%|████ | 7/20 [00:03<00:06]", 20),
+            Some(7)
+        );
+        assert_eq!(
+            parse_step_progress("sampling: 100%|████|20/20 [00:09<00:00]", 20),
+            Some(20)
+        );
+        assert_eq!(parse_step_progress("loaded 7/12 tensors", 20), None);
     }
 
     #[test]

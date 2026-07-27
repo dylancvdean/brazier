@@ -275,6 +275,20 @@ fn looks_like_single_quant(repo_id: &str) -> bool {
 pub struct RepoFile {
     pub path: String,
     pub size: Option<u64>,
+    /// SHA-256 of the resolved file contents when Hugging Face exposes an
+    /// LFS object id. Unlike byte length, this detects a complete-but-corrupt
+    /// local copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+fn lfs_sha256(value: &Value) -> Option<String> {
+    let oid = value
+        .get("lfs")
+        .and_then(|lfs| lfs.get("oid"))
+        .and_then(Value::as_str)?;
+    (oid.len() == 64 && oid.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| oid.to_ascii_lowercase())
 }
 
 /// List files in a Hugging Face model repository (tree API).
@@ -305,7 +319,8 @@ pub async fn list_repo_files(
                 return None;
             }
             let size = value.get("size").and_then(Value::as_u64);
-            Some(RepoFile { path, size })
+            let sha256 = lfs_sha256(&value);
+            Some(RepoFile { path, size, sha256 })
         })
         .collect())
 }
@@ -351,7 +366,8 @@ pub async fn paths_info(
                 .and_then(|lfs| lfs.get("size"))
                 .and_then(Value::as_u64)
                 .or_else(|| value.get("size").and_then(Value::as_u64));
-            Some(RepoFile { path, size })
+            let sha256 = lfs_sha256(&value);
+            Some(RepoFile { path, size, sha256 })
         })
         .collect())
 }
@@ -655,5 +671,18 @@ mod tests {
             &["mlx".into(), "text-generation".into()],
             "mlx-vlm"
         ));
+    }
+
+    #[test]
+    fn extracts_only_sha256_lfs_object_ids() {
+        let sha = "645473886d7dbb0103f84c563c798f7b0867293d919752d4d6be6a432b0bc988";
+        assert_eq!(
+            lfs_sha256(&serde_json::json!({ "lfs": { "oid": sha } })).as_deref(),
+            Some(sha)
+        );
+        assert_eq!(
+            lfs_sha256(&serde_json::json!({ "lfs": { "oid": "git-sha-is-not-enough" } })),
+            None
+        );
     }
 }

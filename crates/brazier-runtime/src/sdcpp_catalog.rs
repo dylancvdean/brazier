@@ -88,6 +88,8 @@ pub struct GenerationDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guidance: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_shift: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
@@ -452,6 +454,23 @@ mod tests {
             Some("t5xxl_fp16.safetensors")
         );
         assert!(flux.gated(), "flux VAE comes from a gated repo");
+    }
+
+    #[test]
+    fn qwen_image_uses_the_supported_gguf_text_encoder() {
+        let qwen = builtin("qwen-image").expect("Qwen Image bundle");
+        let llm = qwen
+            .components
+            .iter()
+            .find(|component| component.flag.as_deref() == Some("llm"))
+            .expect("Qwen2.5-VL text encoder");
+
+        assert_eq!(llm.repo_id, "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF");
+        assert_eq!(llm.path, "Qwen2.5-VL-7B-Instruct-Q8_0.gguf");
+        assert_eq!(
+            qwen.manifest().args.get("llm").map(String::as_str),
+            Some("Qwen2.5-VL-7B-Instruct-Q8_0.gguf")
+        );
     }
 
     /// Every offered size must be a real, safe path, since picking one

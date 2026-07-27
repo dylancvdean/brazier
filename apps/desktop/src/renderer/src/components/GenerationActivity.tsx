@@ -85,6 +85,10 @@ export function GenerationActivity({
   }
 
   const byModel = active.origin === 'model'
+  const stepPercent =
+    active.total_steps > 0
+      ? Math.min(100, Math.round((active.current_step / active.total_steps) * 100))
+      : 0
   return (
     <section className="generation-activity" role="status" aria-live="polite">
       <div className="generation-activity-head">
@@ -94,6 +98,10 @@ export function GenerationActivity({
           {byModel ? 'The model is generating' : 'Generating'} a {active.modality}
         </strong>
         <span className="generation-activity-timing">
+          {active.current_step > 0
+            ? `Step ${active.current_step} of ${active.total_steps}`
+            : `Preparing · ${active.total_steps} steps`}
+          {' · '}
           {elapsedLabel(active.elapsed_secs)} · gives up after{' '}
           {elapsedLabel(active.timeout_secs)}
         </span>
@@ -107,6 +115,16 @@ export function GenerationActivity({
           <Square size={12} fill="currentColor" />
           {stopping ? 'Stopping…' : 'Stop'}
         </button>
+      </div>
+      <div
+        className="generation-activity-progress"
+        role="progressbar"
+        aria-label="Diffusion steps"
+        aria-valuemin={0}
+        aria-valuemax={active.total_steps}
+        aria-valuenow={active.current_step}
+      >
+        <span style={{ width: `${stepPercent}%` }} />
       </div>
       <div className="generation-activity-body">
         {initImageUrl && (

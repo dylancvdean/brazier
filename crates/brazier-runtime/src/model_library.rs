@@ -195,13 +195,11 @@ pub fn normalize_library_paths(paths: &[String]) -> anyhow::Result<Vec<String>> 
         );
         let canonical = std::fs::canonicalize(&path)
             .map_err(|error| anyhow::anyhow!("library path {}: {error}", path.display()))?;
-        if normalized
-            .iter()
-            .any(|existing: &String| *existing == canonical)
-        {
+        let canonical = canonical.display().to_string();
+        if normalized.contains(&canonical) {
             continue;
         }
-        normalized.push(canonical.display().to_string());
+        normalized.push(canonical);
     }
     Ok(normalized)
 }

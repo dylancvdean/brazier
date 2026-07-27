@@ -634,6 +634,127 @@ pub fn extract_tool_calls(body: &serde_json::Value) -> Vec<AccumulatedToolCall> 
         .unwrap_or_default()
 }
 
+/// Recover the legacy `{"action": ..., "action_input": ...}` envelope emitted
+/// as assistant text by some tool-trained models.
+///
+/// Those models commonly put a Python-style dictionary inside `action_input`,
+/// so accepting only strict JSON would leave a valid tool request visible as
+/// plaintext instead of executing it.
+pub fn extract_legacy_action(content: &str) -> Option<(AccumulatedToolCall, Option<String>)> {
+    let envelope = serde_json::from_str::<serde_json::Value>(strip_json_fence(content)).ok()?;
+    let name = envelope.get("action")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let arguments = match envelope.get("action_input") {
+        Some(serde_json::Value::String(text)) => normalize_legacy_arguments(text),
+        Some(value @ serde_json::Value::Object(_)) => serde_json::to_string(value).ok()?,
+        Some(serde_json::Value::Null) | None => "{}".to_owned(),
+        Some(value) => serde_json::json!({ "input": value }).to_string(),
+    };
+    let thought = envelope
+        .get("thought")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned);
+    Some((
+        AccumulatedToolCall {
+            id: "legacy_action_0".to_owned(),
+            name: crate::harmony::logical_tool_name(name),
+            arguments,
+        },
+        thought,
+    ))
+}
+
+fn strip_json_fence(content: &str) -> &str {
+    let trimmed = content.trim();
+    let Some(after_open) = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```JSON"))
+        .or_else(|| trimmed.strip_prefix("```"))
+    else {
+        return trimmed;
+    };
+    after_open.strip_suffix("```").unwrap_or(after_open).trim()
+}
+
+fn normalize_legacy_arguments(text: &str) -> String {
+    let trimmed = text.trim();
+    if let Ok(value @ serde_json::Value::Object(_)) =
+        serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        return value.to_string();
+    }
+    if let Some(converted) = python_string_dict_to_json(trimmed)
+        && let Ok(value @ serde_json::Value::Object(_)) =
+            serde_json::from_str::<serde_json::Value>(&converted)
+    {
+        return value.to_string();
+    }
+    serde_json::json!({ "input": text }).to_string()
+}
+
+/// Convert the string quoting used by Python dictionary literals to JSON.
+/// Values other than strings are left untouched; `action_input` payloads are
+/// expected to be shallow argument objects rather than arbitrary Python.
+fn python_string_dict_to_json(input: &str) -> Option<String> {
+    #[derive(Clone, Copy)]
+    enum Quote {
+        Single,
+        Double,
+    }
+
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        match quote {
+            None => match ch {
+                '\'' => {
+                    output.push('"');
+                    quote = Some(Quote::Single);
+                }
+                '"' => {
+                    output.push(ch);
+                    quote = Some(Quote::Double);
+                }
+                _ => output.push(ch),
+            },
+            Some(Quote::Double) => {
+                output.push(ch);
+                if ch == '\\' {
+                    output.push(chars.next()?);
+                } else if ch == '"' {
+                    quote = None;
+                }
+            }
+            Some(Quote::Single) => match ch {
+                '\'' => {
+                    output.push('"');
+                    quote = None;
+                }
+                '"' => output.push_str("\\\""),
+                '\\' => match chars.next()? {
+                    '\'' => output.push('\''),
+                    '"' => output.push_str("\\\""),
+                    '\\' => output.push_str("\\\\"),
+                    escaped => {
+                        output.push('\\');
+                        output.push(escaped);
+                    }
+                },
+                '\n' => output.push_str("\\n"),
+                '\r' => output.push_str("\\r"),
+                '\t' => output.push_str("\\t"),
+                _ => output.push(ch),
+            },
+        }
+    }
+    quote.is_none().then_some(output)
+}
+
 /// Serialize accumulated tool calls back into OpenAI assistant-message form.
 pub fn tool_calls_to_json(calls: &[AccumulatedToolCall]) -> serde_json::Value {
     serde_json::Value::Array(
@@ -1955,6 +2076,35 @@ mod tests {
             }]
         });
         assert_eq!(extract_assistant_text(&body).unwrap(), "Hello from weights");
+    }
+
+    #[test]
+    fn extracts_legacy_action_with_python_style_arguments() {
+        let content = json!({
+            "action": "generate_image",
+            "action_input": r#"{'prompt': 'A wooden sign that clearly says \'Welcome Home\' in elegant lettering.'}"#,
+            "thought": "The user wants a picture of a pretty house with a sign."
+        })
+        .to_string();
+
+        let (call, thought) = extract_legacy_action(&content).expect("legacy action");
+        assert_eq!(call.id, "legacy_action_0");
+        assert_eq!(call.name, "generate_image");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+            json!({
+                "prompt": "A wooden sign that clearly says 'Welcome Home' in elegant lettering."
+            })
+        );
+        assert_eq!(
+            thought.as_deref(),
+            Some("The user wants a picture of a pretty house with a sign.")
+        );
+    }
+
+    #[test]
+    fn ordinary_json_content_is_not_mistaken_for_a_tool_call() {
+        assert!(extract_legacy_action(r#"{"status":"done"}"#).is_none());
     }
 
     #[test]

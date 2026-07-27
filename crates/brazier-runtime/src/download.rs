@@ -399,6 +399,13 @@ async fn hash_file(path: &Path) -> anyhow::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+async fn sha256_matches(path: &Path, expected: Option<&str>) -> anyhow::Result<bool> {
+    match expected {
+        Some(expected) => Ok(hash_file(path).await? == expected),
+        None => Ok(true),
+    }
+}
+
 /// Hash bytes (used by tests and small fixture writes).
 pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
@@ -450,6 +457,7 @@ struct FileDownload<'a> {
     job: Option<(&'a Database, &'a str)>,
     cancel: Option<&'a Arc<StopFlag>>,
     expected_size: Option<u64>,
+    expected_sha256: Option<&'a str>,
     snapshot: Option<SnapshotProgressCtx<'a>>,
 }
 
@@ -532,24 +540,36 @@ async fn download_file_to_with_opts(
         job,
         cancel,
         expected_size,
+        expected_sha256,
         snapshot,
     } = request;
     if destination.is_file() {
         let len = tokio::fs::metadata(destination).await?.len();
         let pointer = looks_like_lfs_pointer(destination).await;
         if !pointer && size_matches_expected(len, expected_size) {
-            if let Some(ctx) = snapshot {
-                emit_file_download_progress(
-                    progress,
-                    Some(ctx),
-                    len,
-                    expected_size.or(Some(len)),
-                    job,
-                );
+            let checksum_matches = if expected_sha256.is_some() {
+                progress(ProgressEvent::phase(
+                    "hash",
+                    format!("Verifying {filename}"),
+                ));
+                sha256_matches(destination, expected_sha256).await?
+            } else {
+                true
+            };
+            if checksum_matches {
+                if let Some(ctx) = snapshot {
+                    emit_file_download_progress(
+                        progress,
+                        Some(ctx),
+                        len,
+                        expected_size.or(Some(len)),
+                        job,
+                    );
+                }
+                return Ok(len);
             }
-            return Ok(len);
         }
-        // Stale LFS pointer or truncated copy — re-download.
+        // Stale LFS pointer, truncated copy, or complete-but-corrupt file.
         let _ = tokio::fs::remove_file(destination).await;
     }
     if let Some(parent) = destination.parent() {
@@ -578,14 +598,25 @@ async fn download_file_to_with_opts(
     };
     if let Some(expected) = expected_size.filter(|size| *size > 0) {
         if existing == expected && !looks_like_lfs_pointer(&partial).await {
-            // A previous attempt may have finished writing this file but been
-            // interrupted before the final rename. Promote it instead of
-            // asking the Hub for an invalid `Range: bytes=<len>-` request.
-            tokio::fs::rename(&partial, destination)
-                .await
-                .context("promote completed partial download")?;
-            emit_file_download_progress(progress, snapshot, existing, Some(expected), job);
-            return Ok(existing);
+            let checksum_matches = if expected_sha256.is_some() {
+                progress(ProgressEvent::phase(
+                    "hash",
+                    format!("Verifying {filename}"),
+                ));
+                sha256_matches(&partial, expected_sha256).await?
+            } else {
+                true
+            };
+            if checksum_matches {
+                // A previous attempt may have finished writing this file but
+                // been interrupted before the final rename.
+                tokio::fs::rename(&partial, destination)
+                    .await
+                    .context("promote completed partial download")?;
+                emit_file_download_progress(progress, snapshot, existing, Some(expected), job);
+                return Ok(existing);
+            }
+            let _ = tokio::fs::remove_file(&partial).await;
         }
         if existing > expected {
             // A partial from a different revision cannot be safely resumed.
@@ -694,6 +725,19 @@ async fn download_file_to_with_opts(
             expected_size.or(total).unwrap_or(0)
         );
     }
+    if let Some(expected) = expected_sha256 {
+        progress(ProgressEvent::phase(
+            "hash",
+            format!("Verifying {filename}"),
+        ));
+        let actual = hash_file(&partial).await?;
+        if actual != expected {
+            let _ = tokio::fs::remove_file(&partial).await;
+            anyhow::bail!(
+                "download of {filename} failed SHA-256 verification (expected {expected}, got {actual})"
+            );
+        }
+    }
 
     tokio::fs::rename(&partial, destination)
         .await
@@ -765,6 +809,7 @@ pub async fn download_mlx_snapshot_with_progress(
                 job: job.as_ref().map(|(db, id)| (db, id.as_str())),
                 cancel: cancel.as_ref(),
                 expected_size: file.size,
+                expected_sha256: file.sha256.as_deref(),
                 snapshot: Some(SnapshotProgressCtx {
                     completed_before: total_bytes,
                     overall_total,
@@ -881,6 +926,7 @@ pub async fn download_streaming_asr_snapshot_with_progress(
                 job: job.as_ref().map(|(db, id)| (db, id.as_str())),
                 cancel: cancel.as_ref(),
                 expected_size: file.size,
+                expected_sha256: file.sha256.as_deref(),
                 snapshot: Some(SnapshotProgressCtx {
                     completed_before: total_bytes,
                     overall_total,
@@ -971,8 +1017,7 @@ pub async fn download_adapter_with_progress(
         crate::hf::paths_info(client, data_dir, repo_id, revision, &[filename.to_owned()])
             .await
             .ok()
-            .and_then(|infos| infos.into_iter().next())
-            .and_then(|info| info.size);
+            .and_then(|infos| infos.into_iter().next());
     let bytes = download_file_to_with_opts(
         FileDownload {
             client,
@@ -983,7 +1028,8 @@ pub async fn download_adapter_with_progress(
             destination: &destination,
             job: None,
             cancel: cancel.as_ref(),
-            expected_size: expected,
+            expected_size: expected.as_ref().and_then(|info| info.size),
+            expected_sha256: expected.as_ref().and_then(|info| info.sha256.as_deref()),
             snapshot: None,
         },
         &mut progress,
@@ -1032,8 +1078,10 @@ pub async fn install_sdcpp_bundle_with_progress(
     }
 
     // Resolve real sizes from the Hub: the catalog's figures are estimates for
-    // the install summary, and downloads are verified against the true length.
+    // the install summary. LFS checksums catch complete files whose bytes are
+    // wrong even when their length happens to match.
     let mut sizes: HashMap<(String, String), Option<u64>> = HashMap::new();
+    let mut hashes: HashMap<(String, String), Option<String>> = HashMap::new();
     for component in &bundle.components {
         validate_repo_id(&component.repo_id)?;
         if sizes.contains_key(&(component.repo_id.clone(), component.path.clone())) {
@@ -1049,12 +1097,13 @@ pub async fn install_sdcpp_bundle_with_progress(
             .await
             .with_context(|| format!("look up files in {}", component.repo_id))?;
         for path in &paths {
-            let size = infos
+            let info = infos
                 .iter()
                 .find(|info| &info.path == path)
-                .with_context(|| format!("{path} is missing from {}", component.repo_id))?
-                .size;
-            sizes.insert((component.repo_id.clone(), path.clone()), size);
+                .with_context(|| format!("{path} is missing from {}", component.repo_id))?;
+            let key = (component.repo_id.clone(), path.clone());
+            sizes.insert(key.clone(), info.size);
+            hashes.insert(key, info.sha256.clone());
         }
     }
 
@@ -1098,6 +1147,9 @@ pub async fn install_sdcpp_bundle_with_progress(
                     .get(&(component.repo_id.clone(), component.path.clone()))
                     .copied()
                     .flatten(),
+                expected_sha256: hashes
+                    .get(&(component.repo_id.clone(), component.path.clone()))
+                    .and_then(|hash| hash.as_deref()),
                 snapshot: Some(SnapshotProgressCtx {
                     completed_before: total_bytes,
                     overall_total,
@@ -1223,6 +1275,7 @@ pub async fn download_personaplex_snapshot_with_progress(
                 job: job.as_ref().map(|(db, id)| (db, id.as_str())),
                 cancel: cancel.as_ref(),
                 expected_size: file.size,
+                expected_sha256: file.sha256.as_deref(),
                 snapshot: Some(SnapshotProgressCtx {
                     completed_before: total_bytes,
                     overall_total,
@@ -1262,14 +1315,14 @@ pub async fn download_personaplex_snapshot_with_progress(
 }
 
 /// Stable identity for a verified snapshot without reading every model byte a
-/// second time. Each file was checked against its Hub-reported size during
-/// download, and the manifest binds the resulting record to that exact list.
+/// second time. Each LFS-backed file was checked against its Hub SHA-256 during
+/// download, and the manifest binds the record to those exact objects.
 fn snapshot_manifest_sha256(files: &[crate::hf::RepoFile]) -> String {
     let mut ordered: Vec<_> = files.iter().collect();
     ordered.sort_unstable_by(|left, right| left.path.cmp(&right.path));
 
     let mut digest = Sha256::new();
-    digest.update(b"brazier-snapshot-manifest-v1\0");
+    digest.update(b"brazier-snapshot-manifest-v2\0");
     for file in ordered {
         digest.update(file.path.as_bytes());
         digest.update([0]);
@@ -1277,6 +1330,13 @@ fn snapshot_manifest_sha256(files: &[crate::hf::RepoFile]) -> String {
             Some(size) => {
                 digest.update([1]);
                 digest.update(size.to_le_bytes());
+            }
+            None => digest.update([0]),
+        }
+        match &file.sha256 {
+            Some(sha256) => {
+                digest.update([1]);
+                digest.update(sha256.as_bytes());
             }
             None => digest.update([0]),
         }
@@ -1316,10 +1376,12 @@ mod tests {
             crate::hf::RepoFile {
                 path: "weights/model.safetensors".into(),
                 size: Some(42),
+                sha256: Some("a".repeat(64)),
             },
             crate::hf::RepoFile {
                 path: "config.json".into(),
                 size: Some(7),
+                sha256: None,
             },
         ];
         let reversed = vec![files[1].clone(), files[0].clone()];
@@ -1352,5 +1414,22 @@ mod tests {
         assert_eq!(result.bytes, 15);
         assert_eq!(result.sha256, sha256_hex(b"fixture-weights"));
         assert!(!result.resumed);
+    }
+
+    #[tokio::test]
+    async fn checksum_rejects_complete_file_with_wrong_bytes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        std::fs::write(&path, b"same-length-bad").unwrap();
+        assert!(
+            !sha256_matches(&path, Some(&sha256_hex(b"same-length-ok!")))
+                .await
+                .unwrap()
+        );
+        assert!(
+            sha256_matches(&path, Some(&sha256_hex(b"same-length-bad")))
+                .await
+                .unwrap()
+        );
     }
 }
