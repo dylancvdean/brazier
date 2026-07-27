@@ -76,11 +76,31 @@ export type AgentSessionSummary = {
   last_run_status: string
   created_at: string
   updated_at: string
+  /** Includes worktree confinement metadata when the session is isolated. */
+  runtime_metadata?: {
+    worktree?: {
+      source_path: string
+      path: string
+      branch: string
+    }
+  } | null
+}
+
+export type AgentWorktreeInfo = {
+  source_path: string
+  path: string
+  branch: string
 }
 
 export type AgentSessionDetail = {
   session: AgentSessionSummary
-  messages: Array<{ id: string; seq: number; role: string; payload: AgentMessage }>
+  messages: Array<{
+    id: string
+    seq: number
+    role: string
+    payload: AgentMessage
+    created_at?: string
+  }>
   tool_executions: ToolExecutionRecord[]
   pending_approvals: AgentApproval[]
   grants: string[]
@@ -117,6 +137,8 @@ export async function createAgentSession(input: {
   permission_mode?: AgentPermissionMode
   permission_settings?: AgentPermissionSettings
   enabled_tools?: string[]
+  /** Isolate the session in a fresh git worktree of the workspace. */
+  confine_to_worktree?: boolean
 }): Promise<AgentSessionSummary> {
   return request('/api/v1/agent/sessions', {
     method: 'POST',
@@ -137,6 +159,7 @@ export async function updateAgentSession(
     permission_mode?: AgentPermissionMode
     permission_settings?: AgentPermissionSettings
     enabled_tools?: string[]
+    confine_to_worktree?: boolean
   }
 ): Promise<AgentSessionSummary> {
   return request(`/api/v1/agent/sessions/${id}`, {

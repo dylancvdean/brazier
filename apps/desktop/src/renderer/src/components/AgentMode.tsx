@@ -4,15 +4,13 @@ import {
   Check,
   ChevronDown,
   FolderOpen,
+  GitBranch,
   Layers,
   LoaderCircle,
   Lock,
   ShieldAlert,
   ShieldCheck,
-  Square,
   Terminal,
-  Trash2,
-  Wrench,
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
@@ -61,12 +59,26 @@ export type AgentComposerControls = {
   placeholder: string
 }
 
+/**
+ * Session list for the app sidebar while Agent mode is active. Replaces the
+ * conversation list so tasks live where chats normally do, grouped by folder.
+ */
+export type AgentSidebarControls = {
+  sessions: AgentSessionSummary[]
+  activeId: string | null
+  select: (id: string) => void
+  remove: (id: string) => void
+  newTask: () => void
+}
+
 type Props = {
   /** Chat model chosen in the top bar; the agent uses the same picker. */
   modelId: string
   models: LocalModel[]
   /** Publish the controls upward; called with null when Agent mode unmounts. */
   onComposerChange?: (controls: AgentComposerControls | null) => void
+  /** Publish the session list for the app sidebar; null on unmount. */
+  onSidebarChange?: (controls: AgentSidebarControls | null) => void
   /** Put a suggested task into the shared composer for the user to edit. */
   onSuggestPrompt?: (text: string) => void
   /**
@@ -93,6 +105,8 @@ type TimelineEntry = {
   truncated?: boolean
   artifactId?: string
   durationMs?: number
+  /** When the tool call started, for interleaving with messages. */
+  timestamp: string
 }
 
 const PERMISSION_LABELS: Record<AgentPermissionMode, { title: string; detail: string }> = {
@@ -118,6 +132,48 @@ function shortPath(path: string | null | undefined): string {
   if (!path) return 'No workspace'
   const parts = path.split('/').filter(Boolean)
   return parts.length <= 2 ? path : `…/${parts.slice(-2).join('/')}`
+}
+
+/**
+ * Directory a session belongs under in the sidebar. Worktree sessions group
+ * with their source checkout so every task for a project sits together.
+ */
+export function sessionDirectory(session: AgentSessionSummary): string {
+  return (
+    session.runtime_metadata?.worktree?.source_path ??
+    session.workspace_path ??
+    ''
+  )
+}
+
+export type AgentSessionGroup = {
+  path: string
+  label: string
+  sessions: AgentSessionSummary[]
+}
+
+/** Group sessions by project directory, newest activity first. */
+export function groupAgentSessionsByDirectory(
+  sessions: AgentSessionSummary[]
+): AgentSessionGroup[] {
+  const buckets = new Map<string, AgentSessionSummary[]>()
+  for (const session of sessions) {
+    const key = sessionDirectory(session)
+    const list = buckets.get(key)
+    if (list) list.push(session)
+    else buckets.set(key, [session])
+  }
+  const groups: AgentSessionGroup[] = [...buckets.entries()].map(([path, entries]) => ({
+    path,
+    label: shortPath(path || null),
+    sessions: [...entries].sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+  }))
+  groups.sort((a, b) => {
+    const aLatest = a.sessions[0]?.updated_at ?? ''
+    const bLatest = b.sessions[0]?.updated_at ?? ''
+    return bLatest.localeCompare(aLatest)
+  })
+  return groups
 }
 
 function argsPreview(tool: string, args: Record<string, unknown>): string {
@@ -154,8 +210,78 @@ function timelineFromRecords(records: ToolExecutionRecord[]): TimelineEntry[] {
     changedPaths: record.changed_paths ?? [],
     truncated: record.truncated,
     artifactId: record.artifact_id,
-    durationMs: record.duration_ms
+    durationMs: record.duration_ms,
+    timestamp: record.created_at
   }))
+}
+
+/** A single row in the interleaved transcript: either a message or a tool call. */
+type TranscriptRow =
+  | { kind: 'message'; message: AgentMessage; index: number }
+  | { kind: 'tool'; entry: TimelineEntry; index: number }
+
+/**
+ * Visible assistant text. Empty tool-only turns and the literal "null" that
+ * weak models (or a null text part coerced through String) sometimes produce
+ * are treated as blank so they do not render as a bubble.
+ */
+function displayableAssistantText(text: unknown): string {
+  if (typeof text !== 'string') return ''
+  const trimmed = text.trim()
+  if (!trimmed || trimmed === 'null' || trimmed === 'undefined') return ''
+  return text
+}
+
+/** Whether a committed message should appear in the transcript UI. */
+function shouldShowMessage(message: AgentMessage): boolean {
+  if (message.role === 'tool') return false
+  if (message.role === 'assistant') {
+    const text = displayableAssistantText(message.text)
+    const reasoning = message.reasoning?.trim()
+    const error = message.error?.trim()
+    // Tool-only turns: the timeline row already shows the call.
+    return Boolean(text || reasoning || error)
+  }
+  return true
+}
+
+/**
+ * Merge committed messages and tool-call timeline entries into a single
+ * timestamp-ordered list, so tool calls appear between the messages they
+ * happened during rather than stacked at the bottom.
+ *
+ * Tool-role messages and empty assistant tool-only turns are omitted: their
+ * details are shown by the matching timeline entry instead. Equal timestamps
+ * keep messages before tools, then fall back to original index so the order
+ * stays stable.
+ */
+function buildTranscriptRows(messages: AgentMessage[], timeline: TimelineEntry[]): TranscriptRow[] {
+  const rows: TranscriptRow[] = []
+  for (const [index, message] of messages.entries()) {
+    if (!shouldShowMessage(message)) continue
+    rows.push({ kind: 'message', message, index })
+  }
+  for (const [index, entry] of timeline.entries()) {
+    rows.push({ kind: 'tool', entry, index })
+  }
+  rows.sort((a, b) => {
+    const ta = a.kind === 'message' ? a.message.timestamp : a.entry.timestamp
+    const tb = b.kind === 'message' ? b.message.timestamp : b.entry.timestamp
+    const byTime = ta.localeCompare(tb)
+    if (byTime !== 0) return byTime
+    // Same instant: show the assistant/user text that introduced a tool before
+    // the tool row itself.
+    if (a.kind !== b.kind) return a.kind === 'message' ? -1 : 1
+    return a.index - b.index
+  })
+  return rows
+}
+
+/** Worktree metadata stored on the session, when confinement is active. */
+function sessionWorktree(
+  session: AgentSessionSummary | null
+): { source_path: string; path: string; branch: string } | null {
+  return session?.runtime_metadata?.worktree ?? null
 }
 
 /**
@@ -388,14 +514,19 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [running, setRunning] = useState(false)
   const [summary, setSummary] = useState<AgentRunSummary | null>(null)
   const [pendingWorkspace, setPendingWorkspace] = useState<string | null>(null)
+  /** When set before the first run, the new session is created inside a worktree. */
+  const [pendingConfineToWorktree, setPendingConfineToWorktree] = useState(false)
+  const [workspaceIsGit, setWorkspaceIsGit] = useState(false)
+  const [worktreeBusy, setWorktreeBusy] = useState(false)
   const [deciding, setDeciding] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [artifact, setArtifact] = useState<{ id: string; text: string } | null>(null)
-  const [sessionListOpen, setSessionListOpen] = useState(false)
   const scrollAnchor = useRef<HTMLDivElement>(null)
   const sessionIdRef = useRef<string | null>(null)
 
   const workspace = session?.workspace_path ?? pendingWorkspace
+  const worktree = sessionWorktree(session)
+  const confinedToWorktree = Boolean(worktree) || (!session && pendingConfineToWorktree)
   const permissionMode: AgentPermissionMode = session?.permission_mode ?? 'ask'
   const modelLabel = useMemo(() => {
     const model = props.models.find((candidate) => candidate.id === props.modelId)
@@ -414,9 +545,15 @@ export function AgentMode(props: Props): React.JSX.Element {
     void listAgentSessions().then(setSessions).catch(() => setSessions([]))
   }, [onError])
 
+  /**
+   * Messages and tool calls merged into timestamp order, so tool calls appear
+   * between the messages they happened during instead of stacked at the bottom.
+   */
+  const transcriptRows = useMemo(() => buildTranscriptRows(messages, timeline), [messages, timeline])
+
   useEffect(() => {
     scrollAnchor.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length, streaming, timeline.length])
+  }, [transcriptRows.length, streaming])
 
   /** Reduce one worker event into the view. */
   const applyEvent = useCallback((event: AgentEvent) => {
@@ -442,7 +579,8 @@ export function AgentMode(props: Props): React.JSX.Element {
             args: event.args,
             environment: event.environment,
             status: 'running',
-            sandbox: event.sandbox
+            sandbox: event.sandbox,
+            timestamp: event.timestamp
           }
         ])
         return
@@ -504,11 +642,13 @@ export function AgentMode(props: Props): React.JSX.Element {
         // The composer already showed the user's own turn; echoing the
         // committed copy would duplicate it.
         if (event.message.role === 'user') return
-        setMessages((current) => [...current, event.message])
         if (event.message.role === 'assistant') {
           setStreaming('')
           setReasoning('')
+          // Tool-only turns have nothing to show: the timeline row covers them.
+          if (!shouldShowMessage(event.message)) return
         }
+        setMessages((current) => [...current, event.message])
         return
       }
       case 'run-completed': {
@@ -562,12 +702,28 @@ export function AgentMode(props: Props): React.JSX.Element {
         setSession(detail.session)
         sessionIdRef.current = detail.session.id
         onSessionBound?.(detail.session.id)
-        setMessages(detail.messages.map((record) => record.payload))
+        // Prefer the daemon's created_at for sorting so messages and tool
+        // executions share one clock format after restore.
+        setMessages(
+          detail.messages.map((record) => {
+            const payload = record.payload
+            return { ...payload, timestamp: record.created_at ?? payload.timestamp }
+          })
+        )
         setTimeline(timelineFromRecords(detail.tool_executions))
         setApprovals(detail.pending_approvals)
         setGrants(detail.grants)
         setSummary(null)
         setStreaming('')
+        setPendingConfineToWorktree(false)
+        const path = detail.session.workspace_path
+        if (path) {
+          void validateAgentWorkspace(path)
+            .then((validated) => setWorkspaceIsGit(validated.git_repository))
+            .catch(() => setWorkspaceIsGit(Boolean(detail.session.runtime_metadata?.worktree)))
+        } else {
+          setWorkspaceIsGit(false)
+        }
         // Restoring never re-runs anything: the worker only rebuilds context.
         await window.brazier.agent.openSession(id)
       } catch (cause) {
@@ -583,14 +739,57 @@ export function AgentMode(props: Props): React.JSX.Element {
     if (!selected) return
     try {
       const validated = await validateAgentWorkspace(selected)
+      setWorkspaceIsGit(validated.git_repository)
+      if (!validated.git_repository) setPendingConfineToWorktree(false)
       if (session) {
-        const updated = await updateAgentSession(session.id, { workspace_path: validated.path })
+        // Leave any existing worktree before pointing at a new folder.
+        if (sessionWorktree(session)) {
+          await updateAgentSession(session.id, { confine_to_worktree: false })
+        }
+        const updated = await updateAgentSession(session.id, {
+          workspace_path: validated.path
+        })
         setSession(updated)
       } else {
         setPendingWorkspace(validated.path)
       }
     } catch (cause) {
       onError(errorText(cause))
+    }
+  }
+
+  async function toggleWorktreeConfinement(): Promise<void> {
+    onError(null)
+    if (!workspaceIsGit && !worktree) {
+      onError('Worktree confinement needs a git repository workspace.')
+      return
+    }
+    if (!session) {
+      setPendingConfineToWorktree((current) => !current)
+      return
+    }
+    if (running) {
+      onError('Stop the current run before changing worktree confinement.')
+      return
+    }
+    setWorktreeBusy(true)
+    try {
+      const updated = await updateAgentSession(session.id, {
+        confine_to_worktree: !worktree
+      })
+      setSession(updated)
+      setSessions((current) =>
+        current.map((entry) => (entry.id === updated.id ? updated : entry))
+      )
+      const path = updated.workspace_path
+      if (path) {
+        const validated = await validateAgentWorkspace(path)
+        setWorkspaceIsGit(validated.git_repository)
+      }
+    } catch (cause) {
+      onError(errorText(cause))
+    } finally {
+      setWorktreeBusy(false)
     }
   }
 
@@ -646,12 +845,14 @@ export function AgentMode(props: Props): React.JSX.Element {
         active = await createAgentSession({
           title: text.slice(0, 60),
           workspace_path: workspace,
-          model: props.modelId
+          model: props.modelId,
+          confine_to_worktree: pendingConfineToWorktree
         })
         setSession(active)
         sessionIdRef.current = active.id
         setSessions((current) => [active as AgentSessionSummary, ...current])
         setPendingWorkspace(null)
+        setPendingConfineToWorktree(false)
         onSessionBound?.(active.id)
       } else if (active.model !== props.modelId) {
         // Model changes only take effect between runs.
@@ -671,13 +872,24 @@ export function AgentMode(props: Props): React.JSX.Element {
       onError(errorText(cause))
     } finally {
       // The daemon owns the record of what happened; re-read it so the timeline
-      // matches the ledger even if an event was missed.
+      // matches the ledger even if an event was missed. Keep live timestamps so
+      // sorting against committed messages (ISO) does not scramble after the
+      // SQLite clock format is swapped in.
       if (sessionIdRef.current) {
         void fetchAgentSession(sessionIdRef.current)
           .then((detail) => {
-            setTimeline(timelineFromRecords(detail.tool_executions))
+            setTimeline((current) => {
+              const records = timelineFromRecords(detail.tool_executions)
+              return records.map((record) => {
+                const existing = current.find((entry) => entry.toolCallId === record.toolCallId)
+                return existing ? { ...record, timestamp: existing.timestamp } : record
+              })
+            })
             setGrants(detail.grants)
             setSession(detail.session)
+            setSessions((current) =>
+              current.map((entry) => (entry.id === detail.session.id ? detail.session : entry))
+            )
           })
           .catch(() => undefined)
       }
@@ -720,6 +932,7 @@ export function AgentMode(props: Props): React.JSX.Element {
     setSummary(null)
     setStreaming('')
     setReasoning('')
+    setPendingConfineToWorktree(false)
   }
 
   async function removeSession(id: string): Promise<void> {
@@ -747,7 +960,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   // Keep the shared composer in step with what the agent can currently do. The
   // callbacks are re-published on every relevant change rather than held in a
   // ref, so the composer never sends against stale session or model state.
-  const { onComposerChange } = props
+  const { onComposerChange, onSidebarChange } = props
   const blockedReason = !props.modelId
     ? 'Choose a model in the top bar…'
     : !workspace
@@ -770,6 +983,19 @@ export function AgentMode(props: Props): React.JSX.Element {
     // render; the primitives below are what actually decide a new publication.
   }, [onComposerChange, running, blockedReason, modelLabel, workspace, session?.id, props.modelId])
 
+  // Same pattern for the app sidebar: Agent mode replaces conversations with
+  // directory-grouped tasks, so the list and its actions live up there.
+  useEffect(() => {
+    onSidebarChange?.({
+      sessions,
+      activeId: session?.id ?? null,
+      select: (id) => void loadSession(id),
+      remove: (id) => void removeSession(id),
+      newTask: () => void startNewTask()
+    })
+    return () => onSidebarChange?.(null)
+  }, [onSidebarChange, sessions, session?.id, loadSession])
+
   return (
     <div className="agent-mode">
       <header className="agent-header">
@@ -777,9 +1003,33 @@ export function AgentMode(props: Props): React.JSX.Element {
           <FolderOpen size={15} />
           <span>
             <strong>{shortPath(workspace)}</strong>
-            <small>{workspace ? 'Workspace' : 'Choose a folder'}</small>
+            <small>
+              {worktree
+                ? `Worktree · ${worktree.branch}`
+                : workspace
+                  ? 'Workspace'
+                  : 'Choose a folder'}
+            </small>
           </span>
         </button>
+        {(workspaceIsGit || worktree || pendingConfineToWorktree) && (
+          <button
+            className={`chip-button subtle${confinedToWorktree ? ' active' : ''}`}
+            type="button"
+            disabled={worktreeBusy || running}
+            title={
+              confinedToWorktree
+                ? worktree
+                  ? `Working in ${worktree.path} (from ${worktree.source_path}). Click to return to the original checkout.`
+                  : 'New tasks will start in a fresh git worktree.'
+                : 'Create a git worktree so the agent cannot dirty your current checkout.'
+            }
+            onClick={() => void toggleWorktreeConfinement()}
+          >
+            {worktreeBusy ? <LoaderCircle className="spin" size={13} /> : <GitBranch size={13} />}
+            {confinedToWorktree ? 'Worktree on' : 'Confine to worktree'}
+          </button>
+        )}
         {sandbox && <SandboxBadge sandbox={sandbox} />}
         <div className="agent-mode-select">
           <button type="button" onClick={() => setModeMenuOpen((open) => !open)} disabled={!session}>
@@ -812,16 +1062,6 @@ export function AgentMode(props: Props): React.JSX.Element {
         <button
           className="chip-button subtle"
           type="button"
-          onClick={() => setSessionListOpen((open) => !open)}
-        >
-          <Layers size={13} /> Tasks
-        </button>
-        <button className="chip-button subtle" type="button" onClick={() => void startNewTask()}>
-          New task
-        </button>
-        <button
-          className="chip-button subtle"
-          type="button"
           disabled={!session || running}
           title="Summarize earlier turns to free up context"
           onClick={() => void compact()}
@@ -829,30 +1069,6 @@ export function AgentMode(props: Props): React.JSX.Element {
           Compact
         </button>
       </header>
-
-      {sessionListOpen && (
-        <div className="agent-session-list">
-          {sessions.length === 0 && <p>No agent tasks yet.</p>}
-          {sessions.map((entry) => (
-            <div className={entry.id === session?.id ? 'agent-session active' : 'agent-session'} key={entry.id}>
-              <button type="button" onClick={() => void loadSession(entry.id)}>
-                <strong>{entry.title}</strong>
-                <span>
-                  {shortPath(entry.workspace_path)} · {entry.last_run_status}
-                </span>
-              </button>
-              <button
-                type="button"
-                className="agent-session-delete"
-                title="Delete this task"
-                onClick={() => void removeSession(entry.id)}
-              >
-                <Trash2 size={13} />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
 
       {sandbox && !sandbox.isolated && (
         <div className="agent-warning">
@@ -890,8 +1106,17 @@ export function AgentMode(props: Props): React.JSX.Element {
           </div>
         )}
 
-        {messages.map((message, index) => {
-          if (message.role === 'tool') return null
+        {transcriptRows.map((row) => {
+          if (row.kind === 'tool') {
+            return (
+              <TimelineRow
+                key={`tool-${row.entry.toolCallId}-${row.index}`}
+                entry={row.entry}
+                onShowFull={(id) => void showArtifact(id)}
+              />
+            )
+          }
+          const { message, index } = row
           if (message.role === 'system') {
             return (
               <article className="agent-message system" key={`system-${index}`}>
@@ -903,6 +1128,12 @@ export function AgentMode(props: Props): React.JSX.Element {
               </article>
             )
           }
+          const bodyText =
+            message.role === 'assistant'
+              ? displayableAssistantText(message.text)
+              : message.role === 'user'
+                ? message.text
+                : ''
           return (
             <article className={`agent-message ${message.role}`} key={`${message.role}-${index}`}>
               <div className="avatar">{message.role === 'assistant' ? <Bot size={16} /> : 'You'}</div>
@@ -913,7 +1144,7 @@ export function AgentMode(props: Props): React.JSX.Element {
                     <pre>{message.reasoning}</pre>
                   </details>
                 )}
-                <Markdown>{message.text}</Markdown>
+                {bodyText ? <Markdown>{bodyText}</Markdown> : null}
                 {message.role === 'assistant' && message.error && (
                   <p className="agent-message-error">{message.error}</p>
                 )}
@@ -922,23 +1153,12 @@ export function AgentMode(props: Props): React.JSX.Element {
           )
         })}
 
-        {timeline.length > 0 && (
-          <section className="agent-timeline">
-            <div className="section-label">
-              <Wrench size={12} /> Activity
-            </div>
-            {timeline.map((entry) => (
-              <TimelineRow key={entry.toolCallId} entry={entry} onShowFull={(id) => void showArtifact(id)} />
-            ))}
-          </section>
-        )}
-
         {approvals.map((approval) => (
           <ApprovalCard key={approval.id} approval={approval} onDecide={(...args) => void decide(...args)} busy={deciding} />
         ))}
 
         {(streaming || reasoning) && (
-          <article className="agent-message assistant">
+          <article className="agent-message assistant streaming">
             <div className="avatar">
               <Bot size={16} />
             </div>
@@ -949,7 +1169,7 @@ export function AgentMode(props: Props): React.JSX.Element {
                   <pre>{reasoning}</pre>
                 </details>
               )}
-              <Markdown>{streaming}</Markdown>
+              {streaming ? <Markdown>{streaming}</Markdown> : null}
             </div>
           </article>
         )}

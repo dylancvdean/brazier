@@ -341,6 +341,17 @@ pub fn system_prompt(
         .workspace_path
         .as_deref()
         .unwrap_or("(no workspace selected)");
+    let worktree = crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref());
+    let workspace_line = if let Some(info) = &worktree {
+        format!(
+            "Workspace: {workspace}\n\
+             This session is confined to a git worktree branched from {} on `{}`. \
+             Edit and run commands here; the user's original checkout is untouched.",
+            info.source_path, info.branch
+        )
+    } else {
+        format!("Workspace: {workspace}")
+    };
     let sandbox_line = if sandbox.isolated {
         format!(
             "Commands run inside a {} sandbox: writes are limited to the workspace and \
@@ -372,7 +383,7 @@ pub fn system_prompt(
 
     format!(
         "You are Brazier's coding and system agent, running locally on the user's machine.\n\n\
-         Workspace: {workspace}\n\
+         {workspace_line}\n\
          Platform: {} ({})\n\
          {sandbox_line}\n\
          {permission_line}\n\n\

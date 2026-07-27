@@ -1550,6 +1550,7 @@ mod tests {
                         auto_approve_host_actions: false,
                     }),
                     enabled_tools: None,
+                    confine_to_worktree: false,
                 })
                 .await
                 .expect("session");

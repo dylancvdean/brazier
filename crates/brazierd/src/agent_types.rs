@@ -337,6 +337,10 @@ pub struct CreateAgentSession {
     pub permission_settings: Option<AgentPermissionSettings>,
     #[serde(default)]
     pub enabled_tools: Option<Vec<String>>,
+    /// When true and `workspace_path` is a git repo, the session workspace is a
+    /// fresh worktree so the agent cannot dirty the user's current checkout.
+    #[serde(default)]
+    pub confine_to_worktree: bool,
 }
 
 fn default_runtime_id() -> String {
@@ -364,6 +368,9 @@ pub struct UpdateAgentSession {
     pub compaction: Option<serde_json::Value>,
     #[serde(default)]
     pub runtime_metadata: Option<serde_json::Value>,
+    /// Set to enable or disable worktree confinement for this session.
+    #[serde(default)]
+    pub confine_to_worktree: Option<bool>,
 }
 
 /// One persisted transcript entry. The payload is the runtime-neutral message

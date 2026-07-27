@@ -63,7 +63,8 @@ import {
   updateRecommendationState,
   uploadAttachmentBlob
 } from './api'
-import { AgentMode, type AgentComposerControls } from './components/AgentMode'
+import { AgentMode, type AgentComposerControls, type AgentSidebarControls } from './components/AgentMode'
+import { AgentSessionSidebar } from './components/AgentSessionSidebar'
 import { DownloadTray } from './components/DownloadTray'
 import { GenerationActivity } from './components/GenerationActivity'
 import { MessageMedia } from './components/MessageMedia'
@@ -366,6 +367,7 @@ export function App(): React.JSX.Element {
   // Agent mode has no composer of its own; it publishes these so the one at the
   // bottom of the window can drive it.
   const [agentComposer, setAgentComposer] = useState<AgentComposerControls | null>(null)
+  const [agentSidebar, setAgentSidebar] = useState<AgentSidebarControls | null>(null)
 
   useEffect(() => {
     if (showWelcome !== false) return
@@ -1187,70 +1189,76 @@ export function App(): React.JSX.Element {
   return (
     <main className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
-        <button className="new-chat" onClick={() => void newConversation()}>
-          <MessageSquarePlus size={17} />
-          New conversation
-        </button>
-        <label className="conversation-search">
-          <Search size={14} />
-          <input
-            aria-label="Search conversations"
-            value={conversationSearch}
-            onChange={(event) => setConversationSearch(event.target.value)}
-            placeholder="Search conversations…"
-          />
-        </label>
-        <div className="sidebar-actions">
-          <button
-            className="chip-button subtle"
-            disabled={!conversationId}
-            title="Export this conversation as JSON"
-            onClick={() => void exportCurrentConversation()}
-          >
-            <Download size={13} />
-            Export
-          </button>
-          <button
-            className="chip-button subtle"
-            title="Import a conversation JSON export"
-            onClick={() => importInput.current?.click()}
-          >
-            <Upload size={13} />
-            Import
-          </button>
-          <input
-            ref={importInput}
-            type="file"
-            accept="application/json,.json"
-            hidden
-            onChange={(event) => {
-              const file = event.target.files?.[0]
-              if (file) void importConversationFromFile(file)
-              event.target.value = ''
-            }}
-          />
-        </div>
-        <div className="conversation-list">
-          <div className="section-label">Recent</div>
-          {conversations.map((conversation) => (
-            <button
-              className={conversation.id === conversationId ? 'conversation active' : 'conversation'}
-              key={conversation.id}
-              onClick={() => setConversationId(conversation.id)}
-            >
-              <span>{conversation.title}</span>
-              <time>{conversation.updated_at.slice(0, 10)}</time>
+        {appMode === 'agent' ? (
+          <AgentSessionSidebar controls={agentSidebar} />
+        ) : (
+          <>
+            <button className="new-chat" onClick={() => void newConversation()}>
+              <MessageSquarePlus size={17} />
+              New conversation
             </button>
-          ))}
-          {conversations.length === 0 && (
-            <p className="empty-sidebar">Your conversations stay on this device.</p>
-          )}
-        </div>
-        <RunHistory
-          runs={runSnapshots}
-          expandedId={expandedRunId}
-          onToggle={(id) => setExpandedRunId((current) => (current === id ? null : id))}
-        />
+            <label className="conversation-search">
+              <Search size={14} />
+              <input
+                aria-label="Search conversations"
+                value={conversationSearch}
+                onChange={(event) => setConversationSearch(event.target.value)}
+                placeholder="Search conversations…"
+              />
+            </label>
+            <div className="sidebar-actions">
+              <button
+                className="chip-button subtle"
+                disabled={!conversationId}
+                title="Export this conversation as JSON"
+                onClick={() => void exportCurrentConversation()}
+              >
+                <Download size={13} />
+                Export
+              </button>
+              <button
+                className="chip-button subtle"
+                title="Import a conversation JSON export"
+                onClick={() => importInput.current?.click()}
+              >
+                <Upload size={13} />
+                Import
+              </button>
+              <input
+                ref={importInput}
+                type="file"
+                accept="application/json,.json"
+                hidden
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  if (file) void importConversationFromFile(file)
+                  event.target.value = ''
+                }}
+              />
+            </div>
+            <div className="conversation-list">
+              <div className="section-label">Recent</div>
+              {conversations.map((conversation) => (
+                <button
+                  className={conversation.id === conversationId ? 'conversation active' : 'conversation'}
+                  key={conversation.id}
+                  onClick={() => setConversationId(conversation.id)}
+                >
+                  <span>{conversation.title}</span>
+                  <time>{conversation.updated_at.slice(0, 10)}</time>
+                </button>
+              ))}
+              {conversations.length === 0 && (
+                <p className="empty-sidebar">Your conversations stay on this device.</p>
+              )}
+            </div>
+            <RunHistory
+              runs={runSnapshots}
+              expandedId={expandedRunId}
+              onToggle={(id) => setExpandedRunId((current) => (current === id ? null : id))}
+            />
+          </>
+        )}
         <div className="privacy-note">
           <span className={`status-dot ${daemonStatus}`} />
           {daemonStatus === 'healthy'
@@ -1469,6 +1477,7 @@ export function App(): React.JSX.Element {
             modelId={selectedModel}
             models={localModels}
             onComposerChange={setAgentComposer}
+            onSidebarChange={setAgentSidebar}
             onSuggestPrompt={setDraft}
             onSessionBound={(agentSessionId) => void session.bindAgentSession(agentSessionId)}
             onError={setError}

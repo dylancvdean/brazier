@@ -730,6 +730,7 @@ mod tests {
             permission_mode: None,
             permission_settings: None,
             enabled_tools: None,
+            confine_to_worktree: false,
         }
     }
 

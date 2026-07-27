@@ -6,6 +6,7 @@ pub mod agent_sandbox;
 pub mod agent_store;
 pub mod agent_tools;
 pub mod agent_types;
+pub mod agent_worktree;
 pub mod api;
 pub mod blob_store;
 pub mod build_recipe;

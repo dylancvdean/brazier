@@ -142,8 +142,13 @@ function toPiMessage(message: AgentMessage): PiMessage | undefined {
 /** Text of an assistant message, ignoring thinking and tool calls. */
 function assistantText(message: AssistantMessage): string {
   return message.content
-    .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
-    .map((part) => part.text)
+    .filter((part) => part.type === 'text')
+    .map((part) => {
+      // Some runtimes emit a null text part on tool-only turns; coerce safely
+      // so join() cannot turn it into the literal string "null".
+      const text = (part as { text?: unknown }).text
+      return typeof text === 'string' ? text : ''
+    })
     .join('')
 }
 

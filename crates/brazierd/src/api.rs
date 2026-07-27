@@ -3943,16 +3943,21 @@ async fn list_agent_sessions(State(state): State<AppState>) -> ApiResult<Json<Va
 
 async fn create_agent_session(
     State(state): State<AppState>,
-    Json(request): Json<crate::agent_types::CreateAgentSession>,
+    Json(mut request): Json<crate::agent_types::CreateAgentSession>,
 ) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
+    let confine = request.confine_to_worktree;
+    request.confine_to_worktree = false;
     if let Some(workspace) = &request.workspace_path {
         validate_workspace_path(&state, workspace)?;
     }
-    let session = state
+    let mut session = state
         .db
         .create_agent_session(request)
         .await
         .map_err(ApiError::internal)?;
+    if confine {
+        session = set_worktree_confinement(&state, session, true).await?;
+    }
     Ok(Json(session))
 }
 
@@ -3998,16 +4003,20 @@ async fn get_agent_session(
 async fn patch_agent_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(update): Json<crate::agent_types::UpdateAgentSession>,
+    Json(mut update): Json<crate::agent_types::UpdateAgentSession>,
 ) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
+    let confine = update.confine_to_worktree.take();
     if let Some(Some(workspace)) = &update.workspace_path {
         validate_workspace_path(&state, workspace)?;
     }
-    let session = state
+    let mut session = state
         .db
         .update_agent_session(&id, update)
         .await
         .map_err(ApiError::internal)?;
+    if let Some(enabled) = confine {
+        session = set_worktree_confinement(&state, session, enabled).await?;
+    }
     Ok(Json(session))
 }
 
@@ -4016,6 +4025,14 @@ async fn delete_agent_session(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     state.agent_broker.terminate_session_processes(&id).await;
+    if let Ok(session) = state.db.agent_session(&id).await {
+        if let Some(info) =
+            crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
+        {
+            // Best-effort cleanup: a leftover worktree is annoying, not fatal.
+            let _ = crate::agent_worktree::remove_worktree(&info).await;
+        }
+    }
     state
         .db
         .delete_agent_session(&id)
@@ -4293,12 +4310,77 @@ async fn validate_agent_workspace(
     Json(request): Json<WorkspaceRequest>,
 ) -> ApiResult<Json<Value>> {
     let resolved = validate_workspace_path(&state, &request.path)?;
-    let git = resolved.join(".git").exists();
+    let git = crate::agent_worktree::is_git_repository(&resolved).await;
     Ok(Json(json!({
         "path": resolved.display().to_string(),
         "git_repository": git,
         "sandbox": state.agent_broker.capabilities(),
     })))
+}
+
+/// Point the session at a fresh git worktree, or restore the source checkout.
+async fn set_worktree_confinement(
+    state: &AppState,
+    session: crate::agent_types::AgentSessionRecord,
+    enabled: bool,
+) -> ApiResult<crate::agent_types::AgentSessionRecord> {
+    let existing =
+        crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref());
+    if enabled {
+        if existing.is_some() {
+            return Ok(session);
+        }
+        let source = session
+            .workspace_path
+            .as_deref()
+            .ok_or_else(|| ApiError::bad_request("choose a workspace before confining to a worktree"))?;
+        let source_path = validate_workspace_path(state, source)?;
+        if !crate::agent_worktree::is_git_repository(&source_path).await {
+            return Err(ApiError::bad_request(
+                "worktree confinement needs a git repository workspace",
+            ));
+        }
+        let info = crate::agent_worktree::create_worktree(&source_path, &session.id)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let metadata = crate::agent_worktree::metadata_with_worktree(
+            session.runtime_metadata.clone(),
+            Some(info.clone()),
+        );
+        validate_workspace_path(state, &info.path)?;
+        state
+            .db
+            .update_agent_session(
+                &session.id,
+                crate::agent_types::UpdateAgentSession {
+                    workspace_path: Some(Some(info.path)),
+                    runtime_metadata: Some(metadata),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(ApiError::internal)
+    } else {
+        let Some(info) = existing else {
+            return Ok(session);
+        };
+        let _ = crate::agent_worktree::remove_worktree(&info).await;
+        let metadata =
+            crate::agent_worktree::metadata_with_worktree(session.runtime_metadata.clone(), None);
+        let source = validate_workspace_path(state, &info.source_path)?;
+        state
+            .db
+            .update_agent_session(
+                &session.id,
+                crate::agent_types::UpdateAgentSession {
+                    workspace_path: Some(Some(source.display().to_string())),
+                    runtime_metadata: Some(metadata),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(ApiError::internal)
+    }
 }
 
 /// A workspace must exist, be a directory, and sit outside Brazier's own data

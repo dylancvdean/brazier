@@ -2014,6 +2014,12 @@ a.inline-link {
   border-color: #67393c;
 }
 
+.chip-button.subtle.active {
+  border-color: #33241a;
+  color: var(--accent);
+  background: var(--accent-dark);
+}
+
 .chip-button.danger {
   border-color: #67393c;
   color: #e8adb1;
@@ -4218,6 +4224,41 @@ label.span-2 {
   font-size: 11px;
 }
 
+.agent-sidebar-list {
+  margin-top: 12px;
+  flex: 1;
+}
+
+.agent-sidebar-group + .agent-sidebar-group {
+  margin-top: 4px;
+}
+
+.agent-sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 12px;
+}
+
+.agent-sidebar-group-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.agent-sidebar-group-label span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-session {
   display: flex;
   align-items: center;
@@ -4226,6 +4267,7 @@ label.span-2 {
 
 .agent-session > button:first-child {
   flex: 1;
+  min-width: 0;
   padding: 7px 10px;
   border: 1px solid transparent;
   border-radius: 9px;
@@ -4245,16 +4287,23 @@ label.span-2 {
 
 .agent-session strong {
   display: block;
+  overflow: hidden;
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-session span {
   display: block;
+  overflow: hidden;
   color: var(--muted);
   font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-session-delete {
+  flex: none;
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 8px;
