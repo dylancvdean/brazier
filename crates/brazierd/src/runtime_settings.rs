@@ -128,6 +128,9 @@ pub struct RuntimeSettings {
     /// Reload the evicted chat model after generation completes.
     #[serde(default = "default_true")]
     pub reload_llm_after_generation: bool,
+    /// Chat `run_javascript` sandbox profile and optional limit overrides.
+    #[serde(default)]
+    pub javascript_sandbox: crate::js_sandbox::JavascriptSandboxSettings,
 }
 
 pub fn default_build_jobs() -> u16 {
@@ -182,6 +185,7 @@ impl Default for RuntimeSettings {
             generation_memory_policy: GenerationMemoryPolicy::Auto,
             generation_memory_headroom_mb: default_generation_headroom_mb(),
             reload_llm_after_generation: true,
+            javascript_sandbox: crate::js_sandbox::JavascriptSandboxSettings::default(),
         }
     }
 }
@@ -253,6 +257,7 @@ impl RuntimeSettings {
                 path.display()
             );
         }
+        self.javascript_sandbox.validate()?;
         Ok(())
     }
 }
@@ -338,5 +343,29 @@ mod tests {
             load(dir.path()).binary_override.as_deref(),
             Some("/opt/homebrew/bin/llama-server")
         );
+    }
+
+    #[test]
+    fn javascript_sandbox_settings_round_trip_in_runtime_settings() {
+        let mut settings = RuntimeSettings::default();
+        settings.javascript_sandbox = crate::js_sandbox::JavascriptSandboxSettings {
+            profile: crate::js_sandbox::JsSandboxProfile::Roomy,
+            capture_console: Some(true),
+            timeout_ms: Some(8_000),
+            memory_mb: None,
+            max_code_bytes: None,
+            max_output_chars: None,
+            max_stack_kb: None,
+        };
+        let encoded = serde_json::to_value(&settings).unwrap();
+        let decoded: RuntimeSettings = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.javascript_sandbox.profile,
+            crate::js_sandbox::JsSandboxProfile::Roomy
+        );
+        assert_eq!(decoded.javascript_sandbox.timeout_ms, Some(8_000));
+        let config = crate::js_sandbox::JsSandboxConfig::from_runtime_settings(&decoded);
+        assert_eq!(config.timeout, std::time::Duration::from_millis(8_000));
+        assert!(config.capture_console);
     }
 }

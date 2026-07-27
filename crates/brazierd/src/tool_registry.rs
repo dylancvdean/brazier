@@ -158,7 +158,7 @@ pub async fn execute(
 
 pub fn combined_catalog(data_dir: &Path) -> Value {
     let mut entries: Vec<Value> = Vec::new();
-    if let Some(builtin) = crate::tools::catalog()
+    if let Some(builtin) = crate::tools::catalog_for(data_dir)
         .get("data")
         .and_then(Value::as_array)
     {

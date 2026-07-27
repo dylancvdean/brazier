@@ -92,6 +92,20 @@ export type RuntimeSettings = {
   generation_memory_policy: 'auto' | 'coresident' | 'exclusive'
   generation_memory_headroom_mb: number
   reload_llm_after_generation: boolean
+  /** Chat `run_javascript` sandbox profile and optional limit overrides. */
+  javascript_sandbox?: JavascriptSandboxSettings
+}
+
+export type JsSandboxProfile = 'strict' | 'default' | 'roomy' | 'custom'
+
+export type JavascriptSandboxSettings = {
+  profile?: JsSandboxProfile
+  capture_console?: boolean | null
+  timeout_ms?: number | null
+  memory_mb?: number | null
+  max_code_bytes?: number | null
+  max_output_chars?: number | null
+  max_stack_kb?: number | null
 }
 
 export type PipelineFeatures = {

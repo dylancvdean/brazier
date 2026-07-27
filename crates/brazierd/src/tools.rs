@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 const FETCH_MAX_BYTES: usize = 256 * 1024;
 const FETCH_MAX_OUTPUT_CHARS: usize = 8_000;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
-const JS_SANDBOX_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A completed built-in tool invocation, suitable for UI display and for the
 /// `tool` role message returned to the model.
@@ -56,6 +55,10 @@ pub fn definitions_for(data_dir: &std::path::Path) -> Value {
         let note = match name {
             "generate_video" => Some(describe_video_model(data_dir, &settings)),
             "generate_image" => Some(describe_image_model(&settings)),
+            "run_javascript" => Some(
+                crate::js_sandbox::JsSandboxConfig::from_runtime_settings(&settings)
+                    .describe_for_model(),
+            ),
             _ => None,
         };
         if let Some(note) = note
@@ -147,7 +150,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "run_javascript",
-                "description": "Run JavaScript in a sandboxed QuickJS environment. No network, filesystem, or host APIs. Use for data transforms, date math, or small algorithms. Use `return` to produce a JSON-serializable result.",
+                "description": "Run JavaScript in a sandboxed QuickJS environment. No network, filesystem, or host APIs. Use for data transforms, date math, or small algorithms.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -224,6 +227,18 @@ pub fn definitions() -> Value {
 
 /// Human-facing catalog used by the `/api/v1/tools` endpoint.
 pub fn catalog() -> Value {
+    catalog_for_config(&crate::js_sandbox::JsSandboxConfig::default())
+}
+
+/// Catalog entries reflecting the live JavaScript sandbox configuration.
+pub fn catalog_for(data_dir: &std::path::Path) -> Value {
+    let settings = crate::runtime_settings::load(data_dir);
+    catalog_for_config(&crate::js_sandbox::JsSandboxConfig::from_runtime_settings(
+        &settings,
+    ))
+}
+
+fn catalog_for_config(js_config: &crate::js_sandbox::JsSandboxConfig) -> Value {
     json!({
         "data": [
             {
@@ -254,11 +269,7 @@ pub fn catalog() -> Value {
             {
                 "name": "run_javascript",
                 "title": "JavaScript sandbox",
-                "description": format!(
-                    "QuickJS sandbox ({} KB code limit, {}s timeout, no I/O).",
-                    crate::js_sandbox::MAX_CODE_BYTES / 1024,
-                    JS_SANDBOX_TIMEOUT.as_secs()
-                ),
+                "description": js_config.describe_for_catalog(),
                 "network": false,
                 "source": "builtin"
             },
@@ -337,7 +348,7 @@ pub async fn execute_with_context(
                 "generate_video requires daemon data directory context"
             )),
         },
-        other => simple_tool(client, other, &parsed)
+        other => simple_tool(client, data_dir, other, &parsed)
             .await
             .map(ToolOutput::from),
     };
@@ -364,6 +375,7 @@ pub async fn execute_with_context(
 /// Built-in tools that return plain text.
 async fn simple_tool(
     client: &reqwest::Client,
+    data_dir: Option<&std::path::Path>,
     name: &str,
     parsed: &Value,
 ) -> anyhow::Result<String> {
@@ -391,8 +403,15 @@ async fn simple_tool(
         "run_javascript" => match parsed.get("code").and_then(Value::as_str) {
             Some(code) => {
                 let code = code.to_owned();
+                let config = match data_dir {
+                    Some(dir) => {
+                        let settings = crate::runtime_settings::load(dir);
+                        crate::js_sandbox::JsSandboxConfig::from_runtime_settings(&settings)
+                    }
+                    None => crate::js_sandbox::JsSandboxConfig::default(),
+                };
                 match tokio::task::spawn_blocking(move || {
-                    crate::js_sandbox::run_javascript(&code, JS_SANDBOX_TIMEOUT)
+                    crate::js_sandbox::run_javascript_with_config(&code, &config)
                 })
                 .await
                 {
@@ -1062,7 +1081,47 @@ mod tests {
         )
         .await;
         assert!(!result.is_error);
-        assert_eq!(result.output, "42");
+        let parsed: Value = serde_json::from_str(&result.output).expect("json envelope");
+        assert_eq!(parsed["return"], 42);
+        assert_eq!(parsed["logs"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn execute_javascript_captures_console() {
+        let client = reqwest::Client::new();
+        let result = execute(
+            &client,
+            "call_1",
+            "run_javascript",
+            r#"{"code": "console.log('hi'); return {ok: true};"}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.output);
+        let parsed: Value = serde_json::from_str(&result.output).expect("json envelope");
+        assert_eq!(parsed["return"]["ok"], true);
+        assert_eq!(parsed["logs"][0], "hi");
+    }
+
+    #[test]
+    fn javascript_tool_description_reflects_sandbox_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let described = definitions_for(dir.path())
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item.pointer("/function/name").and_then(Value::as_str) == Some("run_javascript"))
+            .and_then(|item| item.pointer("/function/description"))
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_owned();
+        assert!(
+            described.contains("Not Node"),
+            "should be honest about the environment: {described}"
+        );
+        assert!(
+            described.contains("console.log"),
+            "default profile should mention console: {described}"
+        );
     }
 }
 
