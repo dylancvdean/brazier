@@ -19,7 +19,7 @@ the desktop app and in headless deployments.
 | API | ✅ OpenAI-compatible Models, Chat Completions, and Responses, plus transcription, generation, and agent endpoints |
 | Tools and MCP | ✅ Built-in utilities, media generation, multi-round tool use, and custom stdio MCP servers |
 | Multimodal input | ✅ Image, audio, and sampled video input with capability-aware fallback |
-| Agent | 🟨 Sandboxed Pi core on macOS and Linux; Windows has no agent sandbox and agent MCP support is still planned |
+| Agent | 🟨 Sandboxed Pi core on macOS and Linux with brokered MCP tools; Windows has no agent sandbox |
 | Media generation | 🟨 Curated image/video models and managed runtimes; backend reliability varies and AMD APU Vulkan support is experimental |
 | Speech recognition | ✅ whisper.cpp, WhisperKit, and Nemotron streaming ASR |
 | Multi-GPU | 🟨 Manual llama.cpp GPU splits are supported; automatic and cross-engine placement are not |

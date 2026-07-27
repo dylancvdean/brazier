@@ -4138,8 +4138,55 @@ async fn agent_capabilities(State(state): State<AppState>) -> ApiResult<Json<Val
     })))
 }
 
-async fn agent_tool_catalog() -> Json<Value> {
-    Json(crate::agent_tools::definitions())
+fn agent_tool_definitions(data_dir: &std::path::Path) -> Value {
+    let mut definitions = crate::agent_tools::definitions()["data"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for server in mcp::enabled_servers(data_dir) {
+        for tool in server.tools {
+            let tool_name = tool.name;
+            let name = mcp::openai_tool_name(&server.id, &tool_name);
+            let description = tool.description.unwrap_or_else(|| {
+                format!(
+                    "Call {tool_name} on the configured {} MCP server.",
+                    server.name
+                )
+            });
+            let schema = if tool.input_schema.is_null() {
+                json!({ "type": "object", "properties": {} })
+            } else {
+                tool.input_schema
+            };
+            definitions.push(json!({
+                "name": name,
+                "label": format!("{} · {}", server.name, tool_name),
+                "description": description,
+                "input_schema": schema,
+                // MCP servers are configured host processes. Agent mode never
+                // presents them as sandboxed calls.
+                "risk": "execute",
+                "executes": true,
+                "needs_workspace": false,
+                "default_environment": "host",
+                "source": "mcp",
+            }));
+        }
+    }
+    json!({ "data": definitions })
+}
+
+fn agent_tool_names(data_dir: &std::path::Path) -> Vec<String> {
+    agent_tool_definitions(data_dir)["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+async fn agent_tool_catalog(State(state): State<AppState>) -> Json<Value> {
+    Json(agent_tool_definitions(&state.data_dir))
 }
 
 async fn list_agent_sessions(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -4349,7 +4396,7 @@ async fn agent_system_prompt(
     let names = session
         .enabled_tools
         .clone()
-        .unwrap_or_else(crate::agent_tools::tool_names);
+        .unwrap_or_else(|| agent_tool_names(&state.data_dir));
     let prompt =
         crate::agent_tools::system_prompt(&session, &state.agent_broker.capabilities(), &names);
     Ok(Json(json!({ "system_prompt": prompt, "tools": names })))
@@ -4370,6 +4417,14 @@ async fn agent_exec_tool(
     {
         return Err(ApiError::bad_request(format!(
             "tool `{}` is not enabled for this session",
+            request.tool
+        )));
+    }
+    if crate::agent_policy::is_mcp_tool_name(&request.tool)
+        && !agent_tool_names(&state.data_dir).contains(&request.tool)
+    {
+        return Err(ApiError::bad_request(format!(
+            "MCP tool `{}` is not enabled or advertised",
             request.tool
         )));
     }
@@ -4404,6 +4459,14 @@ async fn agent_exec_tool_stream(
     {
         return Err(ApiError::bad_request(format!(
             "tool `{}` is not enabled for this session",
+            request.tool
+        )));
+    }
+    if crate::agent_policy::is_mcp_tool_name(&request.tool)
+        && !agent_tool_names(&state.data_dir).contains(&request.tool)
+    {
+        return Err(ApiError::bad_request(format!(
+            "MCP tool `{}` is not enabled or advertised",
             request.tool
         )));
     }
@@ -5044,6 +5107,187 @@ mod tests {
             assert_eq!(tool["input_schema"]["type"], "object");
             assert!(tool["risk"].as_str().is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn enabled_mcp_tools_join_agent_catalog_and_policy() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        mcp::save(
+            dir.path(),
+            &mcp::McpConfig {
+                servers: vec![mcp::McpServerConfig {
+                    id: "demo".into(),
+                    name: "Demo server".into(),
+                    command: "/definitely/not/run-during-this-test".into(),
+                    args: Vec::new(),
+                    env: std::collections::HashMap::new(),
+                    enabled: true,
+                    tools: vec![mcp::McpToolEntry {
+                        name: "lookup".into(),
+                        description: Some("Look up a value through the demo server.".into()),
+                        input_schema: json!({
+                            "type": "object",
+                            "properties": { "query": { "type": "string" } },
+                            "required": ["query"]
+                        }),
+                    }],
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let app = router(test_state(dir.path()).await);
+
+        let (status, catalog) = get_request(&app, "/api/v1/agent/tools").await;
+        assert_eq!(status, StatusCode::OK);
+        let tool = catalog["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "mcp/demo/lookup")
+            .expect("MCP tool in agent catalog");
+        assert_eq!(tool["default_environment"], "host");
+        assert_eq!(tool["risk"], "execute");
+        assert_eq!(tool["input_schema"]["required"], json!(["query"]));
+
+        let (_, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+        )
+        .await;
+        let session_id = session["id"].as_str().unwrap();
+        let (_, prompt) =
+            get_request(&app, &format!("/api/v1/agent/sessions/{session_id}/prompt")).await;
+        assert!(
+            prompt["tools"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("mcp/demo/lookup"))
+        );
+
+        let (status, held) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/exec",
+            json!({
+                "session_id": session_id,
+                "tool": "mcp/demo/lookup",
+                "arguments": { "query": "value" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{held}");
+        assert_eq!(held["status"], "approval_required");
+        assert_eq!(held["environment"], "host");
+        assert_eq!(
+            held["approval"]["elevation"]["requested_network_access"],
+            true
+        );
+        assert_eq!(held["approval"]["allow_session_scope"], false);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approved_agent_mcp_call_executes_and_is_recorded() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let server = r#"
+count=0
+while IFS= read -r line; do
+  count=$((count + 1))
+  if [ "$count" -eq 1 ]; then
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}'
+  elif [ "$count" -eq 3 ]; then
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"mcp-agent-ok"}]}}'
+  fi
+done
+"#;
+        mcp::save(
+            dir.path(),
+            &mcp::McpConfig {
+                servers: vec![mcp::McpServerConfig {
+                    id: "demo".into(),
+                    name: "Demo server".into(),
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), server.into()],
+                    env: std::collections::HashMap::new(),
+                    enabled: true,
+                    tools: vec![mcp::McpToolEntry {
+                        name: "lookup".into(),
+                        description: Some("Look up a test value.".into()),
+                        input_schema: json!({ "type": "object", "properties": {} }),
+                    }],
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (_, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+        )
+        .await;
+        let session_id = session["id"].as_str().unwrap();
+        let arguments = json!({ "query": "value" });
+        let (_, held) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/exec",
+            json!({
+                "session_id": session_id,
+                "tool": "mcp/demo/lookup",
+                "arguments": arguments,
+                "tool_call_id": "mcp-call"
+            }),
+        )
+        .await;
+        let approval_id = held["approval"]["id"].as_str().unwrap();
+        json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/agent/approvals/{approval_id}"),
+            json!({ "decision": "approve", "scope": "once" }),
+        )
+        .await;
+        let (status, done) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/exec",
+            json!({
+                "session_id": session_id,
+                "tool": "mcp/demo/lookup",
+                "arguments": arguments,
+                "tool_call_id": "mcp-call",
+                "approval_id": approval_id
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{done}");
+        assert_eq!(done["status"], "completed", "{done}");
+        assert_eq!(done["output"], "mcp-agent-ok");
+        assert_eq!(done["environment"], "host");
+
+        let (_, executions) = get_request(
+            &app,
+            &format!("/api/v1/agent/sessions/{session_id}/tool-executions"),
+        )
+        .await;
+        let record = &executions["data"][0];
+        assert_eq!(record["tool"], "mcp/demo/lookup");
+        assert_eq!(record["approval_id"], approval_id);
+        assert_eq!(record["status"], "completed");
     }
 
     #[tokio::test]

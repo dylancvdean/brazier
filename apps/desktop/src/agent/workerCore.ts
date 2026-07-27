@@ -146,7 +146,10 @@ export class AgentWorkerCore {
     if (!this.runtime) throw new Error('The agent worker has no runtime.')
     const remote = await broker.session(sessionId)
     const prompt = await broker.systemPrompt(sessionId)
-    this.tools ??= await broker.tools()
+    // MCP configuration can change while the utility process remains alive.
+    // Refresh when opening a session so newly enabled server tools do not
+    // require restarting the desktop application.
+    this.tools = await broker.tools()
     const enabled = remote.session.enabled_tools ?? undefined
     const tools = enabled
       ? this.tools.filter((tool) => enabled.includes(tool.name))

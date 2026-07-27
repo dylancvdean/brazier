@@ -620,8 +620,34 @@ async fn run_tool(
         "spawn_subagent" => anyhow::bail!(
             "`spawn_subagent` runs in the agent worker, not through the daemon exec path"
         ),
+        other if agent_policy::is_mcp_tool_name(other) => {
+            mcp_tool(context, plan, other, arguments).await
+        }
         other => anyhow::bail!("no executor for tool `{other}`"),
     }
+}
+
+async fn mcp_tool(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    name: &str,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    anyhow::ensure!(
+        plan.environment == AgentEnvironment::Host,
+        "MCP servers must run as explicitly approved host processes"
+    );
+    let (server_id, tool_name) =
+        brazier_runtime::mcp::parse_tool_name(name).context("invalid MCP tool name")?;
+    let encoded = serde_json::to_string(arguments).context("encode MCP tool arguments")?;
+    let invocation =
+        brazier_runtime::mcp::call_tool(context.data_dir, &server_id, &tool_name, &encoded).await;
+    Ok(ToolOutcome {
+        output: invocation.output,
+        is_error: invocation.is_error,
+        exit_code: None,
+        changed_paths: Vec::new(),
+    })
 }
 
 /// Validate a tool-supplied path for this call, including symlink escapes.

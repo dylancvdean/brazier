@@ -8,11 +8,12 @@ description = "Agent policy, sandboxing, worktree, and execution components for 
 
 [features]
 default = []
-execution = ["dep:brazier-storage"]
+execution = ["dep:brazier-runtime", "dep:brazier-storage"]
 
 [dependencies]
 anyhow.workspace = true
 brazier-protocol = { path = "../brazier-protocol" }
+brazier-runtime = { path = "../brazier-runtime", optional = true }
 brazier-storage = { path = "../brazier-storage", optional = true }
 serde.workspace = true
 serde_json.workspace = true

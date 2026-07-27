@@ -233,6 +233,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "brazier-protocol",
+ "brazier-runtime",
  "brazier-storage",
  "serde",
  "serde_json",

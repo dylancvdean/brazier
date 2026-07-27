@@ -213,8 +213,13 @@ what is left is mostly the difference between working and trustworthy.
   already full and that is the worst moment to fail. Which half produced a
   summary is recorded on the session, and the narrative is cut at a sentence
   boundary if a model answers an eight-sentence instruction with an essay.
-- Optional MCP tools inside agent sessions, reusing the existing MCP client
-  behind the same policy broker.
+- **Optional MCP tools are available inside agent sessions.** Enabled servers'
+  advertised schemas join the agent catalog and system prompt, and the worker
+  refreshes that catalog when it opens a session. Calls reuse the existing MCP
+  client but still enter through the agent execution broker: an MCP server is
+  reported honestly as a host process with network reach, Ask mode holds every
+  call for one-shot approval, Sandbox-only mode refuses it, and disabled or
+  unadvertised tools cannot be invoked.
 
 ## Tool packs and release hardening
 
