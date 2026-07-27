@@ -64,6 +64,11 @@ export class AgentToolExecutor {
   private fallbackSandbox: SandboxDescription
   /** Approvals requested during the current run, for the run summary. */
   approvalsRequested = 0
+  /** Worker-handled tools that never reach the daemon exec endpoint. */
+  private readonly localHandlers = new Map<
+    string,
+    (request: ExecuteToolRequest) => Promise<ToolExecutionOutcome>
+  >()
 
   constructor(options: {
     broker: BrokerClient
@@ -83,6 +88,14 @@ export class AgentToolExecutor {
 
   setDefinitions(definitions: AgentToolDefinition[]): void {
     this.definitions = new Map(definitions.map((tool) => [tool.name, tool]))
+  }
+
+  /** Register a tool that the worker executes itself (e.g. `spawn_subagent`). */
+  setLocalHandler(
+    tool: string,
+    handler: (request: ExecuteToolRequest) => Promise<ToolExecutionOutcome>
+  ): void {
+    this.localHandlers.set(tool, handler)
   }
 
   private event<T extends AgentEvent['type']>(
@@ -118,6 +131,42 @@ export class AgentToolExecutor {
       environment: requestedEnvironment,
       sandbox: this.fallbackSandbox
     })
+
+    const local = this.localHandlers.get(request.tool)
+    if (local) {
+      try {
+        const outcome = await local(request)
+        if (outcome.isError) {
+          this.event(request.runId, 'tool-failed', {
+            toolCallId: request.toolCallId,
+            tool: request.tool,
+            environment: outcome.environment,
+            sandbox: outcome.sandbox,
+            error: outcome.output,
+            denied: outcome.denied,
+            durationMs: outcome.durationMs
+          })
+        } else {
+          this.event(request.runId, 'tool-completed', {
+            toolCallId: request.toolCallId,
+            tool: request.tool,
+            environment: outcome.environment,
+            sandbox: outcome.sandbox,
+            output: outcome.output,
+            truncated: outcome.truncated,
+            artifactId: outcome.artifactId,
+            exitCode: outcome.exitCode,
+            changedPaths: outcome.changedPaths,
+            durationMs: outcome.durationMs,
+            executionId: outcome.executionId
+          })
+        }
+        return outcome
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause)
+        return this.fail(request, message, false, 0)
+      }
+    }
 
     let approvalId: string | undefined
     // At most one approval round trip per call: the daemon issues an approval

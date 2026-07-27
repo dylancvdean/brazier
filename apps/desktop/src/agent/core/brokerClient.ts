@@ -176,6 +176,37 @@ export class BrokerClient {
     return this.request(`/api/v1/agent/sessions/${id}`)
   }
 
+  async createSession(input: {
+    title?: string
+    workspace_path?: string | null
+    model: string
+    permission_mode?: DaemonSessionRecord['permission_mode']
+    permission_settings?: DaemonSessionRecord['permission_settings']
+    enabled_tools?: string[]
+    confine_to_worktree?: boolean
+  }): Promise<DaemonSessionRecord> {
+    return this.request('/api/v1/agent/sessions', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    })
+  }
+
+  /** Text-profile overrides for a model, used when resolving subagent defaults. */
+  async textProfile(modelId: string): Promise<{
+    subagent_model?: string | null
+    max_subagents?: number | null
+  } | null> {
+    const payload = await this.request<{
+      models: Record<string, { kind?: string; subagent_model?: string | null; max_subagents?: number | null }>
+    }>('/api/v1/models/settings')
+    const profile = payload.models[modelId]
+    if (!profile || profile.kind !== 'text') return null
+    return {
+      subagent_model: profile.subagent_model,
+      max_subagents: profile.max_subagents
+    }
+  }
+
   async systemPrompt(id: string): Promise<{ system_prompt: string; tools: string[] }> {
     return this.request(`/api/v1/agent/sessions/${id}/prompt`)
   }

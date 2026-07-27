@@ -108,6 +108,12 @@ type TimelineEntry = {
   durationMs?: number
   /** When the tool call started, for interleaving with messages. */
   timestamp: string
+  /** Set when this row tracks a `spawn_subagent` child. */
+  subagent?: {
+    childSessionId: string
+    model: string
+    status: 'running' | 'completed' | 'failed' | 'cancelled'
+  }
 }
 
 const PERMISSION_LABELS: Record<AgentPermissionMode, { title: string; detail: string }> = {
@@ -178,6 +184,10 @@ export function groupAgentSessionsByDirectory(
 }
 
 function argsPreview(tool: string, args: Record<string, unknown>): string {
+  if (tool === 'spawn_subagent' && typeof args.prompt === 'string') {
+    const prompt = args.prompt.trim()
+    return prompt.length > 80 ? `${prompt.slice(0, 80)}…` : prompt
+  }
   if (typeof args.command === 'string') return args.command
   if (typeof args.path === 'string') return args.path
   if (typeof args.from === 'string' && typeof args.to === 'string') {
@@ -450,26 +460,33 @@ function TimelineRow({
   onShowFull: (artifactId: string) => void
 }): React.JSX.Element {
   const statusLabel =
-    entry.status === 'running'
-      ? 'running'
-      : entry.status === 'awaiting-approval'
-        ? 'waiting for you'
-        : entry.status === 'denied'
-          ? 'refused'
-          : entry.status
+    entry.subagent
+      ? entry.subagent.status === 'running'
+        ? 'running'
+        : entry.subagent.status
+      : entry.status === 'running'
+        ? 'running'
+        : entry.status === 'awaiting-approval'
+          ? 'waiting for you'
+          : entry.status === 'denied'
+            ? 'refused'
+            : entry.status
+  const title = entry.subagent
+    ? `Subagent · ${entry.subagent.model}`
+    : entry.tool
   return (
     <details className={`agent-tool ${entry.status}`}>
       <summary>
-        {entry.status === 'running' ? (
+        {entry.status === 'running' || entry.subagent?.status === 'running' ? (
           <LoaderCircle className="spin" size={13} />
         ) : entry.status === 'awaiting-approval' ? (
           <Lock size={13} />
-        ) : entry.status === 'completed' ? (
+        ) : entry.status === 'completed' || entry.subagent?.status === 'completed' ? (
           <Check size={13} />
         ) : (
           <X size={13} />
         )}
-        <strong>{entry.tool}</strong>
+        <strong>{title}</strong>
         <span className="agent-tool-args">{argsPreview(entry.tool, entry.args)}</span>
         <span className={`agent-env ${entry.environment}`}>
           {entry.environment === 'host' ? 'host' : 'sandbox'}
@@ -543,7 +560,11 @@ export function AgentMode(props: Props): React.JSX.Element {
       .then(setCapabilities)
       .catch((cause: unknown) => onError(errorText(cause)))
     void fetchAgentTools().then(setTools).catch(() => setTools([]))
-    void listAgentSessions().then(setSessions).catch(() => setSessions([]))
+    void listAgentSessions()
+      .then((entries) =>
+        setSessions(entries.filter((entry) => entry.runtime_metadata?.kind !== 'subagent'))
+      )
+      .catch(() => setSessions([]))
   }, [onError])
 
   /**
@@ -633,6 +654,49 @@ export function AgentMode(props: Props): React.JSX.Element {
                   sandbox: event.sandbox,
                   error: event.error,
                   durationMs: event.durationMs
+                }
+              : entry
+          )
+        )
+        return
+      }
+      case 'subagent-started': {
+        setTimeline((current) =>
+          current.map((entry) =>
+            entry.toolCallId === event.toolCallId
+              ? {
+                  ...entry,
+                  status: 'running',
+                  subagent: {
+                    childSessionId: event.childSessionId,
+                    model: event.model,
+                    status: 'running'
+                  }
+                }
+              : entry
+          )
+        )
+        return
+      }
+      case 'subagent-completed': {
+        setTimeline((current) =>
+          current.map((entry) =>
+            entry.toolCallId === event.toolCallId
+              ? {
+                  ...entry,
+                  status:
+                    event.status === 'completed'
+                      ? 'completed'
+                      : event.status === 'cancelled'
+                        ? 'denied'
+                        : 'failed',
+                  output: event.summary,
+                  error: event.status === 'completed' ? undefined : event.summary,
+                  subagent: {
+                    childSessionId: event.childSessionId,
+                    model: event.model,
+                    status: event.status
+                  }
                 }
               : entry
           )

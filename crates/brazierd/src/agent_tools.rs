@@ -57,6 +57,7 @@ fn label(name: &str) -> &'static str {
         "git_status" => "Git status",
         "git_diff" => "Git diff",
         "request_permission" => "Request access",
+        "spawn_subagent" => "Spawn subagent",
         _ => "Tool",
     }
 }
@@ -327,6 +328,26 @@ fn raw_definitions() -> Vec<(&'static str, &'static str, Value)> {
                 vec!["reason"],
             ),
         ),
+        (
+            "spawn_subagent",
+            "Start a sandboxed child agent on a focused subtask and wait for its final answer. \
+             Use for parallel investigation or isolated work that should not clutter this \
+             transcript. Pass a clear prompt; optionally override the model. Nested subagents \
+             are not allowed.",
+            object_with_reason(
+                json!({
+                    "prompt": {
+                        "type": "string",
+                        "description": "Task for the child agent. Be specific about files, checks, and the expected result."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional Brazier model id. Defaults to the parent profile's subagent model, then this model."
+                    }
+                }),
+                vec!["prompt"],
+            ),
+        ),
     ]
 }
 
@@ -381,6 +402,13 @@ pub fn system_prompt(
         }
     };
 
+    let spawn_line = if tool_names.iter().any(|name| name == "spawn_subagent") {
+        "- Use spawn_subagent for focused parallel work; pass a complete prompt and wait for its \
+           summary. Do not nest further subagents.\n"
+    } else {
+        ""
+    };
+
     format!(
         "You are Brazier's coding and system agent, running locally on the user's machine.\n\n\
          {workspace_line}\n\
@@ -397,6 +425,7 @@ pub fn system_prompt(
          - Never try to read credential files, ssh keys, or Brazier's own data directory. Those \
            calls are refused and the attempt is recorded.\n\
          - When you need access you do not have, call request_permission and explain why.\n\
+         {spawn_line}\
          - Stop and summarize when the task is done: what changed, what you ran, and what is \
            still open.\n\n\
          Available tools: {}.",
@@ -485,6 +514,7 @@ mod tests {
         assert_eq!(risk_of("fs_move"), "destructive");
         assert_eq!(risk_of("fs_read"), "read");
         assert_eq!(risk_of("shell_run"), "execute");
+        assert_eq!(risk_of("spawn_subagent"), "execute");
     }
 
     #[test]

@@ -1281,6 +1281,10 @@ export type TextProfile = {
   enable_reasoning?: boolean | null
   reasoning_budget_tokens?: number | null
   system_prompt?: string | null
+  /** Model id for agent subagents. Null/unset means the parent model. */
+  subagent_model?: string | null
+  /** Max concurrent subagents. Null inherits the default of 2. */
+  max_subagents?: number | null
   loras?: LoraBinding[]
   extra_args?: string[]
 }

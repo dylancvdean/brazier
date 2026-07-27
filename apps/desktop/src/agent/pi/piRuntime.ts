@@ -25,7 +25,16 @@ import type { BrokerClient } from '../core/brokerClient'
 import { mergeSummary, renderTranscript, requestModelSummary } from '../core/compaction'
 import { repairToolArguments } from '../core/modelCompat'
 import { accumulate, describeSummary, emptySummary } from '../core/runSummary'
-import { AgentToolExecutor, EventSequencer } from '../core/toolExecutor'
+import {
+  buildSubagentMetadata,
+  childEnabledTools,
+  isSubagentSession,
+  resolveMaxSubagents,
+  resolveSubagentModel,
+  SPAWN_SUBAGENT_TOOL,
+  summarizeSubagentResult
+} from '../core/subagent'
+import { AgentToolExecutor, EventSequencer, type ExecuteToolRequest, type ToolExecutionOutcome } from '../core/toolExecutor'
 import type {
   AgentCompactionState,
   AgentEvent,
@@ -286,6 +295,11 @@ class PiAgentSession implements AgentSession {
   private enabledTools: string[]
   private readonly sandbox: SandboxDescription
   private readonly maxToolsPerTurn?: number
+  private readonly spawnSubagent: (
+    parent: PiAgentSession,
+    request: ExecuteToolRequest
+  ) => Promise<ToolExecutionOutcome>
+  private readonly cancelChildren: () => Promise<void>
   private toolsThisTurn = 0
   private queue?: EventQueue
   private currentRunId?: string
@@ -297,6 +311,11 @@ class PiAgentSession implements AgentSession {
     systemPrompt: string
     sandbox: SandboxDescription
     capabilities: CreateAgentSessionOptions['capabilities']
+    spawnSubagent: (
+      parent: PiAgentSession,
+      request: ExecuteToolRequest
+    ) => Promise<ToolExecutionOutcome>
+    cancelChildren: () => Promise<void>
   }) {
     this.id = options.state.id
     this.broker = options.broker
@@ -305,6 +324,8 @@ class PiAgentSession implements AgentSession {
     this.enabledTools = options.state.enabledTools ?? options.definitions.map((tool) => tool.name)
     this.sandbox = options.sandbox
     this.maxToolsPerTurn = options.capabilities.maxToolsPerTurn
+    this.spawnSubagent = options.spawnSubagent
+    this.cancelChildren = options.cancelChildren
     this.executor = new AgentToolExecutor({
       broker: options.broker,
       sessionId: options.state.id,
@@ -313,6 +334,9 @@ class PiAgentSession implements AgentSession {
       definitions: options.definitions,
       sandbox: options.sandbox
     })
+    this.executor.setLocalHandler(SPAWN_SUBAGENT_TOOL, (request) =>
+      this.spawnSubagent(this, request)
+    )
 
     this.agent = new Agent({
       // Every model request goes to the daemon's OpenAI-compatible endpoint,
@@ -339,6 +363,11 @@ class PiAgentSession implements AgentSession {
     })
 
     this.agent.subscribe((event) => this.onPiEvent(event))
+  }
+
+  /** Forward a child-session event onto this parent's stream (approvals, etc.). */
+  forwardEvent(event: AgentEvent): void {
+    this.queue?.push(event)
   }
 
   /** Application tools, wrapped so Pi can call them but not bypass them. */
@@ -523,7 +552,10 @@ class PiAgentSession implements AgentSession {
   }
 
   async cancel(): Promise<void> {
+    // Abort the parent first so in-flight tool AbortSignals fire, then make
+    // sure any child sessions are torn down even if a signal was missed.
     this.agent.abort()
+    await this.cancelChildren()
     // Also stop anything the tools left running and refuse pending approvals.
     await this.broker.cancel(this.id).catch(() => undefined)
     this.emit({ ...this.base('run-cancelled') } as AgentEvent)
@@ -666,6 +698,8 @@ export class PiAgentRuntime implements AgentRuntime {
   readonly descriptor = DESCRIPTOR
   private readonly broker: BrokerClient
   private readonly sessions = new Map<string, PiAgentSession>()
+  /** In-flight child session ids keyed by parent session id. */
+  private readonly childrenByParent = new Map<string, Set<string>>()
   private sandbox?: SandboxDescription
 
   constructor(broker: BrokerClient) {
@@ -683,6 +717,203 @@ export class PiAgentRuntime implements AgentRuntime {
       detail: capabilities.sandbox.detail
     }
     return this.sandbox
+  }
+
+  private trackChild(parentId: string, childId: string): void {
+    const set = this.childrenByParent.get(parentId) ?? new Set<string>()
+    set.add(childId)
+    this.childrenByParent.set(parentId, set)
+  }
+
+  private untrackChild(parentId: string, childId: string): void {
+    const set = this.childrenByParent.get(parentId)
+    if (!set) return
+    set.delete(childId)
+    if (set.size === 0) this.childrenByParent.delete(parentId)
+  }
+
+  async cancelChildren(parentId: string): Promise<void> {
+    const children = [...(this.childrenByParent.get(parentId) ?? [])]
+    await Promise.all(
+      children.map(async (childId) => {
+        const child = this.sessions.get(childId)
+        if (child) await child.cancel().catch(() => undefined)
+        else await this.broker.cancel(childId).catch(() => undefined)
+      })
+    )
+  }
+
+  /**
+   * Create a depth-1 child Pi session, run the prompt, and return its summary
+   * as the parent's tool result. Approvals from the child are forwarded onto
+   * the parent's event stream so the UI can answer them while waiting.
+   */
+  async spawnSubagent(
+    parent: PiAgentSession,
+    request: ExecuteToolRequest
+  ): Promise<ToolExecutionOutcome> {
+    const started = Date.now()
+    const parentState = parent.getState()
+    const sandbox = await this.sandboxDescription()
+    const fail = (message: string): ToolExecutionOutcome => ({
+      output: message,
+      isError: true,
+      denied: false,
+      environment: 'sandbox',
+      sandbox,
+      changedPaths: [],
+      truncated: false,
+      durationMs: Date.now() - started
+    })
+
+    if (isSubagentSession(parentState.runtimeMetadata)) {
+      return fail('Subagents cannot spawn further subagents.')
+    }
+
+    const prompt =
+      typeof request.args.prompt === 'string' ? request.args.prompt.trim() : ''
+    if (!prompt) return fail('`prompt` is required.')
+
+    let profile
+    try {
+      profile = await this.broker.textProfile(parentState.model.id)
+    } catch {
+      profile = null
+    }
+    const max = resolveMaxSubagents(profile)
+    const inFlight = this.childrenByParent.get(parent.id)?.size ?? 0
+    if (inFlight >= max) {
+      return fail(
+        `Already running ${inFlight} subagent(s); max concurrent is ${max}. Wait for one to finish.`
+      )
+    }
+
+    const modelId = resolveSubagentModel(request.args.model, profile, parentState.model.id)
+    const catalog = await this.broker.tools()
+    const parentToolNames =
+      parentState.enabledTools ?? catalog.map((tool) => tool.name)
+    const enabled = childEnabledTools(parentToolNames)
+
+    let childRecord
+    try {
+      childRecord = await this.broker.createSession({
+        title: `Subagent · ${prompt.slice(0, 48)}`,
+        workspace_path: parentState.workspacePath,
+        model: modelId,
+        permission_mode: parentState.permissionMode,
+        permission_settings: parentState.permissionSettings,
+        enabled_tools: enabled
+      })
+      const metadata = buildSubagentMetadata(
+        parent.id,
+        parentState.runtimeMetadata as Record<string, unknown> | undefined
+      )
+      childRecord = await this.broker.updateSession(childRecord.id, {
+        runtime_metadata: metadata
+      })
+    } catch (cause) {
+      return fail(cause instanceof Error ? cause.message : String(cause))
+    }
+
+    this.trackChild(parent.id, childRecord.id)
+    parent.forwardEvent({
+      type: 'subagent-started',
+      sessionId: parent.id,
+      runId: request.runId,
+      timestamp: new Date().toISOString(),
+      sequence: 0,
+      toolCallId: request.toolCallId,
+      childSessionId: childRecord.id,
+      model: modelId,
+      prompt
+    })
+
+    let status: 'completed' | 'failed' | 'cancelled' = 'completed'
+    let summary = ''
+    try {
+      if (request.signal?.aborted) {
+        status = 'cancelled'
+        summary = 'Subagent cancelled before it started.'
+        await this.broker.cancel(childRecord.id).catch(() => undefined)
+      } else {
+        const promptPayload = await this.broker.systemPrompt(childRecord.id)
+        const childTools = catalog.filter((tool) => enabled.includes(tool.name))
+        const { inferModelCapabilities } = await import('../core/modelCompat')
+        const childSession = (await this.createSession({
+          sessionId: childRecord.id,
+          model: { id: modelId, name: modelId },
+          systemPrompt: promptPayload.system_prompt,
+          tools: childTools,
+          messages: [],
+          capabilities: inferModelCapabilities(modelId)
+        })) as PiAgentSession
+
+        const abortChild = (): void => {
+          void childSession.cancel()
+        }
+        request.signal?.addEventListener('abort', abortChild, { once: true })
+        try {
+          for await (const event of childSession.run({ text: prompt })) {
+            if (
+              event.type === 'approval-required' ||
+              event.type === 'elevation-requested'
+            ) {
+              // Keep child session id on the event so approvals stay keyed correctly,
+              // but deliver on the parent's stream while the parent tool is waiting.
+              parent.forwardEvent(event)
+            }
+          }
+        } finally {
+          request.signal?.removeEventListener('abort', abortChild)
+        }
+
+        const childState = childSession.getState()
+        if (childState.lastRunStatus === 'cancelled' || request.signal?.aborted) {
+          status = 'cancelled'
+          summary = 'Subagent was cancelled.'
+        } else if (childState.lastRunStatus === 'failed') {
+          status = 'failed'
+          summary = summarizeSubagentResult(childState.messages, {
+            failed: true,
+            error: 'the child run failed'
+          })
+        } else {
+          summary = summarizeSubagentResult(childState.messages)
+        }
+      }
+    } catch (cause) {
+      status = 'failed'
+      summary = summarizeSubagentResult([], {
+        failed: true,
+        error: cause instanceof Error ? cause.message : String(cause)
+      })
+    } finally {
+      this.untrackChild(parent.id, childRecord.id)
+    }
+
+    parent.forwardEvent({
+      type: 'subagent-completed',
+      sessionId: parent.id,
+      runId: request.runId,
+      timestamp: new Date().toISOString(),
+      sequence: 0,
+      toolCallId: request.toolCallId,
+      childSessionId: childRecord.id,
+      model: modelId,
+      status,
+      summary
+    })
+
+    return {
+      output: summary,
+      isError: status !== 'completed',
+      denied: false,
+      environment: 'sandbox',
+      sandbox,
+      changedPaths: [],
+      truncated: false,
+      durationMs: Date.now() - started
+    }
   }
 
   async createSession(options: CreateAgentSessionOptions): Promise<AgentSession> {
@@ -703,7 +934,8 @@ export class PiAgentRuntime implements AgentRuntime {
       enabledTools: remote.session.enabled_tools ?? undefined,
       createdAt: remote.session.created_at,
       updatedAt: remote.session.updated_at,
-      lastRunStatus: 'idle'
+      lastRunStatus: 'idle',
+      runtimeMetadata: (remote.session.runtime_metadata as Record<string, unknown> | null) ?? undefined
     }
     const session = new PiAgentSession({
       broker: this.broker,
@@ -711,7 +943,9 @@ export class PiAgentRuntime implements AgentRuntime {
       definitions: options.tools,
       systemPrompt: options.systemPrompt,
       sandbox,
-      capabilities: options.capabilities
+      capabilities: options.capabilities,
+      spawnSubagent: (parent, request) => this.spawnSubagent(parent, request),
+      cancelChildren: () => this.cancelChildren(options.sessionId)
     })
     this.sessions.set(session.id, session)
     return session
@@ -743,5 +977,6 @@ export class PiAgentRuntime implements AgentRuntime {
       await session.dispose()
     }
     this.sessions.clear()
+    this.childrenByParent.clear()
   }
 }

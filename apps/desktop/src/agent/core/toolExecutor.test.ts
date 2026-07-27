@@ -326,4 +326,34 @@ describe('AgentToolExecutor', () => {
       false
     )
   })
+
+  it('runs local handlers without calling the daemon exec endpoint', async () => {
+    const broker = fakeBroker([])
+    const { executor, events } = makeExecutor(broker.client)
+    executor.setLocalHandler('spawn_subagent', async () => ({
+      output: 'child done',
+      isError: false,
+      denied: false,
+      environment: 'sandbox',
+      sandbox,
+      changedPaths: [],
+      truncated: false,
+      durationMs: 12
+    }))
+
+    const outcome = await executor.execute({
+      runId: 'run-1',
+      toolCallId: 'call-sub',
+      tool: 'spawn_subagent',
+      args: { prompt: 'investigate' }
+    })
+
+    expect(outcome.output).toBe('child done')
+    expect(broker.execTool).not.toHaveBeenCalled()
+    expect(events.map((event) => event.type)).toEqual([
+      'tool-call-proposed',
+      'tool-started',
+      'tool-completed'
+    ])
+  })
 })

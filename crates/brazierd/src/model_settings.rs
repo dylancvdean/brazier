@@ -181,6 +181,12 @@ pub struct TextProfile {
     /// Prepended to every conversation with this model.
     pub system_prompt: Option<String>,
 
+    // --- agent ---
+    /// Model id for `spawn_subagent` children. `None` means the parent's model.
+    pub subagent_model: Option<String>,
+    /// Max concurrent subagents a parent may run. Default 2 when unset.
+    pub max_subagents: Option<u32>,
+
     // --- adapters ---
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub loras: Vec<LoraBinding>,
@@ -511,6 +517,14 @@ fn validate_text(profile: &TextProfile) -> anyhow::Result<()> {
         );
     }
     anyhow::ensure!(profile.stop.len() <= 8, "at most eight stop sequences");
+    if let Some(model) = &profile.subagent_model {
+        anyhow::ensure!(
+            !model.trim().is_empty(),
+            "subagent model must not be empty when set"
+        );
+        anyhow::ensure!(model.len() <= 512, "subagent model id is too long");
+    }
+    ensure_range(profile.max_subagents, 1, 8, "max subagents")?;
     validate_loras(&profile.loras)?;
     validate_extra_args(&profile.extra_args)
 }
@@ -908,6 +922,48 @@ mod tests {
             ..TextProfile::default()
         });
         assert!(profile.validate("gguf:acme/model.gguf").is_err());
+    }
+
+    #[test]
+    fn subagent_settings_validate_defaults_and_bounds() {
+        assert!(
+            ModelProfile::Text(TextProfile::default())
+                .validate("gguf:acme/model.gguf")
+                .is_ok()
+        );
+        assert!(
+            ModelProfile::Text(TextProfile {
+                max_subagents: Some(2),
+                subagent_model: Some("gguf:other.gguf".into()),
+                ..TextProfile::default()
+            })
+            .validate("gguf:acme/model.gguf")
+            .is_ok()
+        );
+        assert!(
+            ModelProfile::Text(TextProfile {
+                max_subagents: Some(0),
+                ..TextProfile::default()
+            })
+            .validate("gguf:acme/model.gguf")
+            .is_err()
+        );
+        assert!(
+            ModelProfile::Text(TextProfile {
+                max_subagents: Some(9),
+                ..TextProfile::default()
+            })
+            .validate("gguf:acme/model.gguf")
+            .is_err()
+        );
+        assert!(
+            ModelProfile::Text(TextProfile {
+                subagent_model: Some("  ".into()),
+                ..TextProfile::default()
+            })
+            .validate("gguf:acme/model.gguf")
+            .is_err()
+        );
     }
 
     /// A settings file that has drifted out of range must not stop the daemon

@@ -83,6 +83,8 @@ export type AgentSessionSummary = {
       path: string
       branch: string
     }
+    kind?: 'subagent'
+    parent_session_id?: string
   } | null
 }
 

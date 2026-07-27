@@ -49,6 +49,7 @@ pub const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { name: "git_status", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
     ToolSpec { name: "git_diff", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
     ToolSpec { name: "request_permission", risk: ToolRiskLevel::Safe, executes: false, needs_workspace: false },
+    ToolSpec { name: "spawn_subagent", risk: ToolRiskLevel::Execute, executes: true, needs_workspace: false },
 ];
 
 pub fn tool_spec(name: &str) -> Option<&'static ToolSpec> {
@@ -443,6 +444,19 @@ fn summarize(
             "Copy {} to {} {where_}",
             argument_str(arguments, "from").unwrap_or("a path"),
             argument_str(arguments, "to").unwrap_or("a path")
+        ),
+        "spawn_subagent" => format!(
+            "Spawn a subagent {where_}: {}",
+            argument_str(arguments, "prompt")
+                .map(|prompt| {
+                    let trimmed = prompt.trim();
+                    if trimmed.len() > 80 {
+                        format!("{}…", &trimmed[..80])
+                    } else {
+                        trimmed.to_owned()
+                    }
+                })
+                .unwrap_or_else(|| "(no prompt)".to_owned())
         ),
         other => format!("Run `{other}` {where_}"),
     };

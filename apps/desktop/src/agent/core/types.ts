@@ -283,6 +283,21 @@ export type AgentCompactedEvent = EventBase & {
   type: 'compacted'
   state: AgentCompactionState
 }
+export type AgentSubagentStartedEvent = EventBase & {
+  type: 'subagent-started'
+  toolCallId: string
+  childSessionId: string
+  model: string
+  prompt: string
+}
+export type AgentSubagentCompletedEvent = EventBase & {
+  type: 'subagent-completed'
+  toolCallId: string
+  childSessionId: string
+  model: string
+  status: 'completed' | 'failed' | 'cancelled'
+  summary: string
+}
 
 export type AgentEvent =
   | AgentRunStartedEvent
@@ -299,6 +314,8 @@ export type AgentEvent =
   | AgentRunCancelledEvent
   | AgentRunFailedEvent
   | AgentCompactedEvent
+  | AgentSubagentStartedEvent
+  | AgentSubagentCompletedEvent
 
 /** End-of-run report the UI renders. */
 export type AgentRunSummary = {

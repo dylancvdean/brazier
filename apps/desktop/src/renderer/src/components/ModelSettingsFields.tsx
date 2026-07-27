@@ -20,10 +20,12 @@ import { useEffect, useState } from 'react'
 
 import {
   fetchModelChatTemplate,
+  listModels,
   registerAdapter,
   type Adapter,
   type ControlNetBinding,
   type DiffusionProfile,
+  type LocalModel,
   type LoraBinding,
   type ModelKind,
   type ModelProfile,
@@ -31,6 +33,7 @@ import {
   type TranscriptionProfile,
   type VoiceProfile
 } from '../api'
+import { modelDisplayName, modelKindFor } from '../model-utils'
 
 /** Extensions a LoRA or ControlNet is published as. */
 const ADAPTER_FILTERS = [
@@ -692,6 +695,71 @@ type SectionProps<T> = {
   onError: (message: string | null) => void
 }
 
+/** Agent-mode defaults for chat models: which model subagents use, and how many. */
+function AgentFields(props: {
+  profile: TextProfile
+  onChange: <K extends keyof TextProfile>(key: K, value: TextProfile[K]) => void
+  excludeModelId: string
+}): React.JSX.Element {
+  const [chatModels, setChatModels] = useState<LocalModel[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    void listModels()
+      .then((models) => {
+        if (cancelled) return
+        setChatModels(
+          models
+            .filter((model) => modelKindFor(model.id) === 'text')
+            .sort((a, b) =>
+              modelDisplayName(a.id, a).title.localeCompare(modelDisplayName(b.id, b).title)
+            )
+        )
+      })
+      .catch(() => {
+        if (!cancelled) setChatModels([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return (
+    <FieldGroup title="Agent" summary="Subagents spawned from Agent mode">
+      <label
+        className="model-field"
+        title="Model used when this agent spawns a subagent. Leave on This model to reuse the parent."
+      >
+        <span>Subagent model</span>
+        <select
+          value={props.profile.subagent_model ?? ''}
+          onChange={(event) =>
+            props.onChange('subagent_model', event.target.value === '' ? null : event.target.value)
+          }
+        >
+          <option value="">This model</option>
+          {chatModels
+            .filter((model) => model.id !== props.excludeModelId)
+            .map((model) => (
+              <option key={model.id} value={model.id}>
+                {modelDisplayName(model.id, model).title}
+              </option>
+            ))}
+        </select>
+      </label>
+      <NumberField
+        label="Max subagents"
+        hint="How many child agents may run at once. Default 2."
+        inherited={2}
+        min={1}
+        max={8}
+        value={props.profile.max_subagents}
+        onChange={(value) => props.onChange('max_subagents', value)}
+      />
+    </FieldGroup>
+  )
+}
+
 function TextFields(props: SectionProps<TextProfile>): React.JSX.Element {
   const { profile, onChange } = props
   const set = <K extends keyof TextProfile>(key: K, value: TextProfile[K]): void =>
@@ -893,6 +961,8 @@ function TextFields(props: SectionProps<TextProfile>): React.JSX.Element {
           onChange={(value) => set('reasoning_budget_tokens', value)}
         />
       </FieldGroup>
+
+      <AgentFields profile={profile} onChange={set} excludeModelId={props.modelId} />
 
       {isLlama ? (
         <FieldGroup title="Loading" summary="Restarts the model when changed">

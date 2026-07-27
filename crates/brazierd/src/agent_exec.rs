@@ -582,6 +582,9 @@ async fn run_tool(
         }
         "git_diff" => git_diff(context, plan, workspace, arguments).await,
         "request_permission" => request_permission(context).await,
+        "spawn_subagent" => anyhow::bail!(
+            "`spawn_subagent` runs in the agent worker, not through the daemon exec path"
+        ),
         other => anyhow::bail!("no executor for tool `{other}`"),
     }
 }
