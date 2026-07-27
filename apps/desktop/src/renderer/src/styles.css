@@ -5548,6 +5548,28 @@ label.span-2 {
   resize: vertical;
 }
 
+.model-field textarea.chat-template-editor {
+  min-height: 180px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+
+.model-field .text-button {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: none;
+  color: var(--accent, #8ab4ff);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 .model-field-actions {
   display: flex;
   gap: 6px;

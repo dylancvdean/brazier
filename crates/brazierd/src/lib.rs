@@ -17,6 +17,7 @@ pub mod download_queue;
 pub mod engine;
 pub mod fork_hints;
 pub mod github_releases;
+pub mod gguf_meta;
 pub mod hardware;
 pub mod harmony;
 pub mod hf;

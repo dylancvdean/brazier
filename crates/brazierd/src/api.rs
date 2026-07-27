@@ -410,6 +410,7 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             get(model_settings_list).put(update_model_settings),
         )
         .route("/api/v1/models/settings/reset", post(reset_model_settings))
+        .route("/api/v1/models/chat-template", get(model_chat_template))
         .route("/api/v1/recommendations", get(model_recommendations))
         .route(
             "/api/v1/recommendations/state",
@@ -1430,6 +1431,49 @@ async fn reset_model_settings(
     Ok(Json(json!({
         "model_id": request.model_id,
         "models": store.models,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelChatTemplateQuery {
+    model_id: String,
+}
+
+/// Return the Jinja chat template embedded in a GGUF, when present.
+async fn model_chat_template(
+    State(state): State<AppState>,
+    Query(query): Query<ModelChatTemplateQuery>,
+) -> ApiResult<Json<Value>> {
+    let settings = state.runtime.settings().await;
+    let extra: Vec<PathBuf> = settings
+        .extra_model_library_paths
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    let path = models_store::path_for_model_id(&state.data_dir, &query.model_id, &extra)
+        .map_err(ApiError::bad_request)?;
+    if !path.is_file() {
+        return Err(ApiError::bad_request(format!(
+            "model file not found for {}",
+            query.model_id
+        )));
+    }
+    // Only GGUFs carry tokenizer.chat_template metadata Brazier can read.
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+    {
+        return Ok(Json(json!({
+            "model_id": query.model_id,
+            "chat_template": Value::Null,
+            "source": "unsupported",
+        })));
+    }
+    let template = crate::gguf_meta::read_chat_template(&path).map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "model_id": query.model_id,
+        "chat_template": template,
+        "source": if template.is_some() { "gguf" } else { "missing" },
     })))
 }
 

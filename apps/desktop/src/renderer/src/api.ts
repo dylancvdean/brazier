@@ -1246,6 +1246,8 @@ export type TextProfile = {
   kv_cache_type_k?: string | null
   kv_cache_type_v?: string | null
   jinja?: boolean | null
+  /** Custom Jinja chat template. Null keeps the GGUF-bundled template. */
+  chat_template?: string | null
   mlock?: boolean | null
   no_mmap?: boolean | null
   rope_scaling?: string | null
@@ -1388,6 +1390,18 @@ export async function resetModelProfile(
     { method: 'POST', body: JSON.stringify({ model_id: modelId }) }
   )
   return response.models
+}
+
+export type ModelChatTemplateResponse = {
+  model_id: string
+  chat_template: string | null
+  source: 'gguf' | 'missing' | 'unsupported'
+}
+
+/** Jinja chat template embedded in a GGUF (`tokenizer.chat_template`). */
+export function fetchModelChatTemplate(modelId: string): Promise<ModelChatTemplateResponse> {
+  const parameters = new URLSearchParams({ model_id: modelId })
+  return request(`/api/v1/models/chat-template?${parameters.toString()}`)
 }
 
 export async function listAdapters(): Promise<Adapter[]> {

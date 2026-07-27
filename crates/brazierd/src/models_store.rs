@@ -386,6 +386,111 @@ fn is_projector(path: &Path) -> bool {
         .is_some_and(|name| name.to_ascii_lowercase().contains("mmproj"))
 }
 
+/// Length of a `-00001-of-00003` shard suffix (llama.cpp split naming).
+const SHARD_SUFFIX_LEN: usize = 15;
+
+/// Strip a `-NNNNN-of-NNNNN` suffix from a GGUF filename stem so shards of one
+/// quant group together.
+pub fn shard_group(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let stem = name.strip_suffix(".gguf").unwrap_or(name);
+    if let Some(base) = strip_shard_suffix(stem) {
+        return base.to_owned();
+    }
+    stem.to_owned()
+}
+
+fn strip_shard_suffix(stem: &str) -> Option<&str> {
+    if stem.len() <= SHARD_SUFFIX_LEN {
+        return None;
+    }
+    let tail = &stem[stem.len() - SHARD_SUFFIX_LEN..];
+    if tail.starts_with('-')
+        && tail[1..6].bytes().all(|byte| byte.is_ascii_digit())
+        && &tail[6..10] == "-of-"
+        && tail[10..].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Some(&stem[..stem.len() - SHARD_SUFFIX_LEN])
+    } else {
+        None
+    }
+}
+
+fn is_gguf_shard_name(name: &str) -> bool {
+    let stem = name.strip_suffix(".gguf").unwrap_or(name);
+    strip_shard_suffix(stem).is_some()
+}
+
+/// Prefer the first shard (`-00001-of-…`) and sum sizes so split GGUFs appear
+/// once in the library.
+fn coalesce_gguf_shards(files: Vec<(PathBuf, u64)>) -> Vec<(PathBuf, u64)> {
+    let mut groups: std::collections::BTreeMap<String, Vec<(PathBuf, u64)>> =
+        std::collections::BTreeMap::new();
+    for (path, size) in files {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let key = if is_gguf_shard_name(&name) {
+            format!(
+                "{}::{}",
+                path.parent()
+                    .map(|parent| parent.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                shard_group(&name)
+            )
+        } else {
+            // Unique key per unsharded file so they never merge.
+            path.to_string_lossy().into_owned()
+        };
+        groups.entry(key).or_default().push((path, size));
+    }
+    let mut out = Vec::with_capacity(groups.len());
+    for mut shards in groups.into_values() {
+        shards.sort_by(|left, right| left.0.cmp(&right.0));
+        let total = shards.iter().fold(0u64, |sum, (_, size)| sum.saturating_add(*size));
+        let (path, _) = shards.remove(0);
+        out.push((path, total));
+    }
+    out.sort_by(|left, right| left.0.cmp(&right.0));
+    out
+}
+
+/// Sibling shard files for a first-shard GGUF path (including itself).
+fn sibling_gguf_shards(path: &Path) -> Vec<PathBuf> {
+    let Some(directory) = path.parent() else {
+        return vec![path.to_path_buf()];
+    };
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return vec![path.to_path_buf()];
+    };
+    if !is_gguf_shard_name(name) {
+        return vec![path.to_path_buf()];
+    }
+    let group = shard_group(name);
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return vec![path.to_path_buf()];
+    };
+    let mut siblings: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|candidate| {
+            candidate
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+                && candidate
+                    .file_name()
+                    .and_then(|file| file.to_str())
+                    .is_some_and(|file| shard_group(file) == group)
+        })
+        .collect();
+    if siblings.is_empty() {
+        siblings.push(path.to_path_buf());
+    }
+    siblings.sort();
+    siblings
+}
+
 pub fn is_projector_file(path: &Path) -> bool {
     is_projector(path)
 }
@@ -856,6 +961,7 @@ fn collect_external_library(
     let has_projector = dir_has_projector(dir);
     let entries = std::fs::read_dir(dir)
         .map_err(|error| anyhow::anyhow!("read model directory {}: {error}", dir.display()))?;
+    let mut ggufs = Vec::new();
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
@@ -894,6 +1000,10 @@ fn collect_external_library(
         if is_projector(&path) {
             continue;
         }
+        let size = std::fs::metadata(&path).ok().map(|meta| meta.len()).unwrap_or(0);
+        ggufs.push((path, size));
+    }
+    for (path, size) in coalesce_gguf_shards(ggufs) {
         let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if !seen_paths.insert(canonical.clone()) {
             continue;
@@ -912,7 +1022,7 @@ fn collect_external_library(
             name,
             engine: "llama.cpp".to_owned(),
             capabilities: gguf_capabilities(has_projector, &key),
-            size_bytes: std::fs::metadata(&path).ok().map(|meta| meta.len()),
+            size_bytes: Some(size),
             read_only: true,
             library_label: Some(label.to_owned()),
         });
@@ -924,6 +1034,7 @@ fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> a
     let has_projector = dir_has_projector(dir);
     let entries = std::fs::read_dir(dir)
         .map_err(|error| anyhow::anyhow!("read model directory {}: {error}", dir.display()))?;
+    let mut ggufs = Vec::new();
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
@@ -940,6 +1051,10 @@ fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> a
         if is_projector(&path) {
             continue;
         }
+        let size = std::fs::metadata(&path).ok().map(|meta| meta.len()).unwrap_or(0);
+        ggufs.push((path, size));
+    }
+    for (path, size) in coalesce_gguf_shards(ggufs) {
         let id = model_id_for_path(root, &path)?;
         let key = id
             .strip_prefix("gguf:")
@@ -954,7 +1069,7 @@ fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> a
             name,
             engine: "llama.cpp".to_owned(),
             capabilities: gguf_capabilities(has_projector, &key),
-            size_bytes: std::fs::metadata(&path).ok().map(|meta| meta.len()),
+            size_bytes: Some(size),
             read_only: false,
             library_label: None,
         });
@@ -977,8 +1092,11 @@ pub fn delete_model(
     if model_id.starts_with("gguf:") {
         let path = path_for_gguf_id(data_dir, model_id.strip_prefix("gguf:").unwrap())?;
         anyhow::ensure!(path.is_file(), "model file not found for {model_id}");
-        std::fs::remove_file(&path)
-            .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
+        let siblings = sibling_gguf_shards(&path);
+        for sibling in &siblings {
+            std::fs::remove_file(sibling)
+                .map_err(|error| anyhow::anyhow!("delete {}: {error}", sibling.display()))?;
+        }
         prune_empty_parents(path.parent(), &gguf_root(data_dir));
         return Ok(path);
     }
@@ -1072,6 +1190,49 @@ mod tests {
         assert_eq!(models[0].engine, "llama.cpp");
         assert!(models[0].capabilities.streaming);
         assert_eq!(models[0].id, "gguf:acme/demo/demo-q4_k_m.gguf");
+    }
+
+    #[test]
+    fn coalesces_split_gguf_shards_into_one_model() {
+        let dir = tempdir().unwrap();
+        let first =
+            download_destination(dir.path(), "acme/big", "model-Q4_K_M-00001-of-00002.gguf")
+                .unwrap();
+        let second =
+            download_destination(dir.path(), "acme/big", "model-Q4_K_M-00002-of-00002.gguf")
+                .unwrap();
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::write(&first, vec![0u8; 40]).unwrap();
+        std::fs::write(&second, vec![0u8; 33]).unwrap();
+        let models = list_gguf_models(dir.path()).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].id,
+            "gguf:acme/big/model-Q4_K_M-00001-of-00002.gguf"
+        );
+        assert_eq!(models[0].size_bytes, Some(73));
+    }
+
+    #[test]
+    fn deleting_first_shard_removes_the_whole_split_set() {
+        let dir = tempdir().unwrap();
+        let first =
+            download_destination(dir.path(), "acme/big", "model-Q4_K_M-00001-of-00002.gguf")
+                .unwrap();
+        let second =
+            download_destination(dir.path(), "acme/big", "model-Q4_K_M-00002-of-00002.gguf")
+                .unwrap();
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::write(&first, b"a").unwrap();
+        std::fs::write(&second, b"b").unwrap();
+        delete_model(
+            dir.path(),
+            "gguf:acme/big/model-Q4_K_M-00001-of-00002.gguf",
+            &[],
+        )
+        .unwrap();
+        assert!(!first.exists());
+        assert!(!second.exists());
     }
 
     #[test]

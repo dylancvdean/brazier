@@ -16,8 +16,10 @@
  */
 
 import { AlertTriangle, FolderOpen, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
 import {
+  fetchModelChatTemplate,
   registerAdapter,
   type Adapter,
   type ControlNetBinding,
@@ -243,6 +245,97 @@ function ExtraArgsField(props: {
         Passed to {props.engine} as written, after everything above. Brazier does not check them —
         an argument this build does not know stops the engine from starting, and the error appears
         where it is launched.
+      </small>
+    </label>
+  )
+}
+
+/**
+ * Editable Jinja chat template. Defaults to the GGUF-bundled
+ * `tokenizer.chat_template` so the box always shows what the model will use.
+ * Clearing the override (Reset) goes back to that bundled source.
+ */
+function ChatTemplateField(props: {
+  modelId: string
+  value: string | null | undefined
+  onChange: (value: string | null) => void
+}): React.JSX.Element {
+  const [bundled, setBundled] = useState<string | null>(null)
+  const [source, setSource] = useState<'gguf' | 'missing' | 'unsupported' | 'loading'>('loading')
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setSource('loading')
+    setError(null)
+    void fetchModelChatTemplate(props.modelId)
+      .then((response) => {
+        if (cancelled) return
+        setBundled(response.chat_template)
+        setSource(response.source)
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return
+        setBundled(null)
+        setSource('missing')
+        setError(cause instanceof Error ? cause.message : String(cause))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [props.modelId])
+
+  const display = props.value ?? bundled ?? ''
+  const customized = props.value != null
+  const loading = source === 'loading'
+
+  return (
+    <label className="model-field wide">
+      <span>Chat template (Jinja)</span>
+      <textarea
+        rows={12}
+        spellCheck={false}
+        className="chat-template-editor"
+        disabled={loading}
+        placeholder={
+          loading
+            ? 'Loading GGUF template…'
+            : source === 'unsupported'
+              ? 'Not available for this model format'
+              : source === 'missing'
+                ? 'No tokenizer.chat_template in this GGUF'
+                : 'GGUF-bundled template'
+        }
+        value={display}
+        onChange={(event) => {
+          const next = event.target.value
+          if (bundled != null && next === bundled) {
+            props.onChange(null)
+            return
+          }
+          props.onChange(next === '' ? null : next)
+        }}
+      />
+      <small>
+        {error
+          ? error
+          : customized
+            ? 'Custom override — restarts the model when saved.'
+            : source === 'gguf'
+              ? 'Using the template bundled in the GGUF.'
+              : source === 'unsupported'
+                ? 'Chat templates are only read from GGUF files.'
+                : source === 'missing'
+                  ? 'This GGUF has no embedded chat template.'
+                  : 'Loading…'}
+        {bundled != null && customized ? (
+          <>
+            {' '}
+            <button type="button" className="text-button" onClick={() => props.onChange(null)}>
+              Reset to bundled
+            </button>
+          </>
+        ) : null}
       </small>
     </label>
   )
@@ -589,6 +682,7 @@ export type InheritedDefaults = {
 }
 
 type SectionProps<T> = {
+  modelId: string
   profile: T
   onChange: (profile: T) => void
   engine: string
@@ -864,6 +958,11 @@ function TextFields(props: SectionProps<TextProfile>): React.JSX.Element {
             label="Jinja templates"
             value={profile.jinja}
             onChange={(value) => set('jinja', value)}
+          />
+          <ChatTemplateField
+            modelId={props.modelId}
+            value={profile.chat_template}
+            onChange={(value) => set('chat_template', value)}
           />
           <ToggleField
             label="Lock in memory"
@@ -1533,6 +1632,7 @@ type ModelSettingsFieldsProps = {
 /** The whole field set for one model, chosen by its kind. */
 export function ModelSettingsFields(props: ModelSettingsFieldsProps): React.JSX.Element {
   const shared = {
+    modelId: props.modelId,
     engine: props.engine,
     adapters: props.adapters,
     inherited: props.inherited,

@@ -227,24 +227,9 @@ pub struct QuantChoice {
     pub tight: bool,
 }
 
-/// Length of a `-00001-of-00003` shard suffix.
-const SHARD_SUFFIX_LEN: usize = 15;
-
 /// Strip a shard suffix, so the parts of one quantisation group together.
 fn shard_group(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let stem = name.strip_suffix(".gguf").unwrap_or(name);
-    if stem.len() > SHARD_SUFFIX_LEN {
-        let tail = &stem[stem.len() - SHARD_SUFFIX_LEN..];
-        if tail.starts_with('-')
-            && tail[1..6].bytes().all(|byte| byte.is_ascii_digit())
-            && &tail[6..10] == "-of-"
-            && tail[10..].bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return stem[..stem.len() - SHARD_SUFFIX_LEN].to_owned();
-        }
-    }
-    stem.to_owned()
+    crate::models_store::shard_group(path)
 }
 
 fn is_companion(path: &str) -> bool {

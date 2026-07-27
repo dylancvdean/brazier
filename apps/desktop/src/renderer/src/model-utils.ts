@@ -112,6 +112,11 @@ export function modelLibraryKey(modelId: string): string {
   return modelId
 }
 
+/** Drop `-00001-of-00003` so split GGUFs read as one model name. */
+export function stripGgufShardSuffix(filename: string): string {
+  return filename.replace(/-\d{5}-of-\d{5}(?=\.gguf$)/i, '')
+}
+
 export function modelDisplayName(
   modelId: string,
   model?: LocalModel
@@ -128,7 +133,7 @@ export function modelDisplayName(
         ? 'External library'
         : 'Local library'
     return {
-      title: file,
+      title: stripGgufShardSuffix(file),
       subtitle: engineText ? `${engineText} · ${source}` : source
     }
   }

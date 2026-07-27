@@ -1060,6 +1060,8 @@ struct LaunchPlan {
     defrag_threshold: Option<f32>,
     loras: Vec<(PathBuf, f32)>,
     extra_args: Vec<String>,
+    /// Custom Jinja chat template; written to a temp file at spawn.
+    chat_template: Option<String>,
 }
 
 impl LaunchPlan {
@@ -1114,14 +1116,30 @@ impl LaunchPlan {
             extra_args: profile
                 .map(|profile| profile.extra_args.clone())
                 .unwrap_or_default(),
+            chat_template: profile.and_then(|profile| {
+                profile
+                    .chat_template
+                    .as_ref()
+                    .map(|text| text.trim())
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned)
+            }),
         }
     }
 
     /// A fingerprint of everything that can only be applied at spawn time.
     fn key(&self, harmony: bool) -> String {
         let reasoning_format = if harmony { "auto" } else { "deepseek" };
+        let template_fp = self
+            .chat_template
+            .as_ref()
+            .map(|text| {
+                use sha2::{Digest, Sha256};
+                hex::encode(Sha256::digest(text.as_bytes()))
+            })
+            .unwrap_or_default();
         format!(
-            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|jinja|rf={}|{}",
+            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|jinja|rf={}|tpl={}|{}",
             self.context_size,
             self.batch_size,
             self.ubatch_size,
@@ -1146,6 +1164,7 @@ impl LaunchPlan {
             self.loras,
             harmony,
             reasoning_format,
+            template_fp,
             self.extra_args.join(" "),
         )
     }
@@ -1220,6 +1239,21 @@ impl LaunchPlan {
             command.arg(arg);
         }
     }
+}
+
+/// Persist a chat template under a content-addressed temp path for `--chat-template-file`.
+fn materialize_chat_template(template: &str) -> anyhow::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(template.as_bytes()));
+    let dir = std::env::temp_dir().join("brazier-chat-templates");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(format!("{}.jinja", &hash[..16.min(hash.len())]));
+    if !path.is_file() {
+        std::fs::write(&path, template)
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(path)
 }
 
 /// The fingerprint a server started with these inputs would carry.
@@ -1303,6 +1337,10 @@ impl LlamaServer {
         let plan = LaunchPlan::resolve(settings, profile, loras, effective_target);
         let launch_key = plan.key(harmony);
         plan.apply(&mut command, harmony);
+        if let Some(template) = &plan.chat_template {
+            let path = materialize_chat_template(template)?;
+            command.arg("--chat-template-file").arg(path);
+        }
         // Separate think tags into `reasoning_content` so Jinja can parse tool
         // calls from the remaining content. Harmony uses its own format value.
         command.arg("--reasoning-format").arg(if harmony {
@@ -1814,8 +1852,18 @@ mod tests {
             vec![(PathBuf::from("/adapters/style.gguf"), 0.8)],
             false,
         );
+        let with_template = launch_key(
+            &settings,
+            Some(&TextProfile {
+                chat_template: Some("{% raw %}custom{% endraw %}".into()),
+                ..TextProfile::default()
+            }),
+            Vec::new(),
+            false,
+        );
         assert_ne!(base, resized);
         assert_ne!(base, with_lora);
+        assert_ne!(base, with_template);
         assert_eq!(base, launch_key(&settings, None, Vec::new(), false));
     }
 

@@ -132,6 +132,9 @@ pub struct TextProfile {
     pub kv_cache_type_k: Option<String>,
     pub kv_cache_type_v: Option<String>,
     pub jinja: Option<bool>,
+    /// Override the GGUF-bundled Jinja chat template (`--chat-template-file`).
+    /// `None` keeps whatever `tokenizer.chat_template` the GGUF embeds.
+    pub chat_template: Option<String>,
     /// Keep the weights resident (`--mlock`).
     pub mlock: Option<bool>,
     /// Read the weights instead of mapping them (`--no-mmap`).
@@ -470,6 +473,16 @@ fn validate_text(profile: &TextProfile) -> anyhow::Result<()> {
             .is_none_or(|value| value > 0),
         "thinking budget must be greater than zero"
     );
+    if let Some(template) = &profile.chat_template {
+        anyhow::ensure!(
+            template.len() <= 2 * 1024 * 1024,
+            "chat template must be at most 2 MiB"
+        );
+        anyhow::ensure!(
+            !template.contains('\0'),
+            "chat template must not contain NUL bytes"
+        );
+    }
     for value in [&profile.kv_cache_type_k, &profile.kv_cache_type_v] {
         ensure_one_of(
             value.as_ref(),
