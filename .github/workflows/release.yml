@@ -144,9 +144,10 @@ jobs:
       - name: Create checksums and Sigstore bundles
         run: |
           cd release
-          sha512sum * > SHA512SUMS
-          for asset in *; do
-            test -f "$asset" || continue
+          mapfile -d '' assets < <(find . -maxdepth 1 -type f -printf '%f\0')
+          test "${#assets[@]}" -gt 0
+          sha512sum "${assets[@]}" > SHA512SUMS
+          for asset in "${assets[@]}"; do
             cosign sign-blob --yes --bundle "$asset.sigstore.json" "$asset"
           done
       - name: Publish GitHub Release and updater metadata
