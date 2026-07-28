@@ -55,13 +55,14 @@ package() {
   install -Dm644 apps/desktop/package.json "${pkgdir}/usr/lib/${pkgname}/package.json"
   install -Dm755 target/release/brazierd "${pkgdir}/usr/lib/${pkgname}/brazierd"
   install -Dm644 apps/desktop/build/icon.png "${pkgdir}/usr/share/pixmaps/${pkgname}.png"
+  install -Dm644 apps/desktop/build/icon.png "${pkgdir}/usr/share/icons/hicolor/1024x1024/apps/${pkgname}.png"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 
   install -dm755 "${pkgdir}/usr/bin"
   cat > "${pkgdir}/usr/bin/${pkgname}" <<'EOF'
 #!/bin/sh
 export BRAZIER_INSTALLED=1
-exec /usr/bin/electron /usr/lib/brazier "$@"
+exec /usr/bin/electron --class=brazier /usr/lib/brazier "$@"
 EOF
   chmod 755 "${pkgdir}/usr/bin/${pkgname}"
 
@@ -74,6 +75,7 @@ Exec=${pkgname} %U
 Icon=${pkgname}
 Terminal=false
 Categories=Utility;Development;
-StartupWMClass=Brazier
+StartupWMClass=brazier
+StartupNotify=true
 EOF
 }
