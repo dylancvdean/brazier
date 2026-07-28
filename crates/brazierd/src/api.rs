@@ -3961,6 +3961,23 @@ async fn chat_completions(
                     });
                     yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
                 }
+                Ok(StreamEvent::GenerationStats { completion_tokens, decode_duration_ms }) => {
+                    let chunk = json!({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": null
+                        }],
+                        "brazier": { "generation": {
+                            "completion_tokens": completion_tokens,
+                            "decode_duration_ms": decode_duration_ms
+                        }}
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
+                }
                 Ok(StreamEvent::End) => break,
                 Err(error) => {
                     tracing::error!(error = %error, "stream generation failed");
@@ -4127,6 +4144,7 @@ async fn responses(
                             "message": message
                         }).to_string()));
                 }
+                Ok(StreamEvent::GenerationStats { .. }) => {}
                 Ok(StreamEvent::End) => break,
                 Err(error) => {
                     tracing::error!(error = %error, "responses stream failed");

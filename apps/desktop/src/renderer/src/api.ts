@@ -558,6 +558,8 @@ export type StreamCompletionResult = {
   toolRecords: ToolCallRecord[]
   clientToolCalls: ClientToolCall[]
   transcript: TranscriptMessagePayload[]
+  /** Present for local engines, measured from their token stream. */
+  generationStats?: { completion_tokens: number; decode_duration_ms: number }
 }
 
 export type ToolCallRecord = {
@@ -661,6 +663,7 @@ export async function streamCompletion(
   const transcript: TranscriptMessagePayload[] = []
   let responseText = ''
   let reasoningText = ''
+  let generationStats: StreamCompletionResult['generationStats']
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -693,6 +696,7 @@ export async function streamCompletion(
           transcript_message?: TranscriptMessagePayload
           fork_hints?: RuntimeForkHint[]
           load?: { phase: string; message: string }
+          generation?: { completion_tokens?: number; decode_duration_ms?: number }
         }
         error?: { message?: string }
       }
@@ -700,6 +704,16 @@ export async function streamCompletion(
         throw new GenerationFailure(chunk.error.message, chunk.brazier?.fork_hints ?? [])
       }
       if (chunk.brazier?.load) options?.onLoad?.(chunk.brazier.load)
+      const generation = chunk.brazier?.generation
+      if (
+        typeof generation?.completion_tokens === 'number' &&
+      typeof generation.decode_duration_ms === 'number'
+      ) {
+        generationStats = {
+          completion_tokens: generation.completion_tokens,
+          decode_duration_ms: generation.decode_duration_ms
+        }
+      }
       if (chunk.brazier?.tool_call) {
         toolRecords.push(chunk.brazier.tool_call)
         options?.onToolCall?.(chunk.brazier.tool_call)
@@ -740,7 +754,7 @@ export async function streamCompletion(
       }
     }
   }
-  return { responseText, reasoningText, toolRecords, clientToolCalls, transcript }
+  return { responseText, reasoningText, toolRecords, clientToolCalls, transcript, generationStats }
 }
 
 export async function searchHub(query: string, engine: string): Promise<HubModel[]> {

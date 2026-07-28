@@ -1687,6 +1687,13 @@ code {
   text-align: center;
 }
 
+.generation-rate {
+  display: inline-block;
+  margin-right: 7px;
+  color: #f8924e;
+  font-variant-numeric: tabular-nums;
+}
+
 .attachment-tray,
 .error-banner {
   display: flex;

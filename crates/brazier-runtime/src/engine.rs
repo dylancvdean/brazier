@@ -1,6 +1,6 @@
 //! Engine adapters and model execution orchestration.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -50,6 +50,12 @@ pub enum StreamEvent {
     ToolCallDelta(llama::ToolCallFragment),
     /// A message added to context during a tool round (for faithful persistence).
     TranscriptMessage(OpenAiMessage),
+    /// Decode timing measured from the local engine's token stream. Remote
+    /// OpenAI-compatible servers do not promise an equivalent metric.
+    GenerationStats {
+        completion_tokens: u64,
+        decode_duration_ms: u64,
+    },
     /// Generation finished.
     End,
 }
@@ -1669,6 +1675,7 @@ impl Runtime {
                     return;
                 }
             };
+            let local_generation = !matches!(backend, ActiveBackend::Remote { .. });
             let tools_active = tool_registry::tools_enabled(
                 &runtime.data_dir,
                 &request,
@@ -1681,6 +1688,7 @@ impl Runtime {
                 settings,
                 profile,
                 tools_active,
+                local_generation,
                 &tx,
             )
             .await
@@ -2081,6 +2089,7 @@ async fn stream_tool_rounds(
     settings: RuntimeSettings,
     profile: Option<crate::model_settings::TextProfile>,
     tools_active: bool,
+    local_generation: bool,
     tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
 ) -> anyhow::Result<()> {
     let model_caps = runtime.model_capabilities(&request.model).await;
@@ -2090,6 +2099,8 @@ async fn stream_tool_rounds(
         images: tool_registry::conversation_images(&request),
     };
     let mut audio_fallback_attempted = false;
+    let mut completion_tokens = 0u64;
+    let mut first_token_at: Option<Instant> = None;
     for round in 0..MAX_TOOL_ROUNDS {
         let last_round = round + 1 == MAX_TOOL_ROUNDS;
         let mut body = llama::translate_chat_request(
@@ -2139,6 +2150,10 @@ async fn stream_tool_rounds(
         while let Some(item) = chunks.recv().await {
             let chunk = item?;
             if let Some(content) = chunk.content {
+                if local_generation {
+                    completion_tokens += 1;
+                    first_token_at.get_or_insert_with(Instant::now);
+                }
                 round_text.push_str(&content);
                 match stream_content {
                     Some(true) => {
@@ -2170,6 +2185,10 @@ async fn stream_tool_rounds(
                 }
             }
             if let Some(reasoning) = chunk.reasoning {
+                if local_generation {
+                    completion_tokens += 1;
+                    first_token_at.get_or_insert_with(Instant::now);
+                }
                 round_reasoning.push_str(&reasoning);
                 if tx
                     .send(Ok(StreamEvent::Reasoning(reasoning)))
@@ -2212,7 +2231,7 @@ async fn stream_tool_rounds(
             {
                 return Ok(());
             }
-            let _ = tx.send(Ok(StreamEvent::End)).await;
+            send_generation_end(tx, completion_tokens, first_token_at).await;
             return Ok(());
         }
         if legacy_call {
@@ -2264,14 +2283,30 @@ async fn stream_tool_rounds(
                 let _ = tx
                     .send(Ok(StreamEvent::ClientToolCalls(client_tool_calls)))
                     .await;
-                let _ = tx.send(Ok(StreamEvent::End)).await;
+                send_generation_end(tx, completion_tokens, first_token_at).await;
                 return Ok(());
             }
             AppendRoundOutcome::ChannelClosed => return Ok(()),
         }
     }
-    let _ = tx.send(Ok(StreamEvent::End)).await;
+    send_generation_end(tx, completion_tokens, first_token_at).await;
     Ok(())
+}
+
+async fn send_generation_end(
+    tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
+    completion_tokens: u64,
+    first_token_at: Option<Instant>,
+) {
+    if let Some(started) = first_token_at {
+        let _ = tx
+            .send(Ok(StreamEvent::GenerationStats {
+                completion_tokens,
+                decode_duration_ms: started.elapsed().as_millis() as u64,
+            }))
+            .await;
+    }
+    let _ = tx.send(Ok(StreamEvent::End)).await;
 }
 
 #[cfg(test)]

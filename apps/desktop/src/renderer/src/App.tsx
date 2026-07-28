@@ -124,11 +124,12 @@ function readChatTitleMode(): ChatTitleMode {
   }
 }
 
-function conversationTitle(text: string, mode: ChatTitleMode): string {
-  const normalized = text.replace(/\s+/g, ' ').trim()
-  if (!normalized || mode === 'never') return 'New conversation'
-  if (mode === 'over-20-tokens' && normalized.split(' ').length <= 20) return 'New conversation'
-  return normalized.slice(0, 48)
+function titleFromCompletion(text: string): string | null {
+  const title = text
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/^\s*["'`]+|["'`]+\s*$/g, '')
+    .trim()
+  return title ? title.slice(0, 80) : null
 }
 
 function readEnabledTools(): string[] {
@@ -384,6 +385,7 @@ export function App(): React.JSX.Element {
   const [streamingReasoning, setStreamingReasoning] = useState('')
   const [streamingTools, setStreamingTools] = useState<ToolCallRecord[]>([])
   const [streamingToolOffsets, setStreamingToolOffsets] = useState<number[]>([])
+  const [generationRate, setGenerationRate] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [forkHints, setForkHints] = useState<RuntimeForkHint[]>([])
@@ -992,6 +994,54 @@ export function App(): React.JSX.Element {
     setDraft('')
   }
 
+  function maybeGenerateConversationTitle(
+    id: string,
+    prompt: string,
+    answer: string,
+    outputTokensPerSecond: number | null,
+    mode: ChatTitleMode
+  ): void {
+    if (
+      mode === 'never' ||
+      (mode === 'over-20-tokens' && outputTokensPerSecond != null && outputTokensPerSecond <= 20)
+    ) {
+      return
+    }
+    const titleMessages: Message[] = [
+      {
+        id: 'title-instruction',
+        conversation_id: id,
+        parent_id: null,
+        role: 'system',
+        content:
+          'Write a short, specific chat title for this exchange. Return only the title, with no quotation marks or punctuation at the end.',
+        model: null,
+        created_at: new Date().toISOString()
+      },
+      {
+        id: 'title-user',
+        conversation_id: id,
+        parent_id: 'title-instruction',
+        role: 'user',
+        content: `User: ${prompt}\n\nAssistant: ${answer}`,
+        model: null,
+        created_at: new Date().toISOString()
+      }
+    ]
+    void streamCompletion(titleMessages, selectedModel, new AbortController().signal, () => {}, {
+      toolChoice: 'none'
+    })
+      .then(({ responseText }) => {
+        const title = titleFromCompletion(responseText)
+        if (!title) return
+        return updateConversation(id, { title }).then(() => refreshConversations(''))
+      })
+      .catch(() => {
+        // Naming is a convenience. A completed chat must not report an error
+        // because its optional title request failed.
+      })
+  }
+
   function changeChatTitleMode(mode: ChatTitleMode): void {
     setChatTitleMode(mode)
     try {
@@ -1145,13 +1195,20 @@ export function App(): React.JSX.Element {
     setStreamingReasoning('')
     setStreamingTools([])
     setStreamingToolOffsets([])
+    setGenerationRate(null)
     const controller = new AbortController()
     abortRef.current = controller
+    const shouldGenerateTitle =
+      !conversationId ||
+      (chain.length === 0 &&
+        conversations.find((conversation) => conversation.id === conversationId)?.title ===
+          'New conversation')
+    let latestGenerationRate: number | null = null
 
     try {
       let activeConversationId = conversationId
       if (!activeConversationId) {
-        const created = await createConversation(conversationTitle(text, chatTitleMode))
+        const created = await createConversation()
         activeConversationId = created.id
         setConversationId(created.id)
       }
@@ -1209,6 +1266,12 @@ export function App(): React.JSX.Element {
         )
         responseText = result.responseText
         responseReasoning = result.reasoningText
+        if (result.generationStats) {
+          latestGenerationRate =
+            (result.generationStats.completion_tokens * 1000) /
+            Math.max(1, result.generationStats.decode_duration_ms)
+          setGenerationRate(latestGenerationRate)
+        }
         for (const entry of result.transcript) {
           const role = entry.role as Role
           const entryReasoning =
@@ -1243,6 +1306,15 @@ export function App(): React.JSX.Element {
           ? { metadata: { reasoning_content: responseReasoning } }
           : {})
       })
+      if (shouldGenerateTitle && responseText.trim()) {
+        maybeGenerateConversationTitle(
+          activeConversationId,
+          text,
+          responseText,
+          latestGenerationRate,
+          chatTitleMode
+        )
+      }
       let finalTipId = assistant.id
       const generatedMedia = [
         ...new Map(
@@ -2051,6 +2123,14 @@ export function App(): React.JSX.Element {
               'The agent edits files and runs commands in the workspace above. Each action is judged by its permission mode.'
             ) : (
               <>
+                {generationRate != null ? (
+                  <span
+                    className="generation-rate"
+                    title="Local engine decode rate, measured from its token stream."
+                  >
+                    {generationRate.toFixed(1)} tok/s
+                  </span>
+                ) : null}
                 Local models can be inaccurate. Verify important information.
                 {toolsEnabled && canUseTools ? ' Tools are enabled (bundled + MCP).' : ''}
                 {selectedCapabilities?.harmony
