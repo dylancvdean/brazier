@@ -660,6 +660,11 @@ pub struct SdcppManifest {
     /// the manifest's directory.
     #[serde(default)]
     pub args: BTreeMap<String, String>,
+    /// Pinned hashes for direct-source components. This makes a corrected
+    /// curated download distinguishable from an older mirror with the same
+    /// filename and command-line flag.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub component_sources: BTreeMap<String, String>,
     /// Relative path (from the manifest's directory) to a single
     /// `.safetensors`/`.gguf` checkpoint, used with sd-cli's `-m` flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1290,6 +1295,8 @@ fn with_bundle_defaults(
         .find(|bundle| bundle.model_id() == model_id)?;
     let defaults = bundle.defaults;
     let mut effective = profile.cloned().unwrap_or_default();
+    effective.sampling_method = effective.sampling_method.or(defaults.sampling_method);
+    effective.schedule = effective.schedule.or(defaults.schedule);
     effective.width = effective.width.or(defaults.width);
     effective.height = effective.height.or(defaults.height);
     effective.steps = effective.steps.or(defaults.steps);
@@ -1298,6 +1305,11 @@ fn with_bundle_defaults(
     effective.flow_shift = effective.flow_shift.or(defaults.flow_shift);
     effective.video_frames = effective.video_frames.or(defaults.video_frames);
     effective.fps = effective.fps.or(defaults.fps);
+    // Video VAE/TAE decoding can require a large temporary GPU buffer even
+    // after a successful denoise. Curated video bundles may make CPU decode a
+    // safety default; it deliberately takes precedence over stale false
+    // values saved before that default existed.
+    effective.vae_on_cpu = defaults.vae_on_cpu.or(effective.vae_on_cpu);
     Some(effective)
 }
 
@@ -2236,6 +2248,7 @@ mod tests {
                 ("diffusion-model".to_owned(), "model.gguf".to_owned()),
                 ("t5xxl".to_owned(), "t5xxl_fp16.safetensors".to_owned()),
             ]),
+            component_sources: BTreeMap::new(),
             single_file: None,
             supports_init_image: false,
         };
@@ -2408,6 +2421,7 @@ mod tests {
                     ),
                     ("vae".to_owned(), "vae.safetensors".to_owned()),
                 ]),
+                component_sources: BTreeMap::new(),
                 single_file: None,
                 supports_init_image: false,
             })
@@ -2423,6 +2437,7 @@ mod tests {
             serde_json::to_vec(&SdcppManifest {
                 modality: Modality::Video,
                 args: BTreeMap::new(),
+                component_sources: BTreeMap::new(),
                 single_file: Some("model.gguf".to_owned()),
                 supports_init_image: false,
             })

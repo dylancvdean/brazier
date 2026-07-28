@@ -45,6 +45,13 @@
           "path": "sd_xl_base_1.0.safetensors",
           "role": "Checkpoint (UNet + VAE + text encoders)",
           "approx_bytes": 6938078334
+        },
+        {
+          "repo_id": "madebyollin/sdxl-vae-fp16-fix",
+          "path": "sdxl.vae.safetensors",
+          "role": "SDXL VAE (fp16-safe)",
+          "flag": "vae",
+          "approx_bytes": 334000000
         }
       ]
     },
@@ -59,8 +66,8 @@
       "defaults": {
         "width": 512,
         "height": 512,
-        "steps": 4,
-        "cfg_scale": 1.0
+        "steps": 1,
+        "cfg_scale": 0.0
       },
       "supports_init_image": true,
       "components": [
@@ -93,6 +100,13 @@
           "path": "RealVisXL_V5.0_fp16.safetensors",
           "role": "Checkpoint (UNet + VAE + text encoders)",
           "approx_bytes": 6938065488
+        },
+        {
+          "repo_id": "madebyollin/sdxl-vae-fp16-fix",
+          "path": "sdxl.vae.safetensors",
+          "role": "SDXL VAE (fp16-safe)",
+          "flag": "vae",
+          "approx_bytes": 334000000
         }
       ]
     },
@@ -108,7 +122,8 @@
         "width": 1024,
         "height": 1024,
         "steps": 4,
-        "cfg_scale": 1.0
+        "cfg_scale": 1.0,
+        "sampling_method": "euler"
       },
       "supports_init_image": true,
       "components": [
@@ -194,6 +209,7 @@
         "height": 1024,
         "steps": 25,
         "cfg_scale": 1.0,
+        "sampling_method": "euler",
         "guidance": 3.5
       },
       "supports_init_image": true,
@@ -278,8 +294,9 @@
       "defaults": {
         "width": 1024,
         "height": 1024,
-        "steps": 26,
-        "cfg_scale": 4.0
+        "steps": 40,
+        "cfg_scale": 3.0,
+        "sampling_method": "euler"
       },
       "supports_init_image": true,
       "components": [
@@ -320,6 +337,7 @@
         "height": 1024,
         "steps": 20,
         "cfg_scale": 2.5,
+        "sampling_method": "euler",
         "flow_shift": 3.0
       },
       "supports_init_image": true,
@@ -391,9 +409,12 @@
         "width": 704,
         "height": 480,
         "steps": 20,
-        "cfg_scale": 5.0,
-        "video_frames": 49,
-        "fps": 24
+        "cfg_scale": 6.0,
+        "sampling_method": "euler",
+        "flow_shift": 3.0,
+        "video_frames": 33,
+        "fps": 24,
+        "vae_on_cpu": true
       },
       "supports_init_image": true,
       "components": [
@@ -407,6 +428,9 @@
         {
           "repo_id": "Kijai/WanVideo_comfy",
           "path": "taew2_2.safetensors",
+          "source_url": "https://github.com/madebyollin/taehv/raw/refs/heads/main/safetensors/taew2_2.safetensors",
+          "source_sha256": "b84609b2a133d48434bd9636bfcb44bf05168dc436e2d3cecf26256faa1f5325",
+          "source_size": 22848048,
           "role": "Video decoder",
           "flag": "tae",
           "approx_bytes": 22848080,
@@ -450,8 +474,11 @@
         "height": 480,
         "steps": 20,
         "cfg_scale": 6.0,
+        "sampling_method": "euler",
+        "flow_shift": 8.0,
         "video_frames": 33,
-        "fps": 16
+        "fps": 16,
+        "vae_on_cpu": true
       },
       "supports_init_image": false,
       "components": [
@@ -463,11 +490,14 @@
           "approx_bytes": 2838104528
         },
         {
-          "repo_id": "Kijai/WanVideo_comfy",
+          "repo_id": "madebyollin/taehv",
           "path": "taew2_1.safetensors",
+          "source_url": "https://github.com/madebyollin/taehv/raw/refs/heads/main/safetensors/taew2_1.safetensors",
+          "source_sha256": "04766eac0221b5390b985ae3fdcca652cbb4b1e8b82b28ea7ff89dfad1b1a93f",
+          "source_size": 22642902,
           "role": "Video decoder",
           "flag": "tae",
-          "approx_bytes": 22642926,
+          "approx_bytes": 22642902,
           "variants": [
             {
               "label": "TAEHV · low VRAM (recommended)",
@@ -487,20 +517,29 @@
           ]
         },
         {
-          "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
-          "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+          "repo_id": "city96/umt5-xxl-encoder-gguf",
+          "path": "umt5-xxl-encoder-Q8_0.gguf",
           "role": "Text encoder (umT5-XXL)",
           "flag": "t5xxl",
-          "approx_bytes": 6735906897,
+          "approx_bytes": 6043068256,
           "variants": [
             {
-              "label": "fp8 scaled",
+              "label": "Q8 GGUF · sd.cpp compatible (recommended)",
+              "repo_id": "city96/umt5-xxl-encoder-gguf",
+              "path": "umt5-xxl-encoder-Q8_0.gguf",
+              "approx_bytes": 6043068256,
+              "note": "The encoder format documented and validated with sd.cpp Wan."
+            },
+            {
+              "label": "Comfy FP8 scaled · legacy",
+              "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
               "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
               "approx_bytes": 6735906897,
-              "note": "Half the size, the usual choice."
+              "note": "For ComfyUI compatibility; it is not reliable with sd.cpp Wan."
             },
             {
               "label": "fp16",
+              "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
               "path": "split_files/text_encoders/umt5_xxl_fp16.safetensors",
               "approx_bytes": 11366399385,
               "note": "Full precision text encoder."
@@ -522,8 +561,11 @@
         "height": 480,
         "steps": 20,
         "cfg_scale": 6.0,
+        "sampling_method": "euler",
+        "flow_shift": 3.0,
         "video_frames": 33,
-        "fps": 16
+        "fps": 16,
+        "vae_on_cpu": true
       },
       "supports_init_image": true,
       "components": [
@@ -567,11 +609,14 @@
           ]
         },
         {
-          "repo_id": "Kijai/WanVideo_comfy",
+          "repo_id": "madebyollin/taehv",
           "path": "taew2_1.safetensors",
+          "source_url": "https://github.com/madebyollin/taehv/raw/refs/heads/main/safetensors/taew2_1.safetensors",
+          "source_sha256": "04766eac0221b5390b985ae3fdcca652cbb4b1e8b82b28ea7ff89dfad1b1a93f",
+          "source_size": 22642902,
           "role": "Video decoder",
           "flag": "tae",
-          "approx_bytes": 22642926,
+          "approx_bytes": 22642902,
           "variants": [
             {
               "label": "TAEHV · low VRAM (recommended)",
@@ -678,11 +723,15 @@
           ]
         },
         {
-          "repo_id": "unsloth/LTX-2.3-GGUF",
-          "path": "vae/ltx-2.3-22b-distilled_video_vae.safetensors",
-          "role": "Video VAE",
-          "flag": "vae",
-          "approx_bytes": 1452256522
+          "repo_id": "madebyollin/taehv",
+          "path": "taeltx2_3.safetensors",
+          "source_url": "https://github.com/madebyollin/taehv/raw/refs/heads/main/safetensors/taeltx2_3.safetensors",
+          "source_sha256": "f0773b4e3e57318e6aa4dd4a35e1d16213a5f160fbc0376163f06888bbcbe246",
+          "source_size": 23531296,
+          "role": "Video decoder",
+          "flag": "tae",
+          "approx_bytes": 23531296,
+          "variants": [{"label":"TAEHV · low VRAM (recommended)","path":"taeltx2_3.safetensors","in_place":true,"approx_bytes":23531296},{"label":"Full VAE · higher quality","repo_id":"unsloth/LTX-2.3-GGUF","path":"vae/ltx-2.3-22b-distilled_video_vae.safetensors","flag":"vae","in_place":true,"approx_bytes":1452256522}]
         },
         {
           "repo_id": "unsloth/LTX-2.3-GGUF",

@@ -424,6 +424,9 @@ pub fn assemble(
     components.push(Component {
         repo_id: repo_id.to_owned(),
         path: path.to_owned(),
+        source_url: None,
+        source_sha256: None,
+        source_size: None,
         // A self-contained checkpoint is passed to `-m`; everything else is a
         // standalone diffusion model.
         flag: (!self_contained).then(|| "diffusion-model".to_owned()),
@@ -446,6 +449,9 @@ pub fn assemble(
         components.push(Component {
             repo_id: requirement.repo_id,
             path: requirement.path,
+            source_url: None,
+            source_sha256: None,
+            source_size: None,
             flag: Some(requirement.flag),
             role: requirement.role,
             gated: requirement.gated,
@@ -493,6 +499,8 @@ pub fn assemble(
 
 fn merge_defaults(base: GenerationDefaults, overrides: GenerationDefaults) -> GenerationDefaults {
     GenerationDefaults {
+        sampling_method: overrides.sampling_method.or(base.sampling_method),
+        schedule: overrides.schedule.or(base.schedule),
         width: overrides.width.or(base.width),
         height: overrides.height.or(base.height),
         steps: overrides.steps.or(base.steps),
@@ -501,6 +509,7 @@ fn merge_defaults(base: GenerationDefaults, overrides: GenerationDefaults) -> Ge
         flow_shift: overrides.flow_shift.or(base.flow_shift),
         video_frames: overrides.video_frames.or(base.video_frames),
         fps: overrides.fps.or(base.fps),
+        vae_on_cpu: overrides.vae_on_cpu.or(base.vae_on_cpu),
     }
 }
 

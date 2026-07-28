@@ -1273,6 +1273,7 @@ mod tests {
                     "diffusion-model".to_owned(),
                     "diffusion.gguf".to_owned(),
                 )]),
+                component_sources: std::collections::BTreeMap::new(),
                 single_file: None,
                 supports_init_image: false,
             })

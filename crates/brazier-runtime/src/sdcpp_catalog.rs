@@ -57,6 +57,14 @@ pub struct Component {
     /// Path inside the Hub repository. When `variants` is non-empty this is the
     /// default choice, and the interface may substitute another.
     pub path: String,
+    /// Optional canonical URL for a component the upstream project publishes
+    /// outside Hugging Face. It is downloaded only with the pinned checksum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_size: Option<u64>,
     /// sd-cli flag without the leading `--` (`diffusion-model`, `vae`,
     /// `clip_l`, `t5xxl`, …). Absent for a self-contained checkpoint, which is
     /// passed to `-m` instead.
@@ -89,6 +97,10 @@ impl Component {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GenerationDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
@@ -104,6 +116,10 @@ pub struct GenerationDefaults {
     pub video_frames: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
+    /// Keep the video decoder on CPU when the GPU cannot reserve its large
+    /// transient decode buffer after denoising.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vae_on_cpu: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +169,7 @@ impl Bundle {
     /// The manifest that lets sd-cli find every downloaded component.
     pub fn manifest(&self) -> sdcpp::SdcppManifest {
         let mut args = BTreeMap::new();
+        let mut component_sources = BTreeMap::new();
         let mut single_file = None;
         for component in &self.components {
             match &component.flag {
@@ -161,10 +178,14 @@ impl Bundle {
                 }
                 None => single_file = Some(component.file_name().to_owned()),
             }
+            if let Some(sha256) = &component.source_sha256 {
+                component_sources.insert(component.file_name().to_owned(), sha256.clone());
+            }
         }
         sdcpp::SdcppManifest {
             modality: self.modality,
             args,
+            component_sources,
             single_file,
             supports_init_image: self.supports_init_image,
         }
@@ -183,6 +204,7 @@ impl Bundle {
             .is_some_and(|manifest| {
                 manifest.modality == self.modality
                     && manifest.args == self.manifest().args
+                    && manifest.component_sources == self.manifest().component_sources
                     && manifest.single_file == self.manifest().single_file
             })
     }
@@ -336,6 +358,27 @@ pub fn validate(bundle: &Bundle) -> anyhow::Result<()> {
             "invalid file path `{}`",
             component.path
         );
+        match (
+            component.source_url.as_deref(),
+            component.source_sha256.as_deref(),
+            component.source_size,
+        ) {
+            (None, None, None) => {}
+            (Some(url), Some(sha256), Some(size)) => {
+                let url = reqwest::Url::parse(url)
+                    .with_context(|| format!("invalid direct component URL for {}", component.role))?;
+                anyhow::ensure!(url.scheme() == "https", "direct component URL must use HTTPS");
+                anyhow::ensure!(
+                    sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                    "direct component SHA-256 must be 64 hexadecimal characters"
+                );
+                anyhow::ensure!(size > 0, "direct component size must be positive");
+            }
+            _ => anyhow::bail!(
+                "direct component {} must specify URL, SHA-256, and size together",
+                component.role
+            ),
+        }
         for variant in &component.variants {
             anyhow::ensure!(
                 !variant.label.trim().is_empty(),
@@ -557,7 +600,10 @@ mod tests {
             manifest.single_file.as_deref(),
             Some("sd_xl_base_1.0.safetensors")
         );
-        assert!(manifest.args.is_empty());
+        assert_eq!(
+            manifest.args.get("vae").map(String::as_str),
+            Some("sdxl.vae.safetensors")
+        );
         assert!(!sdxl.gated());
     }
 
@@ -591,6 +637,9 @@ mod tests {
             components: vec![Component {
                 repo_id: "acme/repo".into(),
                 path: "model.safetensors".into(),
+                source_url: None,
+                source_sha256: None,
+                source_size: None,
                 flag: None,
                 role: "Checkpoint".into(),
                 gated: false,
@@ -662,6 +711,9 @@ mod tests {
         two_models.components.push(Component {
             repo_id: "acme/repo".into(),
             path: "other.safetensors".into(),
+            source_url: None,
+            source_sha256: None,
+            source_size: None,
             flag: Some("diffusion-model".into()),
             role: "Diffusion".into(),
             gated: false,
@@ -676,6 +728,9 @@ mod tests {
         collision.components.push(Component {
             repo_id: "acme/other".into(),
             path: "nested/model.safetensors".into(),
+            source_url: None,
+            source_sha256: None,
+            source_size: None,
             flag: Some("vae".into()),
             role: "VAE".into(),
             gated: false,

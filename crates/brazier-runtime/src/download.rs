@@ -453,6 +453,7 @@ struct FileDownload<'a> {
     repo_id: &'a str,
     revision: &'a str,
     filename: &'a str,
+    source_url: Option<&'a str>,
     destination: &'a Path,
     job: Option<(&'a Database, &'a str)>,
     cancel: Option<&'a Arc<StopFlag>>,
@@ -536,6 +537,7 @@ async fn download_file_to_with_opts(
         repo_id,
         revision,
         filename,
+        source_url,
         destination,
         job,
         cancel,
@@ -636,15 +638,21 @@ async fn download_file_to_with_opts(
             format!("Downloading {filename}")
         },
     ));
-    let url = resolve_url(repo_id, revision, filename);
+    let url = source_url
+        .map(str::to_owned)
+        .unwrap_or_else(|| resolve_url(repo_id, revision, filename));
 
-    let mut builder = hf_auth::apply_auth(
-        client.get(&url).header(
-            "user-agent",
-            format!("brazier/{}", env!("CARGO_PKG_VERSION")),
-        ),
-        data_dir,
+    let request = client.get(&url).header(
+        "user-agent",
+        format!("brazier/{}", env!("CARGO_PKG_VERSION")),
     );
+    // Hugging Face credentials must never accompany an explicitly configured
+    // third-party source (such as an upstream GitHub release).
+    let mut builder = if source_url.is_some() {
+        request
+    } else {
+        hf_auth::apply_auth(request, data_dir)
+    };
     if existing > 0 {
         builder = builder.header("range", format!("bytes={existing}-"));
     }
@@ -805,6 +813,7 @@ pub async fn download_mlx_snapshot_with_progress(
                 repo_id: &request.repo_id,
                 revision: &request.revision,
                 filename: &file.path,
+                source_url: None,
                 destination: &destination,
                 job: job.as_ref().map(|(db, id)| (db, id.as_str())),
                 cancel: cancel.as_ref(),
@@ -922,6 +931,7 @@ pub async fn download_streaming_asr_snapshot_with_progress(
                 repo_id: &request.repo_id,
                 revision: &request.revision,
                 filename: &file.path,
+                source_url: None,
                 destination: &destination,
                 job: job.as_ref().map(|(db, id)| (db, id.as_str())),
                 cancel: cancel.as_ref(),
@@ -1025,6 +1035,7 @@ pub async fn download_adapter_with_progress(
             repo_id,
             revision,
             filename,
+            source_url: None,
             destination: &destination,
             job: None,
             cancel: cancel.as_ref(),
@@ -1083,6 +1094,20 @@ pub async fn install_sdcpp_bundle_with_progress(
     let mut sizes: HashMap<(String, String), Option<u64>> = HashMap::new();
     let mut hashes: HashMap<(String, String), Option<String>> = HashMap::new();
     for component in &bundle.components {
+        if let Some(source_url) = &component.source_url {
+            let url = reqwest::Url::parse(source_url)
+                .with_context(|| format!("invalid direct component URL for {}", component.role))?;
+            anyhow::ensure!(url.scheme() == "https", "direct component URL must use HTTPS");
+            anyhow::ensure!(
+                component.source_size.is_some() && component.source_sha256.is_some(),
+                "direct component {} must pin its size and SHA-256",
+                component.role
+            );
+            let key = (component.repo_id.clone(), component.path.clone());
+            sizes.insert(key.clone(), component.source_size);
+            hashes.insert(key, component.source_sha256.clone());
+            continue;
+        }
         validate_repo_id(&component.repo_id)?;
         if sizes.contains_key(&(component.repo_id.clone(), component.path.clone())) {
             continue;
@@ -1140,6 +1165,7 @@ pub async fn install_sdcpp_bundle_with_progress(
                 repo_id: &component.repo_id,
                 revision: "main",
                 filename: &component.path,
+                source_url: component.source_url.as_deref(),
                 destination: &destination,
                 job: job.as_ref().map(|(db, id)| (db, id.as_str())),
                 cancel: cancel.as_ref(),
@@ -1271,6 +1297,7 @@ pub async fn download_personaplex_snapshot_with_progress(
                 repo_id: &request.repo_id,
                 revision: &request.revision,
                 filename: &file.path,
+                source_url: None,
                 destination: &destination,
                 job: job.as_ref().map(|(db, id)| (db, id.as_str())),
                 cancel: cancel.as_ref(),
