@@ -70,6 +70,14 @@ try {
 console.log(`Preparing Brazier ${next} from ${version}.`)
 execFileSync('pnpm', ['version:bump', '--', next], { cwd: root, stdio: 'inherit' })
 
+// The release tag must point at the commit whose manifests carry that exact
+// version. Stage only tracked bump output: the checkout was verified clean
+// before this command, so this cannot accidentally absorb unrelated files.
+if (git(['status', '--porcelain']).length === 0) {
+  throw new Error('Version bump did not change any tracked files.')
+}
+git(['add', '-u'], { stdio: 'inherit' })
+git(['commit', '-m', `release: ${tag}`], { stdio: 'inherit' })
 git(['tag', '-a', tag, '-m', `Brazier ${tag}`], { stdio: 'inherit' })
 git(['push', 'origin', 'HEAD', tag], { stdio: 'inherit' })
 console.log(`Released ${tag}.`)
