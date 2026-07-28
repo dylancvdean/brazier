@@ -41,8 +41,12 @@ jobs:
           case "$tag" in v*) ;; *) echo "Release tags must start with v" >&2; exit 1;; esac
           root_version="$(node -p 'require("./package.json").version')"
           desktop_version="$(node -p 'require("./apps/desktop/package.json").version')"
-          test "$tag" = "v$root_version"
-          test "$tag" = "v$desktop_version"
+          expected_root="v$root_version"
+          expected_desktop="v$desktop_version"
+          if [ "$tag" != "$expected_root" ] || [ "$tag" != "$expected_desktop" ]; then
+            echo "Tag/version mismatch: tag=$tag, root=$expected_root, desktop=$expected_desktop" >&2
+            exit 1
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   macos:
