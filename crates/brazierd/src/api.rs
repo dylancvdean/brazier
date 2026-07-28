@@ -363,6 +363,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         )
         .route("/api/v1/agent/sessions/{id}/cancel", post(cancel_agent_run))
         .route(
+            "/api/v1/agent/sessions/{id}/apply-worktree",
+            post(apply_agent_worktree),
+        )
+        .route(
             "/api/v1/agent/sessions/{id}/prompt",
             get(agent_system_prompt),
         )
@@ -4286,8 +4290,9 @@ async fn delete_agent_session(
         && let Some(info) =
             crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
     {
-        // Best-effort cleanup: a leftover worktree is annoying, not fatal.
-        let _ = crate::agent_worktree::remove_worktree(&info).await;
+        crate::agent_worktree::remove_worktree(&info)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
     state
         .db
@@ -4295,6 +4300,48 @@ async fn delete_agent_session(
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(json!({ "deleted": true })))
+}
+
+/// Copy the task's worktree delta into the source checkout for local testing.
+async fn apply_agent_worktree(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let session = state
+        .db
+        .agent_session(&id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    if session.last_run_status == "running" {
+        return Err(ApiError::bad_request(
+            "stop the agent before applying its worktree changes",
+        ));
+    }
+    let info = crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
+        .ok_or_else(|| ApiError::bad_request("this task does not use a managed worktree"))?;
+    let applied = crate::agent_worktree::apply_to_source(&info)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let metadata = crate::agent_worktree::metadata_with_worktree(
+        session.runtime_metadata.clone(),
+        Some(applied.worktree),
+    );
+    let session = state
+        .db
+        .update_agent_session(
+            &id,
+            crate::agent_types::UpdateAgentSession {
+                runtime_metadata: Some(metadata),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "session": session,
+        "changed_paths": applied.changed_paths,
+        "already_up_to_date": applied.already_up_to_date,
+    })))
 }
 
 async fn list_agent_messages(
@@ -4674,9 +4721,10 @@ async fn set_worktree_confinement(
                 "worktree confinement needs a git repository workspace",
             ));
         }
-        let info = crate::agent_worktree::create_worktree(&source_path, &session.id)
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let info =
+            crate::agent_worktree::create_worktree(&source_path, &session.id, &session.title)
+                .await
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
         let metadata = crate::agent_worktree::metadata_with_worktree(
             session.runtime_metadata.clone(),
             Some(info.clone()),
@@ -4698,7 +4746,9 @@ async fn set_worktree_confinement(
         let Some(info) = existing else {
             return Ok(session);
         };
-        let _ = crate::agent_worktree::remove_worktree(&info).await;
+        crate::agent_worktree::remove_worktree(&info)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
         let metadata =
             crate::agent_worktree::metadata_with_worktree(session.runtime_metadata.clone(), None);
         let source = validate_workspace_path(state, &info.source_path)?;

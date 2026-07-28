@@ -4194,6 +4194,15 @@ label.span-2 {
   flex: 1;
 }
 
+.agent-worktree-notice {
+  min-width: 0;
+  overflow: hidden;
+  color: #8fa68f;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-workspace {
   display: flex;
   align-items: center;

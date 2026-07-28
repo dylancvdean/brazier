@@ -82,6 +82,7 @@ export type AgentSessionSummary = {
       source_path: string
       path: string
       branch: string
+      last_applied_tree?: string
     }
     kind?: 'subagent'
     parent_session_id?: string
@@ -172,6 +173,17 @@ export async function updateAgentSession(
 
 export async function deleteAgentSession(id: string): Promise<void> {
   await request(`/api/v1/agent/sessions/${id}`, { method: 'DELETE' })
+}
+
+export async function applyAgentWorktree(id: string): Promise<{
+  session: AgentSessionSummary
+  changed_paths: string[]
+  already_up_to_date: boolean
+}> {
+  return request(`/api/v1/agent/sessions/${id}/apply-worktree`, {
+    method: 'POST',
+    body: JSON.stringify({})
+  })
 }
 
 export async function decideAgentApproval(

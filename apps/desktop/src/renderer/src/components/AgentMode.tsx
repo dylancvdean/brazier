@@ -26,6 +26,7 @@ import type {
 } from '../../../agent/core/types'
 import type { WorkerMessage } from '../../../agent/core/protocol'
 import {
+  applyAgentWorktree,
   createAgentSession,
   decideAgentApproval,
   deleteAgentSession,
@@ -585,7 +586,8 @@ export function AgentMode(props: Props): React.JSX.Element {
   /** When set before the first run, the new session is created inside a worktree. */
   const [pendingConfineToWorktree, setPendingConfineToWorktree] = useState(false)
   const [workspaceIsGit, setWorkspaceIsGit] = useState(false)
-  const [worktreeBusy, setWorktreeBusy] = useState(false)
+  const [applyingWorktree, setApplyingWorktree] = useState(false)
+  const [worktreeNotice, setWorktreeNotice] = useState<string | null>(null)
   const [deciding, setDeciding] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [artifact, setArtifact] = useState<{ id: string; text: string } | null>(null)
@@ -920,18 +922,13 @@ export function AgentMode(props: Props): React.JSX.Element {
     try {
       const validated = await validateAgentWorkspace(selected)
       setWorkspaceIsGit(validated.git_repository)
-      if (!validated.git_repository) setPendingConfineToWorktree(false)
       if (session) {
-        // Leave any existing worktree before pointing at a new folder.
-        if (sessionWorktree(session)) {
-          await updateAgentSession(session.id, { confine_to_worktree: false })
-        }
-        const updated = await updateAgentSession(session.id, {
-          workspace_path: validated.path
-        })
-        setSession(updated)
+        onError('A task keeps the workspace it started with. Start a new task to use another folder.')
       } else {
         setPendingWorkspace(validated.path)
+        // Git tasks are isolated by default. The user can opt out before the
+        // task exists, but an existing task never moves behind their back.
+        setPendingConfineToWorktree(validated.git_repository)
       }
     } catch (cause) {
       onError(errorText(cause))
@@ -948,29 +945,7 @@ export function AgentMode(props: Props): React.JSX.Element {
       setPendingConfineToWorktree((current) => !current)
       return
     }
-    if (running) {
-      onError('Stop the current run before changing worktree confinement.')
-      return
-    }
-    setWorktreeBusy(true)
-    try {
-      const updated = await updateAgentSession(session.id, {
-        confine_to_worktree: !worktree
-      })
-      setSession(updated)
-      setSessions((current) =>
-        current.map((entry) => (entry.id === updated.id ? updated : entry))
-      )
-      const path = updated.workspace_path
-      if (path) {
-        const validated = await validateAgentWorkspace(path)
-        setWorkspaceIsGit(validated.git_repository)
-      }
-    } catch (cause) {
-      onError(errorText(cause))
-    } finally {
-      setWorktreeBusy(false)
-    }
+    onError('Worktree isolation is fixed for this task. Start a new task to change it.')
   }
 
   async function changePermissionMode(mode: AgentPermissionMode): Promise<void> {
@@ -1020,6 +995,7 @@ export function AgentMode(props: Props): React.JSX.Element {
       return
     }
     try {
+      setWorktreeNotice(null)
       let active = session
       if (!active) {
         const requestedWorktree = pendingConfineToWorktree
@@ -1106,6 +1082,10 @@ export function AgentMode(props: Props): React.JSX.Element {
   }
 
   async function startNewTask(): Promise<void> {
+    const previousWorktree = sessionWorktree(session)
+    const nextWorkspace =
+      previousWorktree?.source_path ?? session?.workspace_path ?? pendingWorkspace
+    const nextWorkspaceIsGit = Boolean(nextWorkspace && (previousWorktree || workspaceIsGit))
     if (session) {
       await window.brazier.agent.closeSession(session.id).catch(() => undefined)
     }
@@ -1121,7 +1101,11 @@ export function AgentMode(props: Props): React.JSX.Element {
     setSummary(null)
     setStreaming('')
     setReasoning('')
-    setPendingConfineToWorktree(false)
+    // New tasks stay in the same project and use isolation by default, matching
+    // the task-per-worktree flow of mature coding-agent tools.
+    setPendingWorkspace(nextWorkspace ?? null)
+    setWorkspaceIsGit(nextWorkspaceIsGit)
+    setPendingConfineToWorktree(nextWorkspaceIsGit)
   }
 
   async function removeSession(id: string): Promise<void> {
@@ -1131,6 +1115,30 @@ export function AgentMode(props: Props): React.JSX.Element {
       if (session?.id === id) await startNewTask()
     } catch (cause) {
       onError(errorText(cause))
+    }
+  }
+
+  async function applyWorktree(): Promise<void> {
+    if (!session || !worktree || running || applyingWorktree) return
+    onError(null)
+    setApplyingWorktree(true)
+    try {
+      const result = await applyAgentWorktree(session.id)
+      setSession(result.session)
+      setSessions((current) =>
+        current.map((entry) => (entry.id === result.session.id ? result.session : entry))
+      )
+      setWorktreeNotice(
+        result.already_up_to_date
+          ? 'Source checkout is already up to date.'
+          : `Applied ${result.changed_paths.length} changed ${
+              result.changed_paths.length === 1 ? 'file' : 'files'
+            } to the source checkout.`
+      )
+    } catch (cause) {
+      onError(errorText(cause))
+    } finally {
+      setApplyingWorktree(false)
     }
   }
 
@@ -1189,7 +1197,15 @@ export function AgentMode(props: Props): React.JSX.Element {
   return (
     <div className="agent-mode">
       <header className="agent-header">
-        <button className="agent-workspace" type="button" onClick={() => void chooseWorkspace()}>
+        <button
+          className="agent-workspace"
+          type="button"
+          title={session ? 'Show this task workspace in the file manager.' : 'Choose a workspace'}
+          onClick={() => {
+            if (session && workspace) void window.brazier.revealFile(workspace)
+            else void chooseWorkspace()
+          }}
+        >
           <FolderOpen size={15} />
           <span>
             <strong>{shortPath(workspace)}</strong>
@@ -1206,19 +1222,42 @@ export function AgentMode(props: Props): React.JSX.Element {
           <button
             className={`chip-button subtle${confinedToWorktree ? ' active' : ''}`}
             type="button"
-            disabled={worktreeBusy || running}
+            disabled={Boolean(session) || running}
             title={
-              confinedToWorktree
-                ? worktree
-                  ? `Working in ${worktree.path} (from ${worktree.source_path}). Click to return to the original checkout.`
-                  : 'New tasks will start in a fresh git worktree.'
-                : 'Create a git worktree so the agent cannot dirty your current checkout.'
+              worktree
+                ? `Isolated in ${worktree.path} on ${worktree.branch}. The source checkout is ${worktree.source_path}.`
+                : session
+                  ? 'This task uses the source checkout. Isolation is fixed once a task starts.'
+                  : confinedToWorktree
+                    ? 'This task will start in a fresh git worktree.'
+                    : 'Run this task in the source checkout.'
             }
             onClick={() => void toggleWorktreeConfinement()}
           >
-            {worktreeBusy ? <LoaderCircle className="spin" size={13} /> : <GitBranch size={13} />}
-            {confinedToWorktree ? 'Worktree on' : 'Confine to worktree'}
+            <GitBranch size={13} />
+            {confinedToWorktree ? 'Isolated worktree' : 'Source checkout'}
           </button>
+        )}
+        {worktree && (
+          <button
+            className="chip-button subtle"
+            type="button"
+            disabled={running || applyingWorktree}
+            title="Copy this task's changes into a clean source checkout for testing or committing."
+            onClick={() => void applyWorktree()}
+          >
+            {applyingWorktree ? (
+              <LoaderCircle className="spin" size={13} />
+            ) : (
+              <Check size={13} />
+            )}
+            {applyingWorktree ? 'Applying…' : 'Apply to checkout'}
+          </button>
+        )}
+        {worktreeNotice && (
+          <span className="agent-worktree-notice" role="status">
+            {worktreeNotice}
+          </span>
         )}
         {sandbox && <SandboxBadge sandbox={sandbox} />}
         <div className="agent-mode-select">

@@ -98,7 +98,11 @@ export function AgentSessionSidebar({ controls }: Props): React.JSX.Element {
                   <button
                     type="button"
                     className="agent-session-delete"
-                    title="Delete this task"
+                    title={
+                      worktree
+                        ? 'Delete this task and remove its worktree. Unapplied changes are protected.'
+                        : 'Delete this task'
+                    }
                     onClick={() => controls.remove(entry.id)}
                   >
                     <Trash2 size={13} />
