@@ -1,6 +1,6 @@
 {
   "name": "@brazier/desktop",
-  "version": "0.2.2-beta.4",
+  "version": "0.2.2-beta.5",
   "private": true,
   "desktopName": "brazier",
   "description": "Brazier desktop application",

@@ -90,6 +90,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           cargo build --release --locked -p brazierd
+          pnpm --filter @brazier/desktop run build
           pnpm --filter @brazier/desktop exec electron-builder --mac --arm64 --publish always
       - uses: actions/upload-artifact@v4
         with:
@@ -120,6 +121,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cargo build --release --locked -p brazierd
+          pnpm --filter @brazier/desktop run build
           pnpm --filter @brazier/desktop exec electron-builder --linux AppImage --x64 --publish always
       - uses: actions/upload-artifact@v4
         with:
