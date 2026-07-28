@@ -66,13 +66,13 @@ export function MessageMedia({
 
   return (
     <div className="message-media">
-      {blobs.map((blob) => {
+      {blobs.map((blob, index) => {
         const url = urls[blob.sha256]
         const isVideo = blob.mime_type.startsWith('video/')
         const isImage = blob.mime_type.startsWith('image/')
         const isAudio = blob.mime_type.startsWith('audio/')
         return (
-          <figure className="message-media-item" key={blob.sha256}>
+          <figure className="message-media-item" key={`${blob.sha256}:${blob.mime_type}:${index}`}>
             {url && isImage && <img src={url} alt="Attached or generated image" />}
             {url && isVideo && <video src={url} controls playsInline />}
             {url && isAudio && <audio src={url} controls />}
