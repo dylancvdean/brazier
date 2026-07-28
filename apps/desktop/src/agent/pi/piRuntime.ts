@@ -304,6 +304,12 @@ class PiAgentSession implements AgentSession {
   private toolsThisTurn = 0
   private queue?: EventQueue
   private currentRunId?: string
+  /**
+   * Pi can emit several message_end events back-to-back. SQLite append uses a
+   * read-then-write transaction to allocate sequence numbers, so overlapping
+   * appends from one session can deadlock while upgrading their read locks.
+   */
+  private persistence = Promise.resolve()
 
   constructor(options: {
     broker: BrokerClient
@@ -440,6 +446,16 @@ class PiAgentSession implements AgentSession {
     this.queue?.push(event)
   }
 
+  /** Keep this session's transcript and status writes in emission order. */
+  private enqueuePersistence<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.persistence.then(task, task)
+    this.persistence = next.then(
+      () => undefined,
+      () => undefined
+    )
+    return next
+  }
+
   private base(type: AgentEvent['type']): {
     type: AgentEvent['type']
     sessionId: string
@@ -485,10 +501,12 @@ class PiAgentSession implements AgentSession {
           this.emit({ ...this.base('message-committed'), message } as AgentEvent)
         }
         this.state = { ...this.state, messages: [...this.state.messages, message] }
-        void this.broker.appendMessages(this.id, [message]).catch(() => {
-          // Persistence failures must not abort a run in progress; the run
-          // still streams and the UI still shows it.
-        })
+        void this.enqueuePersistence(() => this.broker.appendMessages(this.id, [message])).catch(
+          () => {
+            // Persistence failures must not abort a run in progress; the run
+            // still streams and the UI still shows it.
+          }
+        )
         return
       }
       default:
@@ -553,7 +571,9 @@ class PiAgentSession implements AgentSession {
   private async setRunStatus(status: AgentRunStatus): Promise<void> {
     this.state = { ...this.state, lastRunStatus: status }
     try {
-      await this.broker.updateSession(this.id, { last_run_status: status })
+      await this.enqueuePersistence(() =>
+        this.broker.updateSession(this.id, { last_run_status: status })
+      )
     } catch {
       // A status write is bookkeeping; losing it must not fail the run.
     }
@@ -604,7 +624,7 @@ class PiAgentSession implements AgentSession {
     this.agent.state.messages = next
       .map(toPiMessage)
       .filter((message): message is PiMessage => Boolean(message))
-    await this.broker.appendMessages(this.id, next, true)
+    await this.enqueuePersistence(() => this.broker.appendMessages(this.id, next, true))
 
     const compaction: AgentCompactionState = {
       compactedAt: new Date().toISOString(),
@@ -613,8 +633,11 @@ class PiAgentSession implements AgentSession {
       summarySource: prose ? 'model' : 'deterministic'
     }
     this.state = { ...this.state, compactionState: compaction }
-    await this.broker
-      .updateSession(this.id, { compaction: compaction as unknown as Record<string, unknown> })
+    await this.enqueuePersistence(() =>
+      this.broker.updateSession(this.id, {
+        compaction: compaction as unknown as Record<string, unknown>
+      })
+    )
       .catch(() => undefined)
     this.emit({ ...this.base('compacted'), state: compaction } as AgentEvent)
     return compaction

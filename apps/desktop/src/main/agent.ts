@@ -26,6 +26,9 @@ type Pending = {
 /** Requests that may run for a long time (a run waits on the model and the user). */
 const LONG_RUNNING: WorkerCommand['type'][] = ['run']
 const SHORT_REQUEST_TIMEOUT_MS = 60_000
+/** A stop is a safety control, so a wedged runtime gets only a short grace period. */
+const CANCEL_GRACE_MS = 2_000
+const DAEMON_CANCEL_TIMEOUT_MS = 5_000
 
 export class AgentSupervisor {
   private worker?: UtilityProcess
@@ -161,8 +164,88 @@ export class AgentSupervisor {
     })
   }
 
+  /**
+   * Cancel at the daemon boundary as well as in the runtime.
+   *
+   * The daemon owns tool processes and pending approvals, while the utility
+   * process owns the model loop. Stopping both independently means a wedged
+   * renderer or runtime cannot leave one half of a run alive.
+   */
+  private async cancelDaemon(sessionId: string): Promise<void> {
+    const connection = this.connection
+    if (!connection) throw new Error('The Brazier daemon connection is not available yet.')
+    const headers = new Headers({ 'content-type': 'application/json' })
+    if (connection.apiKey) headers.set('authorization', `Bearer ${connection.apiKey}`)
+    const response = await fetch(
+      `${connection.address}/api/v1/agent/sessions/${encodeURIComponent(sessionId)}/cancel`,
+      {
+        method: 'POST',
+        headers,
+        body: '{}',
+        signal: AbortSignal.timeout(DAEMON_CANCEL_TIMEOUT_MS)
+      }
+    )
+    if (!response.ok) {
+      throw new Error(`The daemon could not cancel the agent run (status ${response.status}).`)
+    }
+  }
+
+  /** Kill a worker that did not acknowledge cancellation and reject its run. */
+  private killUnresponsiveWorker(): void {
+    const worker = this.worker
+    if (!worker) return
+    worker.kill()
+    const error = new Error('The agent worker was terminated because it did not stop in time.')
+    for (const [, pending] of this.pending) pending.reject(error)
+    this.pending.clear()
+    this.worker = undefined
+    this.ready = undefined
+  }
+
+  private async cancel(sessionId: string): Promise<{ cancelled: true }> {
+    // Start both cancellation paths immediately. In particular, do not queue
+    // daemon cleanup behind a runtime that may be precisely what is wedged.
+    const daemonCancellation = this.cancelDaemon(sessionId)
+    const workerWasRunning = Boolean(this.worker)
+    const workerCancellation = workerWasRunning
+      ? Promise.race([
+          this.send({ type: 'cancel', requestId: this.requestId(), sessionId }),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error('The agent worker did not acknowledge cancellation.')),
+              CANCEL_GRACE_MS
+            )
+          })
+        ]).catch((error: unknown) => {
+          // Do this in the rejection path rather than after waiting for daemon
+          // cleanup, so the two-second grace period is a real upper bound.
+          this.killUnresponsiveWorker()
+          throw error
+        })
+      : Promise.resolve()
+
+    const [daemonResult, workerResult] = await Promise.allSettled([
+      daemonCancellation,
+      workerCancellation
+    ])
+
+    // Either boundary can conclusively stop the active model loop. Report a
+    // failure only if neither could be reached; otherwise Stop remains
+    // successful even when its hard-kill fallback was needed.
+    if (
+      daemonResult.status === 'rejected' &&
+      (!workerWasRunning || workerResult.status === 'rejected')
+    ) {
+      throw new Error(
+        `Could not stop the agent safely: ${daemonResult.reason instanceof Error ? daemonResult.reason.message : String(daemonResult.reason)}`
+      )
+    }
+    return { cancelled: true }
+  }
+
   /** Renderer entry point: run one command against the worker. */
   async invoke(command: WorkerCommandInput): Promise<unknown> {
+    if (command.type === 'cancel') return this.cancel(command.sessionId)
     await this.ensureWorker()
     return this.send({ ...command, requestId: this.requestId() } as WorkerCommand)
   }

@@ -1512,7 +1512,7 @@ export function App(): React.JSX.Element {
             onComposerChange={setAgentComposer}
             onSidebarChange={setAgentSidebar}
             onSuggestPrompt={setDraft}
-            onSessionBound={(agentSessionId) => void session.bindAgentSession(agentSessionId)}
+            onSessionBound={session.bindAgentSession}
             onError={setError}
           />
         ) : null}

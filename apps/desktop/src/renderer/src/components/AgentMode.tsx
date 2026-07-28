@@ -1022,11 +1022,12 @@ export function AgentMode(props: Props): React.JSX.Element {
     try {
       let active = session
       if (!active) {
+        const requestedWorktree = pendingConfineToWorktree
         active = await createAgentSession({
           title: text.slice(0, 60),
           workspace_path: workspace,
           model: props.modelId,
-          confine_to_worktree: pendingConfineToWorktree
+          confine_to_worktree: requestedWorktree
         })
         setSession(active)
         sessionIdRef.current = active.id
@@ -1034,6 +1035,14 @@ export function AgentMode(props: Props): React.JSX.Element {
         setPendingWorkspace(null)
         setPendingConfineToWorktree(false)
         onSessionBound?.(active.id)
+        // Never silently start in the source checkout after the user selected
+        // confinement. The returned session metadata is the daemon's receipt
+        // that the worktree was actually created and applied.
+        if (requestedWorktree && !sessionWorktree(active)) {
+          throw new Error(
+            'Worktree confinement could not be verified. The task was not started.'
+          )
+        }
       } else if (active.model !== props.modelId) {
         // Model changes only take effect between runs.
         await window.brazier.agent.setModel(active.id, { id: props.modelId })
@@ -1137,19 +1146,22 @@ export function AgentMode(props: Props): React.JSX.Element {
   const sandbox = capabilities?.sandbox
   const executeTools = tools.filter((tool) => tool.executes).length
 
-  // Keep the shared composer in step with what the agent can currently do. The
-  // callbacks are re-published on every relevant change rather than held in a
-  // ref, so the composer never sends against stale session or model state.
+  // Keep the shared composer in step with what the agent can currently do.
   const { onComposerChange, onSidebarChange } = props
   const blockedReason = !props.modelId
     ? 'Choose a model in the top bar…'
     : !workspace
       ? 'Choose a workspace folder…'
       : ''
+  // The parent keeps these controls between child renders. Route actions
+  // through a ref so a UI-only state change (notably the pre-session worktree
+  // toggle) can never leave the shared composer holding an older `send`.
+  const composerActionsRef = useRef({ send, stop })
+  composerActionsRef.current = { send, stop }
   useEffect(() => {
     onComposerChange?.({
-      send,
-      stop,
+      send: (text) => composerActionsRef.current.send(text),
+      stop: () => composerActionsRef.current.stop(),
       running,
       blockedReason,
       placeholder: blockedReason
@@ -1159,9 +1171,7 @@ export function AgentMode(props: Props): React.JSX.Element {
           : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`
     })
     return () => onComposerChange?.(null)
-    // `send` and `stop` close over session state, so they are re-created each
-    // render; the primitives below are what actually decide a new publication.
-  }, [onComposerChange, running, blockedReason, modelLabel, workspace, session?.id, props.modelId])
+  }, [onComposerChange, running, blockedReason, modelLabel, workspace])
 
   // Same pattern for the app sidebar: Agent mode replaces conversations with
   // directory-grouped tasks, so the list and its actions live up there.
