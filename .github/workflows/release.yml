@@ -39,8 +39,10 @@ jobs:
         run: |
           tag="${REQUESTED_TAG:-${GITHUB_REF_NAME}}"
           case "$tag" in v*) ;; *) echo "Release tags must start with v" >&2; exit 1;; esac
-          test "$tag" = "v$(node -p \"require('./package.json').version\")"
-          test "$tag" = "v$(node -p \"require('./apps/desktop/package.json').version\")"
+          root_version="$(node -p 'require("./package.json").version')"
+          desktop_version="$(node -p 'require("./apps/desktop/package.json").version')"
+          test "$tag" = "v$root_version"
+          test "$tag" = "v$desktop_version"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   macos:
