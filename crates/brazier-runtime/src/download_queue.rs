@@ -155,14 +155,18 @@ async fn run_one(
     active: &ActiveDownloads,
     work: QueuedDownload,
 ) {
+    // Register before checking durable state so cancellation cannot slip
+    // between "still pending" and registration. Once the flag is visible,
+    // every later cancel reaches this worker directly.
+    let cancel = active.register(&work.job_id);
     // A job cancelled or paused while still waiting in line should not start.
     if let Ok(job) = db.get_download_job_public(&work.job_id).await
         && matches!(job.status.as_str(), "paused" | "cancelled")
     {
+        active.finish(&work.job_id);
         return;
     }
 
-    let cancel = active.register(&work.job_id);
     let job_handle = Some((db.clone(), work.job_id.clone()));
     let progress = Box::new(|_| {});
     let result = match work.work {

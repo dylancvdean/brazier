@@ -309,6 +309,13 @@ impl Database {
         replace: bool,
     ) -> anyhow::Result<Vec<AgentMessageRecord>> {
         let mut tx = self.pool.begin().await?;
+        // Acquire SQLite's write reservation before reading MAX(seq). A
+        // deferred transaction that reads first can deadlock with another
+        // append when both try to upgrade their shared locks.
+        sqlx::query("UPDATE agent_sessions SET updated_at = datetime('now') WHERE id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
         if replace {
             sqlx::query("DELETE FROM agent_messages WHERE session_id = ?")
                 .bind(session_id)
@@ -335,10 +342,6 @@ impl Database {
             .execute(&mut *tx)
             .await?;
         }
-        sqlx::query("UPDATE agent_sessions SET updated_at = datetime('now') WHERE id = ?")
-            .bind(session_id)
-            .execute(&mut *tx)
-            .await?;
         tx.commit().await?;
         self.agent_messages(session_id).await
     }
@@ -493,9 +496,7 @@ impl Database {
             current.status.as_str()
         );
         let mut effective_scope = scope.unwrap_or(ApprovalScope::Once);
-        if effective_scope == ApprovalScope::Session
-            && !self.approval_allows_session_scope(id).await?
-        {
+        if effective_scope == ApprovalScope::Session && !current.allow_session_scope {
             // Destructive and host actions never carry a standing grant, even
             // if the UI asks for one.
             effective_scope = ApprovalScope::Once;
@@ -505,7 +506,8 @@ impl Database {
         } else {
             ApprovalStatus::Denied
         };
-        sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
             r#"UPDATE agent_approvals
                SET status = ?, scope = ?, note = ?, decided_at = datetime('now')
                WHERE id = ? AND status = 'pending'"#,
@@ -514,8 +516,12 @@ impl Database {
         .bind(effective_scope.as_str())
         .bind(&note)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "approval {id} was decided concurrently"
+        );
 
         if approved && effective_scope == ApprovalScope::Session && !current.scope_key.is_empty() {
             let key = grant_key(current.environment, &current.scope_key);
@@ -526,20 +532,25 @@ impl Database {
             .bind(&current.session_id)
             .bind(&key)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
+        tx.commit().await?;
         self.approval(id).await
     }
 
     /// Spend a one-shot approval so it cannot authorize a second call.
     pub async fn consume_approval(&self, id: &str) -> anyhow::Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE agent_approvals SET status = 'consumed' WHERE id = ? AND status = 'approved'",
         )
         .bind(id)
         .execute(&self.pool)
         .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "approval {id} is not available to consume"
+        );
         Ok(())
     }
 
@@ -905,6 +916,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_appends_allocate_distinct_sequence_numbers() {
+        let (_dir, db) = database().await;
+        let session = db
+            .create_agent_session(session_request(Some("/ws")))
+            .await
+            .expect("create session");
+        let first_db = db.clone();
+        let first_session = session.id.clone();
+        let second_db = db.clone();
+        let second_session = session.id.clone();
+
+        let (first, second) = tokio::join!(
+            async move {
+                first_db
+                    .append_agent_messages(
+                        &first_session,
+                        &[AppendAgentMessage {
+                            role: "user".to_owned(),
+                            payload: json!({ "text": "first" }),
+                        }],
+                        false,
+                    )
+                    .await
+            },
+            async move {
+                second_db
+                    .append_agent_messages(
+                        &second_session,
+                        &[AppendAgentMessage {
+                            role: "user".to_owned(),
+                            payload: json!({ "text": "second" }),
+                        }],
+                        false,
+                    )
+                    .await
+            }
+        );
+        first.expect("first append");
+        second.expect("second append");
+
+        let messages = db.agent_messages(&session.id).await.expect("messages");
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let mut texts = messages
+            .iter()
+            .map(|message| message.payload["text"].as_str().expect("text"))
+            .collect::<Vec<_>>();
+        texts.sort_unstable();
+        assert_eq!(texts, vec!["first", "second"]);
+    }
+
+    #[tokio::test]
     async fn session_scope_is_downgraded_when_the_policy_forbids_it() {
         let (_dir, db) = database().await;
         let session = db
@@ -949,8 +1017,42 @@ mod tests {
             "a decided approval must not be re-decided"
         );
         db.consume_approval(&approval.id).await.expect("consume");
+        assert!(
+            db.consume_approval(&approval.id).await.is_err(),
+            "a consumed approval must not be claimed again"
+        );
         let spent = db.approval(&approval.id).await.expect("read");
         assert_eq!(spent.status, ApprovalStatus::Consumed);
+    }
+
+    #[tokio::test]
+    async fn concurrent_consumers_cannot_claim_the_same_approval() {
+        let (_dir, db) = database().await;
+        let session = db
+            .create_agent_session(session_request(Some("/ws")))
+            .await
+            .expect("create session");
+        let approval = db
+            .create_approval(new_approval(&session.id, true))
+            .await
+            .expect("create approval");
+        db.decide_approval(&approval.id, true, Some(ApprovalScope::Once), None)
+            .await
+            .expect("approve");
+
+        let first_db = db.clone();
+        let first_id = approval.id.clone();
+        let second_db = db.clone();
+        let second_id = approval.id.clone();
+        let (first, second) = tokio::join!(
+            async move { first_db.consume_approval(&first_id).await },
+            async move { second_db.consume_approval(&second_id).await }
+        );
+        assert_ne!(
+            first.is_ok(),
+            second.is_ok(),
+            "exactly one concurrent consumer must claim the approval"
+        );
     }
 
     #[tokio::test]

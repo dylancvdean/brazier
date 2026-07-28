@@ -388,6 +388,7 @@ export function App(): React.JSX.Element {
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
+  const conversationRefreshRef = useRef(0)
   const fileInput = useRef<HTMLInputElement>(null)
   const importInput = useRef<HTMLInputElement>(null)
   const scrollAnchor = useRef<HTMLDivElement>(null)
@@ -505,7 +506,9 @@ export function App(): React.JSX.Element {
     prepareAbortRef.current = controller
     void prepareModel(modelId, {
       signal: controller.signal,
-      onLoad: (event) => setModelLoadStatus(event.message)
+      onLoad: (event) => {
+        if (!controller.signal.aborted) setModelLoadStatus(event.message)
+      }
     })
       .then(() => {
         if (controller.signal.aborted) return
@@ -516,7 +519,7 @@ export function App(): React.JSX.Element {
         void refreshCapabilities()
       })
       .catch((cause: unknown) => {
-        if ((cause as Error).name === 'AbortError') return
+        if (controller.signal.aborted || (cause as Error).name === 'AbortError') return
         setModelPrepareState('error')
         setModelLoadStatus(null)
         if (cause instanceof GenerationFailure) {
@@ -758,7 +761,11 @@ export function App(): React.JSX.Element {
   }
 
   async function refreshConversations(query = conversationSearch): Promise<void> {
+    const refreshId = ++conversationRefreshRef.current
     const data = await listConversations(query)
+    // Search requests can resolve out of order while the user types. Only the
+    // newest query is allowed to replace the visible results or selection.
+    if (refreshId !== conversationRefreshRef.current) return
     setConversations(data)
     // Only an unfiltered list is worth caching for the next cold start.
     if (!query.trim()) writeCachedConversations(data)

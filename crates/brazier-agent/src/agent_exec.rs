@@ -298,6 +298,23 @@ async fn execute_inner(
         }
     };
 
+    // Claim a one-shot approval before starting the call. Validation and
+    // execution are separate async operations, so consuming it afterwards
+    // would let two concurrent requests both run on the same approval.
+    if let Some(approval_id) = &plan.approval_id
+        && context.db.consume_approval(approval_id).await.is_err()
+    {
+        let response = denied(
+            request,
+            plan.sandbox.clone(),
+            spec.risk,
+            "That approval was already used once.".to_owned(),
+            started,
+        );
+        record(context, request, &response, spec.risk).await?;
+        return Ok(response);
+    }
+
     let outcome = run_tool(
         context,
         request,
@@ -351,12 +368,6 @@ async fn execute_inner(
             is_error: true,
         },
     };
-
-    // A one-shot approval is spent whether the call succeeded or failed, so a
-    // failure cannot be retried on the same grant.
-    if let Some(approval_id) = &plan.approval_id {
-        context.db.consume_approval(approval_id).await?;
-    }
 
     let record = record(context, request, &response, spec.risk).await?;
     response.execution_id = Some(record);

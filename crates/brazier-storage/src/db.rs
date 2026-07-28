@@ -814,6 +814,11 @@ impl Database {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let blob_refs = blob_store::blob_refs_in_content(&message.content);
+        for sha256 in &blob_refs {
+            blob_store::validate_sha256(sha256)?;
+        }
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"INSERT INTO messages(id, conversation_id, parent_id, role, content_json, model,
                                    tool_calls_json, tool_call_id, source, correlation_id,
@@ -832,13 +837,20 @@ impl Database {
         .bind(&message.correlation_id)
         .bind(&message.status)
         .bind(metadata_json)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         sqlx::query("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?")
             .bind(conversation_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-        self.index_message_blobs(&id, &message.content).await?;
+        for sha256 in blob_refs {
+            sqlx::query("INSERT INTO message_attachments(message_id, sha256) VALUES(?, ?)")
+                .bind(&id)
+                .bind(sha256)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
         self.get_message(&id).await
     }
 
@@ -851,11 +863,23 @@ impl Database {
         message_id: &str,
         update: UpdateMessage,
     ) -> anyhow::Result<Message> {
-        let owner: Option<String> =
-            sqlx::query_scalar("SELECT conversation_id FROM messages WHERE id = ?")
-                .bind(message_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let blob_refs = update
+            .content
+            .as_ref()
+            .map(blob_store::blob_refs_in_content)
+            .unwrap_or_default();
+        for sha256 in &blob_refs {
+            blob_store::validate_sha256(sha256)?;
+        }
+        let mut tx = self.pool.begin().await?;
+        // Take the write reservation before reading ownership so two edits do
+        // not both enter a deferred read transaction and then fail to upgrade.
+        let owner: Option<String> = sqlx::query_scalar(
+            "UPDATE messages SET id = id WHERE id = ? RETURNING conversation_id",
+        )
+        .bind(message_id)
+        .fetch_optional(&mut *tx)
+        .await?;
         anyhow::ensure!(
             owner.as_deref() == Some(conversation_id),
             "message does not belong to this conversation"
@@ -864,39 +888,36 @@ impl Database {
             sqlx::query("UPDATE messages SET content_json = ? WHERE id = ?")
                 .bind(serde_json::to_string(content)?)
                 .bind(message_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
-            self.index_message_blobs(message_id, content).await?;
+            sqlx::query("DELETE FROM message_attachments WHERE message_id = ?")
+                .bind(message_id)
+                .execute(&mut *tx)
+                .await?;
+            for sha256 in blob_refs {
+                sqlx::query("INSERT INTO message_attachments(message_id, sha256) VALUES(?, ?)")
+                    .bind(message_id)
+                    .bind(sha256)
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
         if let Some(status) = update.status.as_deref() {
             sqlx::query("UPDATE messages SET status = ? WHERE id = ?")
                 .bind(status)
                 .bind(message_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
         if let Some(metadata) = update.metadata.as_ref() {
             sqlx::query("UPDATE messages SET metadata_json = ? WHERE id = ?")
                 .bind(serde_json::to_string(metadata)?)
                 .bind(message_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
+        tx.commit().await?;
         self.get_message(message_id).await
-    }
-
-    async fn index_message_blobs(&self, message_id: &str, content: &Value) -> anyhow::Result<()> {
-        for sha256 in blob_store::blob_refs_in_content(content) {
-            blob_store::validate_sha256(&sha256)?;
-            sqlx::query(
-                "INSERT OR IGNORE INTO message_attachments(message_id, sha256) VALUES(?, ?)",
-            )
-            .bind(message_id)
-            .bind(&sha256)
-            .execute(&self.pool)
-            .await?;
-        }
-        Ok(())
     }
 
     pub async fn upsert_attachment(
@@ -1046,6 +1067,11 @@ impl Database {
             "unsupported export schema version {}",
             export.schema_version
         );
+        for message in &export.messages {
+            for sha256 in blob_store::blob_refs_in_content(&message.content) {
+                blob_store::validate_sha256(&sha256)?;
+            }
+        }
         for blob in &export.blobs {
             blob_store::validate_sha256(&blob.sha256)?;
             let bytes = base64::Engine::decode(
@@ -1053,6 +1079,11 @@ impl Database {
                 blob.data_base64.trim(),
             )
             .context("decode export blob")?;
+            anyhow::ensure!(
+                blob_store::sha256_hex(&bytes) == blob.sha256,
+                "export blob {} does not match its declared digest",
+                blob.sha256
+            );
             let stored = blob_store::store_bytes(
                 data_dir,
                 &bytes,
@@ -1074,20 +1105,35 @@ impl Database {
         } else {
             title
         };
-        let conversation = self.create_conversation(title).await?;
+        let conversation_id = Uuid::new_v4().to_string();
         let mut id_map: HashMap<String, String> = HashMap::new();
         for message in &export.messages {
-            id_map.insert(message.id.clone(), Uuid::new_v4().to_string());
+            anyhow::ensure!(
+                id_map
+                    .insert(message.id.clone(), Uuid::new_v4().to_string())
+                    .is_none(),
+                "duplicate message id in import"
+            );
         }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT INTO conversations(id, title) VALUES(?, ?)")
+            .bind(&conversation_id)
+            .bind(title)
+            .execute(&mut *tx)
+            .await?;
         for message in export.messages {
             let new_id = id_map
                 .get(&message.id)
                 .context("missing remapped message id")?;
-            let parent_id = message
-                .parent_id
-                .as_ref()
-                .and_then(|parent| id_map.get(parent))
-                .cloned();
+            let parent_id = match message.parent_id.as_ref() {
+                Some(parent) => Some(
+                    id_map
+                        .get(parent)
+                        .cloned()
+                        .with_context(|| format!("missing parent message {parent}"))?,
+                ),
+                None => None,
+            };
             let content_json = serde_json::to_string(&message.content)?;
             let tool_calls_json = message
                 .tool_calls
@@ -1106,7 +1152,7 @@ impl Database {
                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
             )
             .bind(new_id)
-            .bind(&conversation.id)
+            .bind(&conversation_id)
             .bind(parent_id)
             .bind(message.role.as_str())
             .bind(content_json)
@@ -1120,15 +1166,66 @@ impl Database {
             .bind(&message.status)
             .bind(metadata_json)
             .bind(&message.created_at)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-            self.index_message_blobs(new_id, &message.content).await?;
+            for sha256 in blob_store::blob_refs_in_content(&message.content) {
+                sqlx::query("INSERT INTO message_attachments(message_id, sha256) VALUES(?, ?)")
+                    .bind(new_id)
+                    .bind(sha256)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        for snapshot in export.run_snapshots {
+            let parent_message_id = match snapshot.parent_message_id.as_ref() {
+                Some(id) => Some(
+                    id_map
+                        .get(id)
+                        .cloned()
+                        .with_context(|| format!("missing run parent message {id}"))?,
+                ),
+                None => None,
+            };
+            let assistant_message_id = match snapshot.assistant_message_id.as_ref() {
+                Some(id) => Some(
+                    id_map
+                        .get(id)
+                        .cloned()
+                        .with_context(|| format!("missing run assistant message {id}"))?,
+                ),
+                None => None,
+            };
+            sqlx::query(
+                r#"INSERT INTO run_snapshots(
+                       id, conversation_id, parent_message_id, assistant_message_id, model,
+                       settings_json, tool_calls_json, response_text, error, created_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(&conversation_id)
+            .bind(parent_message_id)
+            .bind(assistant_message_id)
+            .bind(snapshot.model)
+            .bind(serde_json::to_string(&snapshot.settings)?)
+            .bind(
+                snapshot
+                    .tool_calls
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+            )
+            .bind(snapshot.response_text)
+            .bind(snapshot.error)
+            .bind(snapshot.created_at)
+            .execute(&mut *tx)
+            .await?;
         }
         sqlx::query("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?")
-            .bind(&conversation.id)
-            .execute(&self.pool)
+            .bind(&conversation_id)
+            .execute(&mut *tx)
             .await?;
-        self.get_conversation(&conversation.id).await
+        tx.commit().await?;
+        self.get_conversation(&conversation_id).await
     }
 
     pub async fn create_download_job(
@@ -1197,7 +1294,7 @@ impl Database {
 
     /// Put a paused or failed job back in line.
     pub async fn requeue_download_job(&self, job_id: &str) -> anyhow::Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'pending', error = NULL, updated_at = datetime('now')
                WHERE id = ? AND status IN ('paused', 'failed', 'cancelled')"#,
@@ -1205,6 +1302,10 @@ impl Database {
         .bind(job_id)
         .execute(&self.pool)
         .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "that download is already queued or running"
+        );
         Ok(())
     }
 
@@ -1234,7 +1335,7 @@ impl Database {
         sqlx::query(
             r#"UPDATE download_jobs
                SET bytes_downloaded = ?, total_bytes = ?, updated_at = datetime('now')
-               WHERE id = ?"#,
+               WHERE id = ? AND status IN ('pending', 'downloading')"#,
         )
         .bind(bytes_downloaded as i64)
         .bind(total_bytes.map(|value| value as i64))
@@ -1250,11 +1351,11 @@ impl Database {
         sha256: &str,
         bytes: u64,
     ) -> anyhow::Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'completed', sha256 = ?, bytes_downloaded = ?,
                    total_bytes = ?, error = NULL, updated_at = datetime('now')
-               WHERE id = ?"#,
+               WHERE id = ? AND status IN ('pending', 'downloading')"#,
         )
         .bind(sha256)
         .bind(bytes as i64)
@@ -1262,6 +1363,10 @@ impl Database {
         .bind(job_id)
         .execute(&self.pool)
         .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "that download is no longer running"
+        );
         Ok(())
     }
 
@@ -1269,7 +1374,7 @@ impl Database {
         sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'downloading', updated_at = datetime('now')
-               WHERE id = ?"#,
+               WHERE id = ? AND status IN ('pending', 'downloading')"#,
         )
         .bind(job_id)
         .execute(&self.pool)
@@ -1293,7 +1398,7 @@ impl Database {
         sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'failed', error = ?, updated_at = datetime('now')
-               WHERE id = ?"#,
+               WHERE id = ? AND status IN ('pending', 'downloading')"#,
         )
         .bind(error)
         .bind(job_id)
@@ -1534,6 +1639,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_writes_are_atomic_with_their_attachment_index() {
+        let (_dir, db) = open().await;
+        let conversation = db.create_conversation("Attachments").await.unwrap();
+        let first_blob = "1".repeat(64);
+        let second_blob = "2".repeat(64);
+        let missing_blob = "3".repeat(64);
+        for sha256 in [&first_blob, &second_blob] {
+            db.upsert_attachment(sha256, "image/png", 12, None)
+                .await
+                .unwrap();
+        }
+        let content_for = |sha256: &str| {
+            json!([{
+                "type": "image_url",
+                "brazier_blob": { "sha256": sha256 }
+            }])
+        };
+
+        let stored = db
+            .create_message(
+                &conversation.id,
+                message(None, Role::User, content_for(&first_blob)),
+            )
+            .await
+            .unwrap();
+        db.update_message(
+            &conversation.id,
+            &stored.id,
+            UpdateMessage {
+                content: Some(content_for(&second_blob)),
+                status: Some("final".into()),
+                metadata: Some(json!({ "edited": true })),
+            },
+        )
+        .await
+        .unwrap();
+        let indexed: Vec<String> =
+            sqlx::query_scalar("SELECT sha256 FROM message_attachments WHERE message_id = ?")
+                .bind(&stored.id)
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(indexed, vec![second_blob.clone()]);
+
+        assert!(
+            db.update_message(
+                &conversation.id,
+                &stored.id,
+                UpdateMessage {
+                    content: Some(content_for(&missing_blob)),
+                    status: Some("failed".into()),
+                    metadata: Some(json!({ "edited": false })),
+                },
+            )
+            .await
+            .is_err(),
+            "a missing attachment must reject the whole edit"
+        );
+        let unchanged = db.get_message(&stored.id).await.unwrap();
+        assert_eq!(unchanged.content, content_for(&second_blob));
+        assert_eq!(unchanged.status.as_deref(), Some("final"));
+        assert_eq!(unchanged.metadata, Some(json!({ "edited": true })));
+        let indexed: Vec<String> =
+            sqlx::query_scalar("SELECT sha256 FROM message_attachments WHERE message_id = ?")
+                .bind(&stored.id)
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(indexed, vec![second_blob]);
+
+        assert!(
+            db.create_message(
+                &conversation.id,
+                message(None, Role::User, content_for(&missing_blob)),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(db.list_messages(&conversation.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn conversations_bind_and_unbind_an_agent_session() {
         let (_dir, db) = open().await;
         let conversation = db.create_conversation("Shared").await.unwrap();
@@ -1653,6 +1840,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_wins_races_with_completion_and_resume() {
+        let (_dir, db) = open().await;
+        let job = db
+            .create_download_job("acme/models", "cancelled.gguf", "main")
+            .await
+            .unwrap();
+        db.cancel_download_job(&job.id).await.unwrap();
+
+        db.start_download_job(&job.id).await.unwrap();
+        db.update_download_job_progress(&job.id, 9, Some(10))
+            .await
+            .unwrap();
+        db.fail_download_job(&job.id, "late failure").await.unwrap();
+        assert!(
+            db.complete_download_job(&job.id, "abc", 10).await.is_err(),
+            "late completion must not resurrect a cancelled download"
+        );
+        let cancelled = db.get_download_job_public(&job.id).await.unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.bytes_downloaded, None);
+        assert_eq!(cancelled.error.as_deref(), Some("cancelled by user"));
+
+        db.requeue_download_job(&job.id).await.unwrap();
+        assert!(
+            db.requeue_download_job(&job.id).await.is_err(),
+            "the same job must not be enqueued by two resume requests"
+        );
+        assert_eq!(
+            db.get_download_job_public(&job.id).await.unwrap().status,
+            "pending"
+        );
+    }
+
+    #[tokio::test]
     async fn importing_keeps_source_labels_but_not_live_turn_ids() {
         let (dir, db) = open().await;
         let conversation = db.create_conversation("Exported").await.unwrap();
@@ -1660,7 +1881,21 @@ mod tests {
         spoken.source = Some("user_voice".into());
         spoken.correlation_id = Some("turn-9".into());
         spoken.status = Some("final".into());
-        db.create_message(&conversation.id, spoken).await.unwrap();
+        let spoken = db.create_message(&conversation.id, spoken).await.unwrap();
+        db.create_run_snapshot(
+            &conversation.id,
+            CreateRunSnapshot {
+                parent_message_id: Some(spoken.id.clone()),
+                assistant_message_id: None,
+                model: "gguf:demo".into(),
+                settings: json!({ "temperature": 0.4 }),
+                tool_calls: Some(json!([{ "name": "calculator" }])),
+                response_text: Some("Four".into()),
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
 
         let export = db
             .export_conversation(dir.path(), &conversation.id)
@@ -1671,5 +1906,14 @@ mod tests {
         assert_eq!(messages[0].source.as_deref(), Some("user_voice"));
         assert_eq!(messages[0].status.as_deref(), Some("final"));
         assert!(messages[0].correlation_id.is_none());
+        let snapshots = db.list_run_snapshots(&imported.id).await.unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].model, "gguf:demo");
+        assert_eq!(snapshots[0].parent_message_id, Some(messages[0].id.clone()));
+        assert_eq!(snapshots[0].settings, json!({ "temperature": 0.4 }));
+        assert_eq!(
+            snapshots[0].tool_calls,
+            Some(json!([{ "name": "calculator" }]))
+        );
     }
 }
