@@ -1389,7 +1389,7 @@ export function App(): React.JSX.Element {
               >
                 <option value="never">Never</option>
                 <option value="always">Always</option>
-                <option value="over-20-tokens">Over 20 tokens</option>
+                <option value="over-20-tokens">Over 20 tok/s</option>
               </select>
             </label>
             <div className="conversation-list">
