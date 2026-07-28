@@ -405,14 +405,15 @@
           "approx_bytes": 9999658848
         },
         {
-          "repo_id": "madebyollin/taehv",
-          "path": "safetensors/taew2_2.safetensors",
+          "repo_id": "Kijai/WanVideo_comfy",
+          "path": "taew2_2.safetensors",
           "role": "Video decoder",
           "flag": "tae",
+          "approx_bytes": 22848080,
           "variants": [
             {
               "label": "TAEHV · low VRAM (recommended)",
-              "path": "safetensors/taew2_2.safetensors",
+              "path": "taew2_2.safetensors",
               "in_place": true,
               "note": "Fast, low-memory decoder. Slightly softer detail than the full VAE."
             },
@@ -462,14 +463,15 @@
           "approx_bytes": 2838104528
         },
         {
-          "repo_id": "madebyollin/taehv",
-          "path": "safetensors/taew2_1.safetensors",
+          "repo_id": "Kijai/WanVideo_comfy",
+          "path": "taew2_1.safetensors",
           "role": "Video decoder",
           "flag": "tae",
+          "approx_bytes": 22642926,
           "variants": [
             {
               "label": "TAEHV · low VRAM (recommended)",
-              "path": "safetensors/taew2_1.safetensors",
+              "path": "taew2_1.safetensors",
               "in_place": true,
               "note": "Fast, low-memory decoder. Slightly softer detail than the full VAE."
             },
@@ -565,14 +567,15 @@
           ]
         },
         {
-          "repo_id": "madebyollin/taehv",
-          "path": "safetensors/taew2_1.safetensors",
+          "repo_id": "Kijai/WanVideo_comfy",
+          "path": "taew2_1.safetensors",
           "role": "Video decoder",
           "flag": "tae",
+          "approx_bytes": 22642926,
           "variants": [
             {
               "label": "TAEHV · low VRAM (recommended)",
-              "path": "safetensors/taew2_1.safetensors",
+              "path": "taew2_1.safetensors",
               "in_place": true,
               "note": "Fast, low-memory decoder. Slightly softer detail than the full VAE."
             },

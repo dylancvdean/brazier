@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, time::Duration};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -343,13 +343,21 @@ pub async fn paths_info(
         return Ok(Vec::new());
     }
     let url = format!("https://huggingface.co/api/models/{repo_id}/paths-info/{revision}");
-    let values: Vec<Value> = hf_auth::apply_auth(client.post(url), data_dir)
+    // This request happens before the first byte progress event. Without a
+    // bound, a stalled Hub connection leaves a queued bundle permanently at
+    // “Starting…” and gives the person no way to distinguish it from an
+    // active transfer. File downloads retain their own resumable policy.
+    const PATHS_INFO_TIMEOUT: Duration = Duration::from_secs(30);
+    let request = hf_auth::apply_auth(client.post(url), data_dir)
         .json(&serde_json::json!({ "paths": paths }))
-        .send()
+        .send();
+    let response = tokio::time::timeout(PATHS_INFO_TIMEOUT, request)
         .await
+        .context("Hugging Face paths-info request timed out after 30s")?
         .context("contact Hugging Face paths-info API")?
         .error_for_status()
-        .context("Hugging Face paths-info request failed")?
+        .context("Hugging Face paths-info request failed")?;
+    let values: Vec<Value> = response
         .json()
         .await
         .context("decode Hugging Face paths-info response")?;

@@ -569,7 +569,7 @@ mod tests {
             .iter()
             .find(|component| component.flag.as_deref() == Some("tae"))
             .expect("TAEHV decoder component");
-        assert_eq!(decoder.path, "safetensors/taew2_2.safetensors");
+        assert_eq!(decoder.path, "taew2_2.safetensors");
         assert_eq!(decoder.file_name(), "taew2_2.safetensors");
         assert!(decoder.variants.iter().any(|variant| {
             variant.flag.as_deref() == Some("vae")
