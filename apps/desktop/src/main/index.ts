@@ -15,6 +15,9 @@ import { AgentSupervisor, registerAgentIpc } from './agent'
  * name, and `migrateLegacyDataDirectory` needs to be able to find them.
  */
 const LEGACY_USER_DATA = app.getPath('userData')
+// A distro package runs `electron /usr/lib/brazier`, which Electron considers
+// an unpackaged app even though its renderer and daemon are installed there.
+const installedApp = app.isPackaged || process.env.BRAZIER_INSTALLED === '1'
 
 /** Session log, opened on first write. See `appendLog`. */
 let logStream: WriteStream | undefined
@@ -191,12 +194,14 @@ function startDaemon(): Promise<Connection> {
   migrateLegacyDataDirectory(directory)
   const command = app.isPackaged
     ? join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'brazierd.exe' : 'brazierd')
+    : installedApp
+      ? join(__dirname, '../..', process.platform === 'win32' ? 'brazierd.exe' : 'brazierd')
     : 'cargo'
-  const args = app.isPackaged
+  const args = installedApp
     ? ['--data-dir', directory]
     : ['run', '-q', '-p', 'brazierd', '--', '--data-dir', directory]
   const child = spawn(command, args, {
-    cwd: app.isPackaged ? undefined : repositoryRoot(),
+    cwd: installedApp ? undefined : repositoryRoot(),
     env: {
       ...process.env,
       RUST_LOG: process.env.RUST_LOG ?? 'brazierd=info',
@@ -293,6 +298,8 @@ function iconPath(): string | undefined {
   const file = process.platform === 'darwin' ? 'icon-mac.png' : 'icon.png'
   const candidates = app.isPackaged
     ? [join(process.resourcesPath, file), join(process.resourcesPath, 'icon.png')]
+    : installedApp
+      ? [join(__dirname, '../..', file)]
     : [join(repositoryRoot(), 'apps', 'desktop', 'build', file)]
   return candidates.find((candidate) => existsSync(candidate))
 }

@@ -1,0 +1,70 @@
+# Maintainer: Dylan C. V. Dean <dylan@dylancvdean.com>
+
+pkgname=brazier
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc='Desktop client and local API for open-weight AI models'
+arch=('x86_64' 'aarch64')
+url='https://github.com/dylancvdean/brazier'
+license=('MIT')
+depends=('electron')
+makedepends=('cargo' 'git' 'nodejs' 'pnpm' 'rust')
+# source=("${pkgname}::git+${url}.git#branch=master")
+# Package the checkout that contains this PKGBUILD. `makepkg` clones it into
+# $srcdir, so commit the changes you want included before building.
+source=("${pkgname}::git+file://${startdir}")
+b2sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/${pkgname}"
+  printf '0.1.0.r%s.g%s\n' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "${srcdir}/${pkgname}"
+  # electron-vite only needs Electron's Node typings to build. Do not fetch or
+  # install the upstream Electron binary: the launcher uses Arch's `electron`.
+  export ELECTRON_SKIP_BINARY_DOWNLOAD=1
+  pnpm install --frozen-lockfile --ignore-scripts
+}
+
+build() {
+  cd "${srcdir}/${pkgname}"
+  pnpm --filter @brazier/desktop run build:agent
+  pnpm --filter @brazier/desktop exec electron-vite build
+  cargo build --release --locked -p brazierd
+}
+
+package() {
+  cd "${srcdir}/${pkgname}"
+
+  install -dm755 "${pkgdir}/usr/lib/${pkgname}"
+  cp -a apps/desktop/out "${pkgdir}/usr/lib/${pkgname}/"
+  # The agent worker intentionally keeps its JavaScript dependencies external.
+  # Dereference pnpm's workspace links so they resolve inside /usr/lib/brazier.
+  cp -aL apps/desktop/node_modules "${pkgdir}/usr/lib/${pkgname}/"
+  install -Dm644 apps/desktop/package.json "${pkgdir}/usr/lib/${pkgname}/package.json"
+  install -Dm755 target/release/brazierd "${pkgdir}/usr/lib/${pkgname}/brazierd"
+  install -Dm644 apps/desktop/build/icon.png "${pkgdir}/usr/share/pixmaps/${pkgname}.png"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+  install -dm755 "${pkgdir}/usr/bin"
+  cat > "${pkgdir}/usr/bin/${pkgname}" <<'EOF'
+#!/bin/sh
+export BRAZIER_INSTALLED=1
+exec /usr/bin/electron /usr/lib/brazier "$@"
+EOF
+  chmod 755 "${pkgdir}/usr/bin/${pkgname}"
+
+  install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/${pkgname}.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Brazier
+Comment=${pkgdesc}
+Exec=${pkgname} %U
+Icon=${pkgname}
+Terminal=false
+Categories=Utility;Development;
+StartupWMClass=Brazier
+EOF
+}
