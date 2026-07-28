@@ -1,7 +1,7 @@
 # Maintainer: Dylan C. V. Dean <dylan@dylancvdean.com>
 
 pkgname=brazier
-pkgver=0.1.0.r125.g28a5240
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Desktop client and local API for open-weight AI models'
 arch=('x86_64' 'aarch64')
@@ -17,11 +17,6 @@ makedepends=('cargo' 'git' 'nodejs' 'pnpm' 'rust')
 # $srcdir, so commit the changes you want included before building.
 source=("${pkgname}::git+file://${startdir}")
 b2sums=('SKIP')
-
-pkgver() {
-  cd "${srcdir}/${pkgname}"
-  printf '0.1.0.r%s.g%s\n' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
-}
 
 prepare() {
   cd "${srcdir}/${pkgname}"
@@ -62,6 +57,11 @@ package() {
   cat > "${pkgdir}/usr/bin/${pkgname}" <<'EOF'
 #!/bin/sh
 export BRAZIER_INSTALLED=1
+# Brazier currently uses XWayland on Linux for a reliable Chromium render path.
+# Setting this before Electron starts makes `--class` apply to the actual
+# window, allowing Plasma to associate it with brazier.desktop.
+export ELECTRON_OZONE_PLATFORM_HINT=x11
+unset WAYLAND_DISPLAY
 exec /usr/bin/electron --class=brazier /usr/lib/brazier "$@"
 EOF
   chmod 755 "${pkgdir}/usr/bin/${pkgname}"
