@@ -13,7 +13,8 @@
     "build": "pnpm -r build",
     "check": "pnpm -r check && cargo check --workspace",
     "test": "pnpm -r test && cargo test --workspace",
-    "format:check": "cargo fmt --all --check"
+    "format:check": "cargo fmt --all --check",
+    "version:bump": "node scripts/bump-version.mjs"
   },
   "engines": {
     "node": ">=24"
