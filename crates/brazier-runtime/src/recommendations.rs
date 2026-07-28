@@ -131,6 +131,10 @@ pub struct Tier {
     /// Absent means agent work uses the same model as chat.
     #[serde(default)]
     pub agent: Option<RepoRecommendation>,
+    /// Additional agent models that fit this tier. The first `agent` remains
+    /// the default so existing installs and recommendation state stay stable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_options: Vec<RepoRecommendation>,
     #[serde(default)]
     pub image: Option<BundleRecommendation>,
     #[serde(default)]
@@ -539,6 +543,20 @@ pub fn resolved_agent(tier: &Tier) -> Option<&RepoRecommendation> {
     }
 }
 
+/// Every agent choice that is available on this machine, default first.
+pub fn resolved_agent_options(tier: &Tier) -> Vec<&RepoRecommendation> {
+    let mut options = Vec::new();
+    if let Some(agent) = resolved_agent(tier) {
+        options.push(agent);
+    }
+    for agent in &tier.agent_options {
+        if agent.runs_here() && !options.iter().any(|existing| existing.id == agent.id) {
+            options.push(agent);
+        }
+    }
+    options
+}
+
 /// Why the tier's own agent model was not used, when it was not.
 pub fn agent_substitution_note(tier: &Tier) -> Option<&str> {
     let agent = tier.agent.as_ref()?;
@@ -579,7 +597,7 @@ mod tests {
     #[test]
     fn a_tier_without_an_agent_model_uses_its_chat_model() {
         let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
-        let tier = catalog.tier_for(gb(32)).unwrap();
+        let tier = catalog.tier_for(gb(16)).unwrap();
         assert!(tier.agent.is_none());
         assert_eq!(
             resolved_agent(tier).unwrap().id,

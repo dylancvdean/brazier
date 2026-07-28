@@ -139,12 +139,12 @@ fn valid_repository(repository: &str) -> bool {
 }
 
 fn valid_revision(revision: &str) -> bool {
-    !revision.is_empty()
-        && revision.len() <= 200
-        && !revision.starts_with('-')
-        && revision
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "/-_.+".contains(character))
+    revision.is_empty()
+        || (revision.len() <= 200
+            && !revision.starts_with('-')
+            && revision
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "/-_.+".contains(character)))
 }
 
 pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
@@ -180,21 +180,21 @@ pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
     let checkout = if recipe.skip_checkout {
         Vec::new()
     } else {
-        vec![
-            PlannedCommand {
-                label: "Clone source without running hooks".to_owned(),
-                program: "git".to_owned(),
-                args: vec![
-                    "-c".into(),
-                    "core.hooksPath=".into(),
-                    "clone".into(),
-                    "--no-checkout".into(),
-                    "--filter=blob:none".into(),
-                    request.repository.clone(),
-                    "{source}".into(),
-                ],
-            },
-            PlannedCommand {
+        let mut checkout = vec![PlannedCommand {
+            label: "Clone source without running hooks".to_owned(),
+            program: "git".to_owned(),
+            args: vec![
+                "-c".into(),
+                "core.hooksPath=".into(),
+                "clone".into(),
+                "--no-checkout".into(),
+                "--filter=blob:none".into(),
+                request.repository.clone(),
+                "{source}".into(),
+            ],
+        }];
+        if !request.revision.is_empty() {
+            checkout.push(PlannedCommand {
                 label: "Checkout selected revision".to_owned(),
                 program: "git".to_owned(),
                 args: vec![
@@ -207,22 +207,23 @@ pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
                     request.revision.clone(),
                     "--".into(),
                 ],
-            },
-            PlannedCommand {
-                label: "Initialize source submodules".to_owned(),
-                program: "git".to_owned(),
-                args: vec![
-                    "-c".into(),
-                    "core.hooksPath=".into(),
-                    "-C".into(),
-                    "{source}".into(),
-                    "submodule".into(),
-                    "update".into(),
-                    "--init".into(),
-                    "--recursive".into(),
-                ],
-            },
-        ]
+            });
+        }
+        checkout.push(PlannedCommand {
+            label: "Initialize source submodules".to_owned(),
+            program: "git".to_owned(),
+            args: vec![
+                "-c".into(),
+                "core.hooksPath=".into(),
+                "-C".into(),
+                "{source}".into(),
+                "submodule".into(),
+                "update".into(),
+                "--init".into(),
+                "--recursive".into(),
+            ],
+        });
+        checkout
     };
     let skip_checkout = recipe.skip_checkout;
     let build = recipe
@@ -326,6 +327,27 @@ mod tests {
             platform: "linux-x64".into(),
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_revision_uses_the_repository_default_branch() {
+        let plan = plan(BuildPlanRequest {
+            engine: "llama.cpp".into(),
+            repository: "https://github.com/example/llama.cpp".into(),
+            revision: String::new(),
+            platform: "linux-x64".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            plan.checkout
+                .iter()
+                .map(|step| step.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Clone source without running hooks",
+                "Initialize source submodules"
+            ]
+        );
     }
 
     #[test]

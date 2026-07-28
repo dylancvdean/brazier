@@ -1226,6 +1226,8 @@ struct LaunchPlan {
     split_mode: Option<String>,
     cache_reuse: Option<u32>,
     defrag_threshold: Option<f32>,
+    mtp: bool,
+    mtp_draft_tokens: u8,
     /// llama-server `--parallel` slot count.
     parallel: u32,
     loras: Vec<(PathBuf, f32)>,
@@ -1240,6 +1242,7 @@ impl LaunchPlan {
         profile: Option<&TextProfile>,
         loras: Vec<(PathBuf, f32)>,
         effective_target: RuntimeTarget,
+        mtp: bool,
     ) -> Self {
         let field = |get: &dyn Fn(&TextProfile) -> Option<u32>, fallback: u32| {
             profile.and_then(get).unwrap_or(fallback)
@@ -1282,7 +1285,17 @@ impl LaunchPlan {
             split_mode: profile.and_then(|profile| profile.split_mode.clone()),
             cache_reuse: profile.and_then(|profile| profile.cache_reuse),
             defrag_threshold: profile.and_then(|profile| profile.defrag_threshold),
-            parallel: crate::model_settings::llama_parallel_slots(profile),
+            mtp,
+            mtp_draft_tokens: profile
+                .and_then(|profile| profile.mtp_draft_tokens)
+                .unwrap_or(2),
+            // MTP works with one generation slot; llama.cpp rejects it with
+            // parallel continuous batching.
+            parallel: if mtp {
+                1
+            } else {
+                crate::model_settings::llama_parallel_slots(profile)
+            },
             loras,
             extra_args: profile
                 .map(|profile| profile.extra_args.clone())
@@ -1310,7 +1323,7 @@ impl LaunchPlan {
             })
             .unwrap_or_default();
         format!(
-            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|{}|jinja|rf={}|tpl={}|{}",
+            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|mtp={}:{}|{}|jinja|rf={}|tpl={}|{}",
             self.context_size,
             self.batch_size,
             self.ubatch_size,
@@ -1334,6 +1347,8 @@ impl LaunchPlan {
             self.defrag_threshold,
             self.loras,
             self.parallel,
+            self.mtp,
+            self.mtp_draft_tokens,
             harmony,
             reasoning_format,
             template_fp,
@@ -1403,6 +1418,13 @@ impl LaunchPlan {
         if let Some(value) = self.defrag_threshold {
             command.arg("--defrag-thold").arg(value.to_string());
         }
+        if self.mtp {
+            command
+                .arg("--spec-type")
+                .arg("draft-mtp")
+                .arg("--spec-draft-n-max")
+                .arg(self.mtp_draft_tokens.to_string());
+        }
         for (path, scale) in &self.loras {
             command
                 .arg("--lora-scaled")
@@ -1438,13 +1460,31 @@ pub fn launch_key(
     profile: Option<&TextProfile>,
     loras: Vec<(PathBuf, f32)>,
     harmony: bool,
+    model_path: Option<&Path>,
 ) -> String {
     let effective_target = if settings.target == RuntimeTarget::Auto {
         crate::hardware::detect().recommended_target
     } else {
         settings.target
     };
-    LaunchPlan::resolve(settings, profile, loras, effective_target).key(harmony)
+    LaunchPlan::resolve(
+        settings,
+        profile,
+        loras,
+        effective_target,
+        mtp_enabled(profile, model_path),
+    )
+    .key(harmony)
+}
+
+fn mtp_enabled(profile: Option<&TextProfile>, model_path: Option<&Path>) -> bool {
+    profile.and_then(|profile| profile.mtp).unwrap_or_else(|| {
+        model_path.is_some_and(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().contains("mtp"))
+        })
+    })
 }
 
 impl LlamaServer {
@@ -1495,8 +1535,11 @@ impl LlamaServer {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        let mtp = mtp_enabled(profile, Some(model_path));
         let projector_path = crate::models_store::projector_for_model(model_path);
-        if let Some(projector) = &projector_path {
+        if let Some(projector) = &projector_path
+            && !mtp
+        {
             command.arg("--mmproj").arg(projector);
         }
         let effective_target = if settings.target == RuntimeTarget::Auto {
@@ -1504,7 +1547,7 @@ impl LlamaServer {
         } else {
             settings.target
         };
-        let plan = LaunchPlan::resolve(settings, profile, loras, effective_target);
+        let plan = LaunchPlan::resolve(settings, profile, loras, effective_target, mtp);
         let launch_key = plan.key(harmony);
         plan.apply(&mut command, harmony);
         if let Some(template) = &plan.chat_template {
@@ -2010,7 +2053,7 @@ mod tests {
     #[test]
     fn the_launch_key_changes_with_anything_applied_at_spawn() {
         let settings = RuntimeSettings::default();
-        let base = launch_key(&settings, None, Vec::new(), false);
+        let base = launch_key(&settings, None, Vec::new(), false, None);
         let resized = launch_key(
             &settings,
             Some(&TextProfile {
@@ -2019,12 +2062,14 @@ mod tests {
             }),
             Vec::new(),
             false,
+            None,
         );
         let with_lora = launch_key(
             &settings,
             None,
             vec![(PathBuf::from("/adapters/style.gguf"), 0.8)],
             false,
+            None,
         );
         let with_template = launch_key(
             &settings,
@@ -2034,11 +2079,12 @@ mod tests {
             }),
             Vec::new(),
             false,
+            None,
         );
         assert_ne!(base, resized);
         assert_ne!(base, with_lora);
         assert_ne!(base, with_template);
-        assert_eq!(base, launch_key(&settings, None, Vec::new(), false));
+        assert_eq!(base, launch_key(&settings, None, Vec::new(), false, None));
 
         let with_parallel = launch_key(
             &settings,
@@ -2049,8 +2095,21 @@ mod tests {
             }),
             Vec::new(),
             false,
+            None,
         );
         assert_ne!(base, with_parallel);
+
+        let mtp_model = Path::new("/models/Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf");
+        let mtp = launch_key(&settings, None, Vec::new(), false, Some(mtp_model));
+        assert_ne!(base, mtp);
+        assert!(mtp_enabled(None, Some(mtp_model)));
+        assert!(!mtp_enabled(
+            Some(&TextProfile {
+                mtp: Some(false),
+                ..TextProfile::default()
+            }),
+            Some(mtp_model)
+        ));
     }
 
     #[test]

@@ -164,7 +164,7 @@ const BUILD_ENGINE_DEFAULTS: Record<
 > = {
   'llama.cpp': {
     repository: 'https://github.com/ggml-org/llama.cpp',
-    revision: 'master'
+    revision: ''
   },
   'mlx-lm': {
     repository: 'https://github.com/ml-explore/mlx-lm',
@@ -205,6 +205,62 @@ function defaultDiscoverEngine(hardware: HardwareInfo | null): DiscoverEngine {
     return 'mlx-lm'
   }
   return 'llama.cpp'
+}
+
+type QuantFit = 'gpu' | 'offload' | 'system' | 'none' | 'unknown'
+
+/**
+ * A search result is a weight file, not a promise that it can be fully
+ * offloaded. Keep the labels conservative: reserve headroom for the KV cache,
+ * runtime allocations, and the desktop rather than comparing raw bytes.
+ */
+function quantFit(file: HubFile, hardware: HardwareInfo | null, bytes = file.size): QuantFit {
+  if (bytes == null || !hardware) return 'unknown'
+  const gpu = hardware.vram_bytes
+  const system = hardware.memory_bytes
+  if (gpu != null) {
+    if (bytes <= gpu * 0.7) return 'gpu'
+    if (system != null && bytes <= system * 0.6) return 'offload'
+    return 'none'
+  }
+  if (system != null && bytes <= system * 0.6) return 'system'
+  return system == null ? 'unknown' : 'none'
+}
+
+function fitLabel(fit: QuantFit): string {
+  switch (fit) {
+    case 'gpu': return 'Fits on GPU'
+    case 'offload': return 'Fits with CPU offload'
+    case 'system': return 'Fits in system memory'
+    case 'none': return "Won't fit"
+    default: return 'Size unknown'
+  }
+}
+
+function quantGroup(path: string): string {
+  return path.replace(/-\d{1,5}-of-\d{1,5}(?=\.gguf$)/i, '')
+}
+
+function quantSizes(files: HubFile[]): Map<string, number> {
+  const sizes = new Map<string, number>()
+  for (const file of files) {
+    if (file.size != null) {
+      const group = quantGroup(file.path)
+      sizes.set(group, (sizes.get(group) ?? 0) + file.size)
+    }
+  }
+  return sizes
+}
+
+function sortQuants(files: HubFile[], hardware: HardwareInfo | null): HubFile[] {
+  const sizes = quantSizes(files)
+  const rank: Record<QuantFit, number> = { gpu: 0, system: 0, offload: 1, unknown: 2, none: 3 }
+  return [...files].sort((left, right) => {
+    const fit =
+      rank[quantFit(left, hardware, sizes.get(quantGroup(left.path)))] -
+      rank[quantFit(right, hardware, sizes.get(quantGroup(right.path)))]
+    return fit || (right.size ?? 0) - (left.size ?? 0) || left.path.localeCompare(right.path)
+  })
 }
 
 export type ManageSection =
@@ -1827,13 +1883,13 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       <div className="model-results">
         {(isSdcpp ? [] : hasSearched ? results : suggested).map((model) => {
           const expanded = expandedRepo === model.id
-          const files = (repoFiles[model.id] ?? []).filter((file) => {
+          const files = sortQuants((repoFiles[model.id] ?? []).filter((file) => {
             const lower = file.path.toLowerCase()
             if (discoverEngine === 'whisper.cpp') {
               return lower.endsWith('.bin') || lower.endsWith('.gguf')
             }
             return lower.endsWith('.gguf')
-          })
+          }), props.hardware)
           const preferred = preferredFiles[model.id]
           const filePickEngine =
             discoverEngine === 'llama.cpp' || discoverEngine === 'whisper.cpp'
@@ -1981,6 +2037,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                   ) : (
                     files.map((file) => {
                     const basename = file.path.split('/').at(-1) ?? file.path
+                    const groupSizes = quantSizes(files)
+                    const groupBytes = groupSizes.get(quantGroup(file.path))
+                    const fit = quantFit(file, props.hardware, groupBytes)
                     const isProjector = basename.toLowerCase().includes('mmproj')
                     const isPreferred =
                       preferred != null &&
@@ -1992,6 +2051,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                             {basename}
                             {isProjector ? ' · multimodal projector' : ''}
                             {isPreferred ? ' · preferred' : ''}
+                            {!isProjector ? ` · ${fitLabel(fit)}` : ''}
                           </strong>
                           <span>
                             {file.path}
@@ -3009,7 +3069,11 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
               {!isStreamingAsrBuild && (
                 <label>
                   <span>Branch, tag, or commit</span>
-                  <input value={revision} onChange={(event) => setRevision(event.target.value)} />
+                  <input
+                    value={revision}
+                    placeholder="Default branch"
+                    onChange={(event) => setRevision(event.target.value)}
+                  />
                 </label>
               )}
               {/* The prose above says what a build needs; this says what this
@@ -3082,7 +3146,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
               <button
                 className="primary-action"
                 type="submit"
-                disabled={building || !repository.trim() || !revision.trim()}
+                disabled={building || !repository.trim()}
               >
                 {building ? <LoaderCircle className="spin" size={15} /> : <Hammer size={15} />}
                 {building ? 'Building…' : 'Start build'}

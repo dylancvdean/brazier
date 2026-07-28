@@ -144,6 +144,8 @@ export type HardwareInfo = {
   architecture: string
   logical_cpus: number
   memory_bytes: number | null
+  vram_bytes: number | null
+  usable_model_memory_bytes: number | null
   gpu: string | null
   gpu_arch: string | null
   amd_apu: boolean
@@ -1191,6 +1193,8 @@ export type Recommendations = {
     image?: BundleRecommendation
     video?: BundleRecommendation
   }
+  /** Alternative agent models for this tier, including the default first. */
+  agent_options?: RepoRecommendation[]
   voice?: { summary?: string | null; models: VoiceRecommendationModel[] } | null
   state: RecommendationState
   swaps: PendingSwap[]
@@ -1295,6 +1299,10 @@ export type TextProfile = {
   split_mode?: string | null
   cache_reuse?: number | null
   defrag_threshold?: number | null
+  /** Use llama.cpp multi-token prediction. Null auto-detects MTP GGUFs. */
+  mtp?: boolean | null
+  /** Maximum MTP draft tokens per step (default 2). */
+  mtp_draft_tokens?: number | null
   temperature?: number | null
   top_p?: number | null
   top_k?: number | null

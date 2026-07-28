@@ -1027,6 +1027,20 @@ function TextFields(props: SectionProps<TextProfile>): React.JSX.Element {
             value={profile.flash_attention}
             onChange={(value) => set('flash_attention', value)}
           />
+          <ToggleField
+            label="MTP speculative decoding"
+            hint="Auto-detected for MTP GGUFs. It uses one llama.cpp slot and cannot combine with image projectors."
+            value={profile.mtp}
+            onChange={(value) => set('mtp', value)}
+          />
+          <NumberField
+            label="MTP draft tokens"
+            hint="How many tokens the model predicts ahead. Default 2; higher is not always faster."
+            min={1}
+            max={6}
+            value={profile.mtp_draft_tokens}
+            onChange={(value) => set('mtp_draft_tokens', value)}
+          />
           <SelectField
             label="KV cache · keys"
             hint="Quantising the cache buys context length with a little quality."

@@ -1657,6 +1657,12 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
         }
         categories.insert("agent".into(), resolved);
     }
+    let agent_options: Vec<Value> = futures::future::join_all(
+        recommendations::resolved_agent_options(tier)
+            .into_iter()
+            .map(|agent| resolve_repo_recommendation(&state, agent, memory)),
+    )
+    .await;
     for (name, entry) in [
         ("image", tier.image.as_ref()),
         ("video", tier.video.as_ref()),
@@ -1687,6 +1693,7 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
         "memory_source": if hardware.vram_bytes.is_some() { "vram" } else { "system" },
         "tier_gb": tier.min_gb,
         "categories": categories,
+        "agent_options": agent_options,
         "voice": catalog.voice,
         "state": recorded,
         "swaps": swaps,

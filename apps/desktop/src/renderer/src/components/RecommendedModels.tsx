@@ -391,13 +391,18 @@ export function RecommendedModels(props: Props): React.JSX.Element {
   const wantsAgent = wanted.includes('agent')
   const text = recommendations.categories.text
   const agent = recommendations.categories.agent
+  const agentOptions = recommendations.agent_options?.length
+    ? recommendations.agent_options
+    : agent
+      ? [agent]
+      : []
   const sharedTextAgent =
     wantsText &&
     wantsAgent &&
     text &&
-    agent &&
-    text.id === agent.id &&
-    text.repo_id === agent.repo_id
+    agentOptions[0] &&
+    text.id === agentOptions[0].id &&
+    text.repo_id === agentOptions[0].repo_id
   if (sharedTextAgent) cards.push(repoCard(['text', 'agent'], text))
   for (const category of wanted) {
     if (category === 'voice') {
@@ -407,6 +412,10 @@ export function RecommendedModels(props: Props): React.JSX.Element {
     }
     if (category === 'text' || category === 'agent') {
       if (sharedTextAgent) continue
+      if (category === 'agent') {
+        for (const entry of agentOptions) cards.push(repoCard(['agent'], entry))
+        continue
+      }
       const entry = recommendations.categories[category]
       if (entry) cards.push(repoCard([category], entry))
       continue

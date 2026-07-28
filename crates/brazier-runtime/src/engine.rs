@@ -1202,7 +1202,8 @@ impl Runtime {
                 .collect()
             })
             .unwrap_or_default();
-        let wanted_key = llama::launch_key(&settings, profile, loras.clone(), harmony);
+        let wanted_key =
+            llama::launch_key(&settings, profile, loras.clone(), harmony, Some(model_path));
         let binary = {
             let guard = self.llama.lock().await;
             if let Some(path) = &guard.binary

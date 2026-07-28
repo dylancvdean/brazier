@@ -19,7 +19,8 @@
     "The remaining 40% is left for the KV cache, the OS, and everything else.",
     "",
     "A tier with no `agent` entry uses its `text` one. A category set to null is",
-    "offered nothing at that tier."
+    "offered nothing at that tier. `agent_options` adds optional agent cards after",
+    "the default agent; each has its own explanation and exact quant selection."
   ],
   "tiers": [
     {
@@ -70,6 +71,20 @@
         "quant": "by_memory",
         "summary": "A 26B mixture-of-experts model with 4B active, so it answers at roughly the speed of a much smaller model while knowing much more."
       },
+      "agent": {
+        "id": "qwen3.6-27b-mtp",
+        "label": "Qwen 3.6 27B MTP",
+        "repo_id": "unsloth/Qwen3.6-27B-MTP-GGUF",
+        "quant": "by_memory",
+        "summary": "The smarter agent choice: a dense 27B Qwen 3.6 with multi-token prediction enabled for faster tool-work turns."
+      },
+      "agent_options": [{
+        "id": "qwen3.6-35b-a3b-mtp",
+        "label": "Qwen 3.6 35B A3B MTP",
+        "repo_id": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+        "quant": "by_memory",
+        "summary": "The faster agent choice: a 35B mixture-of-experts model with only 3B active parameters and MTP decoding."
+      }],
       "image": {
         "id": "sd35-medium",
         "label": "Stable Diffusion 3.5 Medium",
@@ -92,6 +107,20 @@
         "quant": "by_memory",
         "summary": "A 26B mixture-of-experts model with 4B active — fast to answer, and at this tier it fits at a quant that costs almost nothing."
       },
+      "agent": {
+        "id": "qwen3.6-27b-mtp",
+        "label": "Qwen 3.6 27B MTP",
+        "repo_id": "unsloth/Qwen3.6-27B-MTP-GGUF",
+        "quant": "by_memory",
+        "summary": "The smarter agent choice: dense 27B Qwen 3.6 with multi-token prediction."
+      },
+      "agent_options": [{
+        "id": "qwen3.6-35b-a3b-mtp",
+        "label": "Qwen 3.6 35B A3B MTP",
+        "repo_id": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+        "quant": "by_memory",
+        "summary": "The faster agent choice: 35B MoE, 3B active, with MTP decoding."
+      }],
       "image": {
         "id": "flux1-dev-q8",
         "label": "FLUX.1 dev (Q8)",
@@ -115,6 +144,20 @@
         "quant": "by_memory",
         "summary": "A 26B mixture-of-experts model with 4B active. At this tier it runs at full 8-bit precision."
       },
+      "agent": {
+        "id": "qwen3.6-27b-mtp",
+        "label": "Qwen 3.6 27B MTP",
+        "repo_id": "unsloth/Qwen3.6-27B-MTP-GGUF",
+        "quant": "by_memory",
+        "summary": "The smarter agent choice: dense 27B Qwen 3.6 with multi-token prediction."
+      },
+      "agent_options": [{
+        "id": "qwen3.6-35b-a3b-mtp",
+        "label": "Qwen 3.6 35B A3B MTP",
+        "repo_id": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+        "quant": "by_memory",
+        "summary": "The faster agent choice: 35B MoE, 3B active, with MTP decoding."
+      }],
       "image": {
         "id": "flux1-dev-bf16",
         "label": "FLUX.1 dev (full precision)",
@@ -137,6 +180,20 @@
         "quant": "by_memory",
         "summary": "A 26B mixture-of-experts model with 4B active, at full 8-bit precision."
       },
+      "agent": {
+        "id": "qwen3.6-27b-mtp",
+        "label": "Qwen 3.6 27B MTP",
+        "repo_id": "unsloth/Qwen3.6-27B-MTP-GGUF",
+        "quant": "by_memory",
+        "summary": "The smarter agent choice: dense 27B Qwen 3.6 with multi-token prediction."
+      },
+      "agent_options": [{
+        "id": "qwen3.6-35b-a3b-mtp",
+        "label": "Qwen 3.6 35B A3B MTP",
+        "repo_id": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+        "quant": "by_memory",
+        "summary": "The faster agent choice: 35B MoE, 3B active, with MTP decoding."
+      }],
       "image": {
         "id": "qwen-image-q8",
         "label": "Qwen-Image 20B (Q8)",

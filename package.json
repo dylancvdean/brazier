@@ -14,7 +14,8 @@
     "check": "pnpm -r check && cargo check --workspace",
     "test": "pnpm -r test && cargo test --workspace",
     "format:check": "cargo fmt --all --check",
-    "version:bump": "node scripts/bump-version.mjs"
+    "version:bump": "node scripts/bump-version.mjs",
+    "release": "node scripts/release.mjs"
   },
   "engines": {
     "node": ">=24"

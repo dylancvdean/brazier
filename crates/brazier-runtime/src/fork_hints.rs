@@ -194,13 +194,33 @@ pub async fn hints_for_repo(
     data_dir: &std::path::Path,
     repo_id: &str,
 ) -> anyhow::Result<Vec<RuntimeForkHint>> {
-    match model_documentation(client, data_dir, repo_id).await {
-        Ok(text) => Ok(runtime_fork_hints_from_text(&text)),
+    let mut hints = match model_documentation(client, data_dir, repo_id).await {
+        Ok(text) => runtime_fork_hints_from_text(&text),
         Err(error) => {
             tracing::debug!(repo_id, error = %error, "model documentation unavailable for fork hints");
-            Ok(Vec::new())
+            Vec::new()
         }
+    };
+    hints.extend(known_hints_for_repo(repo_id));
+    hints.sort_by(|left, right| left.repository.cmp(&right.repository));
+    hints.dedup_by(|left, right| left.repository == right.repository);
+    Ok(hints)
+}
+
+fn known_hints_for_repo(repo_id: &str) -> Vec<RuntimeForkHint> {
+    // Bonsai's Q1 kernels are not in upstream llama.cpp. Keep this durable
+    // mapping locally instead of relying on a model-card scrape at the moment
+    // the model fails to load.
+    if repo_id.eq_ignore_ascii_case("prism-ml/Bonsai-27B-gguf") {
+        return vec![RuntimeForkHint {
+            engine: "llama.cpp".to_owned(),
+            display_name: "PrismML llama.cpp".to_owned(),
+            repository: "https://github.com/PrismML-Eng/llama.cpp".to_owned(),
+            trusted: false,
+            summary: "Required for Bonsai's Q1 hybrid-attention kernels".to_owned(),
+        }];
     }
+    Vec::new()
 }
 
 pub async fn load_error_with_hints(
@@ -247,6 +267,16 @@ mod tests {
         assert_eq!(hints[0].engine, "llama.cpp");
         assert_eq!(hints[0].repository, "https://github.com/example/llama.cpp");
         assert!(!hints[0].trusted);
+    }
+
+    #[test]
+    fn bonsai_has_a_runtime_hint_even_without_a_card_scan() {
+        let hints = known_hints_for_repo("prism-ml/Bonsai-27B-gguf");
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.repository == "https://github.com/PrismML-Eng/llama.cpp")
+        );
     }
 
     #[test]

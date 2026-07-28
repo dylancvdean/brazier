@@ -153,6 +153,11 @@ pub struct TextProfile {
     pub split_mode: Option<String>,
     pub cache_reuse: Option<u32>,
     pub defrag_threshold: Option<f32>,
+    /// Use llama.cpp's multi-token prediction draft head (`--spec-type draft-mtp`).
+    /// `None` auto-enables it for an MTP GGUF filename.
+    pub mtp: Option<bool>,
+    /// Maximum MTP draft tokens per step. Unset uses the conservative default of 2.
+    pub mtp_draft_tokens: Option<u8>,
 
     // --- sampling, sent per request ---
     pub temperature: Option<f32>,
@@ -528,6 +533,7 @@ fn validate_text(profile: &TextProfile) -> anyhow::Result<()> {
         anyhow::ensure!(model.len() <= 512, "subagent model id is too long");
     }
     ensure_range(profile.max_subagents, 1, 8, "max subagents")?;
+    ensure_range(profile.mtp_draft_tokens, 1, 6, "MTP draft tokens")?;
     validate_loras(&profile.loras)?;
     validate_extra_args(&profile.extra_args)
 }
