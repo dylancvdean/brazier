@@ -1,4 +1,5 @@
 pub mod api;
+pub mod support;
 
 pub use brazier_agent::{agent_exec, agent_policy, agent_sandbox, agent_tools, agent_worktree};
 pub use brazier_formats::{gguf_meta, wav};

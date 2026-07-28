@@ -2116,6 +2116,24 @@ export async function saveBlobToDisk(
   return window.brazier.saveFile(suggestedName || fallback, bytes)
 }
 
+/** Download the daemon's privacy-filtered diagnostic archive and save it natively. */
+export async function saveSupportBundle(): Promise<string | null> {
+  const daemon = await connection()
+  const headers = new Headers()
+  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
+  const response = await fetch(`${daemon.address}/api/v1/support/bundle`, { headers })
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as {
+      error?: { message?: string }
+    } | null
+    throw new Error(
+      payload?.error?.message ?? `Could not create support bundle (${response.status}).`
+    )
+  }
+  const bytes = await response.arrayBuffer()
+  return window.brazier.saveFile('brazier-support.zip', bytes)
+}
+
 export async function uploadAttachmentBlob(file: File): Promise<StoredBlob> {
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader()

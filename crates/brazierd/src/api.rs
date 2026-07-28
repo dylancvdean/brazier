@@ -35,7 +35,7 @@ use crate::{
     hf::{self, SearchQuery},
     hf_auth, llama, mcp, media, model_bindings, model_settings, models_store,
     progress::ProgressEvent,
-    recommendations, remote, runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr,
+    recommendations, remote, runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, support,
     tool_registry, toolchain_hints,
     types::{
         ChatCompletionRequest, CreateConversation, CreateMessage, OpenAiMessage, ResponsesRequest,
@@ -226,6 +226,7 @@ pub fn router(state: AppState) -> Router {
 pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router {
     let protected = Router::new()
         .route("/api/v1/capabilities", get(capabilities))
+        .route("/api/v1/support/bundle", get(support_bundle))
         .route(
             "/api/v1/conversations",
             get(list_conversations).post(create_conversation),
@@ -623,6 +624,24 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             }
         }
     })))
+}
+
+async fn support_bundle(State(state): State<AppState>) -> ApiResult<Response> {
+    let bytes = support::create_bundle(&state)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"brazier-support.zip\"",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn list_conversations(
@@ -4809,10 +4828,11 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use std::sync::Arc;
+    use std::{io::Read, sync::Arc};
     use tempfile::tempdir;
     use tokio::sync::Mutex;
     use tower::ServiceExt;
+    use zip::ZipArchive;
 
     #[test]
     fn allows_the_ui_and_whatever_else_was_named() {
@@ -4976,6 +4996,39 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, parsed)
+    }
+
+    #[tokio::test]
+    async fn support_bundle_route_returns_a_reviewable_zip() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/support/bundle")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut report = String::new();
+        archive
+            .by_name("diagnostics.json")
+            .unwrap()
+            .read_to_string(&mut report)
+            .unwrap();
+        let report: Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(report["format_version"], 1);
+        assert_eq!(report["privacy"]["conversations_included"], false);
+        assert_eq!(report["privacy"]["credentials_included"], false);
+        assert!(report["engine"].is_object());
+        assert!(report["runtimes"].is_array());
     }
 
     /// The approval round trip an agent worker performs: a held call, a user

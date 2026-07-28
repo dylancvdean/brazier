@@ -234,7 +234,11 @@ what is left is mostly the difference between working and trustworthy.
   tools, so widening it stays deliberate and visible in the launch command.
   External binding already exists (`--host`, with keyless non-loopback access
   requiring `--allow-insecure-remote`).
-- Add API-key management (rotation and per-client keys; today there is one key,
-  generated at startup or supplied), redacted support bundles, SBOMs, signed
-  updates, notarization, and release packaging.
+- **Redacted support bundles are in:** Manage → Support downloads a reviewable
+  ZIP containing an allow-listed engine, runtime, hardware, and toolchain
+  snapshot. Conversations, attachments, model output, credentials, and logs are
+  excluded; secret-shaped fields, URL query strings, and user-home/data-directory
+  path prefixes are scrubbed before serialization. Still open: API-key management
+  (rotation and per-client keys; today there is one key, generated at startup or
+  supplied), SBOMs, signed updates, notarization, and release packaging.
 - Complete public naming review before stable application identifiers ship.

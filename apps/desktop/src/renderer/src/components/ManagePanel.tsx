@@ -82,6 +82,7 @@ import {
   type RuntimeSettings,
   type RuntimeTarget,
   saveRuntimeSettings,
+  saveSupportBundle,
   searchHub,
   setHuggingFaceToken,
   updateRecommendationState,
@@ -214,6 +215,7 @@ export type ManageSection =
   | 'engine'
   | 'mcp'
   | 'remote'
+  | 'support'
 
 type ManagePanelProps = {
   section: ManageSection
@@ -245,7 +247,8 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'runtimes', label: 'Runtimes', icon: <Cpu size={15} /> },
   { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
   { id: 'remote', label: 'Remote servers', icon: <Globe size={15} /> },
-  { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> }
+  { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> },
+  { id: 'support', label: 'Support', icon: <ShieldAlert size={15} /> }
 ]
 
 function progressLabel(event: ProgressEvent | null): string {
@@ -430,6 +433,7 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
             {props.section === 'mcp' && <McpSection {...props} onError={setError} />}
             {props.section === 'remote' && <RemoteSection {...props} onError={setError} />}
             {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
+            {props.section === 'support' && <SupportSection {...props} onError={setError} />}
           </div>
         </div>
       </aside>
@@ -438,6 +442,50 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
 }
 
 type SectionProps = ManagePanelProps & { onError: (message: string | null) => void }
+
+function SupportSection(props: SectionProps): React.JSX.Element {
+  const [saving, setSaving] = useState(false)
+  const [savedPath, setSavedPath] = useState<string | null>(null)
+
+  async function download(): Promise<void> {
+    setSaving(true)
+    setSavedPath(null)
+    props.onError(null)
+    try {
+      const path = await saveSupportBundle()
+      if (path) setSavedPath(path)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>Support</h2>
+        <p>Create a diagnostic archive you can inspect before sharing.</p>
+      </header>
+
+      <div className="settings-group">
+        <div className="section-label">Redacted support bundle</div>
+        <p className="model-help">
+          Includes engine, runtime, hardware, and toolchain information. Conversations, prompts,
+          responses, attachments, credentials, and logs are not included. User-home and Brazier
+          data-directory prefixes, URL credentials, and secret-bearing fields are removed.
+        </p>
+        <div className="runtime-actions">
+          <button className="primary-action" disabled={saving} onClick={() => void download()}>
+            {saving ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
+            {saving ? 'Creating bundle…' : 'Download support bundle'}
+          </button>
+        </div>
+        {savedPath && <p className="model-help">Saved to {savedPath}</p>}
+      </div>
+    </section>
+  )
+}
 
 function modelCountSummary(ggufCount: number, mlxCount: number): string {
   const parts: string[] = []

@@ -25,6 +25,7 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+zip = { version = "4.3", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 http-body-util = "0.1.4"
