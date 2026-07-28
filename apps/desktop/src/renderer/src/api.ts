@@ -482,6 +482,10 @@ export function updateConversation(
   })
 }
 
+export function deleteConversation(conversationId: string): Promise<void> {
+  return request(`/api/v1/conversations/${conversationId}`, { method: 'DELETE' })
+}
+
 /**
  * Transcribe one finished utterance through the daemon's ASR path.
  *

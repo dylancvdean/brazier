@@ -233,7 +233,9 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         )
         .route(
             "/api/v1/conversations/{id}",
-            get(get_conversation).patch(update_conversation),
+            get(get_conversation)
+                .patch(update_conversation)
+                .delete(delete_conversation),
         )
         .route(
             "/api/v1/conversations/{id}/messages",
@@ -728,6 +730,18 @@ async fn update_conversation(
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!(conversation)))
+}
+
+async fn delete_conversation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    state
+        .db
+        .delete_conversation(&id)
+        .await
+        .map_err(ApiError::not_found)?;
+    Ok(Json(json!({ "deleted": true })))
 }
 
 async fn list_messages(

@@ -4,8 +4,10 @@ import {
   Box,
   Brain,
   Cpu,
+  ChevronLeft,
+  ChevronRight,
+  Ellipsis,
   Gauge,
-  GitBranch,
   Image,
   LoaderCircle,
   Menu,
@@ -19,6 +21,8 @@ import {
   SlidersHorizontal,
   Sparkles,
   Square,
+  Pencil,
+  Trash2,
   Upload,
   Video,
   Wrench,
@@ -28,6 +32,7 @@ import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useR
 import {
   createConversation,
   createMessage,
+  deleteConversation,
   engineStatus,
   fetchCapabilities,
   fetchModelBindings,
@@ -60,6 +65,7 @@ import {
   recordRun,
   saveRuntimeSettings,
   streamCompletion,
+  updateConversation,
   updateRecommendationState,
   uploadAttachmentBlob
 } from './api'
@@ -92,7 +98,7 @@ import {
   runtimeNoticeForModel,
   visionCapabilityTitle
 } from './model-utils'
-import { childCounts, messageChain } from './graph'
+import { branchSiblings, messageChain } from './graph'
 import { buildChatDisplayItems } from './chatDisplay'
 import {
   readCachedConversations,
@@ -105,6 +111,25 @@ import {
 import type { Attachment, ContentPart, Conversation, Message, Role } from './types'
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
+const CHAT_TITLE_MODE_KEY = 'brazier.chatTitleMode.v1'
+
+type ChatTitleMode = 'never' | 'always' | 'over-20-tokens'
+
+function readChatTitleMode(): ChatTitleMode {
+  try {
+    const value = localStorage.getItem(CHAT_TITLE_MODE_KEY)
+    return value === 'never' || value === 'over-20-tokens' || value === 'always' ? value : 'always'
+  } catch {
+    return 'always'
+  }
+}
+
+function conversationTitle(text: string, mode: ChatTitleMode): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (!normalized || mode === 'never') return 'New conversation'
+  if (mode === 'over-20-tokens' && normalized.split(' ').length <= 20) return 'New conversation'
+  return normalized.slice(0, 48)
+}
 
 function readEnabledTools(): string[] {
   try {
@@ -123,6 +148,43 @@ function writeEnabledTools(names: string[]): void {
   } catch {
     // Best-effort persistence.
   }
+}
+
+function BranchNavigator({
+  messages,
+  messageId,
+  onSelect
+}: {
+  messages: Message[]
+  messageId: string
+  onSelect: (id: string) => void
+}): React.JSX.Element | null {
+  const siblings = branchSiblings(messages, messageId)
+  const index = siblings.findIndex((message) => message.id === messageId)
+  if (siblings.length < 2 || index < 0) return null
+  return (
+    <div className="branch-navigator" aria-label={`Branch ${index + 1} of ${siblings.length}`}>
+      <button
+        type="button"
+        title="Previous branch"
+        aria-label="Previous branch"
+        disabled={index === 0}
+        onClick={() => onSelect(siblings[index - 1].id)}
+      >
+        <ChevronLeft size={13} />
+      </button>
+      <span>{index + 1}/{siblings.length}</span>
+      <button
+        type="button"
+        title="Next branch"
+        aria-label="Next branch"
+        disabled={index === siblings.length - 1}
+        onClick={() => onSelect(siblings[index + 1].id)}
+      >
+        <ChevronRight size={13} />
+      </button>
+    </div>
+  )
 }
 
 function contentText(message: Message): string {
@@ -312,6 +374,8 @@ export function App(): React.JSX.Element {
   const [conversations, setConversations] = useState<Conversation[]>(() => readCachedConversations())
   const [conversationSearch, setConversationSearch] = useState('')
   const [conversationId, setConversationId] = useState<string | null>(null)
+  const [chatTitleMode, setChatTitleMode] = useState<ChatTitleMode>(() => readChatTitleMode())
+  const [conversationMenuId, setConversationMenuId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [tipId, setTipId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -395,7 +459,6 @@ export function App(): React.JSX.Element {
 
   const chain = useMemo(() => messageChain(messages, tipId), [messages, tipId])
   const chatDisplayItems = useMemo(() => buildChatDisplayItems(chain), [chain])
-  const branches = useMemo(() => childCounts(messages), [messages])
   const canChat = Boolean(selectedModel) && modelPrepareState === 'ready'
   const selectedCapabilities = localModels.find((model) => model.id === selectedModel)?.capabilities
   const chatModels = useMemo(() => localModels.filter((model) => isChatModel(model)), [localModels])
@@ -929,6 +992,47 @@ export function App(): React.JSX.Element {
     setDraft('')
   }
 
+  function changeChatTitleMode(mode: ChatTitleMode): void {
+    setChatTitleMode(mode)
+    try {
+      localStorage.setItem(CHAT_TITLE_MODE_KEY, mode)
+    } catch {
+      // Best-effort persistence.
+    }
+  }
+
+  async function renameConversation(conversation: Conversation): Promise<void> {
+    setConversationMenuId(null)
+    const title = window.prompt('Rename conversation', conversation.title)?.trim()
+    if (!title || title === conversation.title) return
+    try {
+      await updateConversation(conversation.id, { title })
+      await refreshConversations('')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  async function removeConversation(conversation: Conversation): Promise<void> {
+    setConversationMenuId(null)
+    if (!window.confirm(`Delete “${conversation.title}”? This cannot be undone.`)) return
+    try {
+      await deleteConversation(conversation.id)
+      if (conversation.id === conversationId) {
+        setConversationId(null)
+        setMessages([])
+        setTipId(null)
+      }
+      const remaining = await listConversations('')
+      setConversations(remaining)
+      writeCachedConversations(remaining)
+      setConversationSearch('')
+      if (conversation.id === conversationId) setConversationId(remaining[0]?.id ?? null)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
   async function applyInferenceSettings(next: RuntimeSettings): Promise<void> {
     setSavingInference(true)
     setError(null)
@@ -1047,7 +1151,7 @@ export function App(): React.JSX.Element {
     try {
       let activeConversationId = conversationId
       if (!activeConversationId) {
-        const created = await createConversation(text.slice(0, 48) || 'Multimodal conversation')
+        const created = await createConversation(conversationTitle(text, chatTitleMode))
         activeConversationId = created.id
         setConversationId(created.id)
       }
@@ -1276,17 +1380,52 @@ export function App(): React.JSX.Element {
                 }}
               />
             </div>
+            <label className="chat-title-mode">
+              <span>Generated names</span>
+              <select
+                aria-label="Generated chat names"
+                value={chatTitleMode}
+                onChange={(event) => changeChatTitleMode(event.target.value as ChatTitleMode)}
+              >
+                <option value="never">Never</option>
+                <option value="always">Always</option>
+                <option value="over-20-tokens">Over 20 tokens</option>
+              </select>
+            </label>
             <div className="conversation-list">
               <div className="section-label">Recent</div>
               {conversations.map((conversation) => (
-                <button
+                <div
                   className={conversation.id === conversationId ? 'conversation active' : 'conversation'}
                   key={conversation.id}
-                  onClick={() => setConversationId(conversation.id)}
                 >
-                  <span>{conversation.title}</span>
-                  <time>{conversation.updated_at.slice(0, 10)}</time>
-                </button>
+                  <button className="conversation-select" onClick={() => setConversationId(conversation.id)}>
+                    <span>{conversation.title}</span>
+                    <time>{conversation.updated_at.slice(0, 10)}</time>
+                  </button>
+                  <button
+                    className="conversation-menu-button"
+                    aria-label={`Actions for ${conversation.title}`}
+                    title="Conversation actions"
+                    onClick={() =>
+                      setConversationMenuId((current) =>
+                        current === conversation.id ? null : conversation.id
+                      )
+                    }
+                  >
+                    <Ellipsis size={16} />
+                  </button>
+                  {conversationMenuId === conversation.id ? (
+                    <div className="conversation-menu">
+                      <button onClick={() => void renameConversation(conversation)}>
+                        <Pencil size={13} /> Rename
+                      </button>
+                      <button className="danger" onClick={() => void removeConversation(conversation)}>
+                        <Trash2 size={13} /> Delete
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
               ))}
               {conversations.length === 0 && (
                 <p className="empty-sidebar">Your conversations stay on this device.</p>
@@ -1598,11 +1737,6 @@ export function App(): React.JSX.Element {
                           {status ? (
                             <span className={`turn-badge ${status}`}>{status}</span>
                           ) : null}
-                          {branches.get(item.branchId) && branches.get(item.branchId)! > 1 ? (
-                            <span className="branch-count">
-                              <GitBranch size={12} /> {branches.get(item.branchId)} branches
-                            </span>
-                          ) : null}
                         </div>
                         <ReasoningDisclosure text={item.reasoning} />
                         {item.segments.map((segment) => {
@@ -1628,13 +1762,11 @@ export function App(): React.JSX.Element {
                             <Markdown key={segment.key}>{segment.text}</Markdown>
                           )
                         })}
-                        <button
-                          className="fork-button"
-                          title="Continue a new branch from this message"
-                          onClick={() => setTipId(item.branchId)}
-                        >
-                          <GitBranch size={13} /> Branch here
-                        </button>
+                        <BranchNavigator
+                          messages={messages}
+                          messageId={item.branchId}
+                          onSelect={setTipId}
+                        />
                       </div>
                     </article>
                   )
@@ -1656,11 +1788,6 @@ export function App(): React.JSX.Element {
                           </span>
                         ) : null}
                         {turn ? <span className={`turn-badge ${turn}`}>{turn}</span> : null}
-                        {branches.get(message.id) && branches.get(message.id)! > 1 ? (
-                          <span className="branch-count">
-                            <GitBranch size={12} /> {branches.get(message.id)} branches
-                          </span>
-                        ) : null}
                       </div>
                       {media.length > 0 && (
                         <div className="media-row">
@@ -1678,11 +1805,20 @@ export function App(): React.JSX.Element {
                       <Markdown>{contentText(message)}</Markdown>
                       <button
                         className="fork-button"
-                        title="Continue a new branch from this message"
-                        onClick={() => setTipId(message.id)}
+                        title="Edit this message and send an alternate branch"
+                        onClick={() => {
+                          setDraft(contentText(message))
+                          setAttachments([])
+                          setTipId(message.parent_id)
+                        }}
                       >
-                        <GitBranch size={13} /> Branch here
+                        <Pencil size={13} /> Edit and branch
                       </button>
+                      <BranchNavigator
+                        messages={messages}
+                        messageId={message.id}
+                        onSelect={setTipId}
+                      />
                     </div>
                   </article>
                 )

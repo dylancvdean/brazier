@@ -21,3 +21,10 @@ export function childCounts(messages: Message[]): Map<string, number> {
   }
   return counts
 }
+
+/** The ordered alternatives to one message, including the message itself. */
+export function branchSiblings(messages: Message[], messageId: string): Message[] {
+  const message = messages.find((candidate) => candidate.id === messageId)
+  if (!message || !message.parent_id) return []
+  return messages.filter((candidate) => candidate.parent_id === message.parent_id)
+}

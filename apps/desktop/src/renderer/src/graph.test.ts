@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { messageChain, childCounts } from './graph'
+import { messageChain, childCounts, branchSiblings } from './graph'
 import type { Message } from './types'
 
 const base = {
@@ -23,5 +23,9 @@ describe('message graph', () => {
 
   it('counts branch points', () => {
     expect(childCounts(messages).get('root')).toBe(2)
+  })
+
+  it('orders the alternatives for a branch message', () => {
+    expect(branchSiblings(messages, 'fork').map((message) => message.id)).toEqual(['first', 'fork'])
   })
 })

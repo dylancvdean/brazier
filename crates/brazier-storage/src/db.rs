@@ -732,6 +732,20 @@ impl Database {
         .await?)
     }
 
+    /// Remove a conversation and its message graph. Message rows cascade from
+    /// the conversation foreign key; blobs remain available to any other turn
+    /// that references them.
+    pub async fn delete_conversation(&self, id: &str) -> anyhow::Result<()> {
+        let result = sqlx::query("DELETE FROM conversations WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!("conversation not found")
+        }
+        Ok(())
+    }
+
     /// Apply a partial conversation update. Absent fields are left alone; an
     /// explicit `agent_session_id: null` unbinds the agent session.
     pub async fn update_conversation(
@@ -1542,6 +1556,26 @@ mod tests {
         let messages = db.list_messages(&conversation.id).await.unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[1].parent_id, messages[2].parent_id);
+    }
+
+    #[tokio::test]
+    async fn deletes_a_conversation_and_its_messages() {
+        let (_dir, db) = open().await;
+        let conversation = db.create_conversation("Disposable").await.unwrap();
+        db.create_message(&conversation.id, message(None, Role::User, json!("Hello")))
+            .await
+            .unwrap();
+
+        db.delete_conversation(&conversation.id).await.unwrap();
+
+        assert!(db.get_conversation(&conversation.id).await.is_err());
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id = ?")
+                .bind(&conversation.id)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
