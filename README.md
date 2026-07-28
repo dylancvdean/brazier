@@ -58,7 +58,12 @@ The daemon prints a `BRAZIER_READY` JSON record containing the selected address.
 Authentication is enabled by default and a random session key is emitted in
 that record for the desktop process.
 
+On Arch Linux, a release build using system Electron can be produced without
+leaving build artifacts in the checkout:
 
+```sh
+makepkg --config packaging/makepkg-local.conf -si
+```
 ## Security
 
 Brazier collects no telemetry. Non-upstream forks,

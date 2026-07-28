@@ -192,16 +192,18 @@ function report(line: string, level: 'log' | 'warn' | 'error' = 'log'): void {
 function startDaemon(): Promise<Connection> {
   const directory = dataDirectory()
   migrateLegacyDataDirectory(directory)
-  const command = app.isPackaged
-    ? join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'brazierd.exe' : 'brazierd')
-    : installedApp
-      ? join(__dirname, '../..', process.platform === 'win32' ? 'brazierd.exe' : 'brazierd')
-    : 'cargo'
-  const args = installedApp
+  const installedDaemon = join(__dirname, '../..', process.platform === 'win32' ? 'brazierd.exe' : 'brazierd')
+  const useInstalledDaemon = process.env.BRAZIER_INSTALLED === '1' || existsSync(installedDaemon)
+  const command = useInstalledDaemon
+    ? installedDaemon
+    : app.isPackaged
+      ? join(process.resourcesPath, 'bin', process.platform === 'win32' ? 'brazierd.exe' : 'brazierd')
+      : 'cargo'
+  const args = (installedApp || useInstalledDaemon)
     ? ['--data-dir', directory]
     : ['run', '-q', '-p', 'brazierd', '--', '--data-dir', directory]
   const child = spawn(command, args, {
-    cwd: installedApp ? undefined : repositoryRoot(),
+    cwd: installedApp || useInstalledDaemon ? undefined : repositoryRoot(),
     env: {
       ...process.env,
       RUST_LOG: process.env.RUST_LOG ?? 'brazierd=info',
@@ -296,11 +298,12 @@ function attachContextMenu(window: BrowserWindow): void {
  */
 function iconPath(): string | undefined {
   const file = process.platform === 'darwin' ? 'icon-mac.png' : 'icon.png'
-  const candidates = app.isPackaged
-    ? [join(process.resourcesPath, file), join(process.resourcesPath, 'icon.png')]
-    : installedApp
-      ? [join(__dirname, '../..', file)]
-    : [join(repositoryRoot(), 'apps', 'desktop', 'build', file)]
+  const installedIcon = join(__dirname, '../..', file)
+  const candidates = process.env.BRAZIER_INSTALLED === '1' || existsSync(installedIcon)
+    ? [installedIcon]
+    : app.isPackaged
+      ? [join(process.resourcesPath, file), join(process.resourcesPath, 'icon.png')]
+      : [join(repositoryRoot(), 'apps', 'desktop', 'build', file)]
   return candidates.find((candidate) => existsSync(candidate))
 }
 

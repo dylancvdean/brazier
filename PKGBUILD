@@ -1,12 +1,15 @@
 # Maintainer: Dylan C. V. Dean <dylan@dylancvdean.com>
 
 pkgname=brazier
-pkgver=0.1.0.r0.g0000000
+pkgver=0.1.0.r123.g7e011f6
 pkgrel=1
 pkgdesc='Desktop client and local API for open-weight AI models'
 arch=('x86_64' 'aarch64')
 url='https://github.com/dylancvdean/brazier'
 license=('MIT')
+# The daemon is built as a stripped Cargo release binary; makepkg's debug
+# package/index hook has no DWARF data to process.
+options=(!debug !lto)
 depends=('electron')
 makedepends=('cargo' 'git' 'nodejs' 'pnpm' 'rust')
 # source=("${pkgname}::git+${url}.git#branch=master")
@@ -30,6 +33,12 @@ prepare() {
 
 build() {
   cd "${srcdir}/${pkgname}"
+  # sqlx builds bundled SQLite for its procedural macro. Arch's C-level LTO
+  # leaves SQLite symbols out of that loadable macro (`sqlite3_db_config` is
+  # then unresolved), so keep this mixed Rust/C build non-LTO.
+  export CFLAGS="${CFLAGS//-flto=auto/}"
+  export CXXFLAGS="${CXXFLAGS//-flto=auto/}"
+  cargo clean
   pnpm --filter @brazier/desktop run build:agent
   pnpm --filter @brazier/desktop exec electron-vite build
   cargo build --release --locked -p brazierd
