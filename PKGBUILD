@@ -1,7 +1,7 @@
 # Maintainer: Dylan C. V. Dean <dylan@dylancvdean.com>
 
 pkgname=brazier
-pkgver=0.1.0.r123.g7e011f6
+pkgver=0.1.0.r125.g28a5240
 pkgrel=1
 pkgdesc='Desktop client and local API for open-weight AI models'
 arch=('x86_64' 'aarch64')
