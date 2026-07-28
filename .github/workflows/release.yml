@@ -91,7 +91,10 @@ jobs:
         run: |
           cargo build --release --locked -p brazierd
           pnpm --filter @brazier/desktop run build
-          pnpm --filter @brazier/desktop exec electron-builder --mac --arm64 --publish always
+          # The final publish job creates exactly one GitHub Release after both
+          # platform builds and signatures are available. Publishing here would
+          # create a draft that races that final release creation.
+          pnpm --filter @brazier/desktop exec electron-builder --mac --arm64 --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: macos-release
@@ -122,7 +125,7 @@ jobs:
         run: |
           cargo build --release --locked -p brazierd
           pnpm --filter @brazier/desktop run build
-          pnpm --filter @brazier/desktop exec electron-builder --linux AppImage --x64 --publish always
+          pnpm --filter @brazier/desktop exec electron-builder --linux AppImage --x64 --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: appimage-release
