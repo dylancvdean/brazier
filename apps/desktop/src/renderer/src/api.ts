@@ -1492,6 +1492,10 @@ export type SdcppComponentVariant = {
   label: string
   path: string
   repo_id?: string | null
+  /** Optional sd-cli flag override, e.g. `tae` instead of `vae`. */
+  flag?: string | null
+  /** Replace this component in the existing model directory. */
+  in_place?: boolean
   approx_bytes?: number | null
   note?: string | null
 }
@@ -1545,10 +1549,11 @@ export function resolveBundleVariants(
     const wanted = choices[index]
     const variant = component.variants?.find((option) => option.label === wanted)
     if (!variant) return component
-    picked.push(variant.label)
+    if (!variant.in_place) picked.push(variant.label)
     return {
       ...component,
       repo_id: variant.repo_id || component.repo_id,
+      flag: variant.flag ?? component.flag,
       path: variant.path,
       approx_bytes: variant.approx_bytes ?? component.approx_bytes
     }

@@ -3707,6 +3707,12 @@ a.inline-link {
   background: #050505;
 }
 
+/* Native fullscreen should show the entire clip rather than inherit a preview crop. */
+video:fullscreen,
+video:-webkit-full-screen {
+  object-fit: contain;
+}
+
 .generate-card figcaption {
   display: flex;
   align-items: center;

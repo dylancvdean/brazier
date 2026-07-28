@@ -32,6 +32,17 @@ pub struct Variant {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_id: Option<String>,
+    /// Override the sd-cli argument used for this alternative. This lets a
+    /// bundle offer, for example, a compact TAE decoder (`--tae`) alongside
+    /// the full-quality VAE (`--vae`) without duplicating its large model
+    /// weights.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<String>,
+    /// Switch this file within the same model directory instead of creating a
+    /// separate variant install. Decoders use this because their large
+    /// diffusion model and text encoder are shared.
+    #[serde(default)]
+    pub in_place: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approx_bytes: Option<u64>,
     /// One-line note on what this size costs or buys.
@@ -168,7 +179,12 @@ impl Bundle {
     pub fn installed(&self, data_dir: &Path) -> bool {
         self.install_dir(data_dir)
             .ok()
-            .is_some_and(|dir| sdcpp::load_manifest(&dir).is_ok())
+            .and_then(|dir| sdcpp::load_manifest(&dir).ok())
+            .is_some_and(|manifest| {
+                manifest.modality == self.modality
+                    && manifest.args == self.manifest().args
+                    && manifest.single_file == self.manifest().single_file
+            })
     }
 }
 
@@ -333,6 +349,16 @@ pub fn validate(bundle: &Bundle) -> anyhow::Result<()> {
             if let Some(repo_id) = &variant.repo_id {
                 crate::models_store::validate_repo_id(repo_id)
                     .with_context(|| format!("invalid repository `{repo_id}`"))?;
+            }
+            if let Some(flag) = &variant.flag {
+                anyhow::ensure!(
+                    !flag.is_empty()
+                        && flag.len() <= 40
+                        && flag
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')),
+                    "invalid sd-cli flag `{flag}`"
+                );
             }
             sdcpp::component_destination(
                 Path::new("/"),
@@ -538,13 +564,17 @@ mod tests {
     #[test]
     fn nested_repo_paths_flatten_to_file_names() {
         let wan = builtin("wan2.2-ti2v-5b").expect("wan bundle");
-        let vae = wan
+        let decoder = wan
             .components
             .iter()
-            .find(|component| component.flag.as_deref() == Some("vae"))
-            .expect("vae component");
-        assert_eq!(vae.path, "split_files/vae/wan2.2_vae.safetensors");
-        assert_eq!(vae.file_name(), "wan2.2_vae.safetensors");
+            .find(|component| component.flag.as_deref() == Some("tae"))
+            .expect("TAEHV decoder component");
+        assert_eq!(decoder.path, "safetensors/taew2_2.safetensors");
+        assert_eq!(decoder.file_name(), "taew2_2.safetensors");
+        assert!(decoder.variants.iter().any(|variant| {
+            variant.flag.as_deref() == Some("vae")
+                && variant.path == "split_files/vae/wan2.2_vae.safetensors"
+        }));
     }
 
     fn sample_bundle(id: &str) -> Bundle {

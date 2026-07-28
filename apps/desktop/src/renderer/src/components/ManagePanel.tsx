@@ -1667,7 +1667,20 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
             const chosen = variantChoices[bundle.id] ?? {}
             const resolved = resolveBundleVariants(bundle, chosen)
             const queued = Boolean(queuedRepos[resolved.id])
-            const installed = bundle.installed || installedModelIds.has(resolved.model_id)
+            const chosenOptions = Object.entries(chosen)
+              .map(([index, label]) =>
+                bundle.components[Number(index)]?.variants?.find((option) => option.label === label)
+              )
+              .filter((option): option is NonNullable<typeof option> => option != null)
+            // Decoder alternatives replace just that file and rewrite the same
+            // manifest, so always leave their action available as “switch”.
+            // Other variants remain distinct model installs.
+            const hasInPlaceChoice = chosenOptions.some((option) => option.in_place)
+            const installed = hasInPlaceChoice
+              ? false
+              : Object.keys(chosen).length === 0
+                ? bundle.installed
+                : installedModelIds.has(resolved.model_id)
             const totalBytes = resolved.components.reduce(
               (sum, component) => sum + (component.approx_bytes ?? 0),
               0

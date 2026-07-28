@@ -405,11 +405,27 @@
           "approx_bytes": 9999658848
         },
         {
-          "repo_id": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
-          "path": "split_files/vae/wan2.2_vae.safetensors",
-          "role": "VAE",
-          "flag": "vae",
-          "approx_bytes": 1409400960
+          "repo_id": "madebyollin/taehv",
+          "path": "safetensors/taew2_2.safetensors",
+          "role": "Video decoder",
+          "flag": "tae",
+          "variants": [
+            {
+              "label": "TAEHV · low VRAM (recommended)",
+              "path": "safetensors/taew2_2.safetensors",
+              "in_place": true,
+              "note": "Fast, low-memory decoder. Slightly softer detail than the full VAE."
+            },
+            {
+              "label": "Full VAE · higher quality",
+              "repo_id": "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+              "path": "split_files/vae/wan2.2_vae.safetensors",
+              "flag": "vae",
+              "in_place": true,
+              "approx_bytes": 1409400960,
+              "note": "Highest decode fidelity, but can require tens of GiB of VRAM."
+            }
+          ]
         },
         {
           "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
@@ -446,11 +462,27 @@
           "approx_bytes": 2838104528
         },
         {
-          "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
-          "path": "split_files/vae/wan_2.1_vae.safetensors",
-          "role": "VAE",
-          "flag": "vae",
-          "approx_bytes": 253815318
+          "repo_id": "madebyollin/taehv",
+          "path": "safetensors/taew2_1.safetensors",
+          "role": "Video decoder",
+          "flag": "tae",
+          "variants": [
+            {
+              "label": "TAEHV · low VRAM (recommended)",
+              "path": "safetensors/taew2_1.safetensors",
+              "in_place": true,
+              "note": "Fast, low-memory decoder. Slightly softer detail than the full VAE."
+            },
+            {
+              "label": "Full VAE · higher quality",
+              "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+              "path": "split_files/vae/wan_2.1_vae.safetensors",
+              "flag": "vae",
+              "in_place": true,
+              "approx_bytes": 253815318,
+              "note": "Highest decode fidelity, but can require tens of GiB of VRAM."
+            }
+          ]
         },
         {
           "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
@@ -533,11 +565,27 @@
           ]
         },
         {
-          "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
-          "path": "split_files/vae/wan_2.1_vae.safetensors",
-          "role": "VAE",
-          "flag": "vae",
-          "approx_bytes": 253815318
+          "repo_id": "madebyollin/taehv",
+          "path": "safetensors/taew2_1.safetensors",
+          "role": "Video decoder",
+          "flag": "tae",
+          "variants": [
+            {
+              "label": "TAEHV · low VRAM (recommended)",
+              "path": "safetensors/taew2_1.safetensors",
+              "in_place": true,
+              "note": "Fast, low-memory decoder. Slightly softer detail than the full VAE."
+            },
+            {
+              "label": "Full VAE · higher quality",
+              "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+              "path": "split_files/vae/wan_2.1_vae.safetensors",
+              "flag": "vae",
+              "in_place": true,
+              "approx_bytes": 253815318,
+              "note": "Highest decode fidelity, but can require tens of GiB of VRAM."
+            }
+          ]
         },
         {
           "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
