@@ -1691,6 +1691,58 @@ fn format_tail(tail: &str) -> String {
     }
 }
 
+/// Resolve the file produced by `sd-cli` for a video request.
+///
+/// The pinned stable-diffusion.cpp release always writes its video encoder's
+/// AVI container, appending `.avi` even when the requested output name ends in
+/// `.mp4`. Convert that AVI here so callers consistently receive a browser-
+/// playable MP4 instead of treating a successfully rendered clip as missing.
+async fn finalize_video_output(requested_output: &Path) -> anyhow::Result<PathBuf> {
+    if requested_output.is_file() {
+        return Ok(requested_output.to_path_buf());
+    }
+
+    let avi_output = PathBuf::from(format!("{}.avi", requested_output.display()));
+    anyhow::ensure!(
+        avi_output.is_file(),
+        "sd-cli did not produce an output video at {} (also checked {})",
+        requested_output.display(),
+        avi_output.display(),
+    );
+
+    let ffmpeg = crate::toolchain_hints::resolve_command("ffmpeg").ok_or_else(|| {
+        anyhow::anyhow!(
+            "sd-cli produced {} as AVI, but ffmpeg is required to convert it to a playable MP4. {}",
+            avi_output.display(),
+            crate::media::ffmpeg_missing_message(),
+        )
+    })?;
+    let output = Command::new(ffmpeg)
+        .arg("-y")
+        .arg("-i")
+        .arg(&avi_output)
+        .args([
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(requested_output)
+        .output()
+        .await
+        .context("convert sd-cli AVI output to MP4 with ffmpeg")?;
+    anyhow::ensure!(
+        output.status.success() && requested_output.is_file(),
+        "sd-cli produced {}, but ffmpeg could not convert it to MP4: {}",
+        avi_output.display(),
+        String::from_utf8_lossy(&output.stderr).trim(),
+    );
+    let _ = tokio::fs::remove_file(&avi_output).await;
+    Ok(requested_output.to_path_buf())
+}
+
 /// Generate a single image with sd-cli. Resolves the binary and the model's
 /// manifest, writes output under a fresh temp directory, and serializes GPU
 /// access via a process-global lock.
@@ -1928,11 +1980,7 @@ pub async fn generate_video(
         total_steps: steps,
     });
     run_sd_cli(command, timeout, &job).await?;
-    anyhow::ensure!(
-        output_path.is_file(),
-        "sd-cli did not produce an output video at {}",
-        output_path.display()
-    );
+    let output_path = finalize_video_output(&output_path).await?;
 
     Ok(GenerateResult {
         output_path,
