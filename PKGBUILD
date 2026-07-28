@@ -52,6 +52,7 @@ package() {
   install -Dm644 apps/desktop/build/icon.png "${pkgdir}/usr/share/pixmaps/${pkgname}.png"
   install -Dm644 apps/desktop/build/icon.png "${pkgdir}/usr/share/icons/hicolor/1024x1024/apps/${pkgname}.png"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 THIRD_PARTY_NOTICES.md "${pkgdir}/usr/share/licenses/${pkgname}/THIRD_PARTY_NOTICES.md"
 
   install -dm755 "${pkgdir}/usr/bin"
   cat > "${pkgdir}/usr/bin/${pkgname}" <<'EOF'

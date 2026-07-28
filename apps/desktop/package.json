@@ -38,6 +38,7 @@
     "@vitejs/plugin-react": "^5.0.0",
     "electron": "^39.0.0",
     "electron-builder": "^26.0.0",
+    "electron-updater": "^6.8.9",
     "electron-vite": "^5.0.0",
     "esbuild": "^0.28.1",
     "typescript": "^5.9.0",
@@ -45,8 +46,17 @@
     "vitest": "^3.2.0"
   },
   "build": {
-    "appId": "dev.brazier.desktop",
+    "appId": "com.brazier.desktop",
     "productName": "Brazier",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "dylancvdean",
+        "repo": "brazier",
+        "releaseType": "draft"
+      }
+    ],
+    "generateUpdatesFilesForAllChannels": true,
     "files": [
       "out/**/*",
       "package.json",
@@ -86,13 +96,20 @@
       ],
       "category": "Utility"
     },
+    "appImage": {
+      "artifactName": "Brazier.AppImage"
+    },
     "mac": {
       "icon": "build/icon-mac.png",
       "target": [
         "dmg",
         "zip"
       ],
-      "category": "public.app-category.utilities"
+      "category": "public.app-category.utilities",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "win": {
       "target": [

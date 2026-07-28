@@ -64,6 +64,16 @@ leaving build artifacts in the checkout:
 ```sh
 makepkg --config packaging/makepkg-local.conf -si
 ```
+
+## Distribution and updates
+
+GitHub Releases provides a signed/notarized Apple Silicon macOS distribution
+and a self-updating Linux AppImage. The AppImage is always named
+`Brazier.AppImage`, so it can replace itself in place without invalidating a
+desktop launcher. Arch users should use the PKGBUILD/AUR package; pacman owns
+updates for that installation. See [the release guide](docs/releasing.md) for
+release credentials and signature verification.
+
 ## Security
 
 Brazier collects no telemetry. Non-upstream forks,

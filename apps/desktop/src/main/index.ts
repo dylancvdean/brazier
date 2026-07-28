@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 
 import { AgentSupervisor, registerAgentIpc } from './agent'
+import { startUpdates } from './updates'
 
 /**
  * Where Electron kept per-app state before the rename below.
@@ -538,6 +539,7 @@ app.whenReady().then(async () => {
     console.error('[brazier] daemon failed to start', error)
   })
   await createWindow()
+  startUpdates()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow()
   })

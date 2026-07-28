@@ -1,0 +1,155 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to release
+        required: true
+        type: string
+
+# Jobs start read-only. Upload jobs get only release write access; the final
+# signing job alone gets an OIDC identity, not a long-lived Linux signing key.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: release
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${REQUESTED_TAG:-${GITHUB_REF_NAME}}"
+          case "$tag" in v*) ;; *) echo "Release tags must start with v" >&2; exit 1;; esac
+          test "$tag" = "v$(node -p \"require('./package.json').version\")"
+          test "$tag" = "v$(node -p \"require('./apps/desktop/package.json').version\")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: validate
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - run: pnpm install --frozen-lockfile
+      - name: Require macOS signing credentials
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$CSC_LINK"
+          test -n "$CSC_KEY_PASSWORD"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_APP_SPECIFIC_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+      - name: Build signed and notarized Apple Silicon distribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cargo build --release --locked -p brazierd
+          pnpm --filter @brazier/desktop exec electron-builder --mac --arm64 --publish always
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: apps/desktop/dist/*
+          if-no-files-found: error
+
+  appimage:
+    needs: [validate, macos]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - run: pnpm install --frozen-lockfile
+      - name: Build AppImage distribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cargo build --release --locked -p brazierd
+          pnpm --filter @brazier/desktop exec electron-builder --linux AppImage --x64 --publish always
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage-release
+          path: apps/desktop/dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, macos, appimage]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - uses: sigstore/cosign-installer@v3
+      - name: Create checksums and Sigstore bundles
+        run: |
+          cd release
+          sha512sum * > SHA512SUMS
+          for asset in *; do
+            test -f "$asset" || continue
+            cosign sign-blob --yes --bundle "$asset.sigstore.json" "$asset"
+          done
+      - name: Publish GitHub Release and updater metadata
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(needs.validate.outputs.tag, '-') }}
+          files: release/*

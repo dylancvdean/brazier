@@ -238,7 +238,14 @@ what is left is mostly the difference between working and trustworthy.
   ZIP containing an allow-listed engine, runtime, hardware, and toolchain
   snapshot. Conversations, attachments, model output, credentials, and logs are
   excluded; secret-shaped fields, URL query strings, and user-home/data-directory
-  path prefixes are scrubbed before serialization. Still open: API-key management
-  (rotation and per-client keys; today there is one key, generated at startup or
-  supplied), SBOMs, signed updates, notarization, and release packaging.
-- Complete public naming review before stable application identifiers ship.
+  path prefixes are scrubbed before serialization. **Release delivery is wired:**
+  a version tag builds a draft GitHub Release, with a signed/notarized Apple
+  Silicon macOS distribution and a fixed-name (`Brazier.AppImage`) Linux
+  AppImage; the final job signs every asset and its checksum manifest with
+  Sigstore before publishing. Packaged macOS and AppImage installs check that
+  GitHub Releases feed and offer a restart to install; the AppImage replaces its
+  own stable path in place, while pacman/AUR installations remain package-manager
+  owned. Still open: API-key management (rotation and per-client keys; today
+  there is one key, generated at startup or supplied) and SBOMs.
+- Complete public naming review before a stable public release, despite the
+  release-ready `com.brazier.desktop` application identifier.
