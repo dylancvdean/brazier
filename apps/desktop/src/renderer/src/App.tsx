@@ -73,6 +73,10 @@ import { AgentMode, type AgentComposerControls, type AgentSidebarControls } from
 import { AgentSessionSidebar } from './components/AgentSessionSidebar'
 import { DownloadTray } from './components/DownloadTray'
 import { GenerationActivity } from './components/GenerationActivity'
+import {
+  GenerateHistorySidebar,
+  type GenerateHistoryEntry
+} from './components/GenerateHistorySidebar'
 import { MessageMedia } from './components/MessageMedia'
 import { Markdown } from './components/Markdown'
 import { ReasoningDisclosure } from './components/ReasoningDisclosure'
@@ -112,8 +116,27 @@ import type { Attachment, ContentPart, Conversation, Message, Role } from './typ
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 const CHAT_TITLE_MODE_KEY = 'brazier.chatTitleMode.v1'
+const GENERATE_HISTORY_KEY = 'brazier.generateHistory.v1'
 
 type ChatTitleMode = 'never' | 'always' | 'over-20-tokens'
+
+function readGenerateHistory(): GenerateHistoryEntry[] {
+  try {
+    const value = localStorage.getItem(GENERATE_HISTORY_KEY)
+    const parsed = value ? (JSON.parse(value) as unknown) : []
+    return Array.isArray(parsed) ? (parsed as GenerateHistoryEntry[]) : []
+  } catch {
+    return []
+  }
+}
+
+function writeGenerateHistory(entries: GenerateHistoryEntry[]): void {
+  try {
+    localStorage.setItem(GENERATE_HISTORY_KEY, JSON.stringify(entries.slice(0, 100)))
+  } catch {
+    // Best-effort local history.
+  }
+}
 
 function readChatTitleMode(): ChatTitleMode {
   try {
@@ -436,6 +459,10 @@ export function App(): React.JSX.Element {
   const [voiceModel, setVoiceModel] = useState('')
   const [generateModel, setGenerateModel] = useState('')
   const [generateModality, setGenerateModality] = useState<'image' | 'video'>('image')
+  const [generateHistory, setGenerateHistory] = useState<GenerateHistoryEntry[]>(() =>
+    readGenerateHistory()
+  )
+  const [activeGenerateHistoryId, setActiveGenerateHistoryId] = useState<string | null>(null)
   const [persona, setPersona] = useState('You are a helpful assistant.')
   const personaEdited = useRef(false)
   // Agent mode has no composer of its own; it publishes these so the one at the
@@ -1407,6 +1434,12 @@ export function App(): React.JSX.Element {
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         {appMode === 'agent' ? (
           <AgentSessionSidebar controls={agentSidebar} />
+        ) : appMode === 'generate' ? (
+          <GenerateHistorySidebar
+            entries={generateHistory}
+            activeId={activeGenerateHistoryId}
+            onSelect={setActiveGenerateHistoryId}
+          />
         ) : (
           <>
             <button className="new-chat" onClick={() => void newConversation()}>
@@ -1686,6 +1719,16 @@ export function App(): React.JSX.Element {
             settings={runtime}
             hardware={hardware}
             onError={setError}
+            history={generateHistory}
+            activeHistoryId={activeGenerateHistoryId}
+            onGenerated={(entry) => {
+              setGenerateHistory((current) => {
+                const next = [entry, ...current]
+                writeGenerateHistory(next)
+                return next
+              })
+              setActiveGenerateHistoryId(entry.id)
+            }}
           />
         ) : null}
         {appMode === 'voice' ? (

@@ -549,6 +549,54 @@ code {
 .conversation-menu button:hover { background: #292929; }
 .conversation-menu button.danger { color: #ec8d8d; }
 
+.generate-history-entry {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 9px;
+  padding: 7px;
+  border: 0;
+  border-radius: 9px;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.generate-history-entry:hover { background: #090909; }
+.generate-history-entry.active { background: #171717; }
+
+.generate-history-thumbnail {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex: none;
+  overflow: hidden;
+  place-items: center;
+  border-radius: 7px;
+  color: #888;
+  background: #0a0a0a;
+}
+
+.generate-history-thumbnail img,
+.generate-history-thumbnail video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.generate-history-copy { min-width: 0; }
+.generate-history-copy strong,
+.generate-history-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generate-history-copy strong { font-size: 11px; font-weight: 500; }
+.generate-history-copy small { margin-top: 3px; color: #707070; font-size: 9px; }
+
 .empty-sidebar,
 .privacy-note {
   color: var(--muted);

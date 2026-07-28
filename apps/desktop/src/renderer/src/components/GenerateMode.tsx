@@ -19,6 +19,7 @@ import {
   AMD_APU_VIDEO_DEFAULTS,
   usesAmdApuVulkanDefaults
 } from '../runtime-defaults'
+import type { GenerateHistoryEntry } from './GenerateHistorySidebar'
 
 type Modality = 'image' | 'video'
 
@@ -32,6 +33,9 @@ type Props = {
   settings: RuntimeSettings | null
   hardware: HardwareInfo | null
   onError: (message: string | null) => void
+  history: GenerateHistoryEntry[]
+  activeHistoryId: string | null
+  onGenerated: (entry: GenerateHistoryEntry) => void
 }
 
 function errorText(cause: unknown): string {
@@ -126,6 +130,18 @@ export function GenerateMode(props: Props) {
   const useApuDefaults = usesAmdApuVulkanDefaults(props.settings, props.hardware)
 
   useEffect(() => {
+    if (!props.activeHistoryId) {
+      setResults([])
+      return
+    }
+    const entry = props.history.find((candidate) => candidate.id === props.activeHistoryId)
+    if (!entry) return
+    setPrompt(entry.prompt)
+    setNegative(entry.negativePrompt)
+    setResults([entry.result])
+  }, [props.activeHistoryId, props.history])
+
+  useEffect(() => {
     const curated = defaultsByModel[selected]
     const configured = configuredByModel[selected]
     if (!curated && !configured) return
@@ -180,6 +196,14 @@ export function GenerateMode(props: Props) {
       const result =
         modality === 'image' ? await generateImage(body) : await generateVideo(body)
       setResults((current) => [result, ...current])
+      props.onGenerated({
+        id: crypto.randomUUID(),
+        prompt: body.prompt,
+        negativePrompt: body.negative_prompt ?? '',
+        modality,
+        result,
+        createdAt: new Date().toISOString()
+      })
     } catch (cause) {
       // Stopping it yourself is not an error worth a red banner.
       props.onError(isCancellation(cause) ? null : errorText(cause))
