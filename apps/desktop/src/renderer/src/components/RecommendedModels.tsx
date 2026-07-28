@@ -24,8 +24,11 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   downloadModel,
   downloadPersonaplexModel,
+  buildRuntime,
+  activateRuntime,
   formatBytes,
   installSdcppBundle,
+  listRuntimes,
   recordRecommendationInstall,
   type BundleRecommendation,
   type ProgressEvent,
@@ -157,6 +160,7 @@ type Props = {
 export function RecommendedModels(props: Props): React.JSX.Element {
   const { recommendations, onInstalled, onError } = props
   const [states, setStates] = useState<Record<string, InstallState>>({})
+  const [includeCompanions, setIncludeCompanions] = useState<Record<string, boolean>>({})
 
   const setState = useCallback((key: string, patch: Partial<InstallState>) => {
     setStates((current) => ({ ...current, [key]: { ...(current[key] ?? IDLE), ...patch } }))
@@ -228,6 +232,23 @@ export function RecommendedModels(props: Props): React.JSX.Element {
         text: `Published in ${files.length} parts, all of which are downloaded together.`
       })
     }
+    const companions = entry.companion_files ?? []
+    const includeCompanion = includeCompanions[key] ?? true
+    if (companions.length > 0) {
+      notes.push({
+        tone: 'plain',
+        text: 'Optional vision projector: lets this model understand images you attach. It is not needed for text-only chat.'
+      })
+    }
+    if (entry.runtime_build) {
+      notes.push({
+        tone: 'plain',
+        text: `${entry.runtime_build.label} is required for this model and will be built and activated automatically.`
+      })
+    }
+    if (entry.unresolved_companions) {
+      notes.push({ tone: 'warn', text: entry.unresolved_companions })
+    }
 
     const meta = entry.bytes
       ? `${entry.quant ? `${entry.quant} · ` : ''}${formatBytes(entry.bytes)} · ${entry.repo_id}`
@@ -248,23 +269,70 @@ export function RecommendedModels(props: Props): React.JSX.Element {
         meta={meta}
         notes={notes}
         action={
-          <InstallButton
-            state={state}
-            label="Install"
-            disabled={Boolean(entry.unresolved) || files.length === 0}
-            onClick={() =>
-              void run(key, categories, entry.id, async (onProgress) => {
-                let modelId: string | undefined
-                // Every shard, in order — llama.cpp needs the whole set before
-                // it can load the first one.
-                for (const file of files) {
-                  const result = await downloadModel(entry.repo_id, file, onProgress)
-                  modelId ??= result.model_id
-                }
-                return modelId
-              })
-            }
-          />
+          <div className="recommendation-actions">
+            {companions.length > 0 ? (
+              <label className="recommendation-companion-choice">
+                <input
+                  type="checkbox"
+                  checked={includeCompanion}
+                  disabled={state.busy || state.done}
+                  onChange={(event) =>
+                    setIncludeCompanions((current) => ({ ...current, [key]: event.target.checked }))
+                  }
+                />
+                Add image understanding
+              </label>
+            ) : null}
+            <InstallButton
+              state={state}
+              label="Install"
+              disabled={Boolean(entry.unresolved) || files.length === 0}
+              onClick={() =>
+                void run(key, categories, entry.id, async (onProgress) => {
+                  let modelId: string | undefined
+                  // Every shard, in order — llama.cpp needs the whole set before
+                  // it can load the first one.
+                  for (const file of files) {
+                    const result = await downloadModel(entry.repo_id, file, onProgress)
+                    modelId ??= result.model_id
+                  }
+                  // Companion files (vision projectors, etc.) go into the same
+                  // directory; llama.cpp auto-attaches any mmproj it finds there.
+                  if (includeCompanion) {
+                    for (const file of companions) {
+                      await downloadModel(entry.repo_id, file, onProgress)
+                    }
+                  }
+                  if (entry.runtime_build) {
+                    const existing = (await listRuntimes()).data.find(
+                      (runtime) =>
+                        runtime.kind === 'source' &&
+                        runtime.engine === entry.runtime_build?.engine &&
+                        runtime.repository === entry.runtime_build?.repository
+                    )
+                    if (existing) {
+                      await activateRuntime(existing.id)
+                    } else {
+                      const built = await buildRuntime(
+                        entry.runtime_build.engine,
+                        entry.runtime_build.repository,
+                        entry.runtime_build.revision,
+                        entry.runtime_build.target,
+                        0,
+                        onProgress
+                      )
+                      const runtime = (await listRuntimes()).data.find(
+                        (candidate) => candidate.path === built.binary
+                      )
+                      if (!runtime) throw new Error('PrismML llama.cpp built but could not be registered.')
+                      await activateRuntime(runtime.id)
+                    }
+                  }
+                  return modelId
+                })
+              }
+            />
+          </div>
         }
       />
     )

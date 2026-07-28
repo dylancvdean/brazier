@@ -60,7 +60,12 @@ const QUANT_LADDER: [(&str, &[&str]); 6] = [
 /// draft model for speculative decoding — and they are much smaller than any
 /// real quant. Without this, "the smallest file that fits" reliably picks a
 /// 500MB projector and calls it a 26B model.
-const COMPANION_MARKERS: [&str; 4] = ["mmproj", "mtp-", "-draft", "projector"];
+///
+/// `dspark` covers PrismML's DSpark speculative-decoding drafter layer, shipped
+/// alongside the Bonsai weights — at ~7 GB the bf16 reference is large enough
+/// to fool the size-based fallback otherwise, and would be picked as "the
+/// model" on a 16 GB machine.
+const COMPANION_MARKERS: [&str; 5] = ["mmproj", "mtp-", "-draft", "projector", "dspark"];
 
 // ---------------------------------------------------------------------------
 // Catalogue
@@ -84,6 +89,17 @@ pub struct RepoRecommendation {
     pub unavailable_on: Vec<String>,
     #[serde(default)]
     pub unavailable_note: Option<String>,
+    /// Optional companion files to fetch into the same model directory after
+    /// the main weights, e.g. a vision projector (`mmproj-…gguf`) that
+    /// `llama.cpp` auto-attaches when it sits next to the model. Filters the
+    /// repository's real file list at resolve time so an absent companion is
+    /// reported instead of failing the install.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companion_files: Vec<String>,
+    /// A mainline-compatible recommendation to use when this model requires a
+    /// source-built runtime fork whose local toolchain is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<Box<RepoRecommendation>>,
 }
 
 impl RepoRecommendation {
@@ -705,7 +721,9 @@ mod tests {
     }
 
     /// `prism-ml/Bonsai-27B-gguf` names its builds in a scheme the ladder does
-    /// not recognise. The recommendation still has to resolve to something.
+    /// not recognise, and ships a speculative-decoding drafter (`dspark`)
+    /// alongside the weights that is large enough to fool a size-based fallback
+    /// otherwise. The recommendation still has to resolve to the real model.
     #[test]
     fn an_unfamiliar_quant_scheme_falls_back_to_the_largest_that_fits() {
         let files = vec![
@@ -721,13 +739,17 @@ mod tests {
             ),
             ("Bonsai-27B-F16.gguf".to_owned(), Some(53_800_000_000)),
         ];
-        // 8GB machine: 4.8GB budget. The projector must not be chosen.
+        // 8GB machine: 4.8GB budget. The projector and drafter must not be
+        // chosen; the only real build that fits is the 1-bit pack.
         let small = choose_quant(&files, gb(8)).unwrap();
         assert_eq!(small.files, vec!["Bonsai-27B-Q1_0.gguf"]);
         assert!(!small.tight);
-        // 16GB machine: 9.6GB budget.
+        // 16GB machine: 9.6GB budget. The 7.3GB dspark-bf16 drafter would have
+        // been picked by the size fallback before `dspark` was a companion
+        // marker; it must now still resolve to the 1-bit model, since the
+        // 53.8GB full-precision build does not fit.
         let larger = choose_quant(&files, gb(16)).unwrap();
-        assert_eq!(larger.files, vec!["Bonsai-27B-dspark-bf16.gguf"]);
+        assert_eq!(larger.files, vec!["Bonsai-27B-Q1_0.gguf"]);
     }
 
     /// Nothing fitting is a fact worth stating, not a reason to show no model.

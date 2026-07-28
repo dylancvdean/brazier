@@ -1605,6 +1605,86 @@ async fn resolve_repo_recommendation(
                 json!("This repository publishes no GGUF weights Brazier can run.");
         }
     }
+
+    // Vision projectors are optional companions, not part of the quant ladder.
+    // Discover them for every recommendation instead of maintaining a fragile
+    // per-model list. Prefer Q8 when a repository publishes several projectors.
+    let mut discovered_companions: Vec<&str> = listing
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .filter(|path| {
+            path.rsplit('/').next().is_some_and(|name| {
+                let name = name.to_ascii_lowercase();
+                name.ends_with(".gguf") && name.contains("mmproj")
+            })
+        })
+        .collect();
+    discovered_companions.sort_by_key(|path| (!path.to_ascii_lowercase().contains("q8"), *path));
+    if let Some(companion) = discovered_companions.first() {
+        resolved["companion_files"] = json!([companion]);
+    }
+
+    // Explicit companion files remain supported for catalogue overrides that
+    // need a nonstandard projector name.
+    if !entry.companion_files.is_empty() && discovered_companions.is_empty() {
+        let published: std::collections::HashSet<&str> =
+            listing.iter().map(|(path, _)| path.as_str()).collect();
+        let mut companions: Vec<&str> = Vec::new();
+        let mut missing: Vec<&str> = Vec::new();
+        for wanted in &entry.companion_files {
+            if published.contains(wanted.as_str()) {
+                companions.push(wanted);
+            } else {
+                missing.push(wanted);
+            }
+        }
+        if !companions.is_empty() {
+            resolved["companion_files"] = json!(companions);
+        }
+        if !missing.is_empty() {
+            resolved["unresolved_companions"] = json!(format!(
+                "Companion file(s) {} not published by this repository.",
+                missing.join(", ")
+            ));
+        }
+    }
+    resolved
+}
+
+/// Resolve a recommendation that may require the PrismML llama.cpp fork.
+/// Bonsai is only offered when its build prerequisites are already present;
+/// otherwise its catalogue-provided mainline fallback is resolved instead.
+async fn resolve_recommended_repo(
+    state: &AppState,
+    entry: &recommendations::RepoRecommendation,
+    memory: u64,
+    build_target: crate::runtime_settings::RuntimeTarget,
+) -> Value {
+    let needs_prismml = matches!(
+        entry.repo_id.to_ascii_lowercase().as_str(),
+        "prism-ml/bonsai-27b-gguf" | "prism-ml/ternary-bonsai-27b-gguf"
+    );
+    if needs_prismml {
+        if let Err(reason) = builds::llama_cpp_build_preflight(build_target) {
+            if let Some(fallback) = entry.fallback.as_deref() {
+                let mut resolved = resolve_repo_recommendation(state, fallback, memory).await;
+                resolved["substituted"] = json!(format!(
+                    "Bonsai needs PrismML llama.cpp, but it cannot be built here yet: {reason}. Showing this mainline llama.cpp model instead."
+                ));
+                return resolved;
+            }
+        }
+    }
+    let mut resolved = resolve_repo_recommendation(state, entry, memory).await;
+    if needs_prismml {
+        resolved["runtime_build"] = json!({
+            "engine": "llama.cpp",
+            "repository": "https://github.com/PrismML-Eng/llama.cpp",
+            "revision": "",
+            "target": build_target.as_str(),
+            "label": "PrismML llama.cpp"
+        });
+    }
     resolved
 }
 
@@ -1641,10 +1721,11 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
     };
 
     let mut categories = serde_json::Map::new();
+    let build_target = hardware.recommended_target;
     if let Some(text) = tier.text.as_ref() {
         categories.insert(
             "text".into(),
-            resolve_repo_recommendation(&state, text, memory).await,
+            resolve_recommended_repo(&state, text, memory, build_target).await,
         );
     }
     if let Some(agent) = recommendations::resolved_agent(tier) {

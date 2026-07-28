@@ -1138,6 +1138,19 @@ export type RepoRecommendation = {
   unresolved?: string
   /** Why the chat model is standing in for the tier's own agent model. */
   substituted?: string
+  /** Extra files to fetch after the main weights, in order. E.g. a vision
+   *  projector that `llama.cpp` auto-attaches when it sits next to the model. */
+  companion_files?: string[]
+  /** Companion file(s) requested but not published by the repository. */
+  unresolved_companions?: string
+  /** A runtime fork that is built and activated with this recommendation. */
+  runtime_build?: {
+    engine: string
+    repository: string
+    revision: string
+    target: string
+    label: string
+  }
 }
 
 /** An image or video model, named by stable-diffusion.cpp bundle. */

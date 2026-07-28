@@ -195,6 +195,31 @@ fn command_available(program: &str) -> bool {
     })
 }
 
+/// Check the local prerequisites for a llama.cpp source build without creating
+/// a checkout. Recommendation selection uses this to avoid offering models
+/// that need a fork when this machine cannot build that fork yet.
+pub fn llama_cpp_build_preflight(target: RuntimeTarget) -> Result<(), String> {
+    for program in ["git", "cmake"] {
+        if !command_available(program) {
+            return Err(format!("`{program}` is required to build from source"));
+        }
+    }
+    if let Some(message) = toolchain_hints::validate_build_target(target) {
+        return Err(message);
+    }
+    if !cfg!(target_os = "windows")
+        && let Some(message) = toolchain_hints::cpp_compiler_preflight_message()
+    {
+        return Err(message);
+    }
+    if matches!(target, RuntimeTarget::Rocm)
+        && let Some(message) = toolchain_hints::rocm_preflight_message()
+    {
+        return Err(message);
+    }
+    Ok(())
+}
+
 async fn run_step(
     label: &str,
     program: &str,

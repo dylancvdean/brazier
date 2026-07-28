@@ -26,11 +26,18 @@
     {
       "min_gb": 8,
       "text": {
-        "id": "bonsai-27b",
-        "label": "Bonsai 27B",
+        "id": "bonsai-27b-1bit",
+        "label": "Bonsai 27B (1-bit)",
         "repo_id": "prism-ml/Bonsai-27B-gguf",
-        "quant": "by_memory",
-        "summary": "A Qwen3.6-27B derivative. On 8GB it has to run at a very low quant, which costs real quality — it is here because nothing larger fits at all."
+        "quant": "Q1_0",
+        "fallback": {
+          "id": "qwen3.5-9b-mainline",
+          "label": "Qwen 3.5 9B",
+          "repo_id": "unsloth/Qwen3.5-9B-GGUF",
+          "quant": "by_memory",
+          "summary": "A capable 9B Qwen model that runs with mainline llama.cpp. Chosen because this machine is missing the tools needed to build PrismML llama.cpp for Bonsai."
+        },
+        "summary": "A Qwen3.6-27B derivative reduced to 1.125 bits per weight — a ~3.9GB footprint and ~90% of FP16 intelligence. Held back with room for the OS and a useful context window. The Q8 vision projector comes along so image input is also available."
       },
       "image": {
         "id": "sd15",
@@ -43,17 +50,24 @@
     {
       "min_gb": 16,
       "text": {
-        "id": "bonsai-27b",
-        "label": "Bonsai 27B",
-        "repo_id": "prism-ml/Bonsai-27B-gguf",
-        "quant": "by_memory",
-        "summary": "A Qwen3.6-27B derivative, at a quant this machine can hold comfortably."
+        "id": "bonsai-27b-ternary",
+        "label": "Bonsai 27B (ternary)",
+        "repo_id": "prism-ml/Ternary-Bonsai-27B-gguf",
+        "quant": "Q2_0",
+        "fallback": {
+          "id": "qwen3.5-9b-mainline",
+          "label": "Qwen 3.5 9B",
+          "repo_id": "unsloth/Qwen3.5-9B-GGUF",
+          "quant": "by_memory",
+          "summary": "A capable 9B Qwen model that runs with mainline llama.cpp. Chosen because this machine is missing the tools needed to build PrismML llama.cpp for Bonsai."
+        },
+        "summary": "The same Qwen3.6-27B derivative at 2-bit ternary weights — ~5.9GB and ~95% of FP16 intelligence. Fuller quality than the 1-bit build, well within this machine's budget. The Q8 vision projector comes along so image input is also available."
       },
       "image": {
         "id": "sd35-medium",
         "label": "Stable Diffusion 3.5 Medium",
-        "bundle_id": "TODO-sd35-medium",
-        "summary": "TODO: no stable-diffusion.cpp bundle exists for SD 3.5 Medium yet. Add one to model-recipes/sdcpp-bundles.json, or point this at an existing bundle id."
+        "bundle_id": "sd35-medium",
+        "summary": "A 2.6B MMDiT model with strong prompt adherence on harder text. A clearer step up from SDXL than FLUX is at this tier."
       },
       "video": {
         "id": "wan2.2-ti2v-5b",
@@ -88,8 +102,8 @@
       "image": {
         "id": "sd35-medium",
         "label": "Stable Diffusion 3.5 Medium",
-        "bundle_id": "TODO-sd35-medium",
-        "summary": "TODO: no stable-diffusion.cpp bundle exists for SD 3.5 Medium yet."
+        "bundle_id": "sd35-medium",
+        "summary": "A 2.6B MMDiT model with strong prompt adherence on text rendering and complex scenes; a clear step up from SDXL at this tier."
       },
       "video": {
         "id": "wan2.2-ti2v-5b",
@@ -165,10 +179,10 @@
         "summary": "FLUX.1 dev with no quantisation applied to the diffusion model — the best it looks."
       },
       "video": {
-        "id": "wan2.2-a14b",
-        "label": "Wan 2.2 A14B",
-        "bundle_id": "TODO-wan2.2-a14b",
-        "summary": "TODO: no stable-diffusion.cpp bundle exists for Wan 2.2 A14B yet. The nearest shipped bundle is wan2.1-i2v-14b-480p."
+        "id": "ltx-2.3-dev",
+        "label": "LTX-2.3 dev (audio + video)",
+        "bundle_id": "ltx-2.3-dev",
+        "summary": "Undistilled LTX-2.3 at ~30 steps with real CFG; better quality than the distilled model and still does audio plus video together."
       }
     },
     {

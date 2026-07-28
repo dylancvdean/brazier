@@ -25,6 +25,89 @@
       ]
     },
     {
+      "id": "sd35-medium",
+      "label": "Stable Diffusion 3.5 Medium",
+      "modality": "image",
+      "key": "stabilityai/stable-diffusion-3.5-medium",
+      "summary": "Stability's 2.6B MMDiT-2 medium variant: a single GGUF-quantised diffusion model plus the usual SD3 text encoders. The current quality step up from SDXL on machines where FLUX is still too heavy.",
+      "license": "stabilityai-community",
+      "featured": false,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 28,
+        "cfg_scale": 4.5
+      },
+      "supports_init_image": true,
+      "components": [
+        {
+          "repo_id": "city96/stable-diffusion-3.5-medium-gguf",
+          "path": "sd3.5_medium-Q4_K_M.gguf",
+          "role": "Diffusion model",
+          "flag": "diffusion-model",
+          "approx_bytes": 1787064768,
+          "variants": [
+            {
+              "label": "Q3_K_S",
+              "path": "sd3.5_medium-Q3_K_S.gguf",
+              "approx_bytes": 1449427392,
+              "note": "Smallest; fits a 8 GB machine."
+            },
+            {
+              "label": "Q3_K_M",
+              "path": "sd3.5_medium-Q3_K_M.gguf",
+              "approx_bytes": 1494548928,
+              "note": "Slightly better than Q3_K_S at the same tier."
+            },
+            {
+              "label": "Q4_K_M",
+              "path": "sd3.5_medium-Q4_K_M.gguf",
+              "approx_bytes": 1787064768,
+              "note": "Recommended; the usual quality/size balance."
+            },
+            {
+              "label": "Q5_K_M",
+              "path": "sd3.5_medium-Q5_K_M.gguf",
+              "approx_bytes": 2067526080,
+              "note": "Better fidelity."
+            },
+            {
+              "label": "Q6_K",
+              "path": "sd3.5_medium-Q6_K.gguf",
+              "approx_bytes": 2317574592,
+              "note": "Near-full quality."
+            },
+            {
+              "label": "Q8_0",
+              "path": "sd3.5_medium-Q8_0.gguf",
+              "approx_bytes": 2855825856,
+              "note": "Effectively lossless; largest."
+            },
+            {
+              "label": "F16",
+              "path": "sd3.5_medium-F16.gguf",
+              "approx_bytes": 4939379136,
+              "note": "Full precision; only for a comfortable machine."
+            }
+          ]
+        },
+        {
+          "repo_id": "comfyanonymous/flux_text_encoders",
+          "path": "clip_l.safetensors",
+          "role": "Text encoder (CLIP-L)",
+          "flag": "clip_l",
+          "approx_bytes": 246144152
+        },
+        {
+          "repo_id": "comfyanonymous/flux_text_encoders",
+          "path": "t5xxl_fp16.safetensors",
+          "role": "Text encoder (T5-XXL)",
+          "flag": "t5xxl",
+          "approx_bytes": 9787841024
+        }
+      ]
+    },
+    {
       "id": "sdxl-base-1.0",
       "label": "SDXL 1.0 base",
       "modality": "image",

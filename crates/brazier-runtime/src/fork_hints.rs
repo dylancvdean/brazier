@@ -208,16 +208,19 @@ pub async fn hints_for_repo(
 }
 
 fn known_hints_for_repo(repo_id: &str) -> Vec<RuntimeForkHint> {
-    // Bonsai's Q1 kernels are not in upstream llama.cpp. Keep this durable
-    // mapping locally instead of relying on a model-card scrape at the moment
-    // the model fails to load.
-    if repo_id.eq_ignore_ascii_case("prism-ml/Bonsai-27B-gguf") {
+    // Bonsai's 1-bit and 2-bit hybrid-attention kernels are not in upstream
+    // llama.cpp. Keep this durable mapping locally instead of relying on a
+    // model-card scrape at the moment the model fails to load.
+    if matches!(
+        repo_id.to_ascii_lowercase().as_str(),
+        "prism-ml/bonsai-27b-gguf" | "prism-ml/ternary-bonsai-27b-gguf"
+    ) {
         return vec![RuntimeForkHint {
             engine: "llama.cpp".to_owned(),
             display_name: "PrismML llama.cpp".to_owned(),
             repository: "https://github.com/PrismML-Eng/llama.cpp".to_owned(),
             trusted: false,
-            summary: "Required for Bonsai's Q1 hybrid-attention kernels".to_owned(),
+            summary: "Required for Bonsai's low-bit hybrid-attention kernels".to_owned(),
         }];
     }
     Vec::new()
@@ -277,6 +280,24 @@ mod tests {
                 .iter()
                 .any(|hint| hint.repository == "https://github.com/PrismML-Eng/llama.cpp")
         );
+    }
+
+    /// The 2-bit ternary build carries the same hybrid-attention kernels and
+    /// the same fork requirement as its 1-bit sibling.
+    #[test]
+    fn ternary_bonsai_shares_the_bonsai_fork_hint() {
+        for repo in [
+            "prism-ml/Ternary-Bonsai-27B-gguf",
+            "prism-ml/ternary-bonsai-27b-gguf",
+        ] {
+            let hints = known_hints_for_repo(repo);
+            assert!(
+                hints
+                    .iter()
+                    .any(|hint| hint.repository == "https://github.com/PrismML-Eng/llama.cpp"),
+                "no PrismML fork hint for {repo}"
+            );
+        }
     }
 
     #[test]

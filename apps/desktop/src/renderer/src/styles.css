@@ -1074,6 +1074,15 @@ code {
   gap: 7px;
 }
 
+.recommendation-companion-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #a3a3a3;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .recommendation-swap-notice {
   position: fixed;
   z-index: 80;
