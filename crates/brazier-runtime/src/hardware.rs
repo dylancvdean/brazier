@@ -245,7 +245,19 @@ fn run_first_line(program: &str, args: &[&str]) -> Option<String> {
 /// Unified-memory machines deliberately report `None`: on Apple Silicon and on
 /// APUs the GPU allocates out of system memory, so a separate VRAM figure would
 /// either double-count it or understate what a model can use.
-fn vram_bytes() -> Option<u64> {
+///
+/// `amd_apu_only` is true when there is at least one AMD GPU and every one of
+/// them is integrated. It is passed in rather than rescanned here because the
+/// KFD topology walk that decides it is the same one `detect` already ran. The
+/// DRM sysfs node `mem_info_vram_total` exists on an AMD APU too, but reports
+/// the small firmware carveout — a 512 MiB figure on a 48 GiB machine sizes
+/// every recommendation against the carveout instead of system RAM. The carveout
+/// only has to be skipped when *every* AMD GPU is integrated; a machine with
+/// both an APU and a discrete AMD card still scans, and `max` picks the
+/// discrete card's real VRAM over the APU's carveout. Intel and NVIDIA are
+/// unaffected: Intel iGPUs expose no `mem_info_vram_total` and NVIDIA is
+/// consulted through `nvidia-smi` above.
+fn vram_bytes(amd_apu_only: bool) -> Option<u64> {
     if let Some(line) = run_first_line(
         "nvidia-smi",
         &[
@@ -265,7 +277,13 @@ fn vram_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         // AMD and Intel expose it through the DRM sysfs nodes. The largest card
-        // wins, since that is the one a model would be loaded onto.
+        // wins, since that is the one a model would be loaded onto. A machine
+        // whose AMD GPUs are all integrated is skipped: an APU's
+        // `mem_info_vram_total` is a carveout, not dedicated memory a model can
+        // occupy, so trusting it understates the machine.
+        if amd_apu_only {
+            return None;
+        }
         let mut best = 0_u64;
         for entry in std::fs::read_dir("/sys/class/drm")
             .into_iter()
@@ -282,6 +300,13 @@ fn vram_bytes() -> Option<u64> {
         if best > 0 {
             return Some(best);
         }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // AMD integration is only detectable through KFD, which is Linux-only;
+        // elsewhere the parameter is unused and nvidia-smi above is the only
+        // consulted source.
+        let _ = amd_apu_only;
     }
     None
 }
@@ -398,6 +423,12 @@ fn detect_uncached() -> HardwareInfo {
             && Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists());
     let gpus = amd_gpus();
     let amd_apu = gpus.iter().any(|gpu| gpu.integrated);
+    // The DRM sysfs VRAM scan trusts every AMD `mem_info_vram_total`, so an APU
+    // whose only AMD GPU is integrated must be skipped — its carveout would
+    // otherwise become the model memory budget. A machine with both an APU and
+    // a discrete AMD card is fine: the scan's `max` picks the discrete card's
+    // real VRAM over the APU's carveout.
+    let amd_apu_only = !gpus.is_empty() && gpus.iter().all(|gpu| gpu.integrated);
     let gfx_arches: Vec<String> = gpus.iter().map(|gpu| gpu.arch.clone()).collect();
     // Verified only against an installed ROCm build, which is the only thing
     // that knows which architectures it carries device code for. Until one is
@@ -477,7 +508,7 @@ fn detect_uncached() -> HardwareInfo {
         ));
     }
     let system_memory = memory_bytes();
-    let vram = vram_bytes();
+    let vram = vram_bytes(amd_apu_only);
     HardwareInfo {
         os: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
