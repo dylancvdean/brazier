@@ -4202,6 +4202,42 @@ video:-webkit-full-screen {
   font-size: 13px;
 }
 
+.bundle-title {
+  display: grid;
+  gap: 3px;
+}
+
+.generation-fit {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.generation-fit.gpu,
+.generation-fit.system {
+  color: #4dca8b;
+}
+
+.generation-fit.offload {
+  color: #e5b550;
+}
+
+.generation-fit.none {
+  color: #ef7777;
+}
+
+.generation-fit.unknown {
+  color: var(--muted);
+}
+
+.generation-fit.model-fit,
+.generation-fit.quant-fit {
+  display: block;
+  margin-top: 3px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .bundle-meta,
 .bundle-size {
   color: var(--muted);

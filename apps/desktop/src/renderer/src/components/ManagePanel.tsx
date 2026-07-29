@@ -215,26 +215,35 @@ type QuantFit = 'gpu' | 'offload' | 'system' | 'none' | 'unknown'
  * offloaded. Keep the labels conservative: reserve headroom for the KV cache,
  * runtime allocations, and the desktop rather than comparing raw bytes.
  */
-function quantFit(file: HubFile, hardware: HardwareInfo | null, bytes = file.size): QuantFit {
+function generationFit(bytes: number | null | undefined, hardware: HardwareInfo | null): QuantFit {
   if (bytes == null || !hardware) return 'unknown'
-  const gpu = hardware.vram_bytes
+  // `gpu_offload_memory_bytes` is the placement budget used by the runtime.
+  // Prefer it so AMD systems are not accidentally assessed against all RAM.
+  const gpu = hardware.gpu_offload_memory_bytes ?? hardware.vram_bytes
   const system = hardware.memory_bytes
   if (gpu != null) {
     if (bytes <= gpu * 0.7) return 'gpu'
     if (system != null && bytes <= system * 0.6) return 'offload'
     return 'none'
   }
+  // A detected discrete GPU with no readable VRAM must not be reported as a
+  // green system-memory fit. That would hide the actual GPU constraint.
+  if (hardware.gpu && !hardware.amd_apu) return 'unknown'
   if (system != null && bytes <= system * 0.6) return 'system'
   return system == null ? 'unknown' : 'none'
 }
 
-function fitLabel(fit: QuantFit): string {
+function quantFit(file: HubFile, hardware: HardwareInfo | null, bytes = file.size): QuantFit {
+  return generationFit(bytes, hardware)
+}
+
+function generationFitLabel(fit: QuantFit): string {
   switch (fit) {
-    case 'gpu': return 'Fits on GPU'
+    case 'gpu': return 'Fits in GPU memory'
     case 'offload': return 'Fits with CPU offload'
     case 'system': return 'Fits in system memory'
-    case 'none': return "Won't fit"
-    default: return 'Size unknown'
+    case 'none': return 'Too large for this machine'
+    default: return 'Memory estimate unavailable'
   }
 }
 
@@ -1048,6 +1057,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [searching, setSearching] = useState(false)
   const [expandedRepo, setExpandedRepo] = useState<string | null>(null)
   const [repoFiles, setRepoFiles] = useState<Record<string, HubFile[]>>({})
+  const [fitPreviews, setFitPreviews] = useState<Record<string, QuantFit>>({})
   const [preferredFiles, setPreferredFiles] = useState<Record<string, string | null>>({})
   const [loadingFilesFor, setLoadingFilesFor] = useState<string | null>(null)
   const [enginePhase, setEnginePhase] = useState<string | null>(null)
@@ -1179,6 +1189,46 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   // Flux and Wan need their VAE and text encoders fetched alongside the
   // diffusion weights, and a manifest written so sd-cli can find them.
   const isSdcpp = discoverEngine === 'stable-diffusion.cpp'
+
+  // Surface the best available tier before a card is expanded. For GGUF
+  // repositories this is the best quant; snapshot repositories use the total
+  // published weight files as a conservative estimate.
+  useEffect(() => {
+    if (isSdcpp) return
+    const models = hasSearched ? results : suggested
+    if (models.length === 0) return
+    let cancelled = false
+    void Promise.all(
+      models.map(async (model) => {
+        try {
+          const response = await listHubFiles(model.id)
+          const files = response.data
+          const ggufs = files.filter((file) => {
+            const lower = file.path.toLowerCase()
+            return lower.endsWith('.gguf') || lower.endsWith('.bin')
+          })
+          if (ggufs.length > 0) {
+            const sizes = quantSizes(ggufs)
+            const best = sortQuants(ggufs, props.hardware).find(
+              (file) => !file.path.toLowerCase().includes('mmproj')
+            )
+            return [model.id, generationFit(best ? sizes.get(quantGroup(best.path)) : null, props.hardware)] as const
+          }
+          const snapshotBytes = files
+            .filter((file) => /\.(safetensors|onnx|bin)$/i.test(file.path))
+            .reduce((total, file) => total + (file.size ?? 0), 0)
+          return [model.id, generationFit(snapshotBytes || null, props.hardware)] as const
+        } catch {
+          return [model.id, 'unknown' as QuantFit] as const
+        }
+      })
+    ).then((entries) => {
+      if (!cancelled) setFitPreviews((current) => ({ ...current, ...Object.fromEntries(entries) }))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [isSdcpp, hasSearched, results, suggested, props.hardware])
 
   useEffect(() => {
     if (!isSdcpp || bundles.length > 0) return
@@ -1801,9 +1851,11 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
               (sum, component) => sum + (component.approx_bytes ?? 0),
               0
             )
+            const fit = generationFit(totalBytes || null, props.hardware)
             return (
               <article className="bundle-card" key={bundle.id}>
                 <div className="bundle-head">
+                  <div className="bundle-title">
                   <strong>
                     {bundle.label}
                     <CapabilityIcons
@@ -1832,6 +1884,8 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                       <span className="installed-badge gated">Token required</span>
                     )}
                   </strong>
+                  <span className={`generation-fit ${fit}`}>{generationFitLabel(fit)}</span>
+                  </div>
                   <span className="bundle-meta">
                     {bundle.modality === 'video' ? 'Video' : 'Image'}
                     {bundle.origin === 'custom' ? ' · Yours' : ''}
@@ -1943,6 +1997,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       <div className="model-results">
         {(isSdcpp ? [] : hasSearched ? results : suggested).map((model) => {
           const expanded = expandedRepo === model.id
+          const previewFit = fitPreviews[model.id] ?? 'unknown'
           const files = sortQuants((repoFiles[model.id] ?? []).filter((file) => {
             const lower = file.path.toLowerCase()
             if (discoverEngine === 'whisper.cpp') {
@@ -1976,6 +2031,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                       <ChevronRight size={13} />
                     )}
                   </button>
+                  <span className={`generation-fit model-fit ${previewFit}`}>
+                    {generationFitLabel(previewFit)}
+                  </span>
                   <span className="model-card-author">{model.author}</span>
                   <div className="model-badges">
                     {model.preferred_quantizer && <span className="unsloth">Unsloth preferred</span>}
@@ -2111,8 +2169,12 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                             {basename}
                             {isProjector ? ' · multimodal projector' : ''}
                             {isPreferred ? ' · preferred' : ''}
-                            {!isProjector ? ` · ${fitLabel(fit)}` : ''}
                           </strong>
+                          {!isProjector && (
+                            <span className={`generation-fit quant-fit ${fit}`}>
+                              {generationFitLabel(fit)}
+                            </span>
+                          )}
                           <span>
                             {file.path}
                             {file.size != null ? ` · ${formatBytes(file.size)}` : ''}
