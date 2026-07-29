@@ -12,6 +12,9 @@ if (!version || !semver.test(version)) {
 }
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
+// Pacman reserves `-` as the pkgver/pkgrel delimiter. Preserve the upstream
+// SemVer everywhere else, but encode its hyphens for Arch packaging.
+const pkgbuildVersion = version.replaceAll('-', '_')
 
 function replace(file, pattern, replacement) {
   const path = resolve(root, file)
@@ -27,7 +30,7 @@ replace('package.json', /"version": "[^"]+"/, `"version": "${version}"`)
 replace('apps/desktop/package.json', /"version": "[^"]+"/, `"version": "${version}"`)
 replace('crates/brazier-runtime/python/streaming_asr_pkg/pyproject.toml', /^version = ".+"$/m, `version = "${version}"`)
 replace('crates/brazier-runtime/python/streaming_asr_pkg/brazier_streaming_asr/__init__.py', /^__version__ = ".+"$/m, `__version__ = "${version}"`)
-replace('PKGBUILD', /^pkgver=.+$/m, `pkgver=${version}`)
+replace('PKGBUILD', /^pkgver=.+$/m, `pkgver=${pkgbuildVersion}`)
 
 // Workspace package versions are recorded in Cargo.lock. Regenerate it while
 // keeping dependency resolution offline so a version bump cannot upgrade deps.
