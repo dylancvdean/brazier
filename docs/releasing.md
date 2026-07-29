@@ -59,5 +59,6 @@ identity pins the signature to this repository's tagged release workflow.
 ## Beta channels
 
 Use normal semver prerelease tags, such as `v0.3.0-beta.1`. The workflow marks
-them as GitHub prereleases. Do not retag or replace a published version: issue
-a higher version instead, so updater metadata and provenance stay immutable.
+them as full GitHub releases so the README's `/releases/latest/download/` links
+continue to resolve. Do not retag or replace a published version: issue a
+higher version instead, so updater metadata and provenance stay immutable.

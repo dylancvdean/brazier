@@ -170,5 +170,9 @@ jobs:
           tag_name: ${{ needs.validate.outputs.tag }}
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(needs.validate.outputs.tag, '-') }}
+          # GitHub's /releases/latest endpoint ignores prereleases. Every
+          # published Brazier release is therefore a full release so the
+          # README's stable download URLs always resolve.
+          prerelease: false
+          make_latest: true
           files: release/*
