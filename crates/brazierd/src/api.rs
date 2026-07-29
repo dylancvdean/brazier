@@ -1615,6 +1615,14 @@ async fn resolve_repo_recommendation(
         }
     }
 
+    // Recommendations need to surface a gated repository before the user
+    // starts its download, particularly during first-run setup where Discover
+    // (and its token field) has not been visited yet. Metadata failures should
+    // not hide an otherwise usable recommendation.
+    if let Ok(trust) = hf::model_trust(&state.http, &state.data_dir, &entry.repo_id).await {
+        resolved["gated"] = json!(trust.gated);
+    }
+
     // Vision projectors are optional companions, not part of the quant ladder.
     // Discover them for every recommendation instead of maintaining a fragile
     // per-model list. Prefer Q8 when a repository publishes several projectors.
@@ -1774,6 +1782,14 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
                 missing.join(", ")
             ));
         }
+        let mut bundle_ids = entry
+            .parts
+            .iter()
+            .map(|part| part.bundle_id.as_str())
+            .chain(entry.bundle_id.as_deref());
+        resolved["gated"] = json!(bundle_ids.any(|id| {
+            sdcpp_catalog::find(&state.data_dir, id).is_some_and(|bundle| bundle.gated())
+        }));
         categories.insert(name.into(), resolved);
     }
 

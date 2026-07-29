@@ -19,7 +19,7 @@ import {
   LoaderCircle,
   Sparkles
 } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   downloadModel,
@@ -29,7 +29,9 @@ import {
   formatBytes,
   installSdcppBundle,
   listRuntimes,
+  huggingFaceTokenStatus,
   recordRecommendationInstall,
+  setHuggingFaceToken,
   listRecommendationSetups,
   startRecommendationSetup,
   type BundleRecommendation,
@@ -165,7 +167,20 @@ export function RecommendedModels(props: Props): React.JSX.Element {
   const [states, setStates] = useState<Record<string, InstallState>>({})
   const [includeCompanions, setIncludeCompanions] = useState<Record<string, boolean>>({})
   const [setups, setSetups] = useState<RecommendationSetup[]>([])
+  const [hfTokenSource, setHfTokenSource] = useState('none')
+  const [hfTokenDraft, setHfTokenDraft] = useState('')
+  const [savingHfToken, setSavingHfToken] = useState(false)
   const announcedSetups = useRef(new Set<string>())
+
+  const categories = props.categories ?? (Object.keys(recommendations.categories) as RecommendationCategory[])
+  const hasGatedCategory = categories.some((category) => {
+    const entry = recommendations.categories[category as keyof typeof recommendations.categories]
+    return entry?.gated === true
+  })
+  const hasGatedRecommendation =
+    hasGatedCategory ||
+    (categories.includes('agent') &&
+      recommendations.agent_options?.some((entry) => entry.gated === true) === true)
 
   useEffect(() => {
     const refresh = (): void => {
@@ -175,6 +190,13 @@ export function RecommendedModels(props: Props): React.JSX.Element {
     const timer = window.setInterval(refresh, 1500)
     return () => window.clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    if (!hasGatedRecommendation) return
+    void huggingFaceTokenStatus()
+      .then((status) => setHfTokenSource(status.source))
+      .catch(() => setHfTokenSource('none'))
+  }, [hasGatedRecommendation])
 
   useEffect(() => {
     for (const setup of setups) {
@@ -188,6 +210,22 @@ export function RecommendedModels(props: Props): React.JSX.Element {
   const setState = useCallback((key: string, patch: Partial<InstallState>) => {
     setStates((current) => ({ ...current, [key]: { ...(current[key] ?? IDLE), ...patch } }))
   }, [])
+
+  async function saveHubToken(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    setSavingHfToken(true)
+    onError?.(null)
+    try {
+      await setHuggingFaceToken(hfTokenDraft.trim())
+      setHfTokenDraft('')
+      const status = await huggingFaceTokenStatus()
+      setHfTokenSource(status.source)
+    } catch (cause) {
+      onError?.(errorText(cause))
+    } finally {
+      setSavingHfToken(false)
+    }
+  }
 
   // A category already set up through this flow opens as installed rather than
   // inviting the same download a second time.
@@ -259,6 +297,12 @@ export function RecommendedModels(props: Props): React.JSX.Element {
     const notes: Array<{ tone: 'warn' | 'plain'; text: string }> = []
     if (entry.substituted) notes.push({ tone: 'plain', text: entry.substituted })
     if (entry.unresolved) notes.push({ tone: 'warn', text: entry.unresolved })
+    if (entry.gated) {
+      notes.push({
+        tone: 'warn',
+        text: 'This model is gated on Hugging Face. Accept its terms there, then add an access token below.'
+      })
+    }
     if (entry.tight) {
       notes.push({
         tone: 'warn',
@@ -325,7 +369,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
             <InstallButton
               state={state}
               label="Install"
-              disabled={Boolean(entry.unresolved) || files.length === 0}
+              disabled={Boolean(entry.unresolved) || files.length === 0 || (entry.gated && hfTokenSource === 'none')}
               onClick={() =>
                 void (async () => {
                   setState(key, { busy: true, progress: null })
@@ -375,6 +419,12 @@ export function RecommendedModels(props: Props): React.JSX.Element {
     const split = (entry.parts?.length ?? 0) > 1
     const notes: Array<{ tone: 'warn' | 'plain'; text: string }> = []
     if (entry.unresolved) notes.push({ tone: 'warn', text: entry.unresolved })
+    if (entry.gated) {
+      notes.push({
+        tone: 'warn',
+        text: 'This model includes gated Hugging Face files. Accept their terms there, then add an access token below.'
+      })
+    }
     if (split) {
       notes.push({
         tone: 'plain',
@@ -400,7 +450,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
                   key={key}
                   state={state}
                   label={split ? `Install ${part.role}` : 'Install'}
-                  disabled={Boolean(entry.unresolved)}
+                  disabled={Boolean(entry.unresolved) || (entry.gated && hfTokenSource === 'none')}
                   onClick={() =>
                     void run(key, [category], entry.id, async (onProgress) => {
                       const result = await installSdcppBundle(
@@ -535,6 +585,49 @@ export function RecommendedModels(props: Props): React.JSX.Element {
         {recommendations.memory_source === 'vram' ? ' of video memory' : ' of memory'}
         {recommendations.tier_gb ? ` · ${recommendations.tier_gb}GB tier` : ''}
       </p>
+      {hasGatedRecommendation ? (
+        <form className="build-form" onSubmit={(event) => void saveHubToken(event)}>
+          <label>
+            <span className="label-with-link">
+              Hugging Face token required for the selected gated model
+              <a
+                className="inline-link"
+                href="https://huggingface.co/settings/tokens"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Create a token
+              </a>
+            </span>
+            <input
+              type="password"
+              autoComplete="off"
+              value={hfTokenDraft}
+              onChange={(event) => setHfTokenDraft(event.target.value)}
+              placeholder={
+                hfTokenSource === 'environment'
+                  ? 'Using HF_TOKEN from the environment'
+                  : hfTokenSource === 'stored'
+                    ? 'Token saved — paste to replace'
+                    : 'hf_…'
+              }
+            />
+          </label>
+          <p className="model-help">
+            Accept the model terms on Hugging Face first. Your token is stored locally and used
+            only for downloads.
+          </p>
+          <div className="build-form-actions">
+            <button
+              className="secondary-action"
+              type="submit"
+              disabled={savingHfToken || !hfTokenDraft.trim()}
+            >
+              {savingHfToken ? <LoaderCircle className="spin" size={14} /> : 'Save token'}
+            </button>
+          </div>
+        </form>
+      ) : null}
       {cards.length === 0 ? (
         <div className="manage-placeholder compact">
           Nothing is recommended for the categories you chose.

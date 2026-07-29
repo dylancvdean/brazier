@@ -1159,6 +1159,8 @@ export type RepoRecommendation = {
     target: string
     label: string
   }
+  /** This repository requires a Hugging Face token before it can be downloaded. */
+  gated?: boolean
 }
 
 /** An image or video model, named by stable-diffusion.cpp bundle. */
@@ -1171,6 +1173,8 @@ export type BundleRecommendation = {
   parts?: Array<{ bundle_id: string; role: string; label: string; variant?: string | null }>
   summary?: string | null
   unresolved?: string
+  /** At least one bundle component requires a Hugging Face token. */
+  gated?: boolean
 }
 
 export type VoiceRecommendationModel = {
