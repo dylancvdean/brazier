@@ -303,6 +303,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/runtime/settings",
             get(runtime_settings).put(update_runtime_settings),
         )
+        .route(
+            "/api/v1/preferences/welcome",
+            get(welcome_preference).put(update_welcome_preference),
+        )
         .route("/api/v1/hardware", get(hardware))
         .route("/api/v1/toolchain", get(toolchain_status))
         .route("/api/v1/engines/llama.cpp/ensure", post(ensure_llama))
@@ -386,6 +390,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             get(get_agent_approval).post(decide_agent_approval),
         )
         .route("/api/v1/agent/artifacts/{id}", get(get_agent_artifact))
+        .route(
+            "/api/v1/agent/workspaces/prompt",
+            get(get_agent_workspace_prompt).put(put_agent_workspace_prompt),
+        )
         .route("/api/v1/agent/workspace", post(validate_agent_workspace))
         .route("/api/v1/tools", get(list_tools))
         .route(
@@ -1222,6 +1230,39 @@ async fn toolchain_status() -> Json<Value> {
 
 async fn runtime_settings(State(state): State<AppState>) -> Json<Value> {
     Json(json!(state.runtime.settings().await))
+}
+
+const WELCOME_PREFERENCE_KEY: &str = "welcome";
+
+#[derive(Debug, Deserialize)]
+struct UpdateWelcomePreference {
+    completed: bool,
+}
+
+async fn welcome_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let completed = state
+        .db
+        .application_preference(WELCOME_PREFERENCE_KEY)
+        .await
+        .map_err(ApiError::internal)?
+        .and_then(|value| value["completed"].as_bool())
+        .unwrap_or(false);
+    Ok(Json(json!({ "completed": completed })))
+}
+
+async fn update_welcome_preference(
+    State(state): State<AppState>,
+    Json(preference): Json<UpdateWelcomePreference>,
+) -> ApiResult<Json<Value>> {
+    state
+        .db
+        .set_application_preference(
+            WELCOME_PREFERENCE_KEY,
+            &json!({ "completed": preference.completed }),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "completed": preference.completed })))
 }
 
 async fn update_runtime_settings(
@@ -4962,6 +5003,24 @@ fn agent_tool_names(data_dir: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+fn validate_agent_enabled_tools(data_dir: &std::path::Path, enabled: &[String]) -> ApiResult<()> {
+    let available: std::collections::HashSet<String> =
+        agent_tool_names(data_dir).into_iter().collect();
+    let unknown: Vec<&str> = enabled
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !available.contains(*name))
+        .collect();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(format!(
+            "unknown agent tools: {}",
+            unknown.join(", ")
+        )))
+    }
+}
+
 async fn agent_tool_catalog(State(state): State<AppState>) -> Json<Value> {
     Json(agent_tool_definitions(&state.data_dir))
 }
@@ -4981,8 +5040,15 @@ async fn create_agent_session(
 ) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
     let confine = request.confine_to_worktree;
     request.confine_to_worktree = false;
-    if let Some(workspace) = &request.workspace_path {
-        validate_workspace_path(&state, workspace)?;
+    if let Some(workspace) = request.workspace_path.as_deref() {
+        request.workspace_path = Some(
+            validate_workspace_path(&state, workspace)?
+                .display()
+                .to_string(),
+        );
+    }
+    if let Some(enabled) = request.enabled_tools.as_deref() {
+        validate_agent_enabled_tools(&state.data_dir, enabled)?;
     }
     let mut session = state
         .db
@@ -5066,8 +5132,14 @@ async fn patch_agent_session(
             "worktree confinement must be changed in a separate request",
         ));
     }
-    if let Some(Some(workspace)) = &update.workspace_path {
-        validate_workspace_path(&state, workspace)?;
+    if let Some(Some(workspace)) = update.workspace_path.as_ref() {
+        let resolved = validate_workspace_path(&state, workspace)?
+            .display()
+            .to_string();
+        update.workspace_path = Some(Some(resolved));
+    }
+    if let Some(enabled) = update.enabled_tools.as_deref() {
+        validate_agent_enabled_tools(&state.data_dir, enabled)?;
     }
     if let Some(enabled) = confine {
         let session = state
@@ -5244,8 +5316,8 @@ async fn cancel_agent_run(
     })))
 }
 
-/// System prompt for a session, built by the application from the live sandbox
-/// state and permission mode.
+/// Effective system prompt for a session: the workspace override when one is
+/// saved, otherwise the application default built from live session state.
 async fn agent_system_prompt(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -5259,16 +5331,193 @@ async fn agent_system_prompt(
         .enabled_tools
         .clone()
         .unwrap_or_else(|| agent_tool_names(&state.data_dir));
-    let repository_prompt =
-        crate::agent_tools::load_repository_system_prompt(session.workspace_path.as_deref())
-            .map_err(ApiError::bad_request)?;
-    let prompt = crate::agent_tools::system_prompt(
+    let workspace_key = agent_session_workspace_key(&state, &session)?;
+    let custom = match workspace_key {
+        Some(ref key) => state
+            .db
+            .agent_workspace_system_prompt(key)
+            .await
+            .map_err(ApiError::internal)?,
+        None => None,
+    };
+    let customized = custom.is_some();
+    let template = custom
+        .as_deref()
+        .unwrap_or(crate::agent_tools::DEFAULT_SYSTEM_PROMPT_TEMPLATE);
+    let components = crate::agent_tools::system_prompt_components(
         &session,
         &state.agent_broker.capabilities(),
         &names,
-        repository_prompt.as_deref(),
     );
-    Ok(Json(json!({ "system_prompt": prompt, "tools": names })))
+    let prompt = crate::agent_tools::render_system_prompt(template, &components);
+    Ok(Json(json!({
+        "system_prompt": prompt,
+        "tools": names,
+        "customized": customized,
+    })))
+}
+
+const MAX_AGENT_SYSTEM_PROMPT_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Deserialize)]
+struct AgentWorkspacePromptQuery {
+    workspace_path: String,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateAgentWorkspacePrompt {
+    workspace_path: String,
+    /// Null restores the generated application default.
+    system_prompt: Option<String>,
+}
+
+fn agent_session_workspace_key(
+    state: &AppState,
+    session: &crate::agent_types::AgentSessionRecord,
+) -> ApiResult<Option<String>> {
+    let worktree = crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref());
+    let raw = worktree
+        .as_ref()
+        .map(|info| info.source_path.as_str())
+        .or(session.workspace_path.as_deref());
+    raw.map(|path| {
+        validate_workspace_path(state, path).map(|resolved| resolved.display().to_string())
+    })
+    .transpose()
+}
+
+fn workspace_prompt_preview_session(
+    workspace_path: String,
+) -> crate::agent_types::AgentSessionRecord {
+    crate::agent_types::AgentSessionRecord {
+        id: "workspace-prompt-preview".to_owned(),
+        title: "Prompt preview".to_owned(),
+        workspace_path: Some(workspace_path),
+        model: "preview".to_owned(),
+        runtime_id: "pi".to_owned(),
+        permission_mode: crate::agent_types::AgentPermissionMode::Ask,
+        permission_settings: crate::agent_types::AgentPermissionSettings::default(),
+        enabled_tools: None,
+        last_run_status: "idle".to_owned(),
+        compaction: None,
+        runtime_metadata: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+fn prompt_components_json(components: &[(&str, String)]) -> Value {
+    Value::Array(
+        components
+            .iter()
+            .map(|(name, content)| {
+                json!({
+                    "name": name,
+                    "placeholder": format!("{{{name}}}"),
+                    "content": content,
+                })
+            })
+            .collect(),
+    )
+}
+
+async fn get_agent_workspace_prompt(
+    State(state): State<AppState>,
+    Query(query): Query<AgentWorkspacePromptQuery>,
+) -> ApiResult<Json<Value>> {
+    let workspace_path = validate_workspace_path(&state, &query.workspace_path)?
+        .display()
+        .to_string();
+    let session = if let Some(id) = query.session_id {
+        let session = state
+            .db
+            .agent_session(&id)
+            .await
+            .map_err(|error| ApiError::not_found(error.to_string()))?;
+        let session_key = agent_session_workspace_key(&state, &session)?;
+        if session_key.as_deref() != Some(workspace_path.as_str()) {
+            return Err(ApiError::bad_request(
+                "agent session does not belong to this workspace",
+            ));
+        }
+        Some(session)
+    } else {
+        None
+    };
+    state
+        .db
+        .remember_agent_workspace(&workspace_path)
+        .await
+        .map_err(ApiError::internal)?;
+    let custom = state
+        .db
+        .agent_workspace_system_prompt(&workspace_path)
+        .await
+        .map_err(ApiError::internal)?;
+    let customized = custom.is_some();
+    let template =
+        custom.unwrap_or_else(|| crate::agent_tools::DEFAULT_SYSTEM_PROMPT_TEMPLATE.to_owned());
+    let session =
+        session.unwrap_or_else(|| workspace_prompt_preview_session(workspace_path.clone()));
+    let names = session
+        .enabled_tools
+        .clone()
+        .unwrap_or_else(|| agent_tool_names(&state.data_dir));
+    let components = crate::agent_tools::system_prompt_components(
+        &session,
+        &state.agent_broker.capabilities(),
+        &names,
+    );
+    let resolved_prompt = crate::agent_tools::render_system_prompt(&template, &components);
+    Ok(Json(json!({
+        "workspace_path": workspace_path,
+        "system_prompt": template,
+        "resolved_prompt": resolved_prompt,
+        "components": prompt_components_json(&components),
+        "customized": customized,
+    })))
+}
+
+async fn put_agent_workspace_prompt(
+    State(state): State<AppState>,
+    Json(request): Json<UpdateAgentWorkspacePrompt>,
+) -> ApiResult<Json<Value>> {
+    let workspace_path = validate_workspace_path(&state, &request.workspace_path)?
+        .display()
+        .to_string();
+    if let Some(prompt) = request.system_prompt.as_deref() {
+        if prompt.len() > MAX_AGENT_SYSTEM_PROMPT_BYTES {
+            return Err(ApiError::bad_request(
+                "agent system prompt cannot exceed 64 KiB",
+            ));
+        }
+    }
+    state
+        .db
+        .set_agent_workspace_system_prompt(&workspace_path, request.system_prompt.as_deref())
+        .await
+        .map_err(ApiError::internal)?;
+    let customized = request.system_prompt.is_some();
+    let system_prompt = request
+        .system_prompt
+        .unwrap_or_else(|| crate::agent_tools::DEFAULT_SYSTEM_PROMPT_TEMPLATE.to_owned());
+    let session = workspace_prompt_preview_session(workspace_path.clone());
+    let names = agent_tool_names(&state.data_dir);
+    let components = crate::agent_tools::system_prompt_components(
+        &session,
+        &state.agent_broker.capabilities(),
+        &names,
+    );
+    let resolved_prompt = crate::agent_tools::render_system_prompt(&system_prompt, &components);
+    Ok(Json(json!({
+        "workspace_path": workspace_path,
+        "system_prompt": system_prompt,
+        "resolved_prompt": resolved_prompt,
+        "components": prompt_components_json(&components),
+        "customized": customized,
+    })))
 }
 
 /// The only way an agent tool call reaches the machine.
@@ -5966,6 +6215,133 @@ mod tests {
         assert_eq!(reloaded["session"]["title"], "Agent task");
     }
 
+    #[tokio::test]
+    async fn workspace_prompt_starts_with_the_full_default_and_can_be_overridden() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let workspace_path = workspace.path().display().to_string();
+        let app = router(test_state(dir.path()).await);
+        let uri = format!("/api/v1/agent/workspaces/prompt?workspace_path={workspace_path}");
+
+        let (status, default) = get_request(&app, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{default}");
+        assert_eq!(default["customized"], false);
+        assert!(
+            default["system_prompt"]
+                .as_str()
+                .unwrap()
+                .contains("{identity}")
+        );
+        assert!(
+            default["resolved_prompt"]
+                .as_str()
+                .unwrap()
+                .contains("You are Brazier's coding and system agent")
+        );
+        assert_eq!(default["components"].as_array().unwrap().len(), 6);
+
+        let (status, saved) = json_request(
+            &app,
+            "PUT",
+            "/api/v1/agent/workspaces/prompt",
+            json!({
+                "workspace_path": workspace_path,
+                "system_prompt": "Use the repository snapshot tests.\n\n{workspace}\n\n{tools}"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["customized"], true);
+        assert!(
+            saved["resolved_prompt"]
+                .as_str()
+                .unwrap()
+                .contains("Workspace:")
+        );
+
+        let (_, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+        )
+        .await;
+        let session_id = session["id"].as_str().unwrap();
+        let (_, prompt) =
+            get_request(&app, &format!("/api/v1/agent/sessions/{session_id}/prompt")).await;
+        let effective = prompt["system_prompt"].as_str().unwrap();
+        assert!(
+            effective.starts_with("Use the repository snapshot tests.\n\nWorkspace:"),
+            "{effective}"
+        );
+        assert!(effective.contains("Available tools:"), "{effective}");
+        assert_eq!(prompt["customized"], true);
+
+        let (status, _) = json_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/agent/sessions/{session_id}"),
+            json!({ "enabled_tools": ["fs_read"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, restricted_prompt) =
+            get_request(&app, &format!("/api/v1/agent/sessions/{session_id}/prompt")).await;
+        assert!(
+            restricted_prompt["system_prompt"]
+                .as_str()
+                .unwrap()
+                .contains("Available tools: fs_read."),
+            "{restricted_prompt}"
+        );
+
+        json_request(
+            &app,
+            "PUT",
+            "/api/v1/agent/workspaces/prompt",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "system_prompt": null
+            }),
+        )
+        .await;
+        let (_, reset) =
+            get_request(&app, &format!("/api/v1/agent/sessions/{session_id}/prompt")).await;
+        assert_eq!(reset["customized"], false);
+        assert!(
+            reset["system_prompt"]
+                .as_str()
+                .unwrap()
+                .contains("You are Brazier's coding and system agent")
+        );
+    }
+
+    #[tokio::test]
+    async fn welcome_completion_is_persisted_in_the_database() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+
+        let (status, initial) = get_request(&app, "/api/v1/preferences/welcome").await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["completed"], false);
+
+        let (status, saved) = json_request(
+            &app,
+            "PUT",
+            "/api/v1/preferences/welcome",
+            json!({ "completed": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["completed"], true);
+
+        let (_, reloaded) = get_request(&app, "/api/v1/preferences/welcome").await;
+        assert_eq!(reloaded["completed"], true);
+    }
+
     async fn get_request(app: &Router, uri: &str) -> (StatusCode, Value) {
         let response = app
             .clone()
@@ -6400,6 +6776,51 @@ done
                 "tool": "shell_run",
                 "arguments": { "command": "echo nope" }
             }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
+
+    #[tokio::test]
+    async fn agent_sessions_reject_unknown_enabled_tools() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (status, refused) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test",
+                "enabled_tools": ["fs_read", "imaginary_tool"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("imaginary_tool")
+        );
+
+        let (_, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+        )
+        .await;
+        let session_id = session["id"].as_str().unwrap();
+        let (status, refused) = json_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/agent/sessions/{session_id}"),
+            json!({ "enabled_tools": ["also_imaginary"] }),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");

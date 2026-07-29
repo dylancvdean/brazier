@@ -141,6 +141,46 @@ pub struct NewApproval {
 }
 
 impl Database {
+    pub async fn remember_agent_workspace(&self, workspace_path: &str) -> anyhow::Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO agent_workspaces(workspace_path) VALUES (?)")
+            .bind(workspace_path)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn agent_workspace_system_prompt(
+        &self,
+        workspace_path: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT system_prompt FROM agent_workspaces WHERE workspace_path = ?",
+        )
+        .bind(workspace_path)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
+    }
+
+    pub async fn set_agent_workspace_system_prompt(
+        &self,
+        workspace_path: &str,
+        system_prompt: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO agent_workspaces(workspace_path, system_prompt)
+               VALUES (?, ?)
+               ON CONFLICT(workspace_path) DO UPDATE SET
+                   system_prompt = excluded.system_prompt,
+                   updated_at = datetime('now')"#,
+        )
+        .bind(workspace_path)
+        .bind(system_prompt)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn create_agent_session(
         &self,
         request: CreateAgentSession,
@@ -148,6 +188,9 @@ impl Database {
         let id = Uuid::new_v4().to_string();
         let settings = request.permission_settings.unwrap_or_default();
         let mode = request.permission_mode.unwrap_or(AgentPermissionMode::Ask);
+        if let Some(workspace) = request.workspace_path.as_deref() {
+            self.remember_agent_workspace(workspace).await?;
+        }
         sqlx::query(
             r#"INSERT INTO agent_sessions(
                    id, title, workspace_path, model, runtime_id, permission_mode,
@@ -862,6 +905,31 @@ mod tests {
         // Untouched fields survive a partial update.
         assert_eq!(updated.model, "gguf:test");
         assert_eq!(updated.workspace_path.as_deref(), Some("/ws"));
+    }
+
+    #[tokio::test]
+    async fn workspace_system_prompt_is_shared_and_resettable() {
+        let (_dir, db) = database().await;
+        db.create_agent_session(session_request(Some("/ws")))
+            .await
+            .expect("create first session");
+        db.create_agent_session(session_request(Some("/ws")))
+            .await
+            .expect("create second session");
+        assert_eq!(db.agent_workspace_system_prompt("/ws").await.unwrap(), None);
+
+        db.set_agent_workspace_system_prompt("/ws", Some("Use snapshot tests."))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.agent_workspace_system_prompt("/ws").await.unwrap(),
+            Some("Use snapshot tests.".to_owned())
+        );
+
+        db.set_agent_workspace_system_prompt("/ws", None)
+            .await
+            .unwrap();
+        assert_eq!(db.agent_workspace_system_prompt("/ws").await.unwrap(), None);
     }
 
     #[tokio::test]

@@ -2875,6 +2875,31 @@ a.inline-link {
   box-shadow: 0 22px 60px rgba(0, 0, 0, 0.45);
 }
 
+.tool-menu-popover.below {
+  top: calc(100% + 8px);
+  bottom: auto;
+}
+
+.agent-tool-menu-anchor {
+  align-self: stretch;
+  align-items: center;
+}
+
+.agent-tool-menu-anchor .tool-menu-popover {
+  right: 0;
+}
+
+.agent-tool-menu-anchor .tools-on {
+  color: #f78438;
+  background: #2f1b0e;
+}
+
+.agent-tool-count {
+  color: var(--muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
 .tool-menu-head {
   display: flex;
   align-items: center;
@@ -5407,6 +5432,135 @@ label.span-2 {
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.agent-prompt-editor {
+  width: min(960px, 100%);
+  height: min(760px, 100%);
+}
+
+.agent-prompt-editor header > div {
+  min-width: 0;
+}
+
+.agent-prompt-editor header strong,
+.agent-prompt-editor header small {
+  display: block;
+}
+
+.agent-prompt-editor header small {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-prompt-editor > p {
+  margin: 0;
+  padding: 12px 14px 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.agent-prompt-editor textarea {
+  min-height: 0;
+  flex: 1;
+  resize: none;
+  margin: 12px 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #090909;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.agent-prompt-components {
+  margin: 0 14px 12px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.agent-prompt-components > strong,
+.agent-prompt-components > span {
+  display: block;
+}
+
+.agent-prompt-components > strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.agent-prompt-components > span {
+  margin-top: 2px;
+}
+
+.agent-prompt-components > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px;
+  max-height: 190px;
+  margin-top: 8px;
+  overflow: auto;
+}
+
+.agent-prompt-components details {
+  align-self: start;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0d0d0d;
+}
+
+.agent-prompt-components summary {
+  padding: 7px 9px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.agent-prompt-components summary code {
+  font-size: 10px;
+}
+
+.agent-prompt-components pre {
+  max-height: 150px;
+  margin: 0;
+  overflow: auto;
+  padding: 8px 9px;
+  border-top: 1px solid var(--line);
+  color: #b7b7b7;
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.agent-prompt-editor footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.agent-prompt-editor footer > span {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.agent-prompt-loading {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 /* Voice as a bar over the shared transcript, not a separate workspace: the

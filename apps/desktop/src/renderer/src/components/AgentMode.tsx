@@ -11,6 +11,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Terminal,
+  Wrench,
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
@@ -34,11 +35,14 @@ import {
   fetchAgentCapabilities,
   fetchAgentSession,
   fetchAgentTools,
+  fetchAgentWorkspacePrompt,
   listAgentSessions,
   sandboxBadge,
+  saveAgentWorkspacePrompt,
   updateAgentSession,
   validateAgentWorkspace,
   type AgentCapabilities,
+  type AgentPromptComponent,
   type AgentSessionSummary,
   type AgentToolCatalogEntry
 } from '../agentApi'
@@ -46,6 +50,7 @@ import { prefillProgressLabel, type LocalModel, type PrefillProgress } from '../
 import { modelDisplayName } from '../model-utils'
 import { Markdown } from './Markdown'
 import { ReasoningDisclosure } from './ReasoningDisclosure'
+import { ToolsMenu } from './ToolsMenu'
 
 /**
  * What the shared composer needs to drive a run. Agent mode has no input of its
@@ -581,6 +586,16 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [streaming, setStreaming] = useState('')
   const [reasoning, setReasoning] = useState('')
   const [prefill, setPrefill] = useState<PrefillProgress | null>(null)
+  const [promptEditorOpen, setPromptEditorOpen] = useState(false)
+  const [promptDraft, setPromptDraft] = useState('')
+  const [promptComponents, setPromptComponents] = useState<AgentPromptComponent[]>([])
+  const [promptCustomized, setPromptCustomized] = useState(false)
+  const [promptLoading, setPromptLoading] = useState(false)
+  const [promptSaving, setPromptSaving] = useState(false)
+  const [pendingEnabledTools, setPendingEnabledTools] = useState<string[] | null>(null)
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false)
+  const [toolDraft, setToolDraft] = useState<string[]>([])
+  const [toolsSaving, setToolsSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [summary, setSummary] = useState<AgentRunSummary | null>(null)
   const [pendingWorkspace, setPendingWorkspace] = useState<string | null>(null)
@@ -597,8 +612,15 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   const workspace = session?.workspace_path ?? pendingWorkspace
   const worktree = sessionWorktree(session)
+  const workspaceSettingsPath = worktree?.source_path ?? workspace
   const confinedToWorktree = Boolean(worktree) || (!session && pendingConfineToWorktree)
   const permissionMode: AgentPermissionMode = session?.permission_mode ?? 'ask'
+  const availableToolNames = useMemo(() => tools.map((tool) => tool.name), [tools])
+  const enabledToolNames = useMemo(() => {
+    const selected = session?.enabled_tools ?? pendingEnabledTools ?? availableToolNames
+    const available = new Set(availableToolNames)
+    return selected.filter((name) => available.has(name))
+  }, [session?.enabled_tools, pendingEnabledTools, availableToolNames])
   const modelLabel = useMemo(() => {
     const model = props.models.find((candidate) => candidate.id === props.modelId)
     return props.modelId ? modelDisplayName(props.modelId, model).title : 'No model selected'
@@ -637,6 +659,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         setRunning(true)
         setSummary(null)
         setStreaming('')
+        setPromptEditorOpen(false)
         setReasoning('')
         setPrefill(null)
         return
@@ -1019,6 +1042,7 @@ export function AgentMode(props: Props): React.JSX.Element {
           title: text.slice(0, 60),
           workspace_path: workspace,
           model: props.modelId,
+          ...(pendingEnabledTools ? { enabled_tools: pendingEnabledTools } : {}),
           confine_to_worktree: requestedWorktree
         })
         setSession(active)
@@ -1026,6 +1050,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         setSessions((current) => [active as AgentSessionSummary, ...current])
         setPendingWorkspace(null)
         setPendingConfineToWorktree(false)
+        setPendingEnabledTools(null)
         onSessionBound?.(active.id)
         // Never silently start in the source checkout after the user selected
         // confinement. The returned session metadata is the daemon's receipt
@@ -1097,11 +1122,101 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }
 
+  async function openPromptEditor(): Promise<void> {
+    if (!workspaceSettingsPath) return
+    setPromptEditorOpen(true)
+    setPromptLoading(true)
+    try {
+      const prompt = await fetchAgentWorkspacePrompt(workspaceSettingsPath, session?.id)
+      setPromptDraft(prompt.system_prompt)
+      setPromptComponents(prompt.components)
+      setPromptCustomized(prompt.customized)
+    } catch (cause) {
+      setPromptEditorOpen(false)
+      onError(errorText(cause))
+    } finally {
+      setPromptLoading(false)
+    }
+  }
+
+  async function refreshWorkerPrompt(): Promise<void> {
+    if (!session) return
+    await window.brazier.agent.closeSession(session.id)
+    await window.brazier.agent.openSession(session.id)
+  }
+
+  function openToolsMenu(): void {
+    setToolDraft(enabledToolNames)
+    setToolsMenuOpen(true)
+  }
+
+  async function closeToolsMenu(): Promise<void> {
+    if (toolsSaving) return
+    setToolsMenuOpen(false)
+    const unchanged =
+      toolDraft.length === enabledToolNames.length &&
+      toolDraft.every((name) => enabledToolNames.includes(name))
+    if (unchanged) return
+    if (!session) {
+      setPendingEnabledTools(toolDraft)
+      return
+    }
+    setToolsSaving(true)
+    try {
+      const updated = await updateAgentSession(session.id, { enabled_tools: toolDraft })
+      setSession(updated)
+      setSessions((current) =>
+        current.map((entry) => (entry.id === updated.id ? updated : entry))
+      )
+      await window.brazier.agent.closeSession(session.id)
+      await window.brazier.agent.openSession(session.id)
+    } catch (cause) {
+      onError(errorText(cause))
+    } finally {
+      setToolsSaving(false)
+    }
+  }
+
+  async function savePrompt(): Promise<void> {
+    if (!workspaceSettingsPath) return
+    setPromptSaving(true)
+    try {
+      const saved = await saveAgentWorkspacePrompt(workspaceSettingsPath, promptDraft)
+      setPromptDraft(saved.system_prompt)
+      setPromptComponents(saved.components)
+      setPromptCustomized(true)
+      await refreshWorkerPrompt()
+      setPromptEditorOpen(false)
+    } catch (cause) {
+      onError(errorText(cause))
+    } finally {
+      setPromptSaving(false)
+    }
+  }
+
+  async function resetPrompt(): Promise<void> {
+    if (!workspaceSettingsPath) return
+    setPromptSaving(true)
+    try {
+      await saveAgentWorkspacePrompt(workspaceSettingsPath, null)
+      const reset = await fetchAgentWorkspacePrompt(workspaceSettingsPath, session?.id)
+      setPromptDraft(reset.system_prompt)
+      setPromptComponents(reset.components)
+      setPromptCustomized(false)
+      await refreshWorkerPrompt()
+    } catch (cause) {
+      onError(errorText(cause))
+    } finally {
+      setPromptSaving(false)
+    }
+  }
+
   async function startNewTask(): Promise<void> {
     const previousWorktree = sessionWorktree(session)
     const nextWorkspace =
       previousWorktree?.source_path ?? session?.workspace_path ?? pendingWorkspace
     const nextWorkspaceIsGit = Boolean(nextWorkspace && (previousWorktree || workspaceIsGit))
+    const nextEnabledTools = session?.enabled_tools ?? pendingEnabledTools
     if (session) {
       await window.brazier.agent.closeSession(session.id).catch(() => undefined)
     }
@@ -1117,10 +1232,12 @@ export function AgentMode(props: Props): React.JSX.Element {
     setSummary(null)
     setStreaming('')
     setReasoning('')
+    setPromptEditorOpen(false)
     // New tasks stay in the same project and use isolation by default, matching
     // the task-per-worktree flow of mature coding-agent tools.
     setPendingWorkspace(nextWorkspace ?? null)
     setWorkspaceIsGit(nextWorkspaceIsGit)
+    setPendingEnabledTools(nextEnabledTools ? [...nextEnabledTools] : null)
     setPendingConfineToWorktree(nextWorkspaceIsGit)
   }
 
@@ -1275,6 +1392,54 @@ export function AgentMode(props: Props): React.JSX.Element {
             {worktreeNotice}
           </span>
         )}
+        <button
+          className="chip-button subtle"
+          type="button"
+          disabled={!workspaceSettingsPath || running}
+          title="Edit the system prompt shared by agent tasks in this workspace."
+          onClick={() => void openPromptEditor()}
+        >
+          <Layers size={13} />
+          System prompt
+        </button>
+        <div className="tool-menu-anchor agent-tool-menu-anchor">
+          <button
+            className={enabledToolNames.length > 0 ? 'chip-button subtle tools-on' : 'chip-button subtle'}
+            type="button"
+            disabled={running || toolsSaving}
+            title={`${enabledToolNames.length} of ${tools.length} tools exposed to the agent`}
+            onClick={() => (toolsMenuOpen ? void closeToolsMenu() : openToolsMenu())}
+          >
+            {toolsSaving ? <LoaderCircle className="spin" size={13} /> : <Wrench size={13} />}
+            Tools
+            <span className="agent-tool-count">
+              {enabledToolNames.length}/{tools.length}
+            </span>
+          </button>
+          {toolsMenuOpen && (
+            <ToolsMenu
+              tools={tools}
+              enabled={toolDraft}
+              disabled={toolsSaving}
+              placement="below"
+              onToggle={(name, on) =>
+                setToolDraft((current) =>
+                  on
+                    ? Array.from(new Set([...current, name]))
+                    : current.filter((entry) => entry !== name)
+                )
+              }
+              onSetAll={(names, on) =>
+                setToolDraft((current) =>
+                  on
+                    ? Array.from(new Set([...current, ...names]))
+                    : current.filter((entry) => !names.includes(entry))
+                )
+              }
+              onClose={() => void closeToolsMenu()}
+            />
+          )}
+        </div>
         {sandbox && <SandboxBadge sandbox={sandbox} />}
         <div className="agent-mode-select">
           <button type="button" onClick={() => setModeMenuOpen((open) => !open)} disabled={!session}>
@@ -1336,10 +1501,6 @@ export function AgentMode(props: Props): React.JSX.Element {
               It reads and edits files in the workspace and runs commands there. Everything runs
               through Brazier's own policy layer: {executeTools} of {tools.length} tools can execute
               programs, and each needs your approval unless you change the mode above.
-            </p>
-            <p>
-              Repository-specific agent instructions can live in{' '}
-              <code>.brazier/agent-system-prompt.md</code>.
             </p>
             <div className="agent-suggestions">
               <button type="button" onClick={() => props.onSuggestPrompt?.('Summarize this repository: layout, build commands, and test entry points.')}>
@@ -1464,6 +1625,80 @@ export function AgentMode(props: Props): React.JSX.Element {
               </button>
             </header>
             <pre>{artifact.text}</pre>
+          </div>
+        </div>
+      )}
+
+      {promptEditorOpen && (
+        <div className="agent-artifact-overlay" role="dialog" aria-modal="true">
+          <div className="agent-artifact agent-prompt-editor">
+            <header>
+              <div>
+                <strong>Workspace system prompt</strong>
+                <small>{workspaceSettingsPath}</small>
+              </div>
+              <button
+                type="button"
+                disabled={promptSaving}
+                onClick={() => setPromptEditorOpen(false)}
+              >
+                <X size={15} />
+              </button>
+            </header>
+            {promptLoading ? (
+              <div className="agent-prompt-loading">
+                <LoaderCircle className="spin" size={16} />
+                Loading prompt…
+              </div>
+            ) : (
+              <>
+                <p>
+                  This template is shared by Agent tasks in this workspace. Shortcuts are replaced
+                  with live session details when a task starts.
+                </p>
+                <textarea
+                  value={promptDraft}
+                  disabled={promptSaving}
+                  spellCheck={false}
+                  onChange={(event) => setPromptDraft(event.target.value)}
+                  aria-label="Workspace agent system prompt"
+                />
+                <section className="agent-prompt-components" aria-label="Prompt shortcuts">
+                  <strong>Generated shortcuts</strong>
+                  <span>Use these anywhere in the prompt. Expand one to inspect its current value.</span>
+                  <div>
+                    {promptComponents.map((component) => (
+                      <details key={component.name}>
+                        <summary>
+                          <code>{component.placeholder}</code>
+                        </summary>
+                        <pre>{component.content}</pre>
+                      </details>
+                    ))}
+                  </div>
+                </section>
+                <footer>
+                  <span>{promptCustomized ? 'Workspace override' : 'Using generated default'}</span>
+                  <button
+                    type="button"
+                    className="chip-button subtle"
+                    disabled={promptSaving || !promptCustomized}
+                    onClick={() => void resetPrompt()}
+                  >
+                    Reset to default
+                  </button>
+                  <button
+                    type="button"
+                    className="chip-button"
+                    disabled={promptSaving}
+                    onClick={() => void savePrompt()}
+                  >
+                    {promptSaving ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />}
+                    Save for workspace
+                  </button>
+                </footer>
+              </>
+            )}
           </div>
         </div>
       )}

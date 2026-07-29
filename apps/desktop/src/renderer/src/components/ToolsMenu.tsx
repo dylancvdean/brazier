@@ -1,10 +1,19 @@
 import { Check, Globe, Wrench } from 'lucide-react'
-import type { BundledTool } from '../api'
+
+export type SelectableTool = {
+  name: string
+  title?: string
+  label?: string
+  description?: string
+  source?: string
+  network?: boolean
+}
 
 type ToolsMenuProps = {
-  tools: BundledTool[]
+  tools: SelectableTool[]
   enabled: string[]
   disabled: boolean
+  placement?: 'above' | 'below'
   onToggle: (name: string, on: boolean) => void
   onSetAll: (names: string[], on: boolean) => void
   onClose: () => void
@@ -13,13 +22,13 @@ type ToolsMenuProps = {
 type ToolGroup = {
   key: string
   label: string
-  tools: BundledTool[]
+  tools: SelectableTool[]
 }
 
 /** Group bundled tools first, then one group per MCP server. */
-function groupTools(tools: BundledTool[]): ToolGroup[] {
-  const bundled: BundledTool[] = []
-  const byServer = new Map<string, BundledTool[]>()
+function groupTools(tools: SelectableTool[]): ToolGroup[] {
+  const bundled: SelectableTool[] = []
+  const byServer = new Map<string, SelectableTool[]>()
   for (const tool of tools) {
     if (tool.source === 'mcp' || tool.name.startsWith('mcp/')) {
       const server = tool.name.split('/')[1] ?? 'mcp'
@@ -47,6 +56,7 @@ export function ToolsMenu({
   tools,
   enabled,
   disabled,
+  placement = 'above',
   onToggle,
   onSetAll,
   onClose
@@ -58,7 +68,10 @@ export function ToolsMenu({
   return (
     <>
       <div className="tool-menu-backdrop" onMouseDown={onClose} />
-      <div className="tool-menu-popover" onMouseDown={(event) => event.stopPropagation()}>
+      <div
+        className={`tool-menu-popover ${placement}`}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <div className="tool-menu-head">
           <span className="popover-title">Tools</span>
           <div className="tool-menu-bulk">
@@ -102,7 +115,7 @@ export function ToolsMenu({
                   </span>
                   <span className="tool-menu-item-body">
                     <strong>
-                      {tool.title || tool.name}
+                      {tool.title || tool.label || tool.name}
                       {tool.network && (
                         <span className="tool-menu-net" title="Uses the network">
                           <Globe size={11} />

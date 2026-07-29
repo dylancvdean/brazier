@@ -23,6 +23,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+export async function fetchWelcomePreference(): Promise<{ completed: boolean }> {
+  return request('/api/v1/preferences/welcome')
+}
+
+export async function saveWelcomePreference(completed: boolean): Promise<{ completed: boolean }> {
+  return request('/api/v1/preferences/welcome', {
+    method: 'PUT',
+    body: JSON.stringify({ completed })
+  })
+}
+
 export type LocalModel = {
   id: string
   object: string

@@ -33,7 +33,12 @@ and errors will be recorded as immutable run snapshots.
 SQLite stores metadata in WAL mode. Large attachments and models belong in
 content-addressed stores under the application data directory. Credentials and
 Hugging Face tokens belong in the operating-system credential store, never in
-SQLite or renderer storage.
+SQLite or renderer storage. Application preferences that must span renderer
+origins also live in SQLite; onboarding completion, for example, is shared by
+the development HTTP renderer and packaged `file://` renderer. The renderer
+promotes the previous localStorage flag on first read for upgrade compatibility,
+and migration 10 treats an already-existing database as an onboarded
+installation so cross-origin upgrades do not replay the welcome flow.
 
 ## APIs
 
@@ -293,13 +298,24 @@ the agent system prompt are served by the daemon too
 (`/api/v1/agent/tools`, `/api/v1/agent/sessions/{id}/prompt`), so the contract a
 model sees always matches the executor and the policy behind it.
 
-A repository may add agent-specific working instructions in
-`.brazier/agent-system-prompt.md`. The daemon reads this regular UTF-8 file from
-the selected workspace when the session opens (up to 64 KiB), appends it to the
-application-owned system prompt, and labels it as lower-priority repository
-guidance. It cannot override sandbox, permission, credential, or reporting
-rules. Prompt-file symlinks are rejected so a repository cannot use this hook
-to read content outside its workspace.
+Agent system prompts are workspace-scoped settings in the daemon database, so
+all tasks grouped under the same workspace share one override. Agent mode's
+header opens the prompt editor. The editable value is a template composed from
+named shortcuts such as `{workspace}`, `{system_info}`, and `{tools}`. The editor
+lists each shortcut below the template and lets users inspect its current,
+read-only expansion. The daemon resolves shortcuts from live session state when
+the worker opens a task; unknown shortcuts remain literal. With no override the
+editor displays the complete default template—not a blank extension field.
+Resetting removes the override and restores that template. Worktree tasks use
+their source repository as the settings key. Execution permissions remain
+enforced by the daemon policy broker independently of prompt text.
+
+Agent mode also exposes the shared grouped tool picker. Its selection is stored
+on the agent session and supplied both to the runtime's tool catalog and the
+prompt template's `{tools}` expansion. Pre-task selections are written when the
+session is created; changing an existing idle task rebuilds its worker session
+so the catalog and prompt cannot drift apart. The daemon rejects tool names that
+are not in its current built-in and MCP catalog.
 
 ### Policy and approvals
 

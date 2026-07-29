@@ -209,6 +209,40 @@ export async function validateAgentWorkspace(path: string): Promise<{
   })
 }
 
+export type AgentWorkspacePrompt = {
+  workspace_path: string
+  /** Editable template. Known `{shortcut}` values are expanded at run time. */
+  system_prompt: string
+  resolved_prompt: string
+  components: AgentPromptComponent[]
+  customized: boolean
+}
+
+export type AgentPromptComponent = {
+  name: string
+  placeholder: string
+  content: string
+}
+
+export async function fetchAgentWorkspacePrompt(
+  workspacePath: string,
+  sessionId?: string
+): Promise<AgentWorkspacePrompt> {
+  const query = new URLSearchParams({ workspace_path: workspacePath })
+  if (sessionId) query.set('session_id', sessionId)
+  return request(`/api/v1/agent/workspaces/prompt?${query.toString()}`)
+}
+
+export async function saveAgentWorkspacePrompt(
+  workspacePath: string,
+  systemPrompt: string | null
+): Promise<AgentWorkspacePrompt> {
+  return request('/api/v1/agent/workspaces/prompt', {
+    method: 'PUT',
+    body: JSON.stringify({ workspace_path: workspacePath, system_prompt: systemPrompt })
+  })
+}
+
 /** Full text of a truncated tool output. */
 export async function fetchAgentArtifact(artifactId: string): Promise<string> {
   const daemon = await connection()

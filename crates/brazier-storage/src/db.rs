@@ -287,6 +287,7 @@ impl Database {
             sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
                 .fetch_one(&self.pool)
                 .await?;
+        let existing_installation = version > 0;
 
         if version < 1 {
             sqlx::query(
@@ -672,6 +673,72 @@ impl Database {
             .execute(&mut *tx)
             .await?;
             sqlx::query("INSERT INTO schema_migrations(version) VALUES (8)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            version = 8;
+        }
+
+        if version < 9 {
+            // Workspace-scoped Agent settings outlive individual tasks. Session
+            // rows remain the task history; this table is the durable project
+            // record they share.
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS agent_workspaces (
+                    workspace_path TEXT PRIMARY KEY,
+                    system_prompt TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"INSERT OR IGNORE INTO agent_workspaces(workspace_path)
+                   SELECT DISTINCT workspace_path
+                   FROM agent_sessions
+                   WHERE workspace_path IS NOT NULL"#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO schema_migrations(version) VALUES (9)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            version = 9;
+        }
+
+        if version < 10 {
+            // Small application preferences that must survive renderer origin
+            // changes (development HTTP versus packaged file URLs).
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS application_preferences (
+                    key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            if existing_installation {
+                // Earlier releases stored this in origin-scoped localStorage.
+                // An existing database is sufficient evidence that this is an
+                // upgrade, and avoids replaying onboarding when switching from
+                // the packaged file:// renderer to the development HTTP one.
+                sqlx::query(
+                    r#"INSERT OR IGNORE INTO application_preferences(key, value_json)
+                       VALUES ('welcome', '{"completed":true}')"#,
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
+            sqlx::query("INSERT INTO schema_migrations(version) VALUES (10)")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -1547,6 +1614,33 @@ impl Database {
         let _: i64 = sqlx::query_scalar("SELECT 1").fetch_one(&self.pool).await?;
         Ok(())
     }
+
+    pub async fn application_preference(&self, key: &str) -> anyhow::Result<Option<Value>> {
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT value_json FROM application_preferences WHERE key = ?")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
+        value
+            .map(|value| serde_json::from_str(&value).context("decode application preference"))
+            .transpose()
+    }
+
+    pub async fn set_application_preference(&self, key: &str, value: &Value) -> anyhow::Result<()> {
+        let encoded = serde_json::to_string(value)?;
+        sqlx::query(
+            r#"INSERT INTO application_preferences(key, value_json)
+               VALUES (?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                   value_json = excluded.value_json,
+                   updated_at = datetime('now')"#,
+        )
+        .bind(key)
+        .bind(encoded)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 pub fn message_text(message: &Message) -> String {
@@ -1601,6 +1695,50 @@ mod tests {
 
         assert_eq!(journal_mode, "wal");
         assert_eq!(busy_timeout, 5_000);
+    }
+
+    #[tokio::test]
+    async fn application_preferences_round_trip_json_values() {
+        let (_dir, db) = open().await;
+        assert_eq!(db.application_preference("welcome").await.unwrap(), None);
+
+        db.set_application_preference("welcome", &json!({ "completed": true }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.application_preference("welcome").await.unwrap(),
+            Some(json!({ "completed": true }))
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_marks_existing_installations_as_onboarded() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("existing.sqlite");
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO schema_migrations(version) VALUES (9)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let db = Database::open(&path).await.unwrap();
+        assert_eq!(
+            db.application_preference("welcome").await.unwrap(),
+            Some(json!({ "completed": true }))
+        );
     }
 
     #[tokio::test]

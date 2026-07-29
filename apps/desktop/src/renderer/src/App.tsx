@@ -937,14 +937,14 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     let cancelled = false
-    void window.brazier
-      .getFlags()
-      .then((flags) => {
+    void Promise.all([window.brazier.getFlags(), hasCompletedWelcome()])
+      .then(([flags, completed]) => {
         if (cancelled) return
-        setShowWelcome(Boolean(flags.forceWelcome) || !hasCompletedWelcome())
+        setShowWelcome(Boolean(flags.forceWelcome) || !completed)
       })
-      .catch(() => {
-        if (!cancelled) setShowWelcome(!hasCompletedWelcome())
+      .catch(async () => {
+        const completed = await hasCompletedWelcome()
+        if (!cancelled) setShowWelcome(!completed)
       })
     return () => {
       cancelled = true
@@ -1457,13 +1457,13 @@ export function App(): React.JSX.Element {
       <main className="app-shell">
         <WelcomeScreen
           onContinue={() => {
-            markWelcomeCompleted()
+            void markWelcomeCompleted()
             setShowWelcome(false)
           }}
           onOpenRuntimes={() => {
             // Opening Runtimes leaves the walkthrough just like choosing
             // Continue: do not show it again after an update.
-            markWelcomeCompleted()
+            void markWelcomeCompleted()
             setManageSection('runtimes')
             setManageOpen(true)
             setShowWelcome(false)
