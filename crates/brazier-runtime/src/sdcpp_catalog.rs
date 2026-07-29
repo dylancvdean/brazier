@@ -365,9 +365,13 @@ pub fn validate(bundle: &Bundle) -> anyhow::Result<()> {
         ) {
             (None, None, None) => {}
             (Some(url), Some(sha256), Some(size)) => {
-                let url = reqwest::Url::parse(url)
-                    .with_context(|| format!("invalid direct component URL for {}", component.role))?;
-                anyhow::ensure!(url.scheme() == "https", "direct component URL must use HTTPS");
+                let url = reqwest::Url::parse(url).with_context(|| {
+                    format!("invalid direct component URL for {}", component.role)
+                })?;
+                anyhow::ensure!(
+                    url.scheme() == "https",
+                    "direct component URL must use HTTPS"
+                );
                 anyhow::ensure!(
                     sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
                     "direct component SHA-256 must be 64 hexadecimal characters"
@@ -644,6 +648,19 @@ mod tests {
         assert!(decoder.variants.iter().any(|variant| {
             variant.flag.as_deref() == Some("vae")
                 && variant.path == "split_files/vae/wan2.2_vae.safetensors"
+        }));
+    }
+
+    #[test]
+    fn wan_21_offers_matching_14b_text_and_image_video_bundles() {
+        let t2v = builtin("wan2.1-t2v-14b").expect("Wan 2.1 T2V 14B bundle");
+        let i2v = builtin("wan2.1-i2v-14b-480p").expect("Wan 2.1 I2V 14B bundle");
+        assert_eq!(t2v.modality, Modality::Video);
+        assert!(!t2v.supports_init_image);
+        assert!(i2v.supports_init_image);
+        assert!(t2v.components.iter().any(|component| {
+            component.repo_id == "city96/Wan2.1-T2V-14B-gguf"
+                && component.flag.as_deref() == Some("diffusion-model")
         }));
     }
 

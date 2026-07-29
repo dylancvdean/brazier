@@ -522,7 +522,7 @@ fn dir_has_projector(dir: &Path) -> bool {
     })
 }
 
-fn gguf_capabilities(has_projector: bool, model_key: &str) -> ModelCapabilities {
+fn gguf_capabilities(has_projector: bool, model_key: &str, model_path: &Path) -> ModelCapabilities {
     let mut input_modalities = vec!["text".into()];
     if has_projector {
         // mmproj enables vision only unless the checkpoint is a known audio LLM.
@@ -539,11 +539,20 @@ fn gguf_capabilities(has_projector: bool, model_key: &str) -> ModelCapabilities 
         streaming: true,
         tools: true,
         reasoning,
-        max_context_length: infer_gguf_context_hint(model_key),
+        max_context_length: gguf_context_length(model_path)
+            .or_else(|| infer_gguf_context_hint(model_key)),
         reasoning_modes,
         harmony: crate::harmony::is_harmony_model(model_key),
         audio_input: native_audio.then(|| "native".to_owned()),
     }
+}
+
+fn gguf_context_length(model_path: &Path) -> Option<u32> {
+    brazier_formats::gguf_meta::read_context_length(model_path)
+        .ok()
+        .flatten()
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value >= 512)
 }
 
 /// True when the checkpoint is likely a chat model that consumes audio tokens
@@ -1021,7 +1030,7 @@ fn collect_external_library(
             id,
             name,
             engine: "llama.cpp".to_owned(),
-            capabilities: gguf_capabilities(has_projector, &key),
+            capabilities: gguf_capabilities(has_projector, &key, &path),
             size_bytes: Some(size),
             read_only: true,
             library_label: Some(label.to_owned()),
@@ -1071,7 +1080,7 @@ fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> a
             id,
             name,
             engine: "llama.cpp".to_owned(),
-            capabilities: gguf_capabilities(has_projector, &key),
+            capabilities: gguf_capabilities(has_projector, &key, &path),
             size_bytes: Some(size),
             read_only: false,
             library_label: None,
@@ -1182,6 +1191,26 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn write_gguf_string(out: &mut Vec<u8>, value: &str) {
+        out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        out.extend_from_slice(value.as_bytes());
+    }
+
+    fn gguf_with_context(architecture: &str, context_length: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"GGUF");
+        out.extend_from_slice(&3u32.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&2u64.to_le_bytes());
+        write_gguf_string(&mut out, "general.architecture");
+        out.extend_from_slice(&8u32.to_le_bytes());
+        write_gguf_string(&mut out, architecture);
+        write_gguf_string(&mut out, &format!("{architecture}.context_length"));
+        out.extend_from_slice(&4u32.to_le_bytes());
+        out.extend_from_slice(&context_length.to_le_bytes());
+        out
+    }
+
     #[test]
     fn model_id_round_trips_through_path() {
         let dir = tempdir().unwrap();
@@ -1209,6 +1238,16 @@ mod tests {
         assert_eq!(models[0].engine, "llama.cpp");
         assert!(models[0].capabilities.streaming);
         assert_eq!(models[0].id, "gguf:acme/demo/demo-q4_k_m.gguf");
+    }
+
+    #[test]
+    fn lists_context_length_from_gguf_metadata() {
+        let dir = tempdir().unwrap();
+        let file = download_destination(dir.path(), "acme/demo", "misleading-8k.gguf").unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, gguf_with_context("llama", 98_304)).unwrap();
+        let models = list_gguf_models(dir.path()).unwrap();
+        assert_eq!(models[0].capabilities.max_context_length, Some(98_304));
     }
 
     #[test]

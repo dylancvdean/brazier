@@ -201,6 +201,21 @@ const BUILD_ENGINE_DEFAULTS: Record<
   }
 }
 
+export function sourceRuntimeId(engine: BuildEngine, buildId: string): string {
+  switch (engine) {
+    case 'llama.cpp':
+      return `source-${buildId}`
+    case 'stable-diffusion.cpp':
+      return `sdcpp-source-${buildId}`
+    case 'whisper.cpp':
+      return `whisper-source-${buildId}`
+    case 'whisperkit':
+      return `whisperkit-source-${buildId}`
+    default:
+      return `${engine}-source-${buildId}`
+  }
+}
+
 function defaultDiscoverEngine(hardware: HardwareInfo | null): DiscoverEngine {
   if (hardware?.os === 'macos' && hardware.architecture === 'aarch64') {
     return 'mlx-lm'
@@ -2400,6 +2415,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   }, [props.hardware?.os, props.hardware?.architecture])
   const [buildJobs, setBuildJobs] = useState(initialBuildJobs)
   const [building, setBuilding] = useState(false)
+  const [activateCompletedBuild, setActivateCompletedBuild] = useState(false)
   const [activeBuildId, setActiveBuildId] = useState<string | null>(null)
   const [buildProgress, setBuildProgress] = useState<JobProgressState>(() =>
     emptyJobProgress('Preparing source build')
@@ -2448,6 +2464,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   useEffect(() => {
     if (!props.pendingBuild) return
     applyBuildEngine(props.pendingBuild.engine, props.pendingBuild.repository)
+    // A fork offered after a failed model load is a recovery action. Once it
+    // builds, make it the engine's default so retrying the model uses it.
+    setActivateCompletedBuild(true)
     setBuildOpen(true)
     props.onPendingBuildConsumed?.()
   }, [props.pendingBuild, props.onPendingBuildConsumed])
@@ -2665,8 +2684,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     setBuildProgress(emptyJobProgress('Preparing source build'))
     setBuildWarning(null)
     props.onError(null)
+    let buildCompleted = false
     try {
-      await buildRuntime(
+      const built = await buildRuntime(
         buildEngine,
         repository.trim(),
         revision.trim(),
@@ -2685,9 +2705,16 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         },
         { onBuildId: setActiveBuildId }
       )
+      buildCompleted = true
+      if (activateCompletedBuild) {
+        await activateRuntime(sourceRuntimeId(buildEngine, built.build_id))
+        setActivateCompletedBuild(false)
+      }
       setBuildProgress((current) => ({
         ...current,
-        headline: 'Build complete — activate it below to use it.',
+        headline: activateCompletedBuild
+          ? 'Build complete — activated as the default runtime.'
+          : 'Build complete — activate it below to use it.',
         percent: 100,
         phase: 'done'
       }))
@@ -2703,10 +2730,14 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         hints: Array.isArray(diagnostics?.hints)
           ? diagnostics.hints.filter((hint): hint is string => typeof hint === 'string')
           : current.hints,
-        headline: 'Build failed',
+        headline: buildCompleted ? 'Build complete, but activation failed' : 'Build failed',
         phase: 'error'
       }))
-      props.onError(`Build failed: ${errorText(cause)}`)
+      props.onError(
+        buildCompleted
+          ? `The runtime was built but could not be activated: ${errorText(cause)}`
+          : `Build failed: ${errorText(cause)}`
+      )
     } finally {
       setBuilding(false)
       setActiveBuildId(null)

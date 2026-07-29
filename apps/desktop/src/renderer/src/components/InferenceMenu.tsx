@@ -39,7 +39,7 @@ type InferenceMenuProps = {
 
 type ReasoningMode = 'off' | 'on' | 'budget'
 
-function contextPresets(maxContext: number | null | undefined): number[] {
+export function contextPresets(maxContext: number | null | undefined): number[] {
   const candidates = [2048, 4096, 8192, 16_384, 32_768, 65_536, 131_072]
   const capped = maxContext
     ? candidates.filter((value) => value <= maxContext)

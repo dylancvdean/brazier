@@ -458,7 +458,7 @@ fn validate_loras(loras: &[LoraBinding]) -> anyhow::Result<()> {
 }
 
 fn validate_text(profile: &TextProfile) -> anyhow::Result<()> {
-    ensure_range(profile.context_size, 512, 1_048_576, "context size")?;
+    ensure_range(profile.context_size, 512, u32::MAX, "context size")?;
     ensure_range(profile.batch_size, 32, 8192, "batch size")?;
     ensure_range(profile.ubatch_size, 1, 8192, "physical batch size")?;
     ensure_range(profile.gpu_layers, -1, 999, "GPU layers")?;
@@ -844,6 +844,15 @@ pub fn resolve_control_net(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_model_reported_context_windows_above_one_million_tokens() {
+        let profile = ModelProfile::Text(TextProfile {
+            context_size: Some(2_000_000),
+            ..TextProfile::default()
+        });
+        profile.validate("gguf:acme/model.gguf").unwrap();
+    }
 
     #[test]
     fn kinds_follow_the_model_id() {

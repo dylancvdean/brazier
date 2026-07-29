@@ -195,8 +195,8 @@ impl Default for RuntimeSettings {
 impl RuntimeSettings {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            (512..=1_048_576).contains(&self.context_size),
-            "context_size must be between 512 and 1048576"
+            self.context_size >= 512,
+            "context_size must be at least 512"
         );
         anyhow::ensure!(
             (32..=8192).contains(&self.batch_size),
@@ -311,6 +311,15 @@ pub async fn save(data_dir: &Path, settings: &RuntimeSettings) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_model_reported_context_windows_above_one_million_tokens() {
+        let settings = RuntimeSettings {
+            context_size: 2_000_000,
+            ..RuntimeSettings::default()
+        };
+        settings.validate().unwrap();
+    }
 
     /// Reproduces a real poisoned settings file: activating the PersonaPlex MLX
     /// runtime stored its virtualenv interpreter as the llama-server override,

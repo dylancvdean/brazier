@@ -782,6 +782,125 @@
       ]
     },
     {
+      "id": "wan2.1-t2v-14b",
+      "label": "Wan 2.1 T2V 14B",
+      "modality": "video",
+      "key": "wan-ai/wan2.1-t2v-14b",
+      "summary": "The full-size Wan 2.1 text-to-video model for higher fidelity than the 1.3B edition. Generates from text alone at 480p or 720p; the quantized diffusion model still needs substantial memory.",
+      "license": "apache-2.0",
+      "featured": true,
+      "defaults": {
+        "width": 832,
+        "height": 480,
+        "steps": 50,
+        "cfg_scale": 5.0,
+        "sampling_method": "euler",
+        "flow_shift": 5.0,
+        "video_frames": 33,
+        "fps": 16,
+        "vae_on_cpu": true
+      },
+      "supports_init_image": false,
+      "components": [
+        {
+          "repo_id": "city96/Wan2.1-T2V-14B-gguf",
+          "path": "wan2.1-t2v-14b-Q4_K_M.gguf",
+          "role": "Diffusion model",
+          "flag": "diffusion-model",
+          "approx_bytes": 10124581504,
+          "variants": [
+            {
+              "label": "Q3_K_S",
+              "path": "wan2.1-t2v-14b-Q3_K_S.gguf",
+              "approx_bytes": 6987864704,
+              "note": "Smallest usable; fits 8–12 GB."
+            },
+            {
+              "label": "Q4_K_M",
+              "path": "wan2.1-t2v-14b-Q4_K_M.gguf",
+              "approx_bytes": 10124581504,
+              "note": "Recommended."
+            },
+            {
+              "label": "Q5_K_M",
+              "path": "wan2.1-t2v-14b-Q5_K_M.gguf",
+              "approx_bytes": 11264907904,
+              "note": "Better fidelity."
+            },
+            {
+              "label": "Q6_K",
+              "path": "wan2.1-t2v-14b-Q6_K.gguf",
+              "approx_bytes": 12476504704,
+              "note": "Near-full quality."
+            },
+            {
+              "label": "Q8_0",
+              "path": "wan2.1-t2v-14b-Q8_0.gguf",
+              "approx_bytes": 15879461504,
+              "note": "Largest; effectively lossless."
+            }
+          ]
+        },
+        {
+          "repo_id": "madebyollin/taehv",
+          "path": "taew2_1.safetensors",
+          "source_url": "https://github.com/madebyollin/taehv/raw/refs/heads/main/safetensors/taew2_1.safetensors",
+          "source_sha256": "04766eac0221b5390b985ae3fdcca652cbb4b1e8b82b28ea7ff89dfad1b1a93f",
+          "source_size": 22642902,
+          "role": "Video decoder",
+          "flag": "tae",
+          "approx_bytes": 22642902,
+          "variants": [
+            {
+              "label": "TAEHV · low VRAM (recommended)",
+              "path": "taew2_1.safetensors",
+              "in_place": true,
+              "note": "Fast, low-memory decoder. Slightly softer detail than the full VAE."
+            },
+            {
+              "label": "Full VAE · higher quality",
+              "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+              "path": "split_files/vae/wan_2.1_vae.safetensors",
+              "flag": "vae",
+              "in_place": true,
+              "approx_bytes": 253815318,
+              "note": "Highest decode fidelity, but can require tens of GiB of VRAM."
+            }
+          ]
+        },
+        {
+          "repo_id": "city96/umt5-xxl-encoder-gguf",
+          "path": "umt5-xxl-encoder-Q8_0.gguf",
+          "role": "Text encoder (umT5-XXL)",
+          "flag": "t5xxl",
+          "approx_bytes": 6043068256,
+          "variants": [
+            {
+              "label": "Q8 GGUF · sd.cpp compatible (recommended)",
+              "repo_id": "city96/umt5-xxl-encoder-gguf",
+              "path": "umt5-xxl-encoder-Q8_0.gguf",
+              "approx_bytes": 6043068256,
+              "note": "The encoder format documented and validated with sd.cpp Wan."
+            },
+            {
+              "label": "Comfy FP8 scaled · legacy",
+              "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+              "path": "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+              "approx_bytes": 6735906897,
+              "note": "For ComfyUI compatibility; it is not reliable with sd.cpp Wan."
+            },
+            {
+              "label": "fp16",
+              "repo_id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+              "path": "split_files/text_encoders/umt5_xxl_fp16.safetensors",
+              "approx_bytes": 11366399385,
+              "note": "Full precision text encoder."
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "wan2.1-i2v-14b-480p",
       "label": "Wan 2.1 I2V 14B (480p)",
       "modality": "video",

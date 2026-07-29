@@ -1,4 +1,4 @@
-//! Read string metadata keys from GGUF files (e.g. `tokenizer.chat_template`).
+//! Read metadata keys from GGUF files without loading model weights into memory.
 
 use std::{
     fs::File,
@@ -6,10 +6,21 @@ use std::{
     path::Path,
 };
 
+const GGUF_TYPE_UINT8: u32 = 0;
+const GGUF_TYPE_INT8: u32 = 1;
+const GGUF_TYPE_UINT16: u32 = 2;
+const GGUF_TYPE_INT16: u32 = 3;
+const GGUF_TYPE_UINT32: u32 = 4;
+const GGUF_TYPE_INT32: u32 = 5;
+const GGUF_TYPE_FLOAT32: u32 = 6;
+const GGUF_TYPE_BOOL: u32 = 7;
 /// GGUF value type for a UTF-8 string.
 const GGUF_TYPE_STRING: u32 = 8;
 /// GGUF value type for a homogeneous array.
 const GGUF_TYPE_ARRAY: u32 = 9;
+const GGUF_TYPE_UINT64: u32 = 10;
+const GGUF_TYPE_INT64: u32 = 11;
+const GGUF_TYPE_FLOAT64: u32 = 12;
 
 /// Maximum bytes we will load for a single string metadata value.
 const MAX_STRING_BYTES: usize = 2 * 1024 * 1024;
@@ -20,19 +31,7 @@ const MAX_STRING_BYTES: usize = 2 * 1024 * 1024;
 /// metadata section from the start of the file so large templates still work
 /// without loading the whole GGUF into memory.
 pub fn read_string_kv(path: &Path, key: &str) -> anyhow::Result<Option<String>> {
-    let mut file =
-        File::open(path).map_err(|error| anyhow::anyhow!("open {}: {error}", path.display()))?;
-    let mut magic = [0u8; 4];
-    file.read_exact(&mut magic)
-        .map_err(|error| anyhow::anyhow!("read GGUF magic: {error}"))?;
-    anyhow::ensure!(&magic == b"GGUF", "{} is not a GGUF file", path.display());
-    let version = read_u32(&mut file)?;
-    anyhow::ensure!(
-        (1..=3).contains(&version),
-        "unsupported GGUF version {version}"
-    );
-    let _tensor_count = read_u64(&mut file)?;
-    let kv_count = read_u64(&mut file)?;
+    let (mut file, kv_count) = open_metadata(path)?;
     for _ in 0..kv_count {
         let entry_key = read_string(&mut file)?;
         let value_type = read_u32(&mut file)?;
@@ -45,6 +44,41 @@ pub fn read_string_kv(path: &Path, key: &str) -> anyhow::Result<Option<String>> 
         skip_value(&mut file, value_type)?;
     }
     Ok(None)
+}
+
+/// Read an unsigned integer metadata value from a GGUF file.
+///
+/// GGUF converters normally encode context length as `uint32`, but accepting
+/// all unsigned widths makes this tolerant of otherwise valid converters.
+/// Returns `Ok(None)` when the key is missing or has another value type.
+pub fn read_unsigned_kv(path: &Path, key: &str) -> anyhow::Result<Option<u64>> {
+    let (mut file, kv_count) = open_metadata(path)?;
+    for _ in 0..kv_count {
+        let entry_key = read_string(&mut file)?;
+        let value_type = read_u32(&mut file)?;
+        if entry_key == key {
+            return match value_type {
+                GGUF_TYPE_UINT8 => Ok(Some(read_u8(&mut file)? as u64)),
+                GGUF_TYPE_UINT16 => Ok(Some(read_u16(&mut file)? as u64)),
+                GGUF_TYPE_UINT32 => Ok(Some(read_u32(&mut file)? as u64)),
+                GGUF_TYPE_UINT64 => Ok(Some(read_u64(&mut file)?)),
+                _ => Ok(None),
+            };
+        }
+        skip_value(&mut file, value_type)?;
+    }
+    Ok(None)
+}
+
+/// Model-native context length advertised by a GGUF's architecture metadata.
+///
+/// The GGUF convention stores the architecture in `general.architecture` and
+/// its context window in `<architecture>.context_length`.
+pub fn read_context_length(path: &Path) -> anyhow::Result<Option<u64>> {
+    let Some(architecture) = read_string_kv(path, "general.architecture")? else {
+        return Ok(None);
+    };
+    read_unsigned_kv(path, &format!("{architecture}.context_length"))
 }
 
 /// Chat template Jinja source embedded in a GGUF, when present.
@@ -61,6 +95,37 @@ pub fn read_chat_template(path: &Path) -> anyhow::Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+fn open_metadata(path: &Path) -> anyhow::Result<(File, u64)> {
+    let mut file =
+        File::open(path).map_err(|error| anyhow::anyhow!("open {}: {error}", path.display()))?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)
+        .map_err(|error| anyhow::anyhow!("read GGUF magic: {error}"))?;
+    anyhow::ensure!(&magic == b"GGUF", "{} is not a GGUF file", path.display());
+    let version = read_u32(&mut file)?;
+    anyhow::ensure!(
+        (1..=3).contains(&version),
+        "unsupported GGUF version {version}"
+    );
+    let _tensor_count = read_u64(&mut file)?;
+    let kv_count = read_u64(&mut file)?;
+    Ok((file, kv_count))
+}
+
+fn read_u8(file: &mut File) -> anyhow::Result<u8> {
+    let mut buf = [0u8; 1];
+    file.read_exact(&mut buf)
+        .map_err(|error| anyhow::anyhow!("read u8: {error}"))?;
+    Ok(buf[0])
+}
+
+fn read_u16(file: &mut File) -> anyhow::Result<u16> {
+    let mut buf = [0u8; 2];
+    file.read_exact(&mut buf)
+        .map_err(|error| anyhow::anyhow!("read u16: {error}"))?;
+    Ok(u16::from_le_bytes(buf))
 }
 
 fn read_u32(file: &mut File) -> anyhow::Result<u32> {
@@ -94,10 +159,10 @@ fn read_string(file: &mut File) -> anyhow::Result<String> {
 
 fn skip_value(file: &mut File, value_type: u32) -> anyhow::Result<()> {
     let size = match value_type {
-        0 | 1 | 7 => 1, // u8 / i8 / bool
-        2 | 3 => 2,     // u16 / i16
-        4..=6 => 4,     // u32 / i32 / f32
-        10..=12 => 8,   // u64 / i64 / f64
+        GGUF_TYPE_UINT8 | GGUF_TYPE_INT8 | GGUF_TYPE_BOOL => 1,
+        GGUF_TYPE_UINT16 | GGUF_TYPE_INT16 => 2,
+        GGUF_TYPE_UINT32 | GGUF_TYPE_INT32 | GGUF_TYPE_FLOAT32 => 4,
+        GGUF_TYPE_UINT64 | GGUF_TYPE_INT64 | GGUF_TYPE_FLOAT64 => 8,
         GGUF_TYPE_STRING => {
             let length = read_u64(file)?;
             skip_bytes(file, length, "string")?;
@@ -150,6 +215,21 @@ mod tests {
         out
     }
 
+    fn write_gguf_with_context(architecture: &str, context_length: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"GGUF");
+        out.extend_from_slice(&3u32.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&2u64.to_le_bytes());
+        write_string(&mut out, "general.architecture");
+        out.extend_from_slice(&GGUF_TYPE_STRING.to_le_bytes());
+        write_string(&mut out, architecture);
+        write_string(&mut out, &format!("{architecture}.context_length"));
+        out.extend_from_slice(&GGUF_TYPE_UINT32.to_le_bytes());
+        out.extend_from_slice(&context_length.to_le_bytes());
+        out
+    }
+
     #[test]
     fn reads_chat_template_string() {
         let dir = tempdir().unwrap();
@@ -171,6 +251,15 @@ mod tests {
         let bytes = write_gguf(&[("general.architecture", "llama")]);
         File::create(&path).unwrap().write_all(&bytes).unwrap();
         assert_eq!(read_chat_template(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn reads_architecture_context_length() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        let bytes = write_gguf_with_context("qwen2", 98_304);
+        File::create(&path).unwrap().write_all(&bytes).unwrap();
+        assert_eq!(read_context_length(&path).unwrap(), Some(98_304));
     }
 
     #[test]
