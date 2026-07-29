@@ -7,6 +7,7 @@ import {
   DEFAULT_MAX_SUBAGENTS,
   isSubagentSession,
   resolveMaxSubagents,
+  resolveSubagentContext,
   resolveSubagentModel,
   SPAWN_SUBAGENT_TOOL,
   summarizeSubagentResult
@@ -29,6 +30,11 @@ describe('subagent helpers', () => {
       'gguf:profile.gguf'
     )
     expect(resolveSubagentModel(undefined, null, 'gguf:parent.gguf')).toBe('gguf:parent.gguf')
+  })
+
+  it('defaults subagent context to the parent context', () => {
+    expect(resolveSubagentContext(null, 32_768)).toBe(32_768)
+    expect(resolveSubagentContext({ subagent_context_size: 16_384 }, 32_768)).toBe(16_384)
   })
 
   it('strips spawn_subagent from child tools so nesting is impossible', () => {

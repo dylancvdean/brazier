@@ -188,6 +188,9 @@ pub struct TextProfile {
     // --- agent ---
     /// Model id for `spawn_subagent` children. `None` means the parent's model.
     pub subagent_model: Option<String>,
+    /// Context available to each subagent. `None` inherits the parent's
+    /// effective context size.
+    pub subagent_context_size: Option<u32>,
     /// Max concurrent subagents a parent may run. Default 2 when unset.
     pub max_subagents: Option<u32>,
     /// When true, llama-server starts with `--parallel = 1 + max_subagents` so
@@ -459,6 +462,12 @@ fn validate_loras(loras: &[LoraBinding]) -> anyhow::Result<()> {
 
 fn validate_text(profile: &TextProfile) -> anyhow::Result<()> {
     ensure_range(profile.context_size, 512, u32::MAX, "context size")?;
+    ensure_range(
+        profile.subagent_context_size,
+        512,
+        u32::MAX,
+        "subagent context size",
+    )?;
     ensure_range(profile.batch_size, 32, 8192, "batch size")?;
     ensure_range(profile.ubatch_size, 1, 8192, "physical batch size")?;
     ensure_range(profile.gpu_layers, -1, 999, "GPU layers")?;

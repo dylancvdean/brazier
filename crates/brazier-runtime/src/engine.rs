@@ -3,6 +3,7 @@
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -66,6 +67,47 @@ pub enum StreamEvent {
     },
     /// Generation finished.
     End,
+}
+
+/// Backend-neutral placement of a prepared chat model.
+///
+/// The desktop consumes this instead of interpreting backend-specific settings.
+/// A backend whose memory placement is controlled elsewhere reports
+/// `Unavailable` rather than pretending that a local GPU/CPU decision was made.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelResidency {
+    pub placement: ModelResidencyPlacement,
+    pub backend: &'static str,
+    pub description: String,
+    pub gpu_bytes: Option<u64>,
+    pub cpu_bytes: Option<u64>,
+    pub gpu_kv_bytes: Option<u64>,
+    pub cpu_kv_bytes: Option<u64>,
+    pub gpu_capacity_bytes: Option<u64>,
+    pub aggregate_context_tokens: Option<u64>,
+    pub parallel_slots: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelResidencyPlacement {
+    Gpu,
+    CpuOffload,
+    Unavailable,
+}
+
+fn residency_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / GIB)
+    } else {
+        format!("{:.0} MiB", bytes as f64 / MIB)
+    }
+}
+
+fn exceeds_gpu_capacity(gpu_bytes: u64, capacity: Option<u64>) -> bool {
+    capacity.is_some_and(|capacity| gpu_bytes > capacity)
 }
 
 type LoadNotifier = Option<tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>>;
@@ -409,6 +451,154 @@ impl Runtime {
         let base_url = server.base_url.clone();
         drop(guard);
         Some(mlx::probe_server(&self.http, &base_url).await)
+    }
+
+    /// Describe the effective placement of the currently prepared model.
+    ///
+    /// llama.cpp exposes the resolved layer placement used to launch its
+    /// process. MLX uses Metal with unified memory, so its weights are directly
+    /// GPU-addressable without a CPU-offload mode. Remote servers intentionally
+    /// remain unknown because their placement is outside Brazier's control.
+    pub async fn loaded_model_residency(&self, model_id: &str) -> ModelResidency {
+        if model_id.starts_with("gguf:") || model_id.starts_with("gguf-ext:") {
+            let guard = self.llama.lock().await;
+            return match guard.server.as_ref() {
+                Some(server) => {
+                    let report = &server.memory_report;
+                    let weights_on_gpu = match (report.offloaded_layers, report.total_layers) {
+                        (Some(offloaded), Some(total)) => offloaded >= total,
+                        _ => server.gpu_layers == -1,
+                    } && server.cpu_moe_layers.unwrap_or_default() == 0;
+                    let reported_kv = report.gpu_kv_bytes.saturating_add(report.cpu_kv_bytes);
+                    let kv_on_gpu = if reported_kv > 0 {
+                        report.gpu_kv_bytes > 0 && report.cpu_kv_bytes == 0
+                    } else {
+                        server.kv_offload
+                    };
+                    let gpu_bytes = report.gpu_bytes();
+                    let cpu_bytes = report.cpu_bytes();
+                    let hardware = crate::hardware::detect();
+                    let gpu_capacity = hardware.gpu_offload_memory_bytes.or(hardware.vram_bytes);
+                    let system_backed_gpu_spill = exceeds_gpu_capacity(gpu_bytes, gpu_capacity);
+                    let fully_gpu = weights_on_gpu && kv_on_gpu && !system_backed_gpu_spill;
+                    let allocation_detail = if gpu_bytes > 0 || cpu_bytes > 0 {
+                        format!(
+                            " Reported allocations: {} GPU ({} KV) and {} CPU ({} KV).",
+                            residency_bytes(gpu_bytes),
+                            residency_bytes(report.gpu_kv_bytes),
+                            residency_bytes(cpu_bytes),
+                            residency_bytes(report.cpu_kv_bytes),
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let reservation = format!(
+                        " KV reservation: {} tokens across {} slot{}.",
+                        server.aggregate_context_size,
+                        server.parallel_slots,
+                        if server.parallel_slots == 1 { "" } else { "s" },
+                    );
+                    let description = if system_backed_gpu_spill {
+                        format!(
+                            "System-memory spill active — llama.cpp reported {} of GPU buffers, above the {} dedicated GPU-memory budget, so the excess is system-backed.{reservation}{allocation_detail}",
+                            residency_bytes(gpu_bytes),
+                            residency_bytes(gpu_capacity.unwrap_or_default()),
+                        )
+                    } else if fully_gpu {
+                        format!(
+                            "Fully GPU resident — model weights and KV cache are on the GPU.{reservation}{allocation_detail}"
+                        )
+                    } else if server.gpu_layers == 0 {
+                        format!(
+                            "CPU resident — model weights and KV cache use CPU memory.{reservation}{allocation_detail}"
+                        )
+                    } else {
+                        format!(
+                            "CPU offload active — model weights or KV cache use CPU memory.{reservation}{allocation_detail}"
+                        )
+                    };
+                    ModelResidency {
+                        placement: if fully_gpu {
+                            ModelResidencyPlacement::Gpu
+                        } else {
+                            ModelResidencyPlacement::CpuOffload
+                        },
+                        backend: "llama.cpp",
+                        description,
+                        gpu_bytes: (gpu_bytes > 0).then_some(gpu_bytes),
+                        cpu_bytes: (cpu_bytes > 0).then_some(cpu_bytes),
+                        gpu_kv_bytes: (reported_kv > 0).then_some(report.gpu_kv_bytes),
+                        cpu_kv_bytes: (reported_kv > 0).then_some(report.cpu_kv_bytes),
+                        gpu_capacity_bytes: gpu_capacity,
+                        aggregate_context_tokens: Some(server.aggregate_context_size),
+                        parallel_slots: Some(server.parallel_slots),
+                    }
+                }
+                None => ModelResidency {
+                    placement: ModelResidencyPlacement::Unavailable,
+                    backend: "llama.cpp",
+                    description:
+                        "Model placement is unavailable because no llama.cpp server is running."
+                            .to_owned(),
+                    gpu_bytes: None,
+                    cpu_bytes: None,
+                    gpu_kv_bytes: None,
+                    cpu_kv_bytes: None,
+                    gpu_capacity_bytes: None,
+                    aggregate_context_tokens: None,
+                    parallel_slots: None,
+                },
+            };
+        }
+
+        if MlxKind::from_model_id(model_id).is_some() {
+            let guard = self.mlx.lock().await;
+            return if guard.server.is_some() {
+                ModelResidency {
+                    placement: ModelResidencyPlacement::Gpu,
+                    backend: "MLX",
+                    description:
+                        "GPU resident — MLX uses Apple unified memory, so the model is directly available to the GPU without CPU offload."
+                            .to_owned(),
+                    gpu_bytes: None,
+                    cpu_bytes: None,
+                    gpu_kv_bytes: None,
+                    cpu_kv_bytes: None,
+                    gpu_capacity_bytes: None,
+                    aggregate_context_tokens: None,
+                    parallel_slots: None,
+                }
+            } else {
+                ModelResidency {
+                    placement: ModelResidencyPlacement::Unavailable,
+                    backend: "MLX",
+                    description: "Model placement is unavailable because no MLX server is running."
+                        .to_owned(),
+                    gpu_bytes: None,
+                    cpu_bytes: None,
+                    gpu_kv_bytes: None,
+                    cpu_kv_bytes: None,
+                    gpu_capacity_bytes: None,
+                    aggregate_context_tokens: None,
+                    parallel_slots: None,
+                }
+            };
+        }
+
+        ModelResidency {
+            placement: ModelResidencyPlacement::Unavailable,
+            backend: "remote",
+            description:
+                "Residency is managed by the remote backend and is not visible to Brazier."
+                    .to_owned(),
+            gpu_bytes: None,
+            cpu_bytes: None,
+            gpu_kv_bytes: None,
+            cpu_kv_bytes: None,
+            gpu_capacity_bytes: None,
+            aggregate_context_tokens: None,
+            parallel_slots: None,
+        }
     }
 
     pub async fn active_runtimes(&self) -> runtimes::ActiveRuntimes {
@@ -1747,17 +1937,20 @@ impl Runtime {
         Ok(rx)
     }
 
+    /// Stop the resident local chat model without shutting down the daemon or
+    /// any media/voice runtimes.
+    pub async fn unload_chat_model(&self) {
+        if let Some(mut server) = self.llama.lock().await.server.take() {
+            let _ = server.stop().await;
+        }
+        if let Some(mut server) = self.mlx.lock().await.server.take() {
+            let _ = server.stop().await;
+        }
+    }
+
     /// Stop any child inference servers (called on daemon shutdown).
     pub async fn shutdown(&self) {
-        let mut guard = self.llama.lock().await;
-        if let Some(mut server) = guard.server.take() {
-            let _ = server.stop().await;
-        }
-        drop(guard);
-        let mut guard = self.mlx.lock().await;
-        if let Some(mut server) = guard.server.take() {
-            let _ = server.stop().await;
-        }
+        self.unload_chat_model().await;
     }
 }
 
@@ -2345,6 +2538,14 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[test]
+    fn gpu_buffers_beyond_dedicated_capacity_are_system_backed() {
+        let gib = 1024_u64 * 1024 * 1024;
+        assert!(exceeds_gpu_capacity(49 * gib, Some(16 * gib)));
+        assert!(!exceeds_gpu_capacity(12 * gib, Some(16 * gib)));
+        assert!(!exceeds_gpu_capacity(49 * gib, None));
+    }
 
     #[tokio::test]
     async fn generated_media_is_immediate_and_persisted_as_a_blob_reference() {

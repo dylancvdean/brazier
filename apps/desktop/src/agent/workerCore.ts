@@ -154,9 +154,18 @@ export class AgentWorkerCore {
     const tools = enabled
       ? this.tools.filter((tool) => enabled.includes(tool.name))
       : this.tools
+    const [profile, defaults] = await Promise.all([
+      broker.textProfile(remote.session.model),
+      broker.runtimeInferenceSettings()
+    ])
     const session = await this.runtime.createSession({
       sessionId,
-      model: { id: remote.session.model, name: remote.session.model },
+      model: {
+        id: remote.session.model,
+        name: remote.session.model,
+        contextWindow: profile?.context_size ?? defaults.context_size,
+        maxTokens: profile?.max_tokens ?? defaults.max_tokens ?? undefined
+      },
       systemPrompt: prompt.system_prompt,
       tools,
       messages: remote.messages.map((record) => record.payload),

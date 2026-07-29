@@ -771,6 +771,30 @@ code {
   transition: background 120ms ease;
 }
 
+.model-unload-button {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.model-unload-button:hover:not(:disabled) {
+  color: #fff;
+  background: #0a0a0a;
+}
+
+.model-unload-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 /* The picker is the one topbar item allowed to give up space: everything
    else keeps its size and long model names ellipsize instead of pushing the
    settings button off-screen. */
@@ -784,6 +808,36 @@ code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.model-title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-title-row strong {
+  min-width: 0;
+}
+
+.model-residency-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: #62c879;
+  box-shadow: 0 0 0 3px rgba(98, 200, 121, 0.12);
+}
+
+.model-residency-dot.cpu_offload {
+  background: #d7b25c;
+  box-shadow: 0 0 0 3px rgba(215, 178, 92, 0.12);
+}
+
+.model-residency-dot.unavailable {
+  background: #7d7d82;
+  box-shadow: 0 0 0 3px rgba(125, 125, 130, 0.1);
 }
 
 .model-icon {

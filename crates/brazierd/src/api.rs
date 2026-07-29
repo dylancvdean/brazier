@@ -492,6 +492,7 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         .route("/api/v1/adapters/delete", post(delete_adapter))
         .route("/api/v1/adapters/download", post(download_adapter))
         .route("/api/v1/models/prepare", post(prepare_model))
+        .route("/api/v1/models/loaded", delete(unload_model))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
@@ -2442,6 +2443,12 @@ struct PrepareModelRequest {
     model_id: String,
 }
 
+async fn unload_model(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    state.runtime.unload_chat_model().await;
+    state.invalidate_runtimes_cache().await;
+    Ok(Json(json!({ "status": "unloaded" })))
+}
+
 async fn prepare_model(
     State(state): State<AppState>,
     Query(query): Query<StreamQuery>,
@@ -2458,10 +2465,16 @@ async fn prepare_model(
                     }
                 }
                 state.invalidate_runtimes_cache().await;
-                return Ok(
-                    Json(json!({ "status": "ready", "model_id": request.model_id }))
-                        .into_response(),
-                );
+                let residency = state
+                    .runtime
+                    .loaded_model_residency(&request.model_id)
+                    .await;
+                return Ok(Json(json!({
+                    "status": "ready",
+                    "model_id": request.model_id,
+                    "residency": residency,
+                }))
+                .into_response());
             }
             Err(error) => return Err(ApiError::from_anyhow(error)),
         }
@@ -2500,7 +2513,12 @@ async fn prepare_model(
             }
         }
         cache_state.invalidate_runtimes_cache().await;
-        let done = json!({ "status": "ready", "model_id": model_id });
+        let residency = cache_state.runtime.loaded_model_residency(&model_id).await;
+        let done = json!({
+            "status": "ready",
+            "model_id": model_id,
+            "residency": residency,
+        });
         yield Ok::<Event, Infallible>(Event::default().data(done.to_string()));
     };
     Ok(Sse::new(events)

@@ -1415,11 +1415,14 @@ export type TextProfile = {
   system_prompt?: string | null
   /** Model id for agent subagents. Null/unset means the parent model. */
   subagent_model?: string | null
+  /** Per-subagent context. Null/unset inherits the parent context. */
+  subagent_context_size?: number | null
   /** Max concurrent subagents. Null inherits the default of 2. */
   max_subagents?: number | null
   /**
    * When true, llama.cpp starts with enough `--parallel` slots for concurrent
-   * subagent generation. Reloads the server; shares the context KV budget.
+   * subagent generation. Reloads the server and allocates the configured
+   * per-agent context to every slot.
    */
   parallel_subagents?: boolean | null
   loras?: LoraBinding[]
@@ -1857,13 +1860,26 @@ export async function setModelBinding(
   return response.bindings ?? {}
 }
 
+export type ModelResidency = {
+  placement: 'gpu' | 'cpu_offload' | 'unavailable'
+  backend: string
+  description: string
+  gpu_bytes: number | null
+  cpu_bytes: number | null
+  gpu_kv_bytes: number | null
+  cpu_kv_bytes: number | null
+  gpu_capacity_bytes: number | null
+  aggregate_context_tokens: number | null
+  parallel_slots: number | null
+}
+
 export async function prepareModel(
   modelId: string,
   options?: {
     signal?: AbortSignal
     onLoad?: (event: { phase: string; message: string }) => void
   }
-): Promise<void> {
+): Promise<ModelResidency | null> {
   const daemon = await connection()
   const response = await fetch(`${daemon.address}/api/v1/models/prepare?stream=true`, {
     method: 'POST',
@@ -1905,6 +1921,7 @@ export async function prepareModel(
         phase?: string
         message?: string
         status?: string
+        residency?: ModelResidency
         error?: { message?: string }
         brazier?: { fork_hints?: RuntimeForkHint[] }
       }
@@ -1914,9 +1931,15 @@ export async function prepareModel(
       if (chunk.phase && chunk.message) {
         options?.onLoad?.({ phase: chunk.phase, message: chunk.message })
       }
-      if (chunk.status === 'ready') return
+      if (chunk.status === 'ready') return chunk.residency ?? null
     }
   }
+  return null
+}
+
+/** Stop the currently resident local chat model, if any. */
+export async function unloadModel(): Promise<void> {
+  await request('/api/v1/models/loaded', { method: 'DELETE' })
 }
 
 export type BundledTool = {

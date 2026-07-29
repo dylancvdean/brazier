@@ -5,6 +5,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -29,6 +30,111 @@ const USER_AGENT: &str = "brazier-llama-manager";
 
 /// Cap stderr we surface so an OOM dump does not flood the UI.
 const STARTUP_STDERR_LIMIT: usize = 4_000;
+const STARTUP_TELEMETRY_LIMIT: usize = 256 * 1024;
+
+/// Allocations llama.cpp reports while loading a model.
+///
+/// Backends use slightly different prefixes (CUDA0, Vulkan0, Metal, CPU,
+/// CPU_Mapped), but the buffer labels are stable enough to retain a useful,
+/// conservative placement summary without tying Brazier to one accelerator.
+#[derive(Debug, Clone, Default)]
+pub struct LlamaMemoryReport {
+    pub gpu_weights_bytes: u64,
+    pub cpu_weights_bytes: u64,
+    pub gpu_kv_bytes: u64,
+    pub cpu_kv_bytes: u64,
+    pub gpu_runtime_bytes: u64,
+    pub cpu_runtime_bytes: u64,
+    pub offloaded_layers: Option<u32>,
+    pub total_layers: Option<u32>,
+}
+
+impl LlamaMemoryReport {
+    pub fn gpu_bytes(&self) -> u64 {
+        self.gpu_weights_bytes
+            .saturating_add(self.gpu_kv_bytes)
+            .saturating_add(self.gpu_runtime_bytes)
+    }
+
+    pub fn cpu_bytes(&self) -> u64 {
+        self.cpu_weights_bytes
+            .saturating_add(self.cpu_kv_bytes)
+            .saturating_add(self.cpu_runtime_bytes)
+    }
+}
+
+fn parse_reported_bytes(line: &str) -> Option<u64> {
+    let (_, value) = line.split_once("buffer size =")?;
+    let mut parts = value.split_whitespace();
+    let amount = parts.next()?.parse::<f64>().ok()?;
+    let multiplier = match parts
+        .next()?
+        .trim_matches(|c: char| !c.is_ascii_alphabetic())
+    {
+        "B" => 1_f64,
+        "KiB" | "KB" => 1024_f64,
+        "MiB" | "MB" => 1024_f64 * 1024_f64,
+        "GiB" | "GB" => 1024_f64 * 1024_f64 * 1024_f64,
+        _ => return None,
+    };
+    Some((amount * multiplier).round().clamp(0.0, u64::MAX as f64) as u64)
+}
+
+fn parse_offloaded_layers(line: &str) -> Option<(u32, u32)> {
+    let lower = line.to_ascii_lowercase();
+    let (_, suffix) = lower.split_once("offloaded ")?;
+    let ratio = suffix.split_whitespace().next()?;
+    let (offloaded, total) = ratio.split_once('/')?;
+    Some((offloaded.parse().ok()?, total.parse().ok()?))
+}
+
+fn parse_memory_report(stderr: &str) -> LlamaMemoryReport {
+    let mut report = LlamaMemoryReport::default();
+    for line in stderr.lines() {
+        if let Some((offloaded, total)) = parse_offloaded_layers(line) {
+            report.offloaded_layers = Some(offloaded);
+            report.total_layers = Some(total);
+        }
+        let Some(bytes) = parse_reported_bytes(line) else {
+            continue;
+        };
+        let lower = line.to_ascii_lowercase();
+        // Be conservative: only an explicit accelerator label is GPU memory.
+        // Forks may call system-backed allocations "Host" rather than "CPU";
+        // treating every unknown prefix as GPU produced false green residency.
+        let gpu = [
+            "cuda", "rocm", "hip", "vulkan", "metal", "kompute", "sycl", "gpu",
+        ]
+        .iter()
+        .any(|backend| lower.contains(backend));
+        let target = if lower.contains("model buffer size") {
+            if gpu {
+                &mut report.gpu_weights_bytes
+            } else {
+                &mut report.cpu_weights_bytes
+            }
+        } else if lower.contains("kv buffer size") {
+            if gpu {
+                &mut report.gpu_kv_bytes
+            } else {
+                &mut report.cpu_kv_bytes
+            }
+        } else if lower.contains("compute buffer size")
+            || lower.contains("output buffer size")
+            || lower.contains("compute meta size")
+        {
+            if gpu {
+                &mut report.gpu_runtime_bytes
+            } else {
+                &mut report.cpu_runtime_bytes
+            }
+        } else {
+            continue;
+        };
+        *target = target.saturating_add(bytes);
+    }
+    report
+}
 
 /// Build a user-facing error when a local inference server dies during launch.
 ///
@@ -1235,6 +1341,18 @@ pub struct LlamaServer {
     pub model_path: PathBuf,
     pub projector_path: Option<PathBuf>,
     pub binary: PathBuf,
+    /// Effective weight placement passed to llama.cpp.
+    pub gpu_layers: i32,
+    /// MoE layers explicitly kept on the CPU, even when other weights are on GPU.
+    pub cpu_moe_layers: Option<u32>,
+    /// Aggregate KV reservation passed through `--ctx-size`.
+    pub aggregate_context_size: u64,
+    /// Number of continuous-batching slots sharing that reservation.
+    pub parallel_slots: u32,
+    /// Whether the effective arguments request that llama.cpp place KV on GPU.
+    pub kv_offload: bool,
+    /// Actual buffer allocations reported during startup.
+    pub memory_report: LlamaMemoryReport,
     /// The launch settings this process was started with.
     ///
     /// Everything below is fixed at spawn time — a context size or a LoRA
@@ -1247,7 +1365,11 @@ pub struct LlamaServer {
 /// What llama-server is actually started with, once the model's overrides have
 /// been laid over the global settings.
 struct LaunchPlan {
+    /// Context promised to one parent request.
     context_size: u32,
+    /// Optional logical limit for each child request. llama.cpp gives every
+    /// parallel slot the same physical size, so the largest logical limit wins.
+    subagent_context_size: Option<u32>,
     batch_size: u32,
     ubatch_size: Option<u32>,
     threads: Option<u16>,
@@ -1279,6 +1401,18 @@ struct LaunchPlan {
 }
 
 impl LaunchPlan {
+    fn aggregate_context_size(&self) -> u64 {
+        let per_slot_context = self
+            .subagent_context_size
+            .unwrap_or(self.context_size)
+            .max(self.context_size);
+        u64::from(per_slot_context) * u64::from(self.parallel)
+    }
+
+    fn kv_offload_enabled(&self) -> bool {
+        self.gpu_layers != 0 && !self.extra_args.iter().any(|arg| arg == "--no-kv-offload")
+    }
+
     fn resolve(
         settings: &RuntimeSettings,
         profile: Option<&TextProfile>,
@@ -1292,6 +1426,7 @@ impl LaunchPlan {
         };
         Self {
             context_size: field(&|profile| profile.context_size, settings.context_size),
+            subagent_context_size: profile.and_then(|profile| profile.subagent_context_size),
             batch_size: field(&|profile| profile.batch_size, settings.batch_size),
             ubatch_size: profile.and_then(|profile| profile.ubatch_size),
             threads: profile
@@ -1360,8 +1495,9 @@ impl LaunchPlan {
             })
             .unwrap_or_default();
         format!(
-            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|mtp={}:{}|{}|jinja|rf={}|tpl={}|{}",
+            "{}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|mtp={}:{}|{}|jinja|rf={}|tpl={}|{}",
             self.context_size,
+            self.subagent_context_size,
             self.batch_size,
             self.ubatch_size,
             self.threads,
@@ -1394,9 +1530,14 @@ impl LaunchPlan {
     }
 
     fn apply(&self, command: &mut Command, _harmony: bool) {
+        // llama-server interprets --ctx-size as the aggregate KV cache and
+        // divides it across --parallel slots. Brazier's context settings are
+        // per agent, so reserve that much for every slot. All llama.cpp slots
+        // are physically equal; an explicitly larger child context therefore
+        // raises the physical size of every slot.
         command
             .arg("--ctx-size")
-            .arg(self.context_size.to_string())
+            .arg(self.aggregate_context_size().to_string())
             .arg("--batch-size")
             .arg(self.batch_size.to_string())
             .arg("--parallel")
@@ -1784,23 +1925,27 @@ impl LlamaServer {
         // Drain stderr while polling so the child cannot deadlock on a full
         // pipe; retain only a bounded tail for a useful startup error.
         let mut stderr_pipe = child.stderr.take().context("capture llama-server stderr")?;
+        let stderr_output = Arc::new(StdMutex::new(Vec::new()));
+        let stderr_capture = Arc::clone(&stderr_output);
         let stderr_task = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
 
-            let mut output = Vec::new();
             let mut chunk = [0_u8; 8_192];
             loop {
                 let read = stderr_pipe.read(&mut chunk).await?;
                 if read == 0 {
                     break;
                 }
+                let mut output = stderr_capture
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
                 output.extend_from_slice(&chunk[..read]);
-                if output.len() > STARTUP_STDERR_LIMIT {
-                    let first = output.len() - STARTUP_STDERR_LIMIT;
+                if output.len() > STARTUP_TELEMETRY_LIMIT {
+                    let first = output.len() - STARTUP_TELEMETRY_LIMIT;
                     output.drain(..first);
                 }
             }
-            Ok::<_, std::io::Error>(output)
+            Ok::<_, std::io::Error>(())
         });
 
         let base_url = format!("http://127.0.0.1:{port}");
@@ -1811,12 +1956,12 @@ impl LlamaServer {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
             if let Some(status) = child.try_wait().context("poll llama-server")? {
-                let stderr = stderr_task
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .map(|output| String::from_utf8_lossy(&output).into_owned())
-                    .unwrap_or_default();
+                let _ = stderr_task.await;
+                let stderr = stderr_output
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                let stderr = String::from_utf8_lossy(&stderr).into_owned();
                 anyhow::bail!(describe_server_startup_failure(
                     "llama-server",
                     status,
@@ -1829,12 +1974,12 @@ impl LlamaServer {
                     if tokio::time::Instant::now() > deadline {
                         let _ = child.start_kill();
                         let status = child.wait().await.ok();
-                        let stderr = stderr_task
-                            .await
-                            .ok()
-                            .and_then(Result::ok)
-                            .map(|output| String::from_utf8_lossy(&output).into_owned())
-                            .unwrap_or_default();
+                        let _ = stderr_task.await;
+                        let stderr = stderr_output
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .clone();
+                        let stderr = String::from_utf8_lossy(&stderr).into_owned();
                         let detail = stderr.trim();
                         if detail.is_empty() {
                             anyhow::bail!("llama-server health check timed out at {base_url}");
@@ -1851,10 +1996,38 @@ impl LlamaServer {
             }
         }
 
+        // `/health` can become ready before the stderr-drain task has copied
+        // the final KV/compute allocation lines out of the pipe. Wait for the
+        // captured byte count to settle so residency reflects the complete
+        // startup report rather than falling back to the requested flags.
+        let mut previous_len = usize::MAX;
+        let mut stable_reads = 0_u8;
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let len = stderr_output
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len();
+            if len == previous_len {
+                stable_reads += 1;
+                if stable_reads >= 2 {
+                    break;
+                }
+            } else {
+                stable_reads = 0;
+                previous_len = len;
+            }
+        }
+
         // The reader must remain alive for the server's lifetime. Dropping its
         // JoinHandle detaches the task, while the pipe is closed automatically
         // when the child exits.
         drop(stderr_task);
+        let startup_stderr = stderr_output
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let memory_report = parse_memory_report(&String::from_utf8_lossy(&startup_stderr));
 
         Ok(Self {
             child,
@@ -1862,6 +2035,12 @@ impl LlamaServer {
             model_path: model_path.to_path_buf(),
             projector_path,
             binary: binary.to_path_buf(),
+            gpu_layers: plan.gpu_layers,
+            cpu_moe_layers: plan.n_cpu_moe,
+            aggregate_context_size: plan.aggregate_context_size(),
+            parallel_slots: plan.parallel,
+            kv_offload: plan.kv_offload_enabled(),
+            memory_report,
             launch_key,
         })
     }
@@ -2366,6 +2545,78 @@ mod tests {
             }),
             Some(mtp_model)
         ));
+    }
+
+    #[test]
+    fn parallel_context_is_allocated_per_slot() {
+        let settings = RuntimeSettings {
+            context_size: 32_768,
+            ..RuntimeSettings::default()
+        };
+        let plan = LaunchPlan::resolve(
+            &settings,
+            Some(&TextProfile {
+                parallel_subagents: Some(true),
+                max_subagents: Some(2),
+                ..TextProfile::default()
+            }),
+            Vec::new(),
+            RuntimeTarget::Cpu,
+            false,
+            None,
+        );
+        assert_eq!(plan.parallel, 3);
+        assert_eq!(plan.aggregate_context_size(), 98_304);
+
+        let larger_children = LaunchPlan::resolve(
+            &settings,
+            Some(&TextProfile {
+                subagent_context_size: Some(65_536),
+                parallel_subagents: Some(true),
+                max_subagents: Some(2),
+                ..TextProfile::default()
+            }),
+            Vec::new(),
+            RuntimeTarget::Cpu,
+            false,
+            None,
+        );
+        assert_eq!(larger_children.aggregate_context_size(), 196_608);
+    }
+
+    #[test]
+    fn startup_memory_report_counts_weights_kv_and_runtime_buffers() {
+        let report = parse_memory_report(
+            "\
+load_tensors: offloaded 33/33 layers to GPU
+load_tensors:      CUDA0 model buffer size = 6144.00 MiB
+load_tensors:  CPU_Mapped model buffer size = 128.00 MiB
+llama_kv_cache_init:      CUDA0 KV buffer size = 3072.00 MiB
+llama_context:      CUDA0 compute buffer size = 512.00 MiB
+llama_context:         CPU compute buffer size = 16.00 MiB
+",
+        );
+        assert_eq!(report.offloaded_layers, Some(33));
+        assert_eq!(report.total_layers, Some(33));
+        assert_eq!(report.gpu_weights_bytes, 6 * 1024 * 1024 * 1024);
+        assert_eq!(report.cpu_weights_bytes, 128 * 1024 * 1024);
+        assert_eq!(report.gpu_kv_bytes, 3 * 1024 * 1024 * 1024);
+        assert_eq!(report.cpu_kv_bytes, 0);
+        assert_eq!(report.gpu_runtime_bytes, 512 * 1024 * 1024);
+        assert_eq!(report.cpu_runtime_bytes, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn startup_memory_report_detects_cpu_kv_and_partial_layer_offload() {
+        let report = parse_memory_report(
+            "\
+load_tensors: offloaded 20/33 layers to GPU
+llama_kv_cache_init:        Host KV buffer size = 2048.00 MiB
+",
+        );
+        assert_eq!(report.offloaded_layers, Some(20));
+        assert_eq!(report.total_layers, Some(33));
+        assert_eq!(report.cpu_kv_bytes, 2 * 1024 * 1024 * 1024);
     }
 
     #[test]

@@ -32,6 +32,7 @@ import {
   collectSpawnPrompts,
   isSubagentSession,
   resolveMaxSubagents,
+  resolveSubagentContext,
   resolveSubagentModel,
   SPAWN_SUBAGENT_TOOL,
   summarizeSubagentResult
@@ -497,13 +498,21 @@ class PiAgentSession implements AgentSession {
       case 'message_update': {
         const inner = event.assistantMessageEvent
         if (inner.type === 'text_delta') {
-          this.emit({ ...this.base('text-delta'), delta: inner.delta, channel: 'text' } as AgentEvent)
+          // Tool-only OpenAI messages use `content: null`; adapters and weak
+          // models sometimes surface that as visible assistant text.
+          const delta = typeof inner.delta === 'string' ? inner.delta : ''
+          if (delta && delta.trim() !== 'null') {
+            this.emit({ ...this.base('text-delta'), delta, channel: 'text' } as AgentEvent)
+          }
         } else if (inner.type === 'thinking_delta') {
-          this.emit({
-            ...this.base('text-delta'),
-            delta: inner.delta,
-            channel: 'reasoning'
-          } as AgentEvent)
+          const delta = typeof inner.delta === 'string' ? inner.delta : ''
+          if (delta) {
+            this.emit({
+              ...this.base('text-delta'),
+              delta,
+              channel: 'reasoning'
+            } as AgentEvent)
+          }
         }
         return
       }
@@ -840,6 +849,7 @@ export class PiAgentRuntime implements AgentRuntime {
     }
 
     const modelId = resolveSubagentModel(request.args.model, profile, parentState.model.id)
+    const contextWindow = resolveSubagentContext(profile, parentState.model.contextWindow)
     const catalog = await this.broker.tools()
     const parentToolNames =
       parentState.enabledTools ?? catalog.map((tool) => tool.name)
@@ -857,6 +867,7 @@ export class PiAgentRuntime implements AgentRuntime {
           index,
           total: prompts.length,
           modelId,
+          contextWindow,
           enabled,
           childTools,
           capabilities
@@ -893,11 +904,12 @@ export class PiAgentRuntime implements AgentRuntime {
     index: number
     total: number
     modelId: string
+    contextWindow?: number
     enabled: string[]
     childTools: AgentToolDefinition[]
     capabilities: CreateAgentSessionOptions['capabilities']
   }): Promise<{ status: 'completed' | 'failed' | 'cancelled'; summary: string }> {
-    const { parent, request, prompt, modelId } = options
+    const { parent, request, prompt, modelId, contextWindow } = options
     const parentState = parent.getState()
 
     let childRecord
@@ -951,7 +963,7 @@ export class PiAgentRuntime implements AgentRuntime {
         const promptPayload = await this.broker.systemPrompt(childRecord.id)
         const childSession = (await this.createSession({
           sessionId: childRecord.id,
-          model: { id: modelId, name: modelId },
+          model: { id: modelId, name: modelId, contextWindow },
           systemPrompt: promptPayload.system_prompt,
           tools: options.childTools,
           messages: [],

@@ -1571,6 +1571,13 @@ export function AgentMode(props: Props): React.JSX.Element {
           </div>
         )}
 
+        {running && !prefill && !streaming && !reasoning && (
+          <div className="runtime-notice model-prepare-notice agent-prefill-notice" role="status">
+            <LoaderCircle className="spin" size={16} />
+            <span>Thinking…</span>
+          </div>
+        )}
+
         {(streaming || reasoning) && (
           <article className="agent-message assistant streaming">
             <div className="avatar">

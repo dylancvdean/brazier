@@ -194,17 +194,40 @@ export class BrokerClient {
   /** Text-profile overrides for a model, used when resolving subagent defaults. */
   async textProfile(modelId: string): Promise<{
     subagent_model?: string | null
+    context_size?: number | null
+    subagent_context_size?: number | null
+    max_tokens?: number | null
     max_subagents?: number | null
   } | null> {
     const payload = await this.request<{
-      models: Record<string, { kind?: string; subagent_model?: string | null; max_subagents?: number | null }>
+      models: Record<
+        string,
+        {
+          kind?: string
+          subagent_model?: string | null
+          context_size?: number | null
+          subagent_context_size?: number | null
+          max_tokens?: number | null
+          max_subagents?: number | null
+        }
+      >
     }>('/api/v1/models/settings')
     const profile = payload.models[modelId]
     if (!profile || profile.kind !== 'text') return null
     return {
       subagent_model: profile.subagent_model,
+      context_size: profile.context_size,
+      subagent_context_size: profile.subagent_context_size,
+      max_tokens: profile.max_tokens,
       max_subagents: profile.max_subagents
     }
+  }
+
+  async runtimeInferenceSettings(): Promise<{
+    context_size: number
+    max_tokens?: number | null
+  }> {
+    return this.request('/api/v1/runtime/settings')
   }
 
   async systemPrompt(id: string): Promise<{ system_prompt: string; tools: string[] }> {

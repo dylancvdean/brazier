@@ -58,6 +58,7 @@ import {
   type HardwareInfo,
   type LocalModel,
   type ModelProfile,
+  type ModelResidency,
   type PipelineFeatures,
   type PendingSwap,
   type RunSnapshot,
@@ -68,6 +69,7 @@ import {
   recordRun,
   saveRuntimeSettings,
   streamCompletion,
+  unloadModel,
   updateConversation,
   updateRecommendationState,
   uploadAttachmentBlob
@@ -440,6 +442,8 @@ export function App(): React.JSX.Element {
   const [modelPrepareState, setModelPrepareState] = useState<
     'idle' | 'loading' | 'ready' | 'error'
   >('idle')
+  const [modelResidency, setModelResidency] = useState<ModelResidency | null>(null)
+  const [modelUnloading, setModelUnloading] = useState(false)
   const [modelBindings, setModelBindings] = useState<Record<string, string>>({})
   const [prefetchedRuntimes, setPrefetchedRuntimes] = useState<RuntimeEntry[] | null>(() => {
     const cached = readCachedRuntimes()
@@ -507,7 +511,7 @@ export function App(): React.JSX.Element {
 
   const chain = useMemo(() => messageChain(messages, tipId), [messages, tipId])
   const chatDisplayItems = useMemo(() => buildChatDisplayItems(chain), [chain])
-  const canChat = Boolean(selectedModel) && modelPrepareState === 'ready'
+  const canChat = Boolean(selectedModel) && modelPrepareState === 'ready' && !modelUnloading
   const selectedCapabilities = localModels.find((model) => model.id === selectedModel)?.capabilities
   const chatModels = useMemo(() => localModels.filter((model) => isChatModel(model)), [localModels])
   const voiceModels = useMemo(() => localModels.filter((model) => isVoiceModel(model)), [localModels])
@@ -607,6 +611,7 @@ export function App(): React.JSX.Element {
     }
     prepareAbortRef.current?.abort()
     setSelectedModel(modelId)
+    setModelResidency(null)
     setForkHints([])
     if (!modelId) {
       setModelPrepareState('idle')
@@ -625,8 +630,9 @@ export function App(): React.JSX.Element {
         if (!controller.signal.aborted) setModelLoadStatus(event.message)
       }
     })
-      .then(() => {
+      .then((residency) => {
         if (controller.signal.aborted) return
+        setModelResidency(residency)
         setModelPrepareState('ready')
         setModelLoadStatus(null)
         void prefetchRuntimes()
@@ -645,6 +651,29 @@ export function App(): React.JSX.Element {
         }
       })
   }, [])
+
+  const unloadSelectedModel = useCallback(async (): Promise<void> => {
+    if (!selectedModel || modelUnloading) return
+    prepareAbortRef.current?.abort()
+    setModelUnloading(true)
+    setModelPrepareState('loading')
+    setModelLoadStatus('Unloading model…')
+    setError(null)
+    try {
+      await unloadModel()
+      setSelectedModel('')
+      setModelResidency(null)
+      setModelPrepareState('idle')
+      setForkHints([])
+      void prefetchRuntimes()
+    } catch (cause) {
+      setModelPrepareState('ready')
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setModelUnloading(false)
+      setModelLoadStatus(null)
+    }
+  }, [selectedModel, modelUnloading])
 
   /** Model list, selection, and setter for whichever mode is on screen. */
   const modeModel = useMemo(() => {
@@ -1163,6 +1192,9 @@ export function App(): React.JSX.Element {
       }
       const saved = await saveRuntimeSettings(adjusted)
       setRuntime(saved)
+      if (selectedModel && modelPrepareState === 'ready') {
+        selectModel(selectedModel)
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -1650,8 +1682,31 @@ export function App(): React.JSX.Element {
               </button>
             ))}
           </div>
+          {(appMode === 'chat' || appMode === 'agent') &&
+            selectedModel &&
+            (modelPrepareState === 'ready' || modelUnloading) && (
+              <button
+                type="button"
+                className="model-unload-button"
+                disabled={modelUnloading || busy || Boolean(agentComposer?.running)}
+                title={
+                  busy || agentComposer?.running
+                    ? 'Stop the active response before unloading the model'
+                    : 'Unload model from memory'
+                }
+                aria-label="Unload model from memory"
+                onClick={() => void unloadSelectedModel()}
+              >
+                {modelUnloading ? (
+                  <LoaderCircle className="spin" size={14} />
+                ) : (
+                  <X size={14} />
+                )}
+              </button>
+            )}
           <button
             className="model-picker"
+            disabled={modelUnloading}
             title={
               appMode === 'chat'
                 ? 'Choose which installed model to chat with'
@@ -1667,7 +1722,19 @@ export function App(): React.JSX.Element {
               <Box size={16} />
             </div>
             <div>
-              <strong>{selectedMeta.title}</strong>
+              <div className="model-title-row">
+                <strong>{selectedMeta.title}</strong>
+                {(appMode === 'chat' || appMode === 'agent') &&
+                  modelPrepareState === 'ready' &&
+                  modelResidency && (
+                    <i
+                      className={`model-residency-dot ${modelResidency.placement}`}
+                      role="img"
+                      aria-label={modelResidency.description}
+                      title={modelResidency.description}
+                    />
+                  )}
+              </div>
               <span>{selectedMeta.subtitle}</span>
             </div>
           </button>
@@ -2290,7 +2357,12 @@ export function App(): React.JSX.Element {
           advancedModelId={modeModel.selected}
           profile={modelProfiles[modeModel.selected]}
           onApply={(next) => void applyInferenceSettings(next)}
-          onProfileSaved={setModelProfiles}
+          onProfileSaved={(models) => {
+            setModelProfiles(models)
+            if (modeModel.selected === selectedModel && modelPrepareState === 'ready') {
+              selectModel(selectedModel)
+            }
+          }}
           onClose={() => setInferenceMenuOpen(false)}
         />
       )}
@@ -2301,7 +2373,12 @@ export function App(): React.JSX.Element {
           profile={modelProfiles[configuringModel]}
           settings={runtime}
           hardware={hardware}
-          onSaved={setModelProfiles}
+          onSaved={(models) => {
+            setModelProfiles(models)
+            if (configuringModel === selectedModel && modelPrepareState === 'ready') {
+              selectModel(selectedModel)
+            }
+          }}
           onClose={() => setConfiguringModel(null)}
         />
       )}
