@@ -5,7 +5,7 @@ use async_stream::stream;
 use axum::http::header;
 use axum::{
     Json, Router,
-    extract::{Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{
@@ -254,7 +254,13 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/conversations/{id}/runs",
             get(list_run_snapshots).post(create_run_snapshot),
         )
-        .route("/api/v1/blobs", post(upload_blob))
+        // Attachments are sent as base64 JSON. Allow for the 4/3 encoding
+        // overhead of the 50 MiB video limit while `blob_store` continues to
+        // enforce the actual type-specific limits after decoding.
+        .route(
+            "/api/v1/blobs",
+            post(upload_blob).layer(DefaultBodyLimit::max(70 * 1024 * 1024)),
+        )
         .route("/api/v1/blobs/{sha256}", get(get_blob))
         .route(
             "/api/v1/huggingface/token",

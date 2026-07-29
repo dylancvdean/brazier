@@ -147,7 +147,23 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
     setActionError(null)
     try {
       await action(job.id)
-      await refresh()
+      if (action === cancelDownloadJob || action === cancelBuildJob) {
+        // A cancellation must take effect in the visible queue immediately.
+        // Besides making the action feel responsive, this avoids a stale poll
+        // briefly leaving a cancelled queued job labelled "Waiting in queue".
+        setJobs((current) =>
+          current.map((currentJob) =>
+            currentJob.id === job.id
+              ? {
+                  ...currentJob,
+                  status: 'cancelled',
+                  error: 'cancelled by user',
+                  updated_at: new Date().toISOString()
+                }
+              : currentJob
+          )
+        )
+      }
       onChanged?.()
     } catch (cause) {
       // A refused resume leaves the row exactly as it was, so without this the

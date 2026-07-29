@@ -1382,7 +1382,20 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       } else {
         await cancelDownloadJob(job.id)
       }
-      setDownloadJobs(await listDownloadJobs())
+      // Reflect cancellation before the next polling round. The daemon still
+      // owns the durable state and the regular refresh reconciles it.
+      setDownloadJobs((current) =>
+        current.map((currentJob) =>
+          currentJob.id === job.id
+            ? {
+                ...currentJob,
+                status: 'cancelled',
+                error: 'cancelled by user',
+                updated_at: new Date().toISOString()
+              }
+            : currentJob
+        )
+      )
     } catch (cause) {
       props.onError(errorText(cause))
     }

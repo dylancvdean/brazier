@@ -1097,7 +1097,10 @@ pub async fn install_sdcpp_bundle_with_progress(
         if let Some(source_url) = &component.source_url {
             let url = reqwest::Url::parse(source_url)
                 .with_context(|| format!("invalid direct component URL for {}", component.role))?;
-            anyhow::ensure!(url.scheme() == "https", "direct component URL must use HTTPS");
+            anyhow::ensure!(
+                url.scheme() == "https",
+                "direct component URL must use HTTPS"
+            );
             anyhow::ensure!(
                 component.source_size.is_some() && component.source_sha256.is_some(),
                 "direct component {} must pin its size and SHA-256",
@@ -1118,9 +1121,25 @@ pub async fn install_sdcpp_bundle_with_progress(
             .filter(|other| other.repo_id == component.repo_id)
             .map(|other| other.path.clone())
             .collect();
-        let infos = crate::hf::paths_info(client, data_dir, &component.repo_id, "main", &paths)
-            .await
-            .with_context(|| format!("look up files in {}", component.repo_id))?;
+        // Metadata is useful for progress and integrity checks, but it must
+        // not make an otherwise downloadable gated component impossible to
+        // install. Some Hub repositories permit `resolve` with an accepted
+        // token while refusing the paths-info endpoint. The actual download
+        // below still verifies any metadata we were able to obtain and
+        // surfaces the precise resolve error if the file is unavailable.
+        let infos =
+            match crate::hf::paths_info(client, data_dir, &component.repo_id, "main", &paths).await
+            {
+                Ok(infos) => infos,
+                Err(error) => {
+                    tracing::warn!(
+                        repository = %component.repo_id,
+                        error = %error,
+                        "could not fetch Hugging Face file metadata; downloading without it"
+                    );
+                    continue;
+                }
+            };
         for path in &paths {
             let info = infos
                 .iter()

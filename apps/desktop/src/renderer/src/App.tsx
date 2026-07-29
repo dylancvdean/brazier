@@ -1441,7 +1441,6 @@ export function App(): React.JSX.Element {
             setShowWelcome(false)
           }}
           onOpenRuntimes={() => {
-            markWelcomeCompleted()
             setManageSection('runtimes')
             setManageOpen(true)
             setShowWelcome(false)
