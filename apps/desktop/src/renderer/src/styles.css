@@ -169,6 +169,12 @@ code {
   margin-top: 8px;
 }
 
+/* Narrow windows only: the bottom-panel toggle. Hidden in the wide layout,
+   where the topbar hamburger does the job. */
+.sidebar-handle {
+  display: none;
+}
+
 .chat-title-mode {
   display: flex;
   align-items: center;
@@ -3643,12 +3649,99 @@ a.inline-link {
     display: none;
   }
 
+  /* Narrow windows: the sidebar becomes a bottom panel in the layout flow,
+     so expanding it shifts the workspace (and composer) up instead of
+     covering them. The topbar hamburger is replaced by .sidebar-handle,
+     which rides the panel's top edge and keeps the toggle next to what it
+     opens. Collapsed, only the handle shows. Nothing is translated
+     off-screen here: scrollable overflow below the viewport would let
+     scrollIntoView pull the whole page, topbar included, out of view. */
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .workspace {
+    min-height: 0;
+  }
+
   .sidebar,
   .platform-darwin .sidebar.open {
-    position: absolute;
-    z-index: 5;
-    height: 100%;
-    box-shadow: 14px 0 40px rgba(0, 0, 0, 0.25);
+    order: 2;
+    width: auto;
+    flex: 0 0 auto;
+    max-height: 60%;
+    padding: 0 12px 10px;
+    overflow: hidden;
+    border-top: 1px solid var(--line);
+    border-right: 0;
+    transition: max-height 180ms ease;
+  }
+
+  .sidebar:not(.open) {
+    width: auto;
+    flex-basis: auto;
+    max-height: 44px;
+    padding-right: 12px;
+    padding-left: 12px;
+    transform: none;
+  }
+
+  /* Children clip instead of squishing while the panel height animates; the
+     conversation list keeps its shrink-and-scroll behaviour once open. */
+  .sidebar > * {
+    flex-shrink: 0;
+  }
+
+  .sidebar > .conversation-list {
+    flex-shrink: 1;
+  }
+
+  .sidebar-handle {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    height: 44px;
+    flex: 0 0 44px;
+    padding: 0 2px;
+    border: 0;
+    color: var(--muted);
+    font-size: 12px;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .sidebar-handle:hover {
+    color: var(--soft);
+  }
+
+  .sidebar-handle .handle-chevron {
+    margin-left: auto;
+    transition: transform 180ms ease;
+  }
+
+  .sidebar.open .sidebar-handle .handle-chevron {
+    transform: rotate(180deg);
+  }
+
+  .sidebar .new-chat {
+    margin-top: 10px;
+  }
+
+  /* The panel's handle takes over from the topbar toggle… */
+  .topbar > .icon-button:first-child {
+    display: none;
+  }
+
+  /* …so the tab strip is what needs to clear the traffic lights on macOS. */
+  .platform-darwin .topbar > .mode-switch {
+    margin-left: 72px;
+  }
+
+  /* The traffic-light drag patch only applies beside the lights at the top;
+     the bottom panel never reaches them. */
+  .platform-darwin .sidebar.open::before {
+    content: none;
   }
 }
 

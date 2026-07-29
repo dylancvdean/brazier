@@ -6,6 +6,7 @@ import {
   Cpu,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Ellipsis,
   Gauge,
   Image,
@@ -1432,6 +1433,22 @@ export function App(): React.JSX.Element {
   return (
     <main className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
+        {/* Narrow windows only (hidden by CSS otherwise): the history panel
+            docks to the bottom and this handle rides its top edge, keeping
+            the toggle next to what it opens. The topbar hamburger takes over
+            in the wide layout. */}
+        <button
+          type="button"
+          className="sidebar-handle"
+          aria-expanded={sidebarOpen}
+          onClick={() => setSidebarOpen((open) => !open)}
+        >
+          <Menu size={16} />
+          <span>
+            {appMode === 'agent' ? 'Tasks' : appMode === 'generate' ? 'History' : 'Conversations'}
+          </span>
+          <ChevronUp className="handle-chevron" size={15} />
+        </button>
         {appMode === 'agent' ? (
           <AgentSessionSidebar controls={agentSidebar} />
         ) : appMode === 'generate' ? (
