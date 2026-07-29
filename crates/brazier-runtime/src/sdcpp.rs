@@ -1311,6 +1311,82 @@ fn with_bundle_defaults(
     Some(effective)
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct InstalledMemoryPlan {
+    total_bytes: u64,
+    diffusion_bytes: u64,
+}
+
+/// Real installed component sizes, separated into the diffusion checkpoint
+/// and everything that can be staged around it (text encoders and VAE).
+fn installed_memory_plan(data_dir: &Path, model_id: &str) -> InstalledMemoryPlan {
+    let Ok((dir, manifest)) = resolve_manifest(data_dir, model_id) else {
+        return InstalledMemoryPlan::default();
+    };
+    let mut plan = InstalledMemoryPlan::default();
+    let mut add = |flag: Option<&str>, name: &str| {
+        let Ok(bytes) = std::fs::metadata(dir.join(name)).map(|meta| meta.len()) else {
+            return;
+        };
+        plan.total_bytes = plan.total_bytes.saturating_add(bytes);
+        if flag == Some("diffusion-model") || flag.is_none() {
+            plan.diffusion_bytes = plan.diffusion_bytes.max(bytes);
+        }
+    };
+    if let Some(file) = manifest.single_file.as_deref() {
+        add(None, file);
+    }
+    for (flag, file) in &manifest.args {
+        add(Some(flag), file);
+    }
+    plan
+}
+
+/// Apply sd.cpp's component-placement controls when its defaults need help to
+/// stay within the accelerator budget. This is deliberately derived from the
+/// installed files, not catalogue estimates, and never overwrites a person's
+/// explicit model profile.
+fn with_component_placement_defaults(
+    profile: Option<&DiffusionProfile>,
+    accelerator_memory_bytes: Option<u64>,
+    plan: InstalledMemoryPlan,
+) -> Option<DiffusionProfile> {
+    let Some(memory) = accelerator_memory_bytes else {
+        return profile.cloned();
+    };
+    if plan.total_bytes == 0 {
+        return profile.cloned();
+    }
+    let budget = memory.saturating_mul(3) / 4;
+    let mut effective = profile.cloned().unwrap_or_default();
+    // Let sd.cpp use the full safe budget even when every component fits;
+    // this also gives graph execution a hard ceiling for activations.
+    effective
+        .max_vram
+        .get_or_insert(budget as f32 / (1024_f32 * 1024_f32 * 1024_f32));
+    if plan.total_bytes > budget {
+        // Encoders and VAE run in separate phases from denoising. Tell sd.cpp
+        // to stage them and stream graph weights rather than requiring every
+        // bundle component to remain resident in VRAM together.
+        effective.auto_fit.get_or_insert(true);
+        effective.diffusion_fa.get_or_insert(true);
+        effective.offload_to_cpu.get_or_insert(true);
+        effective
+            .params_backend
+            .get_or_insert_with(|| "cpu".to_owned());
+        effective.stream_layers.get_or_insert(true);
+        // If the denoiser itself fits, sd.cpp can stage the encoder and VAE
+        // into VRAM for their own phases. Only force CPU computation when the
+        // denoiser already needs the whole graph budget.
+        if plan.diffusion_bytes > budget {
+            effective.clip_on_cpu.get_or_insert(true);
+            effective.vae_on_cpu.get_or_insert(true);
+            effective.vae_tiling.get_or_insert(true);
+        }
+    }
+    Some(effective)
+}
+
 /// Resolve the platform policy once for both image and video launch paths.
 fn effective_diffusion_profile(
     data_dir: &Path,
@@ -1331,6 +1407,11 @@ fn effective_diffusion_profile(
         tracing::info!("applying Vulkan AMD APU defaults to stable-diffusion.cpp generation");
     }
     let profile = with_bundle_defaults(data_dir, model_id, profile).or_else(|| profile.cloned());
+    let profile = with_component_placement_defaults(
+        profile.as_ref(),
+        hardware.gpu_offload_memory_bytes,
+        installed_memory_plan(data_dir, model_id),
+    );
     let profile = with_amd_apu_vulkan_defaults(profile.as_ref(), enabled, modality);
     with_accelerator_memory_budget(
         profile.as_ref(),

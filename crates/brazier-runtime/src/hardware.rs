@@ -250,18 +250,10 @@ fn run_first_line(program: &str, args: &[&str]) -> Option<String> {
 /// APUs the GPU allocates out of system memory, so a separate VRAM figure would
 /// either double-count it or understate what a model can use.
 ///
-/// `amd_apu_only` is true when there is at least one AMD GPU and every one of
-/// them is integrated. It is passed in rather than rescanned here because the
-/// KFD topology walk that decides it is the same one `detect` already ran. The
-/// DRM sysfs node `mem_info_vram_total` exists on an AMD APU too, but reports
-/// the small firmware carveout — a 512 MiB figure on a 48 GiB machine sizes
-/// every recommendation against the carveout instead of system RAM. The carveout
-/// only has to be skipped when *every* AMD GPU is integrated; a machine with
-/// both an APU and a discrete AMD card still scans, and `max` picks the
-/// discrete card's real VRAM over the APU's carveout. Intel and NVIDIA are
-/// unaffected: Intel iGPUs expose no `mem_info_vram_total` and NVIDIA is
-/// consulted through `nvidia-smi` above.
-fn vram_bytes(amd_apu_only: bool) -> Option<u64> {
+/// The DRM sysfs node `mem_info_vram_total` exists on AMD APUs too, where it
+/// reports only a small firmware carveout. The caller decides whether a small
+/// value is meaningful after it has combined this result with KFD topology.
+fn vram_bytes() -> Option<u64> {
     if let Some(line) = run_first_line(
         "nvidia-smi",
         &[
@@ -281,13 +273,7 @@ fn vram_bytes(amd_apu_only: bool) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         // AMD and Intel expose it through the DRM sysfs nodes. The largest card
-        // wins, since that is the one a model would be loaded onto. A machine
-        // whose AMD GPUs are all integrated is skipped: an APU's
-        // `mem_info_vram_total` is a carveout, not dedicated memory a model can
-        // occupy, so trusting it understates the machine.
-        if amd_apu_only {
-            return None;
-        }
+        // wins, since that is the one a model would be loaded onto.
         let mut best = 0_u64;
         for entry in std::fs::read_dir("/sys/class/drm")
             .into_iter()
@@ -304,13 +290,6 @@ fn vram_bytes(amd_apu_only: bool) -> Option<u64> {
         if best > 0 {
             return Some(best);
         }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // AMD integration is only detectable through KFD, which is Linux-only;
-        // elsewhere the parameter is unused and nvidia-smi above is the only
-        // consulted source.
-        let _ = amd_apu_only;
     }
     None
 }
@@ -350,6 +329,20 @@ fn amd_gtt_bytes() -> Option<u64> {
 /// matters. Recommendations are sized against this.
 pub fn usable_model_memory_bytes(vram: Option<u64>, system: Option<u64>) -> Option<u64> {
     vram.or(system)
+}
+
+/// Memory budget for choosing a downloadable model.
+///
+/// A discrete Linux or Windows GPU is a hard placement limit: falling back to
+/// host RAM when its VRAM cannot be read recommends files that cannot run on
+/// the accelerator. Unified-memory Macs and AMD APUs legitimately use system
+/// memory instead.
+pub fn recommendation_memory_bytes(hardware: &HardwareInfo) -> Option<u64> {
+    let accelerator = hardware.gpu_offload_memory_bytes.or(hardware.vram_bytes);
+    if hardware.os != "macos" && hardware.gpu.is_some() && !hardware.amd_apu {
+        return accelerator;
+    }
+    accelerator.or(hardware.memory_bytes)
 }
 
 /// Where an installed managed ROCm llama.cpp build puts its binaries.
@@ -454,13 +447,18 @@ fn detect_uncached() -> HardwareInfo {
         || (cfg!(target_os = "windows")
             && Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists());
     let gpus = amd_gpus();
-    let amd_apu = gpus.iter().any(|gpu| gpu.integrated);
-    // The DRM sysfs VRAM scan trusts every AMD `mem_info_vram_total`, so an APU
-    // whose only AMD GPU is integrated must be skipped — its carveout would
-    // otherwise become the model memory budget. A machine with both an APU and
-    // a discrete AMD card is fine: the scan's `max` picks the discrete card's
-    // real VRAM over the APU's carveout.
     let amd_apu_only = !gpus.is_empty() && gpus.iter().all(|gpu| gpu.integrated);
+    let raw_vram = vram_bytes();
+    // An APU's small firmware carveout is not a model-placement budget. A
+    // multi-gigabyte DRM value, however, is decisive evidence of a discrete
+    // card even if KFD topology happened to report it as integrated.
+    const MIN_DEDICATED_VRAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    let vram = if amd_apu_only && raw_vram.is_some_and(|bytes| bytes < MIN_DEDICATED_VRAM_BYTES) {
+        None
+    } else {
+        raw_vram
+    };
+    let amd_apu = amd_apu_only && vram.is_none();
     let gfx_arches: Vec<String> = gpus.iter().map(|gpu| gpu.arch.clone()).collect();
     // Verified only against an installed ROCm build, which is the only thing
     // that knows which architectures it carries device code for. Until one is
@@ -540,7 +538,6 @@ fn detect_uncached() -> HardwareInfo {
         ));
     }
     let system_memory = memory_bytes();
-    let vram = vram_bytes(amd_apu_only);
     let gpu_offload_memory = vram.or_else(|| amd_apu.then(amd_gtt_bytes).flatten());
     HardwareInfo {
         os: std::env::consts::OS,
@@ -595,6 +592,25 @@ mod tests {
         assert_eq!(usable_model_memory_bytes(vram, system), vram);
         assert_eq!(usable_model_memory_bytes(None, system), system);
         assert_eq!(usable_model_memory_bytes(None, None), None);
+    }
+
+    #[test]
+    fn recommendations_never_substitute_host_ram_for_a_discrete_gpu() {
+        let hardware = HardwareInfo {
+            os: "linux",
+            architecture: "x86_64",
+            logical_cpus: 8,
+            memory_bytes: Some(64 * 1024 * 1024 * 1024),
+            vram_bytes: None,
+            gpu_offload_memory_bytes: None,
+            usable_model_memory_bytes: Some(64 * 1024 * 1024 * 1024),
+            gpu: Some("AMD GPU".into()),
+            gpu_arch: None,
+            amd_apu: false,
+            targets: Vec::new(),
+            recommended_target: RuntimeTarget::Vulkan,
+        };
+        assert_eq!(recommendation_memory_bytes(&hardware), None);
     }
 
     #[test]

@@ -201,10 +201,17 @@ impl Catalog {
     /// tiers is treated as the smaller one rather than being promoted into
     /// recommendations it cannot hold.
     pub fn tier_for(&self, memory_bytes: u64) -> Option<&Tier> {
-        let gb = memory_bytes / (1024 * 1024 * 1024);
+        // Hardware often reports a marketed 16 GB card a few MiB below 16
+        // GiB. Treat that small accounting gap as the advertised tier, but do
+        // not use this tolerance for choosing the actual quant — that remains
+        // deliberately conservative below.
+        const TIER_BOUNDARY_TOLERANCE: u64 = 256 * 1024 * 1024;
         self.tiers
             .iter()
-            .filter(|tier| u64::from(tier.min_gb) <= gb)
+            .filter(|tier| {
+                let threshold = u64::from(tier.min_gb) * 1024 * 1024 * 1024;
+                memory_bytes.saturating_add(TIER_BOUNDARY_TOLERANCE) >= threshold
+            })
             .max_by_key(|tier| tier.min_gb)
     }
 }
@@ -645,6 +652,14 @@ mod tests {
     }
 
     #[test]
+    fn a_near_16_gib_card_uses_the_16_gb_tier() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        // RX 7800 XT's DRM value is 16 MiB below 16 GiB.
+        let reported = gb(16) - 16 * 1024 * 1024;
+        assert_eq!(catalog.tier_for(reported).unwrap().min_gb, 16);
+    }
+
+    #[test]
     fn a_tier_without_an_agent_model_uses_its_chat_model() {
         let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
         let tier = catalog.tier_for(gb(16)).unwrap();
@@ -789,9 +804,18 @@ mod tests {
     #[test]
     fn a_pinned_ternary_recommendation_does_not_select_the_unsupported_pq_variant() {
         let files = vec![
-            ("Ternary-Bonsai-27B-PQ2_0.gguf".to_owned(), Some(5_900_000_000)),
-            ("Ternary-Bonsai-27B-Q2_0.gguf".to_owned(), Some(5_900_000_000)),
-            ("Ternary-Bonsai-27B-Q2_g64.gguf".to_owned(), Some(7_600_000_000)),
+            (
+                "Ternary-Bonsai-27B-PQ2_0.gguf".to_owned(),
+                Some(5_900_000_000),
+            ),
+            (
+                "Ternary-Bonsai-27B-Q2_0.gguf".to_owned(),
+                Some(5_900_000_000),
+            ),
+            (
+                "Ternary-Bonsai-27B-Q2_g64.gguf".to_owned(),
+                Some(7_600_000_000),
+            ),
         ];
 
         let choice = find_quant(&files, "Q2_g64").unwrap();

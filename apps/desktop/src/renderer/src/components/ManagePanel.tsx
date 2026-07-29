@@ -215,7 +215,11 @@ type QuantFit = 'gpu' | 'offload' | 'system' | 'none' | 'unknown'
  * offloaded. Keep the labels conservative: reserve headroom for the KV cache,
  * runtime allocations, and the desktop rather than comparing raw bytes.
  */
-function generationFit(bytes: number | null | undefined, hardware: HardwareInfo | null): QuantFit {
+function generationFit(
+  bytes: number | null | undefined,
+  hardware: HardwareInfo | null,
+  diffusionBytes = bytes
+): QuantFit {
   if (bytes == null || !hardware) return 'unknown'
   // `gpu_offload_memory_bytes` is the placement budget used by the runtime.
   // Prefer it so AMD systems are not accidentally assessed against all RAM.
@@ -223,6 +227,12 @@ function generationFit(bytes: number | null | undefined, hardware: HardwareInfo 
   const system = hardware.memory_bytes
   if (gpu != null) {
     if (bytes <= gpu * 0.7) return 'gpu'
+    // sd.cpp can stage encoder/VAE weights through VRAM between phases. A
+    // bundle is still an accelerator fit when its denoiser leaves headroom,
+    // provided host RAM can hold the staged components.
+    if (diffusionBytes != null && diffusionBytes <= gpu * 0.7 && system != null && bytes <= system * 0.6) {
+      return 'gpu'
+    }
     if (system != null && bytes <= system * 0.6) return 'offload'
     return 'none'
   }
@@ -1851,7 +1861,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
               (sum, component) => sum + (component.approx_bytes ?? 0),
               0
             )
-            const fit = generationFit(totalBytes || null, props.hardware)
+            const diffusionBytes = resolved.components
+              .filter((component) => component.flag === 'diffusion-model' || !component.flag)
+              .reduce((sum, component) => sum + (component.approx_bytes ?? 0), 0)
+            const fit = generationFit(totalBytes || null, props.hardware, diffusionBytes || null)
             return (
               <article className="bundle-card" key={bundle.id}>
                 <div className="bundle-head">
