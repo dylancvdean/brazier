@@ -102,7 +102,7 @@ jobs:
           # useful for differential updates and otherwise add release noise;
           # builder-debug.yml is diagnostic output, not a release asset.
           path: |
-            apps/desktop/dist/Brazier-*-arm64.dmg
+            apps/desktop/dist/Brazier.dmg
             apps/desktop/dist/Brazier-*-arm64-mac.zip
             apps/desktop/dist/latest-mac.yml
           if-no-files-found: error
@@ -160,7 +160,7 @@ jobs:
           sha512sum "${assets[@]}" > SHA512SUMS
           # Updater manifests are checksummed but not independently signed.
           # Sign only executable installables users may download and run.
-          installables=(Brazier-*-arm64.dmg Brazier-*-arm64-mac.zip Brazier.AppImage)
+          installables=(Brazier.dmg Brazier-*-arm64-mac.zip Brazier.AppImage)
           for asset in "${installables[@]}"; do
             cosign sign-blob --yes --bundle "$asset.sigstore.json" "$asset"
           done

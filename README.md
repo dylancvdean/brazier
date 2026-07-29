@@ -64,11 +64,15 @@ that record for the desktop process.
 ## Distribution and updates
 
 GitHub Releases provides a signed/notarized Apple Silicon macOS distribution
-and a self-updating Linux AppImage. The AppImage is always named
-`Brazier.AppImage`, so it can replace itself in place without invalidating a
-desktop launcher. Arch users should use the PKGBUILD, pacman owns
-updates for that installation. See [the release guide](docs/releasing.md) for
-release credentials and signature verification.
+and a self-updating Linux AppImage:
+
+- [Download for macOS (Apple Silicon)](https://github.com/dylancvdean/brazier/releases/latest/download/Brazier.dmg)
+- [Download for Linux (AppImage)](https://github.com/dylancvdean/brazier/releases/latest/download/Brazier.AppImage)
+
+Both links always resolve to the latest release. The AppImage can replace
+itself in place without invalidating a desktop launcher. Arch users should use
+the PKGBUILD, since pacman owns updates for that installation. See [the release
+guide](docs/releasing.md) for release credentials and signature verification.
 
 ## Security
 

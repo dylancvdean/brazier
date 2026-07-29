@@ -102,6 +102,9 @@
     "appImage": {
       "artifactName": "Brazier.AppImage"
     },
+    "dmg": {
+      "artifactName": "Brazier.dmg"
+    },
     "mac": {
       "icon": "build/icon-mac.png",
       "target": [
