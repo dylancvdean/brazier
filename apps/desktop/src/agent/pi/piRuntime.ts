@@ -24,6 +24,7 @@ import { streamSimple } from '@earendil-works/pi-ai/api/openai-completions'
 import type { BrokerClient } from '../core/brokerClient'
 import { mergeSummary, renderTranscript, requestModelSummary } from '../core/compaction'
 import { repairToolArguments } from '../core/modelCompat'
+import { prefillListener } from './prefillProgress'
 import { accumulate, describeSummary, emptySummary } from '../core/runSummary'
 import {
   buildSubagentMetadata,
@@ -348,8 +349,22 @@ class PiAgentSession implements AgentSession {
     this.agent = new Agent({
       // Every model request goes to the daemon's OpenAI-compatible endpoint,
       // so local and remote models both work with no provider configuration.
-      streamFn: (model, context, options) =>
-        streamSimple(model as Model<'openai-completions'>, context, options),
+      streamFn: (model, context, options) => {
+        const progress = prefillListener((event) => {
+          this.emit({
+            ...this.base('prefill-progress'),
+            total: event.total,
+            cached: event.cached,
+            processed: event.processed,
+            elapsedMs: event.elapsed_ms,
+            contextTotal: event.context_total
+          } as AgentEvent)
+        })
+        return streamSimple(model as Model<'openai-completions'>, context, {
+          ...options,
+          headers: { ...options?.headers, ...progress.headers }
+        })
+      },
       // The transcript only ever holds LLM messages, because the application
       // converts its own shapes before they reach the agent. Anything else a
       // runtime version adds for its own bookkeeping is dropped here rather

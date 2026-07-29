@@ -205,6 +205,14 @@ type EventBase = {
 }
 
 export type AgentRunStartedEvent = EventBase & { type: 'run-started' }
+export type AgentPrefillProgressEvent = EventBase & {
+  type: 'prefill-progress'
+  total: number
+  cached: number
+  processed: number
+  elapsedMs: number
+  contextTotal?: number | null
+}
 export type AgentTextDeltaEvent = EventBase & {
   type: 'text-delta'
   delta: string
@@ -316,6 +324,7 @@ export type AgentSubagentProgressEvent = EventBase & {
 
 export type AgentEvent =
   | AgentRunStartedEvent
+  | AgentPrefillProgressEvent
   | AgentTextDeltaEvent
   | AgentToolCallProposedEvent
   | AgentApprovalRequiredEvent

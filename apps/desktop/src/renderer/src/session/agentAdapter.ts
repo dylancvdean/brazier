@@ -175,6 +175,17 @@ export class WorkerAgentAdapter implements AgentAdapter {
         this.setStatus(correlationId, 'running')
         this.publish({ type: 'runStarted', correlationId })
         return
+      case 'prefill-progress':
+        this.publish({
+          type: 'statusUpdated',
+          correlationId,
+          status: `Prefilling ${Math.min(event.processed, event.total).toLocaleString()} / ${event.total.toLocaleString()} tokens${
+            event.contextTotal
+              ? ` · context ${event.total.toLocaleString()} / ${event.contextTotal.toLocaleString()}`
+              : ''
+          }`
+        })
+        return
       case 'text-delta':
         // Reasoning is not an answer and is never spoken.
         if (event.channel === 'reasoning') return

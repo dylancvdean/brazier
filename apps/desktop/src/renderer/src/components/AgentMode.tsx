@@ -42,7 +42,7 @@ import {
   type AgentSessionSummary,
   type AgentToolCatalogEntry
 } from '../agentApi'
-import type { LocalModel } from '../api'
+import { prefillProgressLabel, type LocalModel, type PrefillProgress } from '../api'
 import { modelDisplayName } from '../model-utils'
 import { Markdown } from './Markdown'
 import { ReasoningDisclosure } from './ReasoningDisclosure'
@@ -580,6 +580,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [grants, setGrants] = useState<string[]>([])
   const [streaming, setStreaming] = useState('')
   const [reasoning, setReasoning] = useState('')
+  const [prefill, setPrefill] = useState<PrefillProgress | null>(null)
   const [running, setRunning] = useState(false)
   const [summary, setSummary] = useState<AgentRunSummary | null>(null)
   const [pendingWorkspace, setPendingWorkspace] = useState<string | null>(null)
@@ -637,9 +638,21 @@ export function AgentMode(props: Props): React.JSX.Element {
         setSummary(null)
         setStreaming('')
         setReasoning('')
+        setPrefill(null)
+        return
+      }
+      case 'prefill-progress': {
+        setPrefill({
+          total: event.total,
+          cached: event.cached,
+          processed: event.processed,
+          elapsed_ms: event.elapsedMs,
+          context_total: event.contextTotal
+        })
         return
       }
       case 'text-delta': {
+        setPrefill(null)
         if (event.channel === 'reasoning') setReasoning((current) => current + event.delta)
         else setStreaming((current) => current + event.delta)
         return
@@ -837,17 +850,20 @@ export function AgentMode(props: Props): React.JSX.Element {
         setRunning(false)
         setSummary(event.summary)
         setStreaming('')
+        setPrefill(null)
         return
       }
       case 'run-cancelled': {
         setRunning(false)
         setStreaming('')
         setApprovals([])
+        setPrefill(null)
         return
       }
       case 'run-failed': {
         setRunning(false)
         setStreaming('')
+        setPrefill(null)
         onError(event.error)
         return
       }
@@ -1321,6 +1337,10 @@ export function AgentMode(props: Props): React.JSX.Element {
               through Brazier's own policy layer: {executeTools} of {tools.length} tools can execute
               programs, and each needs your approval unless you change the mode above.
             </p>
+            <p>
+              Repository-specific agent instructions can live in{' '}
+              <code>.brazier/agent-system-prompt.md</code>.
+            </p>
             <div className="agent-suggestions">
               <button type="button" onClick={() => props.onSuggestPrompt?.('Summarize this repository: layout, build commands, and test entry points.')}>
                 Explore the repository
@@ -1382,6 +1402,13 @@ export function AgentMode(props: Props): React.JSX.Element {
         {approvals.map((approval) => (
           <ApprovalCard key={approval.id} approval={approval} onDecide={(...args) => void decide(...args)} busy={deciding} />
         ))}
+
+        {running && prefill && !streaming && !reasoning && (
+          <div className="runtime-notice model-prepare-notice agent-prefill-notice" role="status">
+            <LoaderCircle className="spin" size={16} />
+            <span>{prefillProgressLabel(prefill)}</span>
+          </div>
+        )}
 
         {(streaming || reasoning) && (
           <article className="agent-message assistant streaming">

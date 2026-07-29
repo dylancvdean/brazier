@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { messagesForCompletion, reasoningAfterTranscriptBoundary } from './api'
+import {
+  messagesForCompletion,
+  prefillProgressLabel,
+  reasoningAfterTranscriptBoundary
+} from './api'
 import type { Message } from './types'
 
 function message(overrides: Partial<Message>): Message {
@@ -103,5 +107,30 @@ describe('reasoningAfterTranscriptBoundary', () => {
         content: 'generated media context'
       })
     ).toBe('final-round reasoning')
+  })
+})
+
+describe('prefillProgressLabel', () => {
+  it('shows both prompt progress and configured context usage', () => {
+    expect(
+      prefillProgressLabel({
+        total: 2_048,
+        cached: 1_024,
+        processed: 1_536,
+        elapsed_ms: 87,
+        context_total: 32_768
+      })
+    ).toBe('Prefilling 1,536 / 2,048 tokens · context 2,048 / 32,768')
+  })
+
+  it('clamps a server overrun and tolerates an unknown context limit', () => {
+    expect(
+      prefillProgressLabel({
+        total: 128,
+        cached: 0,
+        processed: 129,
+        elapsed_ms: 10
+      })
+    ).toBe('Prefilling 128 / 128 tokens')
   })
 })

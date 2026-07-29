@@ -346,6 +346,12 @@ pub fn translate_chat_request(
         "top_p": top_p,
         "chat_template_kwargs": { "enable_thinking": reasoning }
     });
+    // Recent llama.cpp builds can stream real prompt-evaluation progress before
+    // the first generated token. Keep the extension local to llama.cpp:
+    // MLX and remote OpenAI-compatible servers may reject unknown fields.
+    if dialect == SamplerDialect::LlamaCpp && stream {
+        body["return_progress"] = serde_json::json!(true);
+    }
     if let Some(budget) = request
         .reasoning_budget_tokens
         .or(profile.and_then(|profile| profile.reasoning_budget_tokens))
@@ -460,6 +466,17 @@ pub struct StreamChunk {
     pub reasoning: Option<String>,
     pub tool_calls: Vec<ToolCallFragment>,
     pub finish_reason: Option<String>,
+    /// llama.cpp prompt-evaluation progress. Other OpenAI-compatible servers
+    /// simply omit this extension.
+    pub prompt_progress: Option<PromptProgress>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptProgress {
+    pub total: u64,
+    pub cache: u64,
+    pub processed: u64,
+    pub time_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,28 +498,47 @@ pub fn parse_stream_chunk(data: &str) -> ChunkParse {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
         return ChunkParse::Skip;
     };
-    let Some(choice) = value.pointer("/choices/0") else {
-        return ChunkParse::Skip;
-    };
+    let prompt_progress = value
+        .get("prompt_progress")
+        .and_then(serde_json::Value::as_object)
+        .map(|progress| PromptProgress {
+            total: progress
+                .get("total")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            cache: progress
+                .get("cache")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            processed: progress
+                .get("processed")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            time_ms: progress
+                .get("time_ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        });
+    let choice = value.pointer("/choices/0");
     let content = choice
-        .pointer("/delta/content")
+        .and_then(|choice| choice.pointer("/delta/content"))
         .and_then(serde_json::Value::as_str)
         .filter(|text| !text.is_empty())
         .map(ToOwned::to_owned);
     let reasoning = choice
-        .pointer("/delta/reasoning_content")
+        .and_then(|choice| choice.pointer("/delta/reasoning_content"))
         .and_then(serde_json::Value::as_str)
         .filter(|text| !text.is_empty())
         .map(ToOwned::to_owned)
         .or_else(|| {
             choice
-                .pointer("/delta/reasoning")
+                .and_then(|choice| choice.pointer("/delta/reasoning"))
                 .and_then(serde_json::Value::as_str)
                 .filter(|text| !text.is_empty())
                 .map(ToOwned::to_owned)
         });
     let tool_calls: Vec<ToolCallFragment> = choice
-        .pointer("/delta/tool_calls")
+        .and_then(|choice| choice.pointer("/delta/tool_calls"))
         .and_then(serde_json::Value::as_array)
         .map(|calls| {
             calls
@@ -529,10 +565,14 @@ pub fn parse_stream_chunk(data: &str) -> ChunkParse {
         })
         .unwrap_or_default();
     let finish_reason = choice
-        .get("finish_reason")
+        .and_then(|choice| choice.get("finish_reason"))
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned);
-    if content.is_none() && reasoning.is_none() && tool_calls.is_empty() && finish_reason.is_none()
+    if content.is_none()
+        && reasoning.is_none()
+        && tool_calls.is_empty()
+        && finish_reason.is_none()
+        && prompt_progress.is_none()
     {
         return ChunkParse::Skip;
     }
@@ -541,6 +581,7 @@ pub fn parse_stream_chunk(data: &str) -> ChunkParse {
         reasoning,
         tool_calls,
         finish_reason,
+        prompt_progress,
     })
 }
 
@@ -2099,6 +2140,7 @@ mod tests {
         let streamed =
             translate_chat_request(&request, ChatContext::local(&settings, "local", true));
         assert!(streamed["stream"].as_bool().unwrap());
+        assert_eq!(streamed["return_progress"], true);
     }
 
     /// Floats make the round trip through JSON as doubles, so they are read
@@ -2543,6 +2585,24 @@ mod tests {
     fn parse_stream_chunk_skips_empty_reasoning_only_when_truly_empty() {
         let data = r#"{"choices":[{"index":0,"delta":{},"finish_reason":null}]}"#;
         assert!(matches!(parse_stream_chunk(data), ChunkParse::Skip));
+    }
+
+    #[test]
+    fn parse_stream_chunk_captures_prompt_progress_without_a_choice() {
+        let data =
+            r#"{"prompt_progress":{"total":2048,"cache":1024,"processed":1536,"time_ms":87}}"#;
+        match parse_stream_chunk(data) {
+            ChunkParse::Chunk(chunk) => assert_eq!(
+                chunk.prompt_progress,
+                Some(PromptProgress {
+                    total: 2048,
+                    cache: 1024,
+                    processed: 1536,
+                    time_ms: 87,
+                })
+            ),
+            other => panic!("unexpected parse result: {other:?}"),
+        }
     }
 
     #[test]

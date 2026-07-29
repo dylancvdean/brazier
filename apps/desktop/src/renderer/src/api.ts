@@ -601,6 +601,21 @@ export class GenerationFailure extends Error {
   }
 }
 
+export type PrefillProgress = {
+  total: number
+  cached: number
+  processed: number
+  elapsed_ms: number
+  context_total?: number | null
+}
+
+export function prefillProgressLabel(progress: PrefillProgress): string {
+  const processed = Math.min(progress.processed, progress.total)
+  const prompt = `Prefilling ${processed.toLocaleString()} / ${progress.total.toLocaleString()} tokens`
+  if (!progress.context_total) return prompt
+  return `${prompt} · context ${progress.total.toLocaleString()} / ${progress.context_total.toLocaleString()}`
+}
+
 function forkHintsFromPayload(payload: unknown): RuntimeForkHint[] {
   if (!payload || typeof payload !== 'object') return []
   const brazier = (payload as { brazier?: { fork_hints?: RuntimeForkHint[] } }).brazier
@@ -628,6 +643,7 @@ export async function streamCompletion(
     onToolCall?: (record: ToolCallRecord) => void
     onReasoning?: (token: string) => void
     onLoad?: (event: { phase: string; message: string }) => void
+    onPrefill?: (event: PrefillProgress) => void
   }
 ): Promise<StreamCompletionResult> {
   const daemon = await connection()
@@ -707,6 +723,7 @@ export async function streamCompletion(
           transcript_message?: TranscriptMessagePayload
           fork_hints?: RuntimeForkHint[]
           load?: { phase: string; message: string }
+          prefill?: PrefillProgress
           generation?: { completion_tokens?: number; decode_duration_ms?: number }
         }
         error?: { message?: string }
@@ -715,6 +732,7 @@ export async function streamCompletion(
         throw new GenerationFailure(chunk.error.message, chunk.brazier?.fork_hints ?? [])
       }
       if (chunk.brazier?.load) options?.onLoad?.(chunk.brazier.load)
+      if (chunk.brazier?.prefill) options?.onPrefill?.(chunk.brazier.prefill)
       const generation = chunk.brazier?.generation
       if (
         typeof generation?.completion_tokens === 'number' &&

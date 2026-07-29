@@ -156,6 +156,47 @@ what is left is mostly the difference between working and trustworthy.
   independently; current trial feedback favors the full process restart over
   same-process reconnects.
 
+## Remote daemon clients — medium term
+
+- **Full desktop connection to a remote Brazier daemon.** Add named local and
+  remote connection profiles so the existing desktop UI can use a daemon on
+  another host without spawning or owning its lifecycle. Chat, conversations,
+  model discovery and downloads, runtime installation and activation, media
+  generation, voice, tools, MCP servers, and agent sessions should operate on
+  the selected host, with that execution location visible anywhere it matters.
+- Add a persistent headless service mode with a stable endpoint, reconnect and
+  offline behavior, client/daemon protocol compatibility checks, and clear
+  multi-client semantics for shared runtime settings and active engines.
+- Harden remote access before presenting it as a normal setup: pairing,
+  revocable per-client credentials, scoped inference/management/agent
+  permissions, encrypted or private-network transport, and remote-host context
+  in execution approvals. The current single bearer key remains suitable for
+  local startup, not the final remote trust model.
+- Make filesystem boundaries honest. Paths selected by the desktop belong to
+  the client, while model libraries, adapters, runtimes, MCP processes, and
+  agent workspaces normally belong to the daemon host. Prefer uploads into
+  managed stores where practical; otherwise label paths as remote and disable
+  local-only actions such as revealing them in the client's file manager.
+- Initially keep inference and tool execution together on the daemon host.
+  Client-local tool runners may follow as a separately paired and permissioned
+  reverse-RPC capability; they are not required for the first remote release.
+
+## Mobile and native clients — later
+
+- **Phone companion app.** Build on the remote-daemon work with a phone-focused
+  client for chat, conversation history, generation, voice, download and
+  runtime monitoring, agent-session visibility, and held-action approvals.
+  Treat full engine workshop and coding-agent parity as optional later layers
+  rather than requirements for the first mobile release.
+- Support Tailscale as a guided private-network deployment path for reaching a
+  persistent daemon, without making a bundled VPN or public internet exposure a
+  prerequisite.
+- **Native user interfaces.** Explore Swift/SwiftUI clients for iPhone, iPad,
+  and macOS and Qt/QML clients where a native Linux or Windows surface is worth
+  the additional maintenance. Keep the versioned daemon API as the shared
+  product boundary and define capability tiers instead of requiring immediate
+  feature parity with the Electron desktop.
+
 ## Engine workshop
 
 - **Toolchain detection** now looks where user-scoped installs actually go —

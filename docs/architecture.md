@@ -293,6 +293,14 @@ the agent system prompt are served by the daemon too
 (`/api/v1/agent/tools`, `/api/v1/agent/sessions/{id}/prompt`), so the contract a
 model sees always matches the executor and the policy behind it.
 
+A repository may add agent-specific working instructions in
+`.brazier/agent-system-prompt.md`. The daemon reads this regular UTF-8 file from
+the selected workspace when the session opens (up to 64 KiB), appends it to the
+application-owned system prompt, and labels it as lower-priority repository
+guidance. It cannot override sandbox, permission, credential, or reporting
+rules. Prompt-file symlinks are rejected so a repository cannot use this hook
+to read content outside its workspace.
+
 ### Policy and approvals
 
 Every call is judged by `agent_policy` from the session's permission mode, the

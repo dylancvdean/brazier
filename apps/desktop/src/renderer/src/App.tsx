@@ -52,6 +52,7 @@ import {
   type BundledTool,
   GenerationFailure,
   prepareModel,
+  prefillProgressLabel,
   setModelBinding,
   type ConversationExport,
   type HardwareInfo,
@@ -1319,6 +1320,7 @@ export function App(): React.JSX.Element {
             builtinToolNames: toolsEnabled ? enabledTools : undefined,
             toolChoice: toolsEnabled ? 'auto' : undefined,
             onLoad: (event) => setModelLoadStatus(event.message),
+            onPrefill: (event) => setModelLoadStatus(prefillProgressLabel(event)),
             onReasoning: (token) => {
               setModelLoadStatus(null)
               roundReasoning += token

@@ -4529,6 +4529,32 @@ async fn chat_completions(
                     });
                     yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
                 }
+                Ok(StreamEvent::PrefillProgress {
+                    total,
+                    cached,
+                    processed,
+                    elapsed_ms,
+                    context_total,
+                }) => {
+                    let chunk = json!({
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": null
+                        }],
+                        "brazier": { "prefill": {
+                            "total": total,
+                            "cached": cached,
+                            "processed": processed,
+                            "elapsed_ms": elapsed_ms,
+                            "context_total": context_total
+                        }}
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
+                }
                 Ok(StreamEvent::Content(content)) => {
                     let chunk = json!({
                         "id": completion_id,
@@ -4801,7 +4827,7 @@ async fn responses(
             .data(json!({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}).to_string()));
         while let Some(item) = token_rx.recv().await {
             match item {
-                Ok(StreamEvent::Load { .. }) => {}
+                Ok(StreamEvent::Load { .. } | StreamEvent::PrefillProgress { .. }) => {}
                 Ok(StreamEvent::Content(content)) => {
                     yield Ok(Event::default()
                         .event("response.output_text.delta")
@@ -5233,8 +5259,15 @@ async fn agent_system_prompt(
         .enabled_tools
         .clone()
         .unwrap_or_else(|| agent_tool_names(&state.data_dir));
-    let prompt =
-        crate::agent_tools::system_prompt(&session, &state.agent_broker.capabilities(), &names);
+    let repository_prompt =
+        crate::agent_tools::load_repository_system_prompt(session.workspace_path.as_deref())
+            .map_err(ApiError::bad_request)?;
+    let prompt = crate::agent_tools::system_prompt(
+        &session,
+        &state.agent_broker.capabilities(),
+        &names,
+        repository_prompt.as_deref(),
+    );
     Ok(Json(json!({ "system_prompt": prompt, "tools": names })))
 }
 

@@ -38,6 +38,14 @@ pub struct Generation {
 pub enum StreamEvent {
     /// Model/server preparation progress.
     Load { phase: String, message: String },
+    /// Prompt evaluation reported by a local llama.cpp server.
+    PrefillProgress {
+        total: u64,
+        cached: u64,
+        processed: u64,
+        elapsed_ms: u64,
+        context_total: Option<u32>,
+    },
     /// Assistant content delta.
     Content(String),
     /// Interleaved thinking / reasoning delta (`reasoning_content`).
@@ -2102,6 +2110,14 @@ async fn stream_tool_rounds(
     let mut audio_fallback_attempted = false;
     let mut completion_tokens = 0u64;
     let mut first_token_at: Option<Instant> = None;
+    // The fraction shown to the user must use the context the server actually
+    // launched with, not merely the model's native maximum.
+    let context_total = Some(
+        profile
+            .as_ref()
+            .and_then(|profile| profile.context_size)
+            .unwrap_or(settings.context_size),
+    );
     for round in 0..MAX_TOOL_ROUNDS {
         let last_round = round + 1 == MAX_TOOL_ROUNDS;
         let mut body = llama::translate_chat_request(
@@ -2150,6 +2166,20 @@ async fn stream_tool_rounds(
         let mut pending_content = String::new();
         while let Some(item) = chunks.recv().await {
             let chunk = item?;
+            if let Some(progress) = chunk.prompt_progress
+                && tx
+                    .send(Ok(StreamEvent::PrefillProgress {
+                        total: progress.total,
+                        cached: progress.cache,
+                        processed: progress.processed,
+                        elapsed_ms: progress.time_ms,
+                        context_total,
+                    }))
+                    .await
+                    .is_err()
+            {
+                return Ok(());
+            }
             if let Some(content) = chunk.content {
                 if local_generation {
                     completion_tokens += 1;
