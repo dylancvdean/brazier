@@ -751,14 +751,17 @@ impl SessionManager {
     /// Stop the backing server and clear the active session.
     pub async fn end_session(&self, id: &str) -> anyhow::Result<()> {
         let mut guard = self.session.lock().await;
-        match guard.as_ref() {
-            Some(session) if session.id == id => {}
+        let session = match guard.as_ref() {
+            Some(session) if session.id == id => session.clone(),
             Some(_) => anyhow::bail!("session id does not match the active realtime voice session"),
             None => anyhow::bail!("no active realtime voice session"),
-        }
-        let session = guard.take().expect("session presence checked above");
-        drop(guard);
-        session.server.lock().await.stop().await
+        };
+        // Keep the session reachable until shutdown succeeds. Clearing it
+        // first would orphan a server when stop reports an error, leaving no
+        // handle for status reporting or a retry.
+        session.server.lock().await.stop().await?;
+        guard.take();
+        Ok(())
     }
 }
 

@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, time::Duration};
+use std::{cmp::Ordering, collections::HashSet, time::Duration};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -300,29 +300,78 @@ pub async fn list_repo_files(
 ) -> anyhow::Result<Vec<RepoFile>> {
     crate::models_store::validate_repo_id(repo_id)?;
     anyhow::ensure!(!revision.is_empty(), "revision is required");
-    let url = format!("https://huggingface.co/api/models/{repo_id}/tree/{revision}");
-    let values: Vec<Value> = hf_auth::apply_auth(client.get(url), data_dir)
-        .send()
-        .await
-        .context("contact Hugging Face tree API")?
-        .error_for_status()
-        .context("Hugging Face tree request failed")?
-        .json()
-        .await
-        .context("decode Hugging Face tree response")?;
-    Ok(values
-        .into_iter()
-        .filter_map(|value| {
-            let path = value.get("path")?.as_str()?.to_owned();
-            let kind = value.get("type").and_then(Value::as_str).unwrap_or("file");
-            if kind != "file" {
-                return None;
-            }
-            let size = value.get("size").and_then(Value::as_u64);
-            let sha256 = lfs_sha256(&value);
-            Some(RepoFile { path, size, sha256 })
-        })
-        .collect())
+    let mut url = reqwest::Url::parse(&format!(
+        "https://huggingface.co/api/models/{repo_id}/tree/{revision}"
+    ))
+    .context("build Hugging Face tree URL")?;
+    url.query_pairs_mut()
+        .append_pair("recursive", "true")
+        .append_pair("expand", "false");
+
+    let mut files = Vec::new();
+    let mut visited = HashSet::new();
+    loop {
+        anyhow::ensure!(
+            visited.insert(url.as_str().to_owned()),
+            "Hugging Face tree pagination looped"
+        );
+        anyhow::ensure!(
+            visited.len() <= 100,
+            "Hugging Face tree returned too many pages"
+        );
+        let response = hf_auth::apply_auth(client.get(url.clone()), data_dir)
+            .send()
+            .await
+            .context("contact Hugging Face tree API")?
+            .error_for_status()
+            .context("Hugging Face tree request failed")?;
+        let next = response
+            .headers()
+            .get(reqwest::header::LINK)
+            .and_then(|value| value.to_str().ok())
+            .and_then(next_link)
+            .map(ToOwned::to_owned);
+        let values: Vec<Value> = response
+            .json()
+            .await
+            .context("decode Hugging Face tree response")?;
+        files.extend(repo_files_from_tree(values));
+
+        let Some(next) = next else {
+            break;
+        };
+        let next = reqwest::Url::parse(&next).context("invalid Hugging Face next-page URL")?;
+        anyhow::ensure!(
+            next.scheme() == "https" && next.host_str() == Some("huggingface.co"),
+            "refusing untrusted Hugging Face next-page URL"
+        );
+        url = next;
+    }
+    Ok(files)
+}
+
+fn repo_files_from_tree(values: Vec<Value>) -> impl Iterator<Item = RepoFile> {
+    values.into_iter().filter_map(|value| {
+        let path = value.get("path")?.as_str()?.to_owned();
+        let kind = value.get("type").and_then(Value::as_str).unwrap_or("file");
+        if kind != "file" {
+            return None;
+        }
+        let size = value.get("size").and_then(Value::as_u64);
+        let sha256 = lfs_sha256(&value);
+        Some(RepoFile { path, size, sha256 })
+    })
+}
+
+fn next_link(header: &str) -> Option<&str> {
+    header.split(',').find_map(|part| {
+        let (target, parameters) = part.trim().split_once(';')?;
+        parameters
+            .split(';')
+            .any(|parameter| parameter.trim() == r#"rel="next""#)
+            .then(|| target.trim().strip_prefix('<')?.strip_suffix('>'))
+            .flatten()
+    })
 }
 
 /// Exact sizes for specific files in a repository.
@@ -622,6 +671,7 @@ pub async fn model_trust(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn readme_summary_strips_frontmatter_and_headings() {
@@ -644,6 +694,46 @@ mod tests {
         assert!(!looks_like_single_quant(
             "unsloth/Llama-3.3-70B-Instruct-GGUF"
         ));
+    }
+
+    #[test]
+    fn recursive_tree_results_keep_nested_gguf_files() {
+        let files = repo_files_from_tree(vec![
+            json!({ "type": "directory", "path": "gguf", "size": 0 }),
+            json!({
+                "type": "file",
+                "path": "gguf/neutrino-8b-fv5.gguf",
+                "size": 4_093_015_136_u64,
+                "lfs": {
+                    "oid": "1c13a34360b2531d28821fb6aee41708f99a040215a2522af37213c6c8c87211"
+                }
+            }),
+        ])
+        .collect::<Vec<_>>();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "gguf/neutrino-8b-fv5.gguf");
+        assert_eq!(files[0].size, Some(4_093_015_136));
+        assert_eq!(
+            files[0].sha256.as_deref(),
+            Some("1c13a34360b2531d28821fb6aee41708f99a040215a2522af37213c6c8c87211")
+        );
+    }
+
+    #[test]
+    fn tree_pagination_selects_only_the_next_link() {
+        let header = concat!(
+            "<https://huggingface.co/previous>; rel=\"prev\", ",
+            "<https://huggingface.co/next?cursor=abc>; rel=\"next\""
+        );
+        assert_eq!(
+            next_link(header),
+            Some("https://huggingface.co/next?cursor=abc")
+        );
+        assert_eq!(
+            next_link("<https://huggingface.co/last>; rel=\"prev\""),
+            None
+        );
     }
 
     #[test]

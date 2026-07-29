@@ -585,7 +585,9 @@ class PiAgentSession implements AgentSession {
     this.agent.abort()
     await this.cancelChildren()
     // Also stop anything the tools left running and refuse pending approvals.
-    await this.broker.cancel(this.id).catch(() => undefined)
+    // A broker failure is not a successful cancellation: host processes or
+    // approvals may still be live, so propagate it to the caller.
+    await this.broker.cancel(this.id)
     this.emit({ ...this.base('run-cancelled') } as AgentEvent)
     await this.setRunStatus('cancelled')
   }

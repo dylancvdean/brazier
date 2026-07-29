@@ -1295,7 +1295,7 @@ impl Database {
 
     /// Mark a job paused, keeping its partial file for a later resume.
     pub async fn pause_download_job(&self, job_id: &str) -> anyhow::Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'paused', updated_at = datetime('now')
                WHERE id = ? AND status IN ('pending', 'downloading')"#,
@@ -1303,6 +1303,10 @@ impl Database {
         .bind(job_id)
         .execute(&self.pool)
         .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "that download is no longer queued or running"
+        );
         Ok(())
     }
 
@@ -1432,7 +1436,7 @@ impl Database {
     }
 
     pub async fn start_download_job(&self, job_id: &str) -> anyhow::Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'downloading', updated_at = datetime('now')
                WHERE id = ? AND status IN ('pending', 'downloading')"#,
@@ -1440,23 +1444,31 @@ impl Database {
         .bind(job_id)
         .execute(&self.pool)
         .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "that download is no longer queued or running"
+        );
         Ok(())
     }
 
     pub async fn cancel_download_job(&self, job_id: &str) -> anyhow::Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'cancelled', error = 'cancelled by user', updated_at = datetime('now')
-               WHERE id = ? AND status IN ('pending', 'downloading')"#,
+               WHERE id = ? AND status IN ('pending', 'downloading', 'paused')"#,
         )
         .bind(job_id)
         .execute(&self.pool)
         .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "that download is already settled or does not exist"
+        );
         Ok(())
     }
 
     pub async fn fail_download_job(&self, job_id: &str, error: &str) -> anyhow::Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'failed', error = ?, updated_at = datetime('now')
                WHERE id = ? AND status IN ('pending', 'downloading')"#,
@@ -1465,6 +1477,10 @@ impl Database {
         .bind(job_id)
         .execute(&self.pool)
         .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "that download is no longer queued or running"
+        );
         Ok(())
     }
 
@@ -1929,11 +1945,11 @@ mod tests {
             .unwrap();
         db.cancel_download_job(&job.id).await.unwrap();
 
-        db.start_download_job(&job.id).await.unwrap();
+        assert!(db.start_download_job(&job.id).await.is_err());
         db.update_download_job_progress(&job.id, 9, Some(10))
             .await
             .unwrap();
-        db.fail_download_job(&job.id, "late failure").await.unwrap();
+        assert!(db.fail_download_job(&job.id, "late failure").await.is_err());
         assert!(
             db.complete_download_job(&job.id, "abc", 10).await.is_err(),
             "late completion must not resurrect a cancelled download"
@@ -1952,6 +1968,24 @@ mod tests {
             db.get_download_job_public(&job.id).await.unwrap().status,
             "pending"
         );
+    }
+
+    #[tokio::test]
+    async fn paused_downloads_can_be_cancelled_but_settled_jobs_cannot() {
+        let (_dir, db) = open().await;
+        let job = db
+            .create_download_job("acme/models", "paused.gguf", "main")
+            .await
+            .unwrap();
+        db.pause_download_job(&job.id).await.unwrap();
+        db.cancel_download_job(&job.id).await.unwrap();
+        assert_eq!(
+            db.get_download_job_public(&job.id).await.unwrap().status,
+            "cancelled"
+        );
+        assert!(db.cancel_download_job(&job.id).await.is_err());
+        assert!(db.cancel_download_job("missing").await.is_err());
+        assert!(db.pause_download_job("missing").await.is_err());
     }
 
     #[tokio::test]

@@ -160,11 +160,21 @@ async fn run_one(
     // every later cancel reaches this worker directly.
     let cancel = active.register(&work.job_id);
     // A job cancelled or paused while still waiting in line should not start.
-    if let Ok(job) = db.get_download_job_public(&work.job_id).await
-        && matches!(job.status.as_str(), "paused" | "cancelled")
-    {
-        active.finish(&work.job_id);
-        return;
+    match db.get_download_job_public(&work.job_id).await {
+        Ok(job) if matches!(job.status.as_str(), "pending" | "downloading") => {}
+        Ok(_) => {
+            active.finish(&work.job_id);
+            return;
+        }
+        Err(error) => {
+            tracing::error!(
+                job_id = %work.job_id,
+                error = %error,
+                "refusing to start download without durable job state"
+            );
+            active.finish(&work.job_id);
+            return;
+        }
     }
 
     let job_handle = Some((db.clone(), work.job_id.clone()));

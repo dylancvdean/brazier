@@ -41,6 +41,26 @@ impl TryFrom<SessionRow> for AgentSessionRecord {
     type Error = anyhow::Error;
 
     fn try_from(row: SessionRow) -> anyhow::Result<Self> {
+        let permission_settings = serde_json::from_str(&row.permission_settings_json)
+            .context("decode agent permission settings")?;
+        let enabled_tools = row
+            .enabled_tools_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .context("decode enabled agent tools")?;
+        let compaction = row
+            .compaction_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .context("decode agent compaction state")?;
+        let runtime_metadata = row
+            .runtime_metadata_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .context("decode agent runtime metadata")?;
         Ok(Self {
             id: row.id,
             title: row.title,
@@ -48,21 +68,11 @@ impl TryFrom<SessionRow> for AgentSessionRecord {
             model: row.model,
             runtime_id: row.runtime_id,
             permission_mode: parse_permission_mode(&row.permission_mode),
-            permission_settings: serde_json::from_str(&row.permission_settings_json)
-                .unwrap_or_default(),
-            enabled_tools: row
-                .enabled_tools_json
-                .as_deref()
-                .and_then(|raw| serde_json::from_str(raw).ok()),
+            permission_settings,
+            enabled_tools,
             last_run_status: row.last_run_status,
-            compaction: row
-                .compaction_json
-                .as_deref()
-                .and_then(|raw| serde_json::from_str(raw).ok()),
-            runtime_metadata: row
-                .runtime_metadata_json
-                .as_deref()
-                .and_then(|raw| serde_json::from_str(raw).ok()),
+            compaction,
+            runtime_metadata,
             created_at: row.created_at,
             updated_at: row.updated_at,
         })
@@ -194,83 +204,127 @@ impl Database {
         id: &str,
         update: UpdateAgentSession,
     ) -> anyhow::Result<AgentSessionRecord> {
+        if let Some(status) = update.last_run_status.as_deref() {
+            anyhow::ensure!(
+                matches!(
+                    status,
+                    "idle" | "running" | "awaiting-approval" | "completed" | "cancelled" | "failed"
+                ),
+                "invalid agent run status `{status}`"
+            );
+        }
+        // Serialize before opening the transaction. A malformed value must not
+        // leave earlier fields committed while a later field fails to encode.
+        let permission_settings = update
+            .permission_settings
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let enabled_tools = update
+            .enabled_tools
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let compaction = update
+            .compaction
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let runtime_metadata = update
+            .runtime_metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+
         // One statement per supplied field keeps the absent-versus-null
-        // distinction that a single dynamic UPDATE would lose.
+        // distinction that a single dynamic UPDATE would lose. They share a
+        // transaction so a failed patch is all-or-nothing.
+        let mut tx = self.pool.begin().await?;
         if let Some(title) = update.title {
             sqlx::query("UPDATE agent_sessions SET title = ? WHERE id = ?")
                 .bind(title)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
         if let Some(workspace) = update.workspace_path {
             sqlx::query("UPDATE agent_sessions SET workspace_path = ? WHERE id = ?")
                 .bind(workspace)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
         if let Some(model) = update.model {
             sqlx::query("UPDATE agent_sessions SET model = ? WHERE id = ?")
                 .bind(model)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
         if let Some(mode) = update.permission_mode {
             sqlx::query("UPDATE agent_sessions SET permission_mode = ? WHERE id = ?")
                 .bind(mode.as_str())
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
-        if let Some(settings) = update.permission_settings {
+        if let Some(settings) = permission_settings {
             sqlx::query("UPDATE agent_sessions SET permission_settings_json = ? WHERE id = ?")
-                .bind(serde_json::to_string(&settings)?)
+                .bind(settings)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
-        if let Some(tools) = update.enabled_tools {
+        if let Some(tools) = enabled_tools {
             sqlx::query("UPDATE agent_sessions SET enabled_tools_json = ? WHERE id = ?")
-                .bind(serde_json::to_string(&tools)?)
+                .bind(tools)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
         if let Some(status) = update.last_run_status {
             sqlx::query("UPDATE agent_sessions SET last_run_status = ? WHERE id = ?")
                 .bind(status)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
-        if let Some(compaction) = update.compaction {
+        if let Some(compaction) = compaction {
             sqlx::query("UPDATE agent_sessions SET compaction_json = ? WHERE id = ?")
-                .bind(serde_json::to_string(&compaction)?)
+                .bind(compaction)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
-        if let Some(metadata) = update.runtime_metadata {
+        if let Some(metadata) = runtime_metadata {
             sqlx::query("UPDATE agent_sessions SET runtime_metadata_json = ? WHERE id = ?")
-                .bind(serde_json::to_string(&metadata)?)
+                .bind(metadata)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
-        sqlx::query("UPDATE agent_sessions SET updated_at = datetime('now') WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE agent_sessions SET updated_at = datetime('now') WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "agent session {id} does not exist"
+        );
+        tx.commit().await?;
         self.agent_session(id).await
     }
 
     pub async fn delete_agent_session(&self, id: &str) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM agent_sessions WHERE id = ?")
+        let result = sqlx::query("DELETE FROM agent_sessions WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "agent session {id} does not exist"
+        );
         Ok(())
     }
 
@@ -312,10 +366,15 @@ impl Database {
         // Acquire SQLite's write reservation before reading MAX(seq). A
         // deferred transaction that reads first can deadlock with another
         // append when both try to upgrade their shared locks.
-        sqlx::query("UPDATE agent_sessions SET updated_at = datetime('now') WHERE id = ?")
-            .bind(session_id)
-            .execute(&mut *tx)
-            .await?;
+        let result =
+            sqlx::query("UPDATE agent_sessions SET updated_at = datetime('now') WHERE id = ?")
+                .bind(session_id)
+                .execute(&mut *tx)
+                .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "agent session {session_id} does not exist"
+        );
         if replace {
             sqlx::query("DELETE FROM agent_messages WHERE session_id = ?")
                 .bind(session_id)
@@ -835,6 +894,74 @@ mod tests {
             .await
             .expect("update");
         assert_eq!(cleared.workspace_path, None);
+    }
+
+    #[tokio::test]
+    async fn invalid_session_patch_is_atomic() {
+        let (_dir, db) = database().await;
+        let session = db
+            .create_agent_session(session_request(Some("/ws")))
+            .await
+            .expect("create session");
+
+        let error = db
+            .update_agent_session(
+                &session.id,
+                UpdateAgentSession {
+                    title: Some("Must not persist".to_owned()),
+                    last_run_status: Some("surprising".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("invalid status must fail");
+        assert!(error.to_string().contains("invalid agent run status"));
+
+        let unchanged = db.agent_session(&session.id).await.expect("reload");
+        assert_eq!(unchanged.title, "Test task");
+        assert_eq!(unchanged.last_run_status, "idle");
+    }
+
+    #[tokio::test]
+    async fn missing_session_mutations_do_not_report_success() {
+        let (_dir, db) = database().await;
+        assert!(
+            db.update_agent_session(
+                "missing",
+                UpdateAgentSession {
+                    title: Some("No row".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert!(db.delete_agent_session("missing").await.is_err());
+        assert!(
+            db.append_agent_messages("missing", &[], false)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_restricted_tool_state_fails_closed() {
+        let (_dir, db) = database().await;
+        let session = db
+            .create_agent_session(session_request(None))
+            .await
+            .expect("create session");
+        sqlx::query("UPDATE agent_sessions SET enabled_tools_json = 'not-json' WHERE id = ?")
+            .bind(&session.id)
+            .execute(&db.pool)
+            .await
+            .expect("corrupt fixture");
+
+        let error = db
+            .agent_session(&session.id)
+            .await
+            .expect_err("corrupt restrictions must not become unrestricted");
+        assert!(error.to_string().contains("decode enabled agent tools"));
     }
 
     #[tokio::test]

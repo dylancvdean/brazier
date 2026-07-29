@@ -2123,6 +2123,7 @@ async fn start_setup_build(state: &AppState, request: builds::BuildRequest) -> A
             .update_download_job_message(&job_id, "Waiting for the build slot")
             .await;
         let Ok(slot) = build_slots.acquire_owned().await else {
+            let _ = db.fail_download_job(&job_id, "build queue is closed").await;
             return;
         };
         if db
@@ -2132,7 +2133,11 @@ async fn start_setup_build(state: &AppState, request: builds::BuildRequest) -> A
         {
             return;
         }
-        let _ = db.start_download_job(&job_id).await;
+        if db.start_download_job(&job_id).await.is_err() {
+            // Cancellation may win between the durable-state check above and
+            // this transition. Never run native build commands after that.
+            return;
+        }
         let progress_db = db.clone();
         let progress_id = job_id.clone();
         let result = builds::run_build_with_progress(
@@ -2170,7 +2175,14 @@ async fn start_setup_build(state: &AppState, request: builds::BuildRequest) -> A
         .await;
         match result {
             Ok(binary) => {
-                let _ = db.complete_download_job(&job_id, "", 100).await;
+                if let Err(error) = db.complete_download_job(&job_id, "", 100).await {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        error = %error,
+                        "build finished after its durable job was settled"
+                    );
+                    return;
+                }
                 let active = runtime.active_runtimes().await;
                 if let Some(entry) = runtimes::list(&data_dir, &active, None, false)
                     .into_iter()
@@ -3197,7 +3209,13 @@ async fn build_runtime(
         {
             return;
         }
-        let _ = db.start_download_job(&job_id).await;
+        if let Err(error) = db.start_download_job(&job_id).await {
+            push_progress(
+                &tx,
+                ProgressEvent::error(format!("build did not start: {error}")),
+            );
+            return;
+        }
         let result = builds::run_build_with_progress(
             &data_dir,
             request,
@@ -3248,7 +3266,15 @@ async fn build_runtime(
         .await;
         match result {
             Ok(binary) => {
-                let _ = db.complete_download_job(&job_id, "", 100).await;
+                if let Err(error) = db.complete_download_job(&job_id, "", 100).await {
+                    push_progress(
+                        &tx,
+                        ProgressEvent::error(format!(
+                            "build finished after its job was settled: {error}"
+                        )),
+                    );
+                    return;
+                }
                 cache_state.invalidate_runtimes_cache().await;
                 push_progress(
                     &tx,
@@ -3325,11 +3351,16 @@ async fn cancel_build_job(
         .payload
         .as_deref()
         .ok_or_else(|| ApiError::bad_request("build is still starting; try again in a moment"))?;
-    if !state.active_builds.cancel(build_id) {
-        return Err(ApiError::bad_request("that build is no longer running"));
-    }
-    let _ = state.db.cancel_download_job(&request.job_id).await;
-    Ok(Json(json!({ "cancelled": request.job_id })))
+    state
+        .db
+        .cancel_download_job(&request.job_id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    let signalled = state.active_builds.cancel(build_id);
+    Ok(Json(json!({
+        "cancelled": request.job_id,
+        "signalled": signalled
+    })))
 }
 
 fn format_build_failure(report: &builds::BuildFailureReport) -> String {
@@ -3561,16 +3592,16 @@ async fn cancel_model_download(
     State(state): State<AppState>,
     Json(request): Json<CancelDownloadRequest>,
 ) -> ApiResult<Json<Value>> {
+    state
+        .db
+        .cancel_download_job(&request.job_id)
+        .await
+        .map_err(ApiError::bad_request)?;
     let signalled = state.active_downloads.cancel(&request.job_id);
-    if signalled {
-        let _ = state.db.cancel_download_job(&request.job_id).await;
-        Ok(Json(json!({ "cancelled": request.job_id })))
-    } else {
-        let _ = state.db.cancel_download_job(&request.job_id).await;
-        Ok(Json(
-            json!({ "cancelled": request.job_id, "queued_only": true }),
-        ))
-    }
+    Ok(Json(json!({
+        "cancelled": request.job_id,
+        "queued_only": !signalled
+    })))
 }
 
 /// Add work to the download queue.
@@ -3690,18 +3721,22 @@ async fn pause_model_download(
     Json(request): Json<DownloadJobRequest>,
 ) -> ApiResult<Json<Value>> {
     use crate::active_downloads::StopReason;
+    // Persist the transition immediately even for an active transfer. This
+    // keeps the tray honest while the worker cooperatively stops, and the
+    // worker's later pause is deliberately allowed to observe "already
+    // paused" without changing it again.
+    state
+        .db
+        .pause_download_job(&request.job_id)
+        .await
+        .map_err(ApiError::bad_request)?;
     let signalled = state
         .active_downloads
         .stop(&request.job_id, StopReason::Pause);
-    // A job still waiting in line is paused directly; the queue skips it.
-    if !signalled {
-        state
-            .db
-            .pause_download_job(&request.job_id)
-            .await
-            .map_err(ApiError::bad_request)?;
-    }
-    Ok(Json(json!({ "paused": request.job_id })))
+    Ok(Json(json!({
+        "paused": request.job_id,
+        "queued_only": !signalled
+    })))
 }
 
 /// Forget a finished, failed, or cancelled job so it leaves the list.
@@ -4477,6 +4512,7 @@ async fn chat_completions(
         // finish_reason they see (including agent runtimes) would otherwise miss
         // the tool round trip.
         let mut finished = false;
+        let mut saw_end = false;
         while let Some(item) = token_rx.recv().await {
             match item {
                 Ok(StreamEvent::Load { phase, message }) => {
@@ -4596,7 +4632,10 @@ async fn chat_completions(
                     });
                     yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
                 }
-                Ok(StreamEvent::End) => break,
+                Ok(StreamEvent::End) => {
+                    saw_end = true;
+                    break;
+                }
                 Err(error) => {
                     tracing::error!(error = %error, "stream generation failed");
                     let fork_hints = error
@@ -4623,7 +4662,7 @@ async fn chat_completions(
                 }
             }
         }
-        if !finished {
+        if !finished && saw_end {
             let final_chunk = json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -4635,6 +4674,20 @@ async fn chat_completions(
                 }]
             });
             yield Ok(Event::default().data(final_chunk.to_string()));
+        } else if !finished {
+            tracing::error!("chat completion stream closed without a terminal event");
+            let chunk = json!({
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "error"
+                }],
+                "error": { "message": "model stream closed before completion" }
+            });
+            yield Ok(Event::default().data(chunk.to_string()));
         }
         yield Ok(Event::default().data("[DONE]"));
     };
@@ -4674,6 +4727,20 @@ fn responses_input_to_messages(input: &Value) -> Vec<OpenAiMessage> {
             reasoning_content: None,
         }],
     }
+}
+
+fn responses_failed_event(response_id: &str, error: &str) -> Value {
+    json!({
+        "type": "response.failed",
+        "response": {
+            "id": response_id,
+            "status": "failed",
+            "error": {
+                "code": "server_error",
+                "message": error
+            }
+        }
+    })
 }
 
 async fn responses(
@@ -4728,6 +4795,7 @@ async fn responses(
         .await
         .map_err(ApiError::internal)?;
     let events = stream! {
+        let mut failure = Some("model stream closed before completion".to_owned());
         yield Ok::<Event, Infallible>(Event::default()
             .event("response.created")
             .data(json!({"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}).to_string()));
@@ -4763,16 +4831,26 @@ async fn responses(
                         }).to_string()));
                 }
                 Ok(StreamEvent::GenerationStats { .. }) => {}
-                Ok(StreamEvent::End) => break,
+                Ok(StreamEvent::End) => {
+                    failure = None;
+                    break;
+                }
                 Err(error) => {
                     tracing::error!(error = %error, "responses stream failed");
+                    failure = Some(error.to_string());
                     break;
                 }
             }
         }
-        yield Ok(Event::default()
-            .event("response.completed")
-            .data(json!({"type": "response.completed", "response": {"id": response_id, "status": "completed"}}).to_string()));
+        if let Some(error) = failure {
+            yield Ok(Event::default()
+                .event("response.failed")
+                .data(responses_failed_event(&response_id, &error).to_string()));
+        } else {
+            yield Ok(Event::default()
+                .event("response.completed")
+                .data(json!({"type": "response.completed", "response": {"id": response_id, "status": "completed"}}).to_string()));
+        }
     };
     Ok(Sse::new(events).into_response())
 }
@@ -4886,7 +4964,19 @@ async fn create_agent_session(
         .await
         .map_err(ApiError::internal)?;
     if confine {
-        session = set_worktree_confinement(&state, session, true).await?;
+        match set_worktree_confinement(&state, session.clone(), true).await {
+            Ok(confined) => session = confined,
+            Err(error) => {
+                if let Err(cleanup) = state.db.delete_agent_session(&session.id).await {
+                    tracing::error!(
+                        session_id = %session.id,
+                        error = %cleanup,
+                        "failed to roll back agent session after worktree setup failed"
+                    );
+                }
+                return Err(error);
+            }
+        }
     }
     Ok(Json(session))
 }
@@ -4936,17 +5026,38 @@ async fn patch_agent_session(
     Json(mut update): Json<crate::agent_types::UpdateAgentSession>,
 ) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
     let confine = update.confine_to_worktree.take();
+    let has_other_updates = update.title.is_some()
+        || update.workspace_path.is_some()
+        || update.model.is_some()
+        || update.permission_mode.is_some()
+        || update.permission_settings.is_some()
+        || update.enabled_tools.is_some()
+        || update.last_run_status.is_some()
+        || update.compaction.is_some()
+        || update.runtime_metadata.is_some();
+    if confine.is_some() && has_other_updates {
+        return Err(ApiError::bad_request(
+            "worktree confinement must be changed in a separate request",
+        ));
+    }
     if let Some(Some(workspace)) = &update.workspace_path {
         validate_workspace_path(&state, workspace)?;
     }
-    let mut session = state
+    if let Some(enabled) = confine {
+        let session = state
+            .db
+            .agent_session(&id)
+            .await
+            .map_err(|error| ApiError::not_found(error.to_string()))?;
+        return Ok(Json(
+            set_worktree_confinement(&state, session, enabled).await?,
+        ));
+    }
+    let session = state
         .db
         .update_agent_session(&id, update)
         .await
         .map_err(ApiError::internal)?;
-    if let Some(enabled) = confine {
-        session = set_worktree_confinement(&state, session, enabled).await?;
-    }
     Ok(Json(session))
 }
 
@@ -4954,10 +5065,14 @@ async fn delete_agent_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    let session = state
+        .db
+        .agent_session(&id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
     state.agent_broker.terminate_session_processes(&id).await;
-    if let Ok(session) = state.db.agent_session(&id).await
-        && let Some(info) =
-            crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
+    if let Some(info) =
+        crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
     {
         crate::agent_worktree::remove_worktree(&info)
             .await
@@ -5074,6 +5189,11 @@ async fn cancel_agent_run(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    state
+        .db
+        .agent_session(&id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
     let terminated = state.agent_broker.terminate_session_processes(&id).await;
     let expired = state
         .db
@@ -5293,13 +5413,17 @@ async fn decide_agent_approval(
         .decide_approval(&id, approved, request.scope, request.note)
         .await
         .map_err(ApiError::bad_request)?;
+    // The decision is already durable. Wake the waiting call before doing
+    // auxiliary timeline bookkeeping so a logging failure cannot strand it or
+    // make the client retry a decision that has already been committed.
+    state.agent_broker.notify_approvals();
 
     // An approved call records itself when it runs. A refused one never runs, so
     // record it here — otherwise the attempt would vanish from the activity
     // timeline as soon as the session is reloaded.
     if !approved {
         let note = approval.note.clone();
-        state
+        if let Err(error) = state
             .db
             .record_tool_execution(crate::agent_store::NewToolExecution {
                 session_id: approval.session_id.clone(),
@@ -5326,10 +5450,16 @@ async fn decide_agent_approval(
                 duration_ms: None,
             })
             .await
-            .map_err(ApiError::internal)?;
+        {
+            tracing::error!(
+                approval_id = %approval.id,
+                session_id = %approval.session_id,
+                error = %error,
+                "approval was denied but its timeline entry could not be recorded"
+            );
+        }
     }
 
-    state.agent_broker.notify_approvals();
     Ok(Json(approval))
 }
 
@@ -5377,6 +5507,11 @@ async fn set_worktree_confinement(
     enabled: bool,
 ) -> ApiResult<crate::agent_types::AgentSessionRecord> {
     let existing = crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref());
+    if session.last_run_status == "running" {
+        return Err(ApiError::bad_request(
+            "stop the agent before changing worktree confinement",
+        ));
+    }
     if enabled {
         if existing.is_some() {
             return Ok(session);
@@ -5399,29 +5534,38 @@ async fn set_worktree_confinement(
             Some(info.clone()),
         );
         validate_workspace_path(state, &info.path)?;
-        state
+        match state
             .db
             .update_agent_session(
                 &session.id,
                 crate::agent_types::UpdateAgentSession {
-                    workspace_path: Some(Some(info.path)),
+                    workspace_path: Some(Some(info.path.clone())),
                     runtime_metadata: Some(metadata),
                     ..Default::default()
                 },
             )
             .await
-            .map_err(ApiError::internal)
+        {
+            Ok(session) => Ok(session),
+            Err(error) => {
+                if let Err(cleanup) = crate::agent_worktree::remove_worktree(&info).await {
+                    tracing::error!(
+                        session_id = %session.id,
+                        error = %cleanup,
+                        "failed to clean up worktree after session update failed"
+                    );
+                }
+                Err(ApiError::internal(error))
+            }
+        }
     } else {
         let Some(info) = existing else {
             return Ok(session);
         };
-        crate::agent_worktree::remove_worktree(&info)
-            .await
-            .map_err(|error| ApiError::bad_request(error.to_string()))?;
         let metadata =
             crate::agent_worktree::metadata_with_worktree(session.runtime_metadata.clone(), None);
         let source = validate_workspace_path(state, &info.source_path)?;
-        state
+        let updated = state
             .db
             .update_agent_session(
                 &session.id,
@@ -5432,7 +5576,31 @@ async fn set_worktree_confinement(
                 },
             )
             .await
-            .map_err(ApiError::internal)
+            .map_err(ApiError::internal)?;
+        if let Err(error) = crate::agent_worktree::remove_worktree(&info).await {
+            let rollback = state
+                .db
+                .update_agent_session(
+                    &session.id,
+                    crate::agent_types::UpdateAgentSession {
+                        workspace_path: Some(session.workspace_path.clone()),
+                        runtime_metadata: session.runtime_metadata.clone(),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            if let Err(rollback) = rollback {
+                tracing::error!(
+                    session_id = %session.id,
+                    error = %error,
+                    rollback_error = %rollback,
+                    "worktree removal and session rollback both failed"
+                );
+                return Err(ApiError::internal(rollback));
+            }
+            return Err(ApiError::bad_request(error.to_string()));
+        }
+        Ok(updated)
     }
 }
 
@@ -5531,6 +5699,16 @@ mod tests {
         let messages = responses_input_to_messages(&json!("hello"));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
+    }
+
+    #[test]
+    fn responses_failures_are_terminal_failures_not_completions() {
+        let event = responses_failed_event("resp_test", "engine exited");
+        assert_eq!(event["type"], "response.failed");
+        assert_eq!(event["response"]["id"], "resp_test");
+        assert_eq!(event["response"]["status"], "failed");
+        assert_eq!(event["response"]["error"]["code"], "server_error");
+        assert_eq!(event["response"]["error"]["message"], "engine exited");
     }
 
     async fn test_state(data_dir: &std::path::Path) -> AppState {
@@ -5635,6 +5813,124 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, parsed)
+    }
+
+    #[tokio::test]
+    async fn download_controls_reject_false_success_and_cancel_paused_jobs() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let job = state
+            .db
+            .create_download_job("acme/models", "queued.gguf", "main")
+            .await
+            .unwrap();
+        let app = router(state.clone());
+
+        let (status, body) = json_request(
+            &app,
+            "POST",
+            "/api/v1/models/download/pause",
+            json!({ "job_id": &job.id }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            state
+                .db
+                .get_download_job_public(&job.id)
+                .await
+                .unwrap()
+                .status,
+            "paused"
+        );
+
+        let (status, body) = json_request(
+            &app,
+            "POST",
+            "/api/v1/models/download/cancel",
+            json!({ "job_id": &job.id }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            state
+                .db
+                .get_download_job_public(&job.id)
+                .await
+                .unwrap()
+                .status,
+            "cancelled"
+        );
+
+        for route in [
+            "/api/v1/models/download/pause",
+            "/api/v1/models/download/cancel",
+        ] {
+            let (status, _) =
+                json_request(&app, "POST", route, json!({ "job_id": "does-not-exist" })).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{route}");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_session_failures_do_not_leave_partial_state_or_report_success() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+
+        let (status, body) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test",
+                "confine_to_worktree": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, sessions) = get_request(&app, "/api/v1/agent/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(sessions["data"], json!([]));
+
+        let (status, _) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions/missing/cancel",
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) =
+            json_request(&app, "DELETE", "/api/v1/agent/sessions/missing", json!({})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (_, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+        )
+        .await;
+        let session_id = session["id"].as_str().unwrap();
+        let (status, _) = json_request(
+            &app,
+            "PATCH",
+            &format!("/api/v1/agent/sessions/{session_id}"),
+            json!({
+                "title": "Must not persist",
+                "confine_to_worktree": true
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (_, reloaded) =
+            get_request(&app, &format!("/api/v1/agent/sessions/{session_id}")).await;
+        assert_eq!(reloaded["session"]["title"], "Agent task");
     }
 
     async fn get_request(app: &Router, uri: &str) -> (StatusCode, Value) {

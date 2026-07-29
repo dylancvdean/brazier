@@ -193,12 +193,11 @@ pub async fn download_gguf_with_progress(
                 engine: Some(engine_label.to_owned()),
                 notice: None,
             };
-            progress(ProgressEvent::done(serde_json::to_value(&result)?));
             if let Some((db, job_id)) = &job {
-                let _ = db
-                    .complete_download_job(job_id, &result.sha256, result.bytes)
-                    .await;
+                db.complete_download_job(job_id, &result.sha256, result.bytes)
+                    .await?;
             }
+            progress(ProgressEvent::done(serde_json::to_value(&result)?));
             return Ok(result);
         }
     }
@@ -236,7 +235,7 @@ pub async fn download_gguf_with_progress(
         },
     ));
     if let Some((db, job_id)) = &job {
-        let _ = db.start_download_job(job_id).await;
+        db.start_download_job(job_id).await?;
     }
     let url = resolve_url(&request.repo_id, &request.revision, &request.filename);
 
@@ -348,12 +347,11 @@ pub async fn download_gguf_with_progress(
         engine: Some(engine_label.to_owned()),
         notice: None,
     };
-    progress(ProgressEvent::done(serde_json::to_value(&result)?));
     if let Some((db, job_id)) = &job {
-        let _ = db
-            .complete_download_job(job_id, &result.sha256, result.bytes)
-            .await;
+        db.complete_download_job(job_id, &result.sha256, result.bytes)
+            .await?;
     }
+    progress(ProgressEvent::done(serde_json::to_value(&result)?));
     Ok(result)
 }
 
@@ -791,7 +789,7 @@ pub async fn download_mlx_snapshot_with_progress(
         ),
     ));
     if let Some((db, job_id)) = &job {
-        let _ = db.start_download_job(job_id).await;
+        db.start_download_job(job_id).await?;
     }
     let overall_total = files.iter().try_fold(0_u64, |total, file| {
         file.size.and_then(|size| total.checked_add(size))
@@ -858,12 +856,11 @@ pub async fn download_mlx_snapshot_with_progress(
         engine: Some(detected.engine_id().to_owned()),
         notice,
     };
-    progress(ProgressEvent::done(serde_json::to_value(&result)?));
     if let Some((db, job_id)) = &job {
-        let _ = db
-            .complete_download_job(job_id, &result.sha256, result.bytes)
-            .await;
+        db.complete_download_job(job_id, &result.sha256, result.bytes)
+            .await?;
     }
+    progress(ProgressEvent::done(serde_json::to_value(&result)?));
     Ok(result)
 }
 
@@ -908,7 +905,7 @@ pub async fn download_streaming_asr_snapshot_with_progress(
         ),
     ));
     if let Some((db, job_id)) = &job {
-        let _ = db.start_download_job(job_id).await;
+        db.start_download_job(job_id).await?;
     }
     let overall_total = files.iter().try_fold(0_u64, |total, file| {
         file.size.and_then(|size| total.checked_add(size))
@@ -966,12 +963,11 @@ pub async fn download_streaming_asr_snapshot_with_progress(
         engine: Some(streaming_asr::ENGINE.to_owned()),
         notice: None,
     };
-    progress(ProgressEvent::done(serde_json::to_value(&result)?));
     if let Some((db, job_id)) = &job {
-        let _ = db
-            .complete_download_job(job_id, &result.sha256, result.bytes)
-            .await;
+        db.complete_download_job(job_id, &result.sha256, result.bytes)
+            .await?;
     }
+    progress(ProgressEvent::done(serde_json::to_value(&result)?));
     Ok(result)
 }
 
@@ -1085,7 +1081,7 @@ pub async fn install_sdcpp_bundle_with_progress(
         ),
     ));
     if let Some((db, job_id)) = &job {
-        let _ = db.start_download_job(job_id).await;
+        db.start_download_job(job_id).await?;
     }
 
     // Resolve real sizes from the Hub: the catalog's figures are estimates for
@@ -1244,12 +1240,11 @@ pub async fn install_sdcpp_bundle_with_progress(
         engine: Some("stable-diffusion.cpp".to_owned()),
         notice: None,
     };
-    progress(ProgressEvent::done(serde_json::to_value(&result)?));
     if let Some((db, job_id)) = &job {
-        let _ = db
-            .complete_download_job(job_id, &result.sha256, result.bytes)
-            .await;
+        db.complete_download_job(job_id, &result.sha256, result.bytes)
+            .await?;
     }
+    progress(ProgressEvent::done(serde_json::to_value(&result)?));
     Ok(result)
 }
 
@@ -1313,7 +1308,7 @@ pub async fn download_personaplex_snapshot_with_progress(
         ),
     ));
     if let Some((db, job_id)) = &job {
-        let _ = db.start_download_job(job_id).await;
+        db.start_download_job(job_id).await?;
     }
     let overall_total = files.iter().try_fold(0_u64, |total, file| {
         file.size.and_then(|size| total.checked_add(size))
@@ -1371,12 +1366,11 @@ pub async fn download_personaplex_snapshot_with_progress(
         engine: Some(crate::voice::ENGINE.to_owned()),
         notice: None,
     };
-    progress(ProgressEvent::done(serde_json::to_value(&result)?));
     if let Some((db, job_id)) = &job {
-        let _ = db
-            .complete_download_job(job_id, &result.sha256, result.bytes)
-            .await;
+        db.complete_download_job(job_id, &result.sha256, result.bytes)
+            .await?;
     }
+    progress(ProgressEvent::done(serde_json::to_value(&result)?));
     Ok(result)
 }
 
@@ -1480,6 +1474,40 @@ mod tests {
         assert_eq!(result.bytes, 15);
         assert_eq!(result.sha256, sha256_hex(b"fixture-weights"));
         assert!(!result.resumed);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_job_never_reaches_the_network() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(&dir.path().join("brazier.sqlite"))
+            .await
+            .unwrap();
+        let job = db
+            .create_download_job("acme/demo", "model.gguf", "main")
+            .await
+            .unwrap();
+        db.cancel_download_job(&job.id).await.unwrap();
+
+        let error = download_gguf_with_progress(
+            &reqwest::Client::new(),
+            dir.path(),
+            DownloadRequest {
+                repo_id: "acme/demo".into(),
+                filename: "model.gguf".into(),
+                revision: "main".into(),
+                engine: "llama.cpp".into(),
+            },
+            noop_progress(),
+            Some((db, job.id)),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("no longer queued or running"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]

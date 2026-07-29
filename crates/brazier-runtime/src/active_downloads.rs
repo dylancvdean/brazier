@@ -29,13 +29,14 @@ pub struct StopFlag(AtomicU8);
 
 impl StopFlag {
     pub fn request(&self, reason: StopReason) {
-        self.0.store(
-            match reason {
-                StopReason::Pause => 1,
-                StopReason::Cancel => 2,
-            },
-            Ordering::Relaxed,
-        );
+        let requested = match reason {
+            StopReason::Pause => 1,
+            StopReason::Cancel => 2,
+        };
+        // Stop requests are monotonic. In particular, a pause arriving after
+        // a cancel must not downgrade cancellation and cause the downloader to
+        // retain a partial file the user asked it to discard.
+        self.0.fetch_max(requested, Ordering::Relaxed);
     }
 
     /// The requested stop, if any.
@@ -136,5 +137,13 @@ mod tests {
             !active.stop("job-1", StopReason::Cancel),
             "no longer running"
         );
+    }
+
+    #[test]
+    fn cancellation_cannot_be_downgraded_to_a_pause() {
+        let flag = StopFlag::default();
+        flag.request(StopReason::Cancel);
+        flag.request(StopReason::Pause);
+        assert_eq!(flag.reason(), Some(StopReason::Cancel));
     }
 }
