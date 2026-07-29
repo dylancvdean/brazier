@@ -1,6 +1,6 @@
 {
   "name": "brazier",
-  "version": "0.2.8-beta.17",
+  "version": "0.2.8-beta.18",
   "private": true,
   "description": "A private, cross-platform workbench for local language models.",
   "license": "MIT",
