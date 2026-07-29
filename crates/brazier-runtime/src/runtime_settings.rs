@@ -48,6 +48,9 @@ pub struct RuntimeSettings {
     pub context_size: u32,
     pub batch_size: u32,
     pub threads: Option<u16>,
+    /// `-1` asks Auto target selection to choose safe placement from the
+    /// model size and accelerator-memory budget. Explicit targets preserve
+    /// llama.cpp's `-1` meaning: offload every layer it can.
     pub gpu_layers: i32,
     pub flash_attention: bool,
     pub kv_cache_type_k: String,

@@ -145,6 +145,7 @@ export type HardwareInfo = {
   logical_cpus: number
   memory_bytes: number | null
   vram_bytes: number | null
+  gpu_offload_memory_bytes: number | null
   usable_model_memory_bytes: number | null
   gpu: string | null
   gpu_arch: string | null

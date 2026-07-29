@@ -50,7 +50,6 @@ const IMAGE_TIMEOUT: Duration = Duration::from_secs(3600);
 const AMD_APU_VIDEO_WIDTH: u32 = 512;
 const AMD_APU_VIDEO_HEIGHT: u32 = 320;
 const AMD_APU_VIDEO_FRAMES: u32 = 17;
-const AMD_APU_VIDEO_VRAM_GIB: f32 = 2.0;
 /// Floor for a video job, covering model load plus a short clip.
 const VIDEO_TIMEOUT_BASE: Duration = Duration::from_secs(1800);
 /// Added per frame-step, so long clips are not cut off mid-render.
@@ -1261,7 +1260,6 @@ fn with_amd_apu_vulkan_defaults(
     // so RADV integrated devices are skipped even though Vulkan can run them.
     profile.auto_fit.get_or_insert(false);
     if modality == Modality::Video {
-        profile.max_vram.get_or_insert(AMD_APU_VIDEO_VRAM_GIB);
         profile.stream_layers.get_or_insert(true);
         // In the pinned sd.cpp API, layer streaming is enabled only when the
         // diffusion parameter backend is CPU. The previous disk default caused
@@ -1319,6 +1317,7 @@ fn effective_diffusion_profile(
     model_id: &str,
     profile: Option<&DiffusionProfile>,
     modality: Modality,
+    model_bytes: Option<u64>,
 ) -> Option<DiffusionProfile> {
     let hardware = crate::hardware::detect();
     let configured_target = crate::runtime_settings::load(data_dir).target;
@@ -1332,7 +1331,40 @@ fn effective_diffusion_profile(
         tracing::info!("applying Vulkan AMD APU defaults to stable-diffusion.cpp generation");
     }
     let profile = with_bundle_defaults(data_dir, model_id, profile).or_else(|| profile.cloned());
-    with_amd_apu_vulkan_defaults(profile.as_ref(), enabled, modality)
+    let profile = with_amd_apu_vulkan_defaults(profile.as_ref(), enabled, modality);
+    with_accelerator_memory_budget(
+        profile.as_ref(),
+        enabled,
+        hardware.gpu_offload_memory_bytes,
+        model_bytes,
+    )
+}
+
+/// Apply a model-size-aware sd.cpp memory cap on Vulkan AMD APUs. Unlike
+/// llama.cpp, sd.cpp has no layer-count control: `--max-vram` is its placement
+/// budget and it streams graph parameters as needed. The user can always
+/// override this value in the model settings.
+fn with_accelerator_memory_budget(
+    profile: Option<&DiffusionProfile>,
+    enabled: bool,
+    accelerator_memory_bytes: Option<u64>,
+    model_bytes: Option<u64>,
+) -> Option<DiffusionProfile> {
+    if !enabled {
+        return profile.cloned();
+    }
+    let Some(accelerator_memory_bytes) = accelerator_memory_bytes else {
+        return profile.cloned();
+    };
+    let budget = accelerator_memory_bytes.saturating_mul(3) / 4;
+    let allocation = model_bytes.map(|bytes| bytes.min(budget)).unwrap_or(budget);
+    let gib = allocation as f64 / (1024_f64 * 1024_f64 * 1024_f64);
+    if gib <= 0.0 {
+        return profile.cloned();
+    }
+    let mut profile = profile.cloned().unwrap_or_default();
+    profile.max_vram.get_or_insert(gib as f32);
+    Some(profile)
 }
 
 /// The `<lora:name:scale>` tags sd-cli reads out of the prompt itself.
@@ -1785,8 +1817,13 @@ pub async fn generate_image(
 
     let job_dir = job_output_dir(data_dir).await?;
     let output_path = job_dir.join("output.png");
-    let profile =
-        effective_diffusion_profile(data_dir, &request.model_id, profile, Modality::Image);
+    let profile = effective_diffusion_profile(
+        data_dir,
+        &request.model_id,
+        profile,
+        Modality::Image,
+        Some(directory_size_bytes(&model_dir)),
+    );
     let profile = profile.as_ref();
 
     let width = request
@@ -1909,8 +1946,13 @@ pub async fn generate_video(
 
     let job_dir = job_output_dir(data_dir).await?;
     let output_path = job_dir.join("output.mp4");
-    let profile =
-        effective_diffusion_profile(data_dir, &request.model_id, profile, Modality::Video);
+    let profile = effective_diffusion_profile(
+        data_dir,
+        &request.model_id,
+        profile,
+        Modality::Video,
+        Some(directory_size_bytes(&model_dir)),
+    );
     let profile = profile.as_ref();
 
     let width = request
@@ -2096,7 +2138,7 @@ mod tests {
         assert_eq!(video.height, Some(AMD_APU_VIDEO_HEIGHT));
         assert_eq!(video.video_frames, Some(AMD_APU_VIDEO_FRAMES));
         assert_eq!(video.auto_fit, Some(false));
-        assert_eq!(video.max_vram, Some(AMD_APU_VIDEO_VRAM_GIB));
+        assert_eq!(video.max_vram, None);
         assert_eq!(video.params_backend.as_deref(), Some("cpu"));
         assert_eq!(video.stream_layers, Some(true));
     }
@@ -2146,9 +2188,26 @@ mod tests {
         assert_eq!(profile.clip_on_cpu, Some(true));
         assert_eq!(profile.offload_to_cpu, Some(false));
         assert_eq!(profile.auto_fit, Some(false));
-        assert_eq!(profile.max_vram, Some(AMD_APU_VIDEO_VRAM_GIB));
+        assert_eq!(profile.max_vram, None);
         assert_eq!(profile.params_backend.as_deref(), Some("cpu"));
         assert_eq!(profile.stream_layers, Some(true));
+    }
+
+    #[test]
+    fn accelerator_budget_uses_model_size_and_preserves_an_override() {
+        let gib = 1024_u64 * 1024 * 1024;
+        let profile =
+            with_accelerator_memory_budget(None, true, Some(23 * gib), Some(28 * gib)).unwrap();
+        assert_eq!(profile.max_vram, Some(17.25));
+
+        let explicit = DiffusionProfile {
+            max_vram: Some(4.0),
+            ..DiffusionProfile::default()
+        };
+        let preserved =
+            with_accelerator_memory_budget(Some(&explicit), true, Some(23 * gib), Some(28 * gib))
+                .unwrap();
+        assert_eq!(preserved.max_vram, Some(4.0));
     }
 
     #[test]

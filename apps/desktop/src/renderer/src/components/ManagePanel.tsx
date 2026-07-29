@@ -3502,6 +3502,9 @@ function EngineSection(props: SectionProps): React.JSX.Element {
             disabled={draft.target === 'cpu'}
             onChange={(event) => setDraft({ ...draft, gpu_layers: Number(event.target.value) })}
           />
+          <small className="model-help">
+            -1 automatically sizes GPU offload from the model and accelerator-memory budget.
+          </small>
         </label>
         <label>
           <span>CPU threads</span>

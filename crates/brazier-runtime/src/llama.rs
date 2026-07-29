@@ -1,6 +1,7 @@
 //! llama.cpp binary discovery, managed installation, and server lifecycle.
 
 use std::{
+    io::{Read, Seek, SeekFrom},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Stdio,
@@ -1243,6 +1244,7 @@ impl LaunchPlan {
         loras: Vec<(PathBuf, f32)>,
         effective_target: RuntimeTarget,
         mtp: bool,
+        model_path: Option<&Path>,
     ) -> Self {
         let field = |get: &dyn Fn(&TextProfile) -> Option<u32>, fallback: u32| {
             profile.and_then(get).unwrap_or(fallback)
@@ -1254,13 +1256,7 @@ impl LaunchPlan {
             threads: profile
                 .and_then(|profile| profile.threads)
                 .or(settings.threads),
-            gpu_layers: if effective_target == RuntimeTarget::Cpu {
-                0
-            } else {
-                profile
-                    .and_then(|profile| profile.gpu_layers)
-                    .unwrap_or(settings.gpu_layers)
-            },
+            gpu_layers: resolved_gpu_layers(settings, profile, effective_target, model_path),
             flash_attention: profile
                 .and_then(|profile| profile.flash_attention)
                 .unwrap_or(settings.flash_attention),
@@ -1437,6 +1433,171 @@ impl LaunchPlan {
     }
 }
 
+/// Pick the safe default for a model when the runtime has not been explicitly
+/// configured.  `-1` remains an explicit "offload everything" value in a
+/// model profile or a manually selected runtime target; only the global Auto
+/// target's legacy default is interpreted as automatic placement.
+///
+/// For oversized GGUFs, this uses the architecture's transformer block count
+/// and the ratio of available accelerator memory to model size to select a
+/// partial offload. Model profiles and explicitly selected runtimes remain
+/// authoritative.
+fn resolved_gpu_layers(
+    settings: &RuntimeSettings,
+    profile: Option<&TextProfile>,
+    effective_target: RuntimeTarget,
+    model_path: Option<&Path>,
+) -> i32 {
+    if effective_target == RuntimeTarget::Cpu {
+        return 0;
+    }
+    if let Some(value) = profile.and_then(|profile| profile.gpu_layers) {
+        return value;
+    }
+    if settings.target != RuntimeTarget::Auto || settings.gpu_layers != -1 {
+        return settings.gpu_layers;
+    }
+
+    automatic_gpu_layers(
+        effective_target,
+        model_path
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len()),
+        model_path.and_then(gguf_block_count),
+        &crate::hardware::detect(),
+    )
+}
+
+/// Automatic placement reserves 25% of the backend's GPU memory budget for
+/// the KV cache, compute buffers, and the display compositor. On AMD APUs the
+/// budget is the kernel-reported GTT aperture rather than the tiny firmware
+/// VRAM carveout or all system RAM.
+fn automatic_gpu_layers(
+    target: RuntimeTarget,
+    model_bytes: Option<u64>,
+    block_count: Option<u32>,
+    hardware: &crate::hardware::HardwareInfo,
+) -> i32 {
+    if target == RuntimeTarget::Vulkan && hardware.gpu_offload_memory_bytes.is_none() {
+        return 0;
+    }
+    let Some(model_bytes) = model_bytes else {
+        return -1;
+    };
+    let Some(gpu_memory_bytes) = hardware.gpu_offload_memory_bytes else {
+        return -1;
+    };
+    if model_bytes <= gpu_memory_bytes.saturating_mul(3) / 4 {
+        return -1;
+    }
+    let Some(block_count) = block_count else {
+        return 0;
+    };
+    let budget = gpu_memory_bytes.saturating_mul(3) / 4;
+    let layers = u64::from(block_count)
+        .saturating_mul(budget)
+        .checked_div(model_bytes)
+        .unwrap_or(0)
+        .clamp(1, u64::from(block_count));
+    i32::try_from(layers).unwrap_or(i32::MAX)
+}
+
+/// Read `<architecture>.block_count` from a GGUF header without parsing its
+/// tensors. GGUF metadata lives before the tensor data, so this adds only a
+/// small sequential read when a model is first loaded.
+fn gguf_block_count(path: &Path) -> Option<u32> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut magic = [0_u8; 4];
+    file.read_exact(&mut magic).ok()?;
+    if &magic != b"GGUF" {
+        return None;
+    }
+    let version = read_u32(&mut file)?;
+    if !(2..=3).contains(&version) {
+        return None;
+    }
+    let _tensor_count = read_u64(&mut file)?;
+    let metadata_count = read_u64(&mut file)?;
+    if metadata_count > 100_000 {
+        return None;
+    }
+    for _ in 0..metadata_count {
+        let key = read_gguf_string(&mut file)?;
+        let value_type = read_u32(&mut file)?;
+        if key.ends_with(".block_count") {
+            if let Some(value) = read_gguf_integer(&mut file, value_type) {
+                return u32::try_from(value).ok().filter(|value| *value > 0);
+            }
+            return None;
+        }
+        skip_gguf_value(&mut file, value_type)?;
+    }
+    None
+}
+
+fn read_u32(file: &mut std::fs::File) -> Option<u32> {
+    let mut bytes = [0_u8; 4];
+    file.read_exact(&mut bytes).ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
+fn read_u64(file: &mut std::fs::File) -> Option<u64> {
+    let mut bytes = [0_u8; 8];
+    file.read_exact(&mut bytes).ok()?;
+    Some(u64::from_le_bytes(bytes))
+}
+
+fn read_gguf_string(file: &mut std::fs::File) -> Option<String> {
+    let length = usize::try_from(read_u64(file)?).ok()?;
+    if length > 1 << 20 {
+        return None;
+    }
+    let mut bytes = vec![0_u8; length];
+    file.read_exact(&mut bytes).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn skip_gguf_bytes(file: &mut std::fs::File, bytes: u64) -> Option<()> {
+    file.seek(SeekFrom::Current(i64::try_from(bytes).ok()?))
+        .ok()?;
+    Some(())
+}
+
+fn read_gguf_integer(file: &mut std::fs::File, value_type: u32) -> Option<u64> {
+    match value_type {
+        4 => Some(u64::from(read_u32(file)?)),
+        5 => u64::try_from(i32::from_le_bytes(read_u32(file)?.to_le_bytes())).ok(),
+        10 => read_u64(file),
+        11 => u64::try_from(i64::from_le_bytes(read_u64(file)?.to_le_bytes())).ok(),
+        _ => None,
+    }
+}
+
+fn skip_gguf_value(file: &mut std::fs::File, value_type: u32) -> Option<()> {
+    match value_type {
+        0 | 1 | 7 => skip_gguf_bytes(file, 1),
+        2 | 3 => skip_gguf_bytes(file, 2),
+        4 | 5 | 6 => skip_gguf_bytes(file, 4),
+        10 | 11 | 12 => skip_gguf_bytes(file, 8),
+        8 => {
+            let length = read_u64(file)?;
+            skip_gguf_bytes(file, length)
+        }
+        9 => {
+            let element_type = read_u32(file)?;
+            let count = read_u64(file)?;
+            if element_type == 9 || count > 1_000_000 {
+                return None;
+            }
+            for _ in 0..count {
+                skip_gguf_value(file, element_type)?;
+            }
+            Some(())
+        }
+        _ => None,
+    }
+}
+
 /// Persist a chat template under a content-addressed temp path for `--chat-template-file`.
 fn materialize_chat_template(template: &str) -> anyhow::Result<PathBuf> {
     use sha2::{Digest, Sha256};
@@ -1473,6 +1634,7 @@ pub fn launch_key(
         loras,
         effective_target,
         mtp_enabled(profile, model_path),
+        model_path,
     )
     .key(harmony)
 }
@@ -1547,7 +1709,14 @@ impl LlamaServer {
         } else {
             settings.target
         };
-        let plan = LaunchPlan::resolve(settings, profile, loras, effective_target, mtp);
+        let plan = LaunchPlan::resolve(
+            settings,
+            profile,
+            loras,
+            effective_target,
+            mtp,
+            Some(model_path),
+        );
         let launch_key = plan.key(harmony);
         plan.apply(&mut command, harmony);
         if let Some(template) = &plan.chat_template {
@@ -1844,6 +2013,7 @@ mod tests {
     use super::*;
     use crate::types::{ChatCompletionRequest, OpenAiMessage};
     use serde_json::json;
+    use std::io::Write;
 
     #[test]
     fn recognizes_only_llama_server_executables() {
@@ -2154,6 +2324,90 @@ mod tests {
             }),
             Some(mtp_model)
         ));
+    }
+
+    #[test]
+    fn automatic_gpu_placement_keeps_oversized_models_off_vulkan() {
+        let integrated = crate::hardware::HardwareInfo {
+            os: "linux",
+            architecture: "x86_64",
+            logical_cpus: 8,
+            memory_bytes: Some(48 * 1024 * 1024 * 1024),
+            vram_bytes: None,
+            gpu_offload_memory_bytes: Some(23 * 1024 * 1024 * 1024),
+            usable_model_memory_bytes: Some(48 * 1024 * 1024 * 1024),
+            gpu: Some("integrated GPU".into()),
+            gpu_arch: None,
+            amd_apu: true,
+            targets: Vec::new(),
+            recommended_target: RuntimeTarget::Vulkan,
+        };
+        assert_eq!(
+            automatic_gpu_layers(
+                RuntimeTarget::Vulkan,
+                Some(28 * 1024 * 1024 * 1024),
+                Some(64),
+                &integrated,
+            ),
+            39
+        );
+        assert_eq!(
+            automatic_gpu_layers(
+                RuntimeTarget::Vulkan,
+                Some(16 * 1024 * 1024 * 1024),
+                Some(64),
+                &integrated,
+            ),
+            -1
+        );
+
+        let discrete = crate::hardware::HardwareInfo {
+            vram_bytes: Some(16 * 1024 * 1024 * 1024),
+            gpu_offload_memory_bytes: Some(16 * 1024 * 1024 * 1024),
+            usable_model_memory_bytes: Some(16 * 1024 * 1024 * 1024),
+            amd_apu: false,
+            ..integrated
+        };
+        assert_eq!(
+            automatic_gpu_layers(
+                RuntimeTarget::Vulkan,
+                Some(10 * 1024 * 1024 * 1024),
+                Some(80),
+                &discrete,
+            ),
+            -1
+        );
+        assert_eq!(
+            automatic_gpu_layers(
+                RuntimeTarget::Vulkan,
+                Some(13 * 1024 * 1024 * 1024),
+                Some(80),
+                &discrete,
+            ),
+            73
+        );
+    }
+
+    #[test]
+    fn reads_transformer_block_count_from_gguf_metadata() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"GGUF").unwrap();
+        file.write_all(&3_u32.to_le_bytes()).unwrap();
+        file.write_all(&0_u64.to_le_bytes()).unwrap();
+        file.write_all(&2_u64.to_le_bytes()).unwrap();
+        for (key, value_type, value) in [
+            ("general.architecture", 8_u32, b"llama".as_slice()),
+            ("llama.block_count", 4_u32, &64_u32.to_le_bytes()),
+        ] {
+            file.write_all(&(key.len() as u64).to_le_bytes()).unwrap();
+            file.write_all(key.as_bytes()).unwrap();
+            file.write_all(&value_type.to_le_bytes()).unwrap();
+            if value_type == 8 {
+                file.write_all(&(value.len() as u64).to_le_bytes()).unwrap();
+            }
+            file.write_all(value).unwrap();
+        }
+        assert_eq!(gguf_block_count(file.path()), Some(64));
     }
 
     #[test]

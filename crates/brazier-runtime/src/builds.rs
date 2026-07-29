@@ -186,13 +186,45 @@ pub fn resolve_command_args(args: &[String], context: &CommandArgsContext<'_>) -
     resolved
 }
 
-fn command_available(program: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|directory| {
-            directory.join(program).is_file()
-                || (cfg!(windows) && directory.join(format!("{program}.exe")).is_file())
-        })
+/// Find a host build tool. macOS GUI apps do not source a login shell, so they
+/// commonly miss Homebrew's prefix even though `cmake` works in Terminal.
+fn command_path(program: &str) -> Option<PathBuf> {
+    let program_path = Path::new(program);
+    if program_path.is_file() {
+        return Some(program_path.to_path_buf());
+    }
+    let directories = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    let directories = {
+        let mut directories = directories;
+        // Apple Silicon Homebrew and the legacy Intel Homebrew location.
+        // Keep these as fallbacks so a deliberately chosen PATH still wins.
+        directories.extend([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ]);
+        directories
+    };
+    directories.into_iter().find_map(|directory| {
+        let candidate = directory.join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            let candidate = directory.join(format!("{program}.exe"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
     })
+}
+
+fn command_available(program: &str) -> bool {
+    command_path(program).is_some()
 }
 
 /// Check the local prerequisites for a llama.cpp source build without creating
@@ -234,7 +266,8 @@ async fn run_step(
     }
     progress(ProgressEvent::phase("build", format!("{label}…")));
     log.push_str(&format!("$ {program} {}\n", args.join(" ")));
-    let mut child = tokio::process::Command::new(program)
+    let executable = command_path(program).unwrap_or_else(|| PathBuf::from(program));
+    let mut child = tokio::process::Command::new(&executable)
         .args(args)
         .current_dir(workdir)
         .stdin(Stdio::null())
@@ -242,7 +275,7 @@ async fn run_step(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("spawn {program}"))?;
+        .with_context(|| format!("spawn {}", executable.display()))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -967,6 +1000,15 @@ mod tests {
             "feature-new-model"
         );
         assert_eq!(sanitize_id_segment("--evil"), "evil");
+    }
+
+    #[test]
+    fn command_lookup_accepts_an_explicit_executable_path() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert_eq!(
+            command_path(&file.path().display().to_string()),
+            Some(file.path().into())
+        );
     }
 
     #[test]

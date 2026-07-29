@@ -26,6 +26,10 @@ pub struct HardwareInfo {
     /// draws on system memory and reporting a separate figure would be a
     /// fiction.
     pub vram_bytes: Option<u64>,
+    /// Memory that a Vulkan backend can use for model weights. On a discrete
+    /// GPU this is dedicated VRAM; on an AMD APU it is the kernel-reported GTT
+    /// aperture, which is a safer placement ceiling than all system RAM.
+    pub gpu_offload_memory_bytes: Option<u64>,
     /// The memory a model actually has to fit in: video memory on a discrete
     /// GPU, system memory otherwise.
     ///
@@ -311,6 +315,34 @@ fn vram_bytes(amd_apu_only: bool) -> Option<u64> {
     None
 }
 
+/// The amount of shared system memory that amdgpu exposes to GPU clients.
+///
+/// This is intentionally not used as `vram_bytes`: it is an allocation budget
+/// for offloading model weights, not dedicated video memory. The largest value
+/// wins on hosts with more than one AMD GPU.
+#[cfg(target_os = "linux")]
+fn amd_gtt_bytes() -> Option<u64> {
+    let mut best = 0_u64;
+    for entry in std::fs::read_dir("/sys/class/drm")
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let total = entry.path().join("device").join("mem_info_gtt_total");
+        if let Ok(text) = std::fs::read_to_string(total)
+            && let Ok(bytes) = text.trim().parse::<u64>()
+        {
+            best = best.max(bytes);
+        }
+    }
+    (best > 0).then_some(best)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn amd_gtt_bytes() -> Option<u64> {
+    None
+}
+
 /// Memory a model has to fit inside on this machine.
 ///
 /// A discrete GPU's own memory is the binding constraint when there is one;
@@ -509,6 +541,7 @@ fn detect_uncached() -> HardwareInfo {
     }
     let system_memory = memory_bytes();
     let vram = vram_bytes(amd_apu_only);
+    let gpu_offload_memory = vram.or_else(|| amd_apu.then(amd_gtt_bytes).flatten());
     HardwareInfo {
         os: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
@@ -517,6 +550,7 @@ fn detect_uncached() -> HardwareInfo {
             .unwrap_or(1),
         memory_bytes: system_memory,
         vram_bytes: vram,
+        gpu_offload_memory_bytes: gpu_offload_memory,
         usable_model_memory_bytes: usable_model_memory_bytes(vram, system_memory),
         gpu: gpu_name.or_else(|| {
             nvidia
