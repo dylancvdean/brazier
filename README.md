@@ -8,6 +8,12 @@ models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and
   <img src="assets/agent-screenshot.png" alt="Brazier agent workspace" width="49%" />
 </p>
 
+## Downloads
+
+
+- [Download for macOS (Apple Silicon)](https://github.com/dylancvdean/brazier/releases/latest/download/Brazier.dmg)
+- [Download for Linux (AppImage)](https://github.com/dylancvdean/brazier/releases/latest/download/Brazier.AppImage)
+
 ## Current features
 
 | Feature | Status |
@@ -61,17 +67,8 @@ The daemon prints a `BRAZIER_READY` JSON record containing the selected address.
 Authentication is enabled by default and a random session key is emitted in
 that record for the desktop process.
 
-## Distribution and updates
-
-GitHub Releases provides a signed/notarized Apple Silicon macOS distribution
-and a self-updating Linux AppImage:
-
-- [Download for macOS (Apple Silicon)](https://github.com/dylancvdean/brazier/releases/latest/download/Brazier.dmg)
-- [Download for Linux (AppImage)](https://github.com/dylancvdean/brazier/releases/latest/download/Brazier.AppImage)
-
-Both links always resolve to the latest release. The AppImage can replace
-itself in place without invalidating a desktop launcher. Arch users should use
-the PKGBUILD, since pacman owns updates for that installation. See [the release
+Arch users can use
+the PKGBUILD, which is an easy way to test release performance. See [the release
 guide](docs/releasing.md) for release credentials and signature verification.
 
 ## Security
