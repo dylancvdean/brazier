@@ -1,20 +1,23 @@
 # Brazier
 
 Brazier is an MIT-licensed desktop client and local API for running open weight AI
-models. It is designed around a sandboxed Electron interface and an independent
-Rust daemon so the same model, conversation, and tool infrastructure works in
-the desktop app and in headless deployments.
+models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and video models with stable-diffusion.cpp (and tool integration for LLMs to call them); bidirectional voice with PersonaPlex, and contains an integrated Pi-based agent harness.
+
+<p align="center">
+  <img src="assets/chat-screenshot.png" alt="Brazier chat workspace" width="49%" />
+  <img src="assets/agent-screenshot.png" alt="Brazier agent workspace" width="49%" />
+</p>
 
 ## Current features
 
 | Feature | Status |
 | --- | --- |
-| Platforms | 🟨 Alpha on macOS and Linux; Windows support is partial |
+| Platforms | 🟨 Beta on macOS and Linux; |
 | Desktop app | ✅ Electron workspaces for chat, generation, voice, agents, and model management |
 | Engines | ✅ llama.cpp, MLX-LM/VLM, stable-diffusion.cpp, whisper.cpp, WhisperKit, Nemotron ASR, PersonaPlex, and remote OpenAI-compatible servers |
 | Custom engine builds | ✅ Build llama.cpp, MLX, whisper.cpp, stable-diffusion.cpp, and PersonaPlex forks from a repository URL on supported platforms |
 | Runtime management | ✅ Managed installs, source builds, system runtime discovery, activation, logs, and removal |
-| Model discovery | 🟨 Hardware-sized recommendations and Hugging Face search; some media and voice recommendations are still placeholders |
+| Model discovery | 🟨 Hardware-sized recommendations and Hugging Face search |
 | Chat | ✅ Persistent branching conversations, search, attachments, cancellation, run history, and import/export |
 | API | ✅ OpenAI-compatible Models, Chat Completions, and Responses, plus transcription, generation, and agent endpoints |
 | Tools and MCP | ✅ Built-in utilities, media generation, multi-round tool use, and custom stdio MCP servers |
@@ -58,19 +61,12 @@ The daemon prints a `BRAZIER_READY` JSON record containing the selected address.
 Authentication is enabled by default and a random session key is emitted in
 that record for the desktop process.
 
-On Arch Linux, a release build using system Electron can be produced without
-leaving build artifacts in the checkout:
-
-```sh
-makepkg --config packaging/makepkg-local.conf -si
-```
-
 ## Distribution and updates
 
 GitHub Releases provides a signed/notarized Apple Silicon macOS distribution
 and a self-updating Linux AppImage. The AppImage is always named
 `Brazier.AppImage`, so it can replace itself in place without invalidating a
-desktop launcher. Arch users should use the PKGBUILD/AUR package; pacman owns
+desktop launcher. Arch users should use the PKGBUILD, pacman owns
 updates for that installation. See [the release guide](docs/releasing.md) for
 release credentials and signature verification.
 
