@@ -193,22 +193,31 @@ pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
                 "{source}".into(),
             ],
         }];
-        if !request.revision.is_empty() {
-            checkout.push(PlannedCommand {
-                label: "Checkout selected revision".to_owned(),
-                program: "git".to_owned(),
-                args: vec![
-                    "-c".into(),
-                    "core.hooksPath=".into(),
-                    "-C".into(),
-                    "{source}".into(),
-                    "checkout".into(),
-                    "--detach".into(),
-                    request.revision.clone(),
-                    "--".into(),
-                ],
-            });
-        }
+        // `--no-checkout` keeps clone hooks from touching the source tree, but
+        // also leaves the worktree empty. Populate it with either the requested
+        // revision or the clone's default HEAD before configuring a build.
+        checkout.push(PlannedCommand {
+            label: if request.revision.is_empty() {
+                "Checkout repository default revision".to_owned()
+            } else {
+                "Checkout selected revision".to_owned()
+            },
+            program: "git".to_owned(),
+            args: vec![
+                "-c".into(),
+                "core.hooksPath=".into(),
+                "-C".into(),
+                "{source}".into(),
+                "checkout".into(),
+                "--detach".into(),
+                if request.revision.is_empty() {
+                    "HEAD".into()
+                } else {
+                    request.revision.clone()
+                },
+                "--".into(),
+            ],
+        });
         checkout.push(PlannedCommand {
             label: "Initialize source submodules".to_owned(),
             program: "git".to_owned(),
@@ -345,9 +354,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "Clone source without running hooks",
+                "Checkout repository default revision",
                 "Initialize source submodules"
             ]
         );
+        assert_eq!(plan.checkout[1].args[6], "HEAD");
     }
 
     #[test]
