@@ -98,7 +98,13 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos-release
-          path: apps/desktop/dist/*
+          # Keep the installables and updater manifest. Blockmaps are only
+          # useful for differential updates and otherwise add release noise;
+          # builder-debug.yml is diagnostic output, not a release asset.
+          path: |
+            apps/desktop/dist/Brazier-*-arm64.dmg
+            apps/desktop/dist/Brazier-*-arm64-mac.zip
+            apps/desktop/dist/latest-mac.yml
           if-no-files-found: error
 
   appimage:
@@ -129,7 +135,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: appimage-release
-          path: apps/desktop/dist/*
+          path: |
+            apps/desktop/dist/Brazier.AppImage
+            apps/desktop/dist/latest-linux.yml
           if-no-files-found: error
 
   publish:
@@ -150,7 +158,10 @@ jobs:
           mapfile -d '' assets < <(find . -maxdepth 1 -type f -printf '%f\0')
           test "${#assets[@]}" -gt 0
           sha512sum "${assets[@]}" > SHA512SUMS
-          for asset in "${assets[@]}"; do
+          # Updater manifests are checksummed but not independently signed.
+          # Sign only executable installables users may download and run.
+          installables=(Brazier-*-arm64.dmg Brazier-*-arm64-mac.zip Brazier.AppImage)
+          for asset in "${installables[@]}"; do
             cosign sign-blob --yes --bundle "$asset.sigstore.json" "$asset"
           done
       - name: Publish GitHub Release and updater metadata
