@@ -18,7 +18,7 @@ resolver = "2"
 debug = "line-tables-only"
 
 [workspace.package]
-version = "0.2.9-beta.19"
+version = "0.2.9-beta.20"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/dylancvdean/brazier"
