@@ -184,16 +184,29 @@
       },
       "requires": [
         {
+          "flag": "vae",
+          "role": "SD3 VAE",
+          "repo_id": "stabilityai/stable-diffusion-3.5-medium",
+          "path": "vae/diffusion_pytorch_model.safetensors",
+          "gated": true
+        },
+        {
           "flag": "clip_l",
           "role": "Text encoder (CLIP-L)",
           "repo_id": "comfyanonymous/flux_text_encoders",
           "path": "clip_l.safetensors"
         },
         {
+          "flag": "clip_g",
+          "role": "Text encoder (CLIP-G)",
+          "repo_id": "Comfy-Org/stable-diffusion-3.5-fp8",
+          "path": "text_encoders/clip_g.safetensors"
+        },
+        {
           "flag": "t5xxl",
           "role": "Text encoder (T5-XXL)",
-          "repo_id": "comfyanonymous/flux_text_encoders",
-          "path": "t5xxl_fp16.safetensors"
+          "repo_id": "city96/t5-v1_1-xxl-encoder-gguf",
+          "path": "t5-v1_1-xxl-encoder-Q4_K_M.gguf"
         }
       ],
       "defaults": {

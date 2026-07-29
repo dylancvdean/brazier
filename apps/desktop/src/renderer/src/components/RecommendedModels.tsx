@@ -28,12 +28,14 @@ import {
   activateRuntime,
   formatBytes,
   installSdcppBundle,
+  listSdcppBundles,
   listRuntimes,
   huggingFaceTokenStatus,
   recordRecommendationInstall,
   setHuggingFaceToken,
   listRecommendationSetups,
   startRecommendationSetup,
+  resolveBundleVariants,
   type BundleRecommendation,
   type ProgressEvent,
   type RecommendationCategory,
@@ -453,8 +455,24 @@ export function RecommendedModels(props: Props): React.JSX.Element {
                   disabled={Boolean(entry.unresolved) || (entry.gated && hfTokenSource === 'none')}
                   onClick={() =>
                     void run(key, [category], entry.id, async (onProgress) => {
+                      const bundle = (await listSdcppBundles()).find(
+                        (candidate) => candidate.id === part.bundle_id
+                      )
+                      if (!bundle) {
+                        throw new Error(`Recommended bundle ${part.bundle_id} is unavailable.`)
+                      }
+                      const wantedVariant = part.variant ?? entry.variant
+                      const choices = wantedVariant
+                        ? Object.fromEntries(
+                            bundle.components.flatMap((component, index) =>
+                              component.variants?.some((variant) => variant.label === wantedVariant)
+                                ? [[index, wantedVariant]]
+                                : []
+                            )
+                          )
+                        : {}
                       const result = await installSdcppBundle(
-                        { id: part.bundle_id },
+                        { bundle: resolveBundleVariants(bundle, choices) },
                         onProgress
                       )
                       return result.model_id

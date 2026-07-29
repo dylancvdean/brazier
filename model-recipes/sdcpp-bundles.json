@@ -29,7 +29,7 @@
       "label": "Stable Diffusion 3.5 Medium",
       "modality": "image",
       "key": "stabilityai/stable-diffusion-3.5-medium",
-      "summary": "Stability's 2.6B MMDiT-2 medium variant: a single GGUF-quantised diffusion model plus the usual SD3 text encoders. The current quality step up from SDXL on machines where FLUX is still too heavy.",
+      "summary": "Stability's 2.6B MMDiT-2 medium variant: a GGUF diffusion model with its SD3 VAE and text encoders. The current quality step up from SDXL on machines where FLUX is still too heavy.",
       "license": "stabilityai-community",
       "featured": false,
       "defaults": {
@@ -92,6 +92,14 @@
           ]
         },
         {
+          "repo_id": "stabilityai/stable-diffusion-3.5-medium",
+          "path": "vae/diffusion_pytorch_model.safetensors",
+          "role": "SD3 VAE",
+          "flag": "vae",
+          "approx_bytes": 167666902,
+          "gated": true
+        },
+        {
           "repo_id": "comfyanonymous/flux_text_encoders",
           "path": "clip_l.safetensors",
           "role": "Text encoder (CLIP-L)",
@@ -99,11 +107,18 @@
           "approx_bytes": 246144152
         },
         {
-          "repo_id": "comfyanonymous/flux_text_encoders",
-          "path": "t5xxl_fp16.safetensors",
-          "role": "Text encoder (T5-XXL)",
+          "repo_id": "Comfy-Org/stable-diffusion-3.5-fp8",
+          "path": "text_encoders/clip_g.safetensors",
+          "role": "Text encoder (CLIP-G)",
+          "flag": "clip_g",
+          "approx_bytes": 1389382176
+        },
+        {
+          "repo_id": "city96/t5-v1_1-xxl-encoder-gguf",
+          "path": "t5-v1_1-xxl-encoder-Q4_K_M.gguf",
+          "role": "Text encoder (T5-XXL, Q4)",
           "flag": "t5xxl",
-          "approx_bytes": 9787841024
+          "approx_bytes": 2896123072
         }
       ]
     },

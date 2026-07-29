@@ -786,6 +786,18 @@ mod tests {
         assert_eq!(larger.files, vec!["Bonsai-27B-Q1_0.gguf"]);
     }
 
+    #[test]
+    fn a_pinned_ternary_recommendation_does_not_select_the_unsupported_pq_variant() {
+        let files = vec![
+            ("Ternary-Bonsai-27B-PQ2_0.gguf".to_owned(), Some(5_900_000_000)),
+            ("Ternary-Bonsai-27B-Q2_0.gguf".to_owned(), Some(5_900_000_000)),
+            ("Ternary-Bonsai-27B-Q2_g64.gguf".to_owned(), Some(7_600_000_000)),
+        ];
+
+        let choice = find_quant(&files, "Q2_g64").unwrap();
+        assert_eq!(choice.files, vec!["Ternary-Bonsai-27B-Q2_g64.gguf"]);
+    }
+
     /// Nothing fitting is a fact worth stating, not a reason to show no model.
     #[test]
     fn a_model_that_cannot_fit_is_offered_with_a_warning() {

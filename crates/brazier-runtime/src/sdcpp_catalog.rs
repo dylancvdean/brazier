@@ -526,6 +526,30 @@ mod tests {
     }
 
     #[test]
+    fn sd35_medium_includes_its_vae_and_all_three_text_encoders() {
+        let sd35 = builtin("sd35-medium").expect("SD 3.5 Medium bundle");
+        let args = sd35.manifest().args;
+
+        assert_eq!(
+            args.get("vae").map(String::as_str),
+            Some("diffusion_pytorch_model.safetensors")
+        );
+        assert_eq!(
+            args.get("clip_l").map(String::as_str),
+            Some("clip_l.safetensors")
+        );
+        assert_eq!(
+            args.get("clip_g").map(String::as_str),
+            Some("clip_g.safetensors")
+        );
+        assert_eq!(
+            args.get("t5xxl").map(String::as_str),
+            Some("t5-v1_1-xxl-encoder-Q4_K_M.gguf")
+        );
+        assert!(sd35.gated(), "the SD3 VAE requires model access");
+    }
+
+    #[test]
     fn qwen_image_uses_the_supported_gguf_text_encoder() {
         let qwen = builtin("qwen-image").expect("Qwen Image bundle");
         let llm = qwen

@@ -1670,41 +1670,13 @@ async fn resolve_repo_recommendation(
     resolved
 }
 
-/// Resolve a recommendation that may require the PrismML llama.cpp fork.
-/// Bonsai is only offered when its build prerequisites are already present;
-/// otherwise its catalogue-provided mainline fallback is resolved instead.
+/// Resolve a repository-backed recommendation against the available files.
 async fn resolve_recommended_repo(
     state: &AppState,
     entry: &recommendations::RepoRecommendation,
     memory: u64,
-    build_target: crate::runtime_settings::RuntimeTarget,
 ) -> Value {
-    let needs_prismml = matches!(
-        entry.repo_id.to_ascii_lowercase().as_str(),
-        "prism-ml/bonsai-27b-gguf" | "prism-ml/ternary-bonsai-27b-gguf"
-    );
-    if needs_prismml {
-        if let Err(reason) = builds::llama_cpp_build_preflight(build_target) {
-            if let Some(fallback) = entry.fallback.as_deref() {
-                let mut resolved = resolve_repo_recommendation(state, fallback, memory).await;
-                resolved["substituted"] = json!(format!(
-                    "Bonsai needs PrismML llama.cpp, but it cannot be built here yet: {reason}. Showing this mainline llama.cpp model instead."
-                ));
-                return resolved;
-            }
-        }
-    }
-    let mut resolved = resolve_repo_recommendation(state, entry, memory).await;
-    if needs_prismml {
-        resolved["runtime_build"] = json!({
-            "engine": "llama.cpp",
-            "repository": "https://github.com/PrismML-Eng/llama.cpp",
-            "revision": "",
-            "target": build_target.as_str(),
-            "label": "PrismML llama.cpp"
-        });
-    }
-    resolved
+    resolve_repo_recommendation(state, entry, memory).await
 }
 
 /// What to install on this machine, and whether any of it has changed.
@@ -1740,11 +1712,10 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
     };
 
     let mut categories = serde_json::Map::new();
-    let build_target = hardware.recommended_target;
     if let Some(text) = tier.text.as_ref() {
         categories.insert(
             "text".into(),
-            resolve_recommended_repo(&state, text, memory, build_target).await,
+            resolve_recommended_repo(&state, text, memory).await,
         );
     }
     if let Some(agent) = recommendations::resolved_agent(tier) {

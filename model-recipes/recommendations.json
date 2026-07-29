@@ -26,7 +26,7 @@
     {
       "min_gb": 8,
       "text": {
-        "id": "bonsai-27b-1bit",
+        "id": "bonsai-27b-1bit-mainline",
         "label": "Bonsai 27B (1-bit)",
         "repo_id": "prism-ml/Bonsai-27B-gguf",
         "quant": "Q1_0",
@@ -35,7 +35,7 @@
           "label": "Qwen 3.5 9B",
           "repo_id": "unsloth/Qwen3.5-9B-GGUF",
           "quant": "by_memory",
-          "summary": "A capable 9B Qwen model that runs with mainline llama.cpp. Chosen because this machine is missing the tools needed to build PrismML llama.cpp for Bonsai."
+          "summary": "A capable 9B Qwen model that runs with mainline llama.cpp."
         },
         "summary": "A Qwen3.6-27B derivative reduced to 1.125 bits per weight — a ~3.9GB footprint and ~90% of FP16 intelligence. Held back with room for the OS and a useful context window. The Q8 vision projector comes along so image input is also available."
       },
@@ -50,30 +50,30 @@
     {
       "min_gb": 16,
       "text": {
-        "id": "bonsai-27b-ternary",
+        "id": "bonsai-27b-ternary-q2-g64-mainline",
         "label": "Bonsai 27B (ternary)",
         "repo_id": "prism-ml/Ternary-Bonsai-27B-gguf",
-        "quant": "Q2_0",
+        "quant": "Q2_g64",
         "fallback": {
           "id": "qwen3.5-9b-mainline",
           "label": "Qwen 3.5 9B",
           "repo_id": "unsloth/Qwen3.5-9B-GGUF",
           "quant": "by_memory",
-          "summary": "A capable 9B Qwen model that runs with mainline llama.cpp. Chosen because this machine is missing the tools needed to build PrismML llama.cpp for Bonsai."
+          "summary": "A capable 9B Qwen model that runs with mainline llama.cpp."
         },
-        "summary": "The same Qwen3.6-27B derivative at 2-bit ternary weights — ~5.9GB and ~95% of FP16 intelligence. Fuller quality than the 1-bit build, well within this machine's budget. The Q8 vision projector comes along so image input is also available."
+        "summary": "The same Qwen3.6-27B derivative at 2-bit ternary weights — ~5.9GB and ~95% of FP16 intelligence. Uses the Q2_g64 build, which runs on current upstream llama.cpp. Fuller quality than the 1-bit build, well within this machine's budget. The Q8 vision projector comes along so image input is also available."
       },
       "image": {
-        "id": "sd35-medium",
+        "id": "sd35-medium-complete",
         "label": "Stable Diffusion 3.5 Medium",
         "bundle_id": "sd35-medium",
         "summary": "A 2.6B MMDiT model with strong prompt adherence on harder text. A clearer step up from SDXL than FLUX is at this tier."
       },
       "video": {
-        "id": "wan2.2-ti2v-5b",
-        "label": "Wan 2.2 TI2V 5B",
-        "bundle_id": "wan2.2-ti2v-5b",
-        "summary": "Text-to-video and image-to-video in one model, at a size that fits a modest machine."
+        "id": "wan2.1-t2v-1.3b-16gb",
+        "label": "Wan 2.1 T2V 1.3B",
+        "bundle_id": "wan2.1-t2v-1.3b",
+        "summary": "A practical text-to-video model for 16 GB machines. The larger Wan 2.2 image-to-video model needs more memory."
       }
     },
     {
@@ -100,7 +100,7 @@
         "summary": "The faster agent choice: a 35B mixture-of-experts model with only 3B active parameters and MTP decoding."
       }],
       "image": {
-        "id": "sd35-medium",
+        "id": "sd35-medium-complete",
         "label": "Stable Diffusion 3.5 Medium",
         "bundle_id": "sd35-medium",
         "summary": "A 2.6B MMDiT model with strong prompt adherence on text rendering and complex scenes; a clear step up from SDXL at this tier."
@@ -173,10 +173,11 @@
         "summary": "The faster agent choice: 35B MoE, 3B active, with MTP decoding."
       }],
       "image": {
-        "id": "flux1-dev-bf16",
-        "label": "FLUX.1 dev (full precision)",
+        "id": "flux1-dev-q8-48gb",
+        "label": "FLUX.1 dev (Q8)",
         "bundle_id": "flux1-dev",
-        "summary": "FLUX.1 dev with no quantisation applied to the diffusion model — the best it looks."
+        "variant": "Q8_0",
+        "summary": "The largest quality-preserving FLUX.1 dev quant published in this bundle."
       },
       "video": {
         "id": "ltx-2.3-dev",
