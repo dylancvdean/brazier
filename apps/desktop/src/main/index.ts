@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 
 import { AgentSupervisor, registerAgentIpc } from './agent'
-import { startUpdates } from './updates'
+import { startUpdates, type UpdateCheckResult } from './updates'
 
 /**
  * Where Electron kept per-app state before the rename below.
@@ -78,6 +78,7 @@ type Connection = {
 let daemon: ChildProcessWithoutNullStreams | undefined
 let connection: Promise<Connection>
 const agent = new AgentSupervisor()
+let checkForUpdates: (() => Promise<UpdateCheckResult>) | undefined
 
 function repositoryRoot(): string {
   const candidates = [
@@ -189,6 +190,16 @@ function report(line: string, level: 'log' | 'warn' | 'error' = 'log'): void {
   else console.log(line)
   appendLog(line)
 }
+
+// Chromium and Node failures otherwise disappear into a terminal that is
+// usually closed for packaged apps. Keep them beside daemon and updater events
+// in the session log, without changing the application's recovery behaviour.
+process.on('uncaughtException', (error) => {
+  report(`[main] uncaught exception: ${error.stack ?? error.message}`, 'error')
+})
+process.on('unhandledRejection', (reason) => {
+  report(`[main] unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`, 'error')
+})
 
 function startDaemon(): Promise<Connection> {
   const directory = dataDirectory()
@@ -395,7 +406,7 @@ async function createWindow(): Promise<void> {
   }
 
   window.webContents.on('did-fail-load', (_event, code, description, validatedURL) => {
-    console.error(`[brazier] renderer failed to load (${code}): ${description} @ ${validatedURL}`)
+    report(`[brazier] renderer failed to load (${code}): ${description} @ ${validatedURL}`, 'error')
     if (!window.isDestroyed() && !window.isVisible()) window.show()
   })
   window.webContents.on('did-finish-load', () => {
@@ -413,7 +424,7 @@ async function createWindow(): Promise<void> {
     const line = 'line' in event ? Number(event.line) : 0
     const sourceId = 'sourceId' in event ? String(event.sourceId) : ''
     if (level >= 2) {
-      console.error(`[renderer:${level}] ${message} (${sourceId}:${line})`)
+      report(`[renderer:${level}] ${message} (${sourceId}:${line})`, 'error')
     }
   })
 
@@ -424,7 +435,7 @@ async function createWindow(): Promise<void> {
       await window.loadFile(join(__dirname, '../renderer/index.html'))
     }
   } catch (error) {
-    console.error('[brazier] failed to load renderer', error)
+    report(`[brazier] failed to load renderer: ${error instanceof Error ? error.stack ?? error.message : String(error)}`, 'error')
     if (!window.isDestroyed() && !window.isVisible()) window.show()
   }
 
@@ -453,6 +464,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('brazier:flags', () => ({
     forceWelcome: forceWelcomeRequested()
   }))
+  ipcMain.handle('brazier:check-for-updates', async () => {
+    if (!checkForUpdates) return { supported: false }
+    return checkForUpdates()
+  })
   ipcMain.handle('brazier:select-directory', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)
     const options = {
@@ -536,10 +551,10 @@ app.whenReady().then(async () => {
       // Reported below; Agent mode surfaces the daemon error when first used.
     })
   connection.catch((error: unknown) => {
-    console.error('[brazier] daemon failed to start', error)
+    report(`[brazier] daemon failed to start: ${error instanceof Error ? error.stack ?? error.message : String(error)}`, 'error')
   })
   await createWindow()
-  startUpdates()
+  checkForUpdates = startUpdates(report).checkForUpdates
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow()
   })

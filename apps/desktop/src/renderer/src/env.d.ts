@@ -16,6 +16,8 @@ declare global {
       getFlags(): Promise<{
         forceWelcome: boolean
       }>
+      /** Check the signed release feed; download still requires confirmation. */
+      checkForUpdates(): Promise<{ supported: boolean }>
       platform: NodeJS.Platform
       selectDirectory(): Promise<string | null>
       /** Folder picker for an agent workspace. */

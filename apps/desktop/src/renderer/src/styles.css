@@ -622,6 +622,31 @@ code {
   border-top: 1px solid var(--line);
 }
 
+.sidebar-update-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: calc(100% - 18px);
+  margin: 8px 9px 10px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 10px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.sidebar-update-button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: #4a4a4a;
+}
+
+.sidebar-update-button:disabled {
+  cursor: default;
+}
+
 .status-dot {
   width: 7px;
   height: 7px;

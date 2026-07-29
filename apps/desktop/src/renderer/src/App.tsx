@@ -16,6 +16,7 @@ import {
   Mic,
   Paperclip,
   Download,
+  RefreshCw,
   Search,
   Send,
   Settings2,
@@ -430,6 +431,7 @@ export function App(): React.JSX.Element {
     repository: string
   } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [checkingForUpdates, setCheckingForUpdates] = useState(false)
   const [localModels, setLocalModels] = useState<LocalModel[]>(() => readCachedModels())
   const [modelsLoading, setModelsLoading] = useState(() => readCachedModels().length === 0)
   const [modelsLoadFailed, setModelsLoadFailed] = useState(false)
@@ -1154,6 +1156,15 @@ export function App(): React.JSX.Element {
     setManageOpen(true)
   }
 
+  async function checkForUpdates(): Promise<void> {
+    setCheckingForUpdates(true)
+    try {
+      await window.brazier.checkForUpdates()
+    } finally {
+      setCheckingForUpdates(false)
+    }
+  }
+
   function startForkBuild(hint: RuntimeForkHint): void {
     setPendingBuild({
       engine: hint.engine as 'llama.cpp' | 'mlx-lm' | 'mlx-vlm',
@@ -1579,6 +1590,16 @@ export function App(): React.JSX.Element {
               ? 'Daemon unavailable'
               : 'Checking daemon…'}
         </div>
+        <button
+          type="button"
+          className="sidebar-update-button"
+          disabled={checkingForUpdates}
+          title="Check for a Brazier app update"
+          onClick={() => void checkForUpdates()}
+        >
+          <RefreshCw className={checkingForUpdates ? 'spin' : ''} size={13} />
+          {checkingForUpdates ? 'Checking for updates…' : 'Check for updates'}
+        </button>
       </aside>
 
       <section className="workspace">

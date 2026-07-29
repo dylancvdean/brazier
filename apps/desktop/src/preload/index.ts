@@ -46,6 +46,7 @@ const agent = {
 contextBridge.exposeInMainWorld('brazier', {
   getConnection: (): Promise<BrazierConnection> => ipcRenderer.invoke('brazier:connection'),
   getFlags: (): Promise<BrazierFlags> => ipcRenderer.invoke('brazier:flags'),
+  checkForUpdates: (): Promise<{ supported: boolean }> => ipcRenderer.invoke('brazier:check-for-updates'),
   platform: process.platform,
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-directory'),
   selectWorkspace: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-workspace'),

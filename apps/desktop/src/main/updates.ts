@@ -1,6 +1,12 @@
 import { app, dialog } from 'electron'
 import { autoUpdater } from 'electron-updater'
 
+type Report = (line: string, level?: 'log' | 'warn' | 'error') => void
+
+export type UpdateCheckResult = {
+  supported: boolean
+}
+
 /**
  * Update only from the GitHub Releases feed embedded by electron-builder.
  *
@@ -8,7 +14,7 @@ import { autoUpdater } from 'electron-updater'
  * signature before it is installed. AppImage updates are checked against the
  * SHA-512 recorded in the release metadata by electron-updater.
  */
-export function startUpdates(): void {
+export function startUpdates(report: Report): { checkForUpdates: () => Promise<UpdateCheckResult> } {
   // Distro packages are updated by their package manager. In particular, the
   // Arch launcher sets BRAZIER_INSTALLED, so it must never replace files that
   // pacman owns. On Linux the updater is meaningful only for a running
@@ -19,30 +25,117 @@ export function startUpdates(): void {
     process.env.BRAZIER_INSTALLED === '1' ||
     (process.platform === 'linux' && !process.env.APPIMAGE)
   ) {
-    return
+    report('[updater] disabled for this installation')
+    return { checkForUpdates: async () => ({ supported: false }) }
   }
 
-  autoUpdater.autoDownload = true
+  // Availability is cheap to check, but an AppImage or macOS bundle can be a
+  // large download. Never transfer it until its owner has said yes.
+  autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = false
 
-  autoUpdater.on('error', (error) => {
+  let checking = false
+  let interactiveCheck = false
+  let downloadPromptOpen = false
+  let downloading = false
+
+  autoUpdater.on('error', async (error) => {
     // Update availability must never prevent an offline/local application from
-    // launching. The release workflow's signed artifacts make failures
-    // diagnosable without turning an unavailable network into a fatal error.
-    console.warn('[brazier] update check failed', error)
+    // launching. Record enough detail to diagnose a release-feed failure.
+    report(`[updater] failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`, 'warn')
+    if (interactiveCheck) {
+      await dialog.showMessageBox({
+        type: 'error',
+        title: 'Could not check for updates',
+        message: 'Brazier could not check for an update.',
+        detail: 'Check your connection and try again. The app will continue to work normally.'
+      })
+    }
+  })
+  autoUpdater.on('checking-for-update', () => report('[updater] checking for updates'))
+  autoUpdater.on('update-not-available', (info) => {
+    report(`[updater] already up to date (version ${info.version})`)
+    if (interactiveCheck) {
+      void dialog.showMessageBox({
+        type: 'info',
+        title: 'Brazier is up to date',
+        message: `You already have the latest version (${info.version}).`
+      })
+    }
+  })
+  autoUpdater.on('download-progress', (progress) => {
+    report(`[updater] download progress: ${Math.round(progress.percent)}% (${progress.transferred}/${progress.total} bytes)`)
+  })
+  autoUpdater.on('update-available', async (info) => {
+    report(`[updater] update available: ${info.version}`)
+    if (downloadPromptOpen || downloading) return
+    downloadPromptOpen = true
+    try {
+      const result = await dialog.showMessageBox({
+        type: 'info',
+        buttons: ['Download update', 'Not now'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'Update available',
+        message: `Brazier ${info.version} is available.`,
+        detail: 'Would you like to download the signed update now? You can keep using Brazier while it downloads.'
+      })
+      if (result.response !== 0) {
+        report(`[updater] download declined for ${info.version}`)
+        return
+      }
+      downloading = true
+      report(`[updater] download approved for ${info.version}`)
+      await autoUpdater.downloadUpdate()
+    } catch (error) {
+      report(
+        `[updater] download failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
+        'error'
+      )
+    } finally {
+      downloadPromptOpen = false
+    }
   })
   autoUpdater.on('update-downloaded', async (info) => {
+    downloading = false
+    report(`[updater] update downloaded: ${info.version}`)
     const result = await dialog.showMessageBox({
       type: 'info',
       buttons: ['Restart and update', 'Later'],
       defaultId: 0,
       cancelId: 1,
       title: 'Update ready',
-      message: `Brazier ${info.version} has been downloaded.`,
+      message: `Brazier ${info.version} is ready to install.`,
       detail: 'Restarting installs the signed update. Your conversations and models stay in place.'
     })
-    if (result.response === 0) autoUpdater.quitAndInstall()
+    if (result.response === 0) {
+      report(`[updater] installing ${info.version}`)
+      autoUpdater.quitAndInstall()
+    } else {
+      report(`[updater] installation deferred for ${info.version}`)
+    }
   })
 
-  void autoUpdater.checkForUpdates()
+  async function checkForUpdates(interactive = false): Promise<UpdateCheckResult> {
+    if (checking) return { supported: true }
+    checking = true
+    interactiveCheck = interactive
+    try {
+      await autoUpdater.checkForUpdates()
+    } catch (error) {
+      // electron-updater usually emits `error`, but retain this fallback so a
+      // rejected check is never invisible in the log.
+      report(
+        `[updater] check rejected: ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
+        'warn'
+      )
+    } finally {
+      checking = false
+      interactiveCheck = false
+    }
+    return { supported: true }
+  }
+
+  void checkForUpdates()
+  return { checkForUpdates: () => checkForUpdates(true) }
 }
