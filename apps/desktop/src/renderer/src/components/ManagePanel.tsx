@@ -227,11 +227,12 @@ function generationFit(
   const system = hardware.memory_bytes
   if (gpu != null) {
     if (bytes <= gpu * 0.7) return 'gpu'
-    // sd.cpp can stage encoder/VAE weights through VRAM between phases. A
-    // bundle is still an accelerator fit when its denoiser leaves headroom,
-    // provided host RAM can hold the staged components.
+    // sd.cpp can stage encoder/VAE weights through VRAM between phases, but
+    // the denoiser's activation buffers vary sharply with resolution and
+    // video frames. Treat that as an offload fit, not a guaranteed green
+    // resident-GPU fit.
     if (diffusionBytes != null && diffusionBytes <= gpu * 0.7 && system != null && bytes <= system * 0.6) {
-      return 'gpu'
+      return 'offload'
     }
     if (system != null && bytes <= system * 0.6) return 'offload'
     return 'none'
@@ -250,9 +251,9 @@ function quantFit(file: HubFile, hardware: HardwareInfo | null, bytes = file.siz
 function generationFitLabel(fit: QuantFit): string {
   switch (fit) {
     case 'gpu': return 'Fits in GPU memory'
-    case 'offload': return 'Fits with CPU offload'
+    case 'offload': return 'Fits with staged offload'
     case 'system': return 'Fits in system memory'
-    case 'none': return 'Too large for this machine'
+    case 'none': return 'Likely too large for this machine'
     default: return 'Memory estimate unavailable'
   }
 }
