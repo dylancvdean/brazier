@@ -1568,6 +1568,30 @@ impl LlamaServer {
         let mut child = command
             .spawn()
             .with_context(|| format!("spawn {}", binary.display()))?;
+        // llama.cpp can emit enough backend/model-load diagnostics to fill a
+        // pipe before it opens the health endpoint.  In particular, Vulkan
+        // builds are chatty while enumerating devices and loading shaders.
+        // Drain stderr while polling so the child cannot deadlock on a full
+        // pipe; retain only a bounded tail for a useful startup error.
+        let mut stderr_pipe = child.stderr.take().context("capture llama-server stderr")?;
+        let stderr_task = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+
+            let mut output = Vec::new();
+            let mut chunk = [0_u8; 8_192];
+            loop {
+                let read = stderr_pipe.read(&mut chunk).await?;
+                if read == 0 {
+                    break;
+                }
+                output.extend_from_slice(&chunk[..read]);
+                if output.len() > STARTUP_STDERR_LIMIT {
+                    let first = output.len() - STARTUP_STDERR_LIMIT;
+                    output.drain(..first);
+                }
+            }
+            Ok::<_, std::io::Error>(output)
+        });
 
         let base_url = format!("http://127.0.0.1:{port}");
         let client = reqwest::Client::builder()
@@ -1577,13 +1601,12 @@ impl LlamaServer {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
             if let Some(status) = child.try_wait().context("poll llama-server")? {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    use tokio::io::AsyncReadExt;
-                    let mut buf = Vec::new();
-                    let _ = pipe.read_to_end(&mut buf).await;
-                    stderr = String::from_utf8_lossy(&buf).into_owned();
-                }
+                let stderr = stderr_task
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .map(|output| String::from_utf8_lossy(&output).into_owned())
+                    .unwrap_or_default();
                 anyhow::bail!(describe_server_startup_failure(
                     "llama-server",
                     status,
@@ -1595,12 +1618,33 @@ impl LlamaServer {
                 _ => {
                     if tokio::time::Instant::now() > deadline {
                         let _ = child.start_kill();
-                        anyhow::bail!("llama-server health check timed out at {base_url}");
+                        let status = child.wait().await.ok();
+                        let stderr = stderr_task
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .map(|output| String::from_utf8_lossy(&output).into_owned())
+                            .unwrap_or_default();
+                        let detail = stderr.trim();
+                        if detail.is_empty() {
+                            anyhow::bail!("llama-server health check timed out at {base_url}");
+                        }
+                        anyhow::bail!(
+                            "llama-server health check timed out at {base_url}{}\n\n{detail}",
+                            status
+                                .map(|value| format!(" ({value})"))
+                                .unwrap_or_default(),
+                        );
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
             }
         }
+
+        // The reader must remain alive for the server's lifetime. Dropping its
+        // JoinHandle detaches the task, while the pipe is closed automatically
+        // when the child exits.
+        drop(stderr_task);
 
         Ok(Self {
             child,

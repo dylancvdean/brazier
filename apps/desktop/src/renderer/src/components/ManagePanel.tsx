@@ -2600,10 +2600,13 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     (target) => target.id === props.settings?.target
   )?.detail
   const runtimeList = runtimes ?? []
-  const customRuntimes = runtimeList.filter((runtime) => runtime.kind !== 'managed')
+  // Managed downloads are real runtime choices too. Keeping them out of this
+  // list left the only Activate button reachable only for source builds, so a
+  // downloaded Vulkan/CPU runtime could never be made the default.
+  const installedRuntimes = runtimeList
   const tabEngines = RUNTIME_TAB_ENGINES[runtimeTab]
   const tabBuildOptions = buildEngineOptions.filter((engine) => tabEngines.includes(engine))
-  const tabCustomRuntimes = customRuntimes.filter((runtime) => tabEngines.includes(runtime.engine))
+  const tabInstalledRuntimes = installedRuntimes.filter((runtime) => tabEngines.includes(runtime.engine))
 
   return (
     <section>
@@ -2878,8 +2881,8 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
 
       <div className="settings-group">
         <div className="settings-group-head">
-          <div className="section-label">Custom runtimes</div>
-          {tabCustomRuntimes.length > 0 && (
+          <div className="section-label">Installed runtimes</div>
+          {tabInstalledRuntimes.some((runtime) => runtime.kind === 'source') && (
             <button
               className="chip-button subtle"
               disabled={checkingUpdates}
@@ -2898,19 +2901,20 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         {runtimes == null && !props.initialRuntimes?.length && (
           <div className="manage-placeholder">
             <LoaderCircle className="spin" size={16} />
-            Scanning for custom runtimes…
+            Scanning installed runtimes…
           </div>
         )}
-        {runtimes != null && tabCustomRuntimes.length === 0 && (
+        {runtimes != null && tabInstalledRuntimes.length === 0 && (
           <div className="manage-placeholder compact">
             <Cpu size={16} />
-            Source builds and forks appear here after you build them.
+            Downloaded and source-built runtimes appear here.
           </div>
         )}
         <div className="runtime-list">
-          {tabCustomRuntimes.map((runtime) => {
+          {tabInstalledRuntimes.map((runtime) => {
             const update = updates[runtime.id]
             const canRebuild =
+              runtime.kind === 'source' &&
               update != null &&
               !update.pinned &&
               !update.error &&
@@ -3006,7 +3010,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             )
           })}
         </div>
-        {updatesChecked && tabCustomRuntimes.length > 0 && (
+        {updatesChecked && tabInstalledRuntimes.some((runtime) => runtime.kind === 'source') && (
           <p className="model-help">
             Update checks compare each source build against the current upstream ref via git.
             Builds made before commit tracking show the latest upstream commit and offer a rebuild.

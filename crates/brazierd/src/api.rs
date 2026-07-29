@@ -1171,6 +1171,8 @@ fn apply_active_flags(
             "mlx-vlm" => &active.mlx_vlm,
             "whisper.cpp" | "whisperkit" => &active.whisper,
             "streaming-asr" => &active.streaming_asr,
+            "stable-diffusion.cpp" => &active.sdcpp,
+            "personaplex" | "personaplex-mlx" => &active.voice,
             _ => &active.llama,
         };
         entry.active = selected.as_ref().is_some_and(|active_path| {
