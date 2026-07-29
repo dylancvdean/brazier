@@ -102,11 +102,13 @@ fn parse_memory_report(stderr: &str) -> LlamaMemoryReport {
         // Be conservative: only an explicit accelerator label is GPU memory.
         // Forks may call system-backed allocations "Host" rather than "CPU";
         // treating every unknown prefix as GPU produced false green residency.
-        let gpu = [
-            "cuda", "rocm", "hip", "vulkan", "metal", "kompute", "sycl", "gpu",
-        ]
-        .iter()
-        .any(|backend| lower.contains(backend));
+        let host = lower.contains("cpu") || lower.contains("host");
+        let gpu = !host
+            && [
+                "cuda", "rocm", "hip", "vulkan", "metal", "kompute", "sycl", "gpu",
+            ]
+            .iter()
+            .any(|backend| lower.contains(backend));
         let target = if lower.contains("model buffer size") {
             if gpu {
                 &mut report.gpu_weights_bytes
@@ -1901,6 +1903,10 @@ impl LlamaServer {
         );
         let launch_key = plan.key(harmony);
         plan.apply(&mut command, harmony);
+        // Level 4 exposes the fitter's effective layer/KV placement. Keep this
+        // after advanced arguments so a user-supplied verbosity does not
+        // accidentally hide the diagnostics needed for residency.
+        command.arg("-lv").arg("4");
         if let Some(template) = &plan.chat_template {
             let path = materialize_chat_template(template)?;
             command.arg("--chat-template-file").arg(path);
@@ -2304,6 +2310,7 @@ mod tests {
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            brazier_mode: None,
         };
         let settings = RuntimeSettings::default();
         let body = translate_chat_request(&request, ChatContext::local(&settings, "local", false));
@@ -2349,6 +2356,7 @@ mod tests {
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            brazier_mode: None,
         }
     }
 
@@ -2550,7 +2558,7 @@ mod tests {
     #[test]
     fn parallel_context_is_allocated_per_slot() {
         let settings = RuntimeSettings {
-            context_size: 32_768,
+            context_size: 131_072,
             ..RuntimeSettings::default()
         };
         let plan = LaunchPlan::resolve(
@@ -2566,12 +2574,33 @@ mod tests {
             None,
         );
         assert_eq!(plan.parallel, 3);
-        assert_eq!(plan.aggregate_context_size(), 98_304);
+        assert_eq!(plan.aggregate_context_size(), 393_216);
+
+        // Equal aggregate token counts are not equivalent launch shapes:
+        // non-linear attention/KV implementations can allocate differently
+        // for three 131k sequences than for one 393k sequence.
+        let one_large_stream = LaunchPlan::resolve(
+            &RuntimeSettings {
+                context_size: 393_216,
+                ..RuntimeSettings::default()
+            },
+            None,
+            Vec::new(),
+            RuntimeTarget::Cpu,
+            false,
+            None,
+        );
+        assert_eq!(
+            plan.aggregate_context_size(),
+            one_large_stream.aggregate_context_size()
+        );
+        assert_eq!(one_large_stream.parallel, 1);
+        assert_ne!(plan.key(false), one_large_stream.key(false));
 
         let larger_children = LaunchPlan::resolve(
             &settings,
             Some(&TextProfile {
-                subagent_context_size: Some(65_536),
+                subagent_context_size: Some(262_144),
                 parallel_subagents: Some(true),
                 max_subagents: Some(2),
                 ..TextProfile::default()
@@ -2581,7 +2610,7 @@ mod tests {
             false,
             None,
         );
-        assert_eq!(larger_children.aggregate_context_size(), 196_608);
+        assert_eq!(larger_children.aggregate_context_size(), 786_432);
     }
 
     #[test]
@@ -2611,7 +2640,7 @@ llama_context:         CPU compute buffer size = 16.00 MiB
         let report = parse_memory_report(
             "\
 load_tensors: offloaded 20/33 layers to GPU
-llama_kv_cache_init:        Host KV buffer size = 2048.00 MiB
+llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
 ",
         );
         assert_eq!(report.offloaded_layers, Some(20));

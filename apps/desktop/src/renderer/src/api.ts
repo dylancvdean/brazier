@@ -669,6 +669,7 @@ export async function streamCompletion(
     signal,
     headers: {
       'content-type': 'application/json',
+      'x-brazier-mode': 'chat',
       ...(daemon.api_key ? { authorization: `Bearer ${daemon.api_key}` } : {})
     },
     body: JSON.stringify({
@@ -1873,11 +1874,14 @@ export type ModelResidency = {
   parallel_slots: number | null
 }
 
+export type ModelLoadMode = 'chat' | 'agent'
+
 export async function prepareModel(
   modelId: string,
   options?: {
     signal?: AbortSignal
     onLoad?: (event: { phase: string; message: string }) => void
+    mode?: ModelLoadMode
   }
 ): Promise<ModelResidency | null> {
   const daemon = await connection()
@@ -1888,7 +1892,7 @@ export async function prepareModel(
       'content-type': 'application/json',
       ...(daemon.api_key ? { authorization: `Bearer ${daemon.api_key}` } : {})
     },
-    body: JSON.stringify({ model_id: modelId })
+    body: JSON.stringify({ model_id: modelId, mode: options?.mode ?? 'chat' })
   })
   if (!response.ok || !response.body) {
     const payload = (await response.json().catch(() => null)) as {

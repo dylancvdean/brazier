@@ -203,6 +203,13 @@ pub struct ChatCompletionRequest {
     /// offer when `builtin_tools` is on. `None` offers every enabled tool.
     #[serde(default)]
     pub builtin_tool_names: Option<Vec<String>>,
+    /// Brazier extension selecting the resident-server shape for this request.
+    ///
+    /// OpenAI-compatible clients omit it and get the single-stream chat shape.
+    /// The desktop agent marks its requests as `agent` so llama.cpp reserves
+    /// the configured continuous-batching slots.
+    #[serde(default)]
+    pub brazier_mode: Option<String>,
 }
 
 impl ChatCompletionRequest {

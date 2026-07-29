@@ -68,7 +68,8 @@ export async function requestModelSummary(request: SummaryRequest): Promise<stri
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${request.apiKey}`
+        authorization: `Bearer ${request.apiKey}`,
+        'x-brazier-mode': 'agent'
       },
       signal: controller.signal,
       body: JSON.stringify({

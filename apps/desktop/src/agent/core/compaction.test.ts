@@ -26,6 +26,7 @@ describe('requestModelSummary', () => {
 
     const [url, init] = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(url).toBe('http://127.0.0.1:1710/v1/chat/completions')
+    expect(new Headers((init as RequestInit).headers).get('x-brazier-mode')).toBe('agent')
     const body = JSON.parse((init as RequestInit).body as string)
     expect(body.model).toBe(base.model)
     expect(body.stream).toBe(false)

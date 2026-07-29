@@ -2441,6 +2441,8 @@ async fn download_adapter(
 #[derive(Debug, Deserialize)]
 struct PrepareModelRequest {
     model_id: String,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 async fn unload_model(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
@@ -2454,8 +2456,13 @@ async fn prepare_model(
     Query(query): Query<StreamQuery>,
     Json(request): Json<PrepareModelRequest>,
 ) -> ApiResult<Response> {
+    let agent_mode = request.mode.as_deref() == Some("agent");
     if !query.stream {
-        match state.runtime.prepare_model_stream(&request.model_id).await {
+        match state
+            .runtime
+            .prepare_model_stream(&request.model_id, agent_mode)
+            .await
+        {
             Ok(mut rx) => {
                 while let Some(item) = rx.recv().await {
                     match item {
@@ -2482,7 +2489,7 @@ async fn prepare_model(
 
     let mut event_rx = state
         .runtime
-        .prepare_model_stream(&request.model_id)
+        .prepare_model_stream(&request.model_id, agent_mode)
         .await
         .map_err(ApiError::from_anyhow)?;
     let model_id = request.model_id.clone();
@@ -4512,8 +4519,16 @@ async fn install_sdcpp_bundle(
 
 async fn chat_completions(
     State(state): State<AppState>,
-    Json(request): Json<ChatCompletionRequest>,
+    headers: HeaderMap,
+    Json(mut request): Json<ChatCompletionRequest>,
 ) -> ApiResult<Response> {
+    if headers
+        .get("x-brazier-mode")
+        .and_then(|value| value.to_str().ok())
+        == Some("agent")
+    {
+        request.brazier_mode = Some("agent".to_owned());
+    }
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
 
     if !request.stream {
@@ -4846,6 +4861,7 @@ async fn responses(
         tool_choice: request.tool_choice,
         builtin_tools: request.builtin_tools,
         builtin_tool_names: None,
+        brazier_mode: None,
     };
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
     if !request.stream {

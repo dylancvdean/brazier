@@ -178,6 +178,17 @@ struct Prepared {
     request: ChatCompletionRequest,
 }
 
+fn profile_for_model_load(
+    mut profile: Option<crate::model_settings::TextProfile>,
+    agent_mode: bool,
+) -> Option<crate::model_settings::TextProfile> {
+    if !agent_mode && let Some(profile) = profile.as_mut() {
+        profile.parallel_subagents = Some(false);
+        profile.subagent_context_size = None;
+    }
+    profile
+}
+
 /// Where a prepared request is sent, and what it authenticates with.
 struct Endpoint {
     base_url: String,
@@ -492,11 +503,14 @@ impl Runtime {
                     } else {
                         String::new()
                     };
+                    let per_slot_context =
+                        server.aggregate_context_size / u64::from(server.parallel_slots.max(1));
                     let reservation = format!(
-                        " KV reservation: {} tokens across {} slot{}.",
+                        " KV reservation: {} tokens across {} slot{} ({} per slot).",
                         server.aggregate_context_size,
                         server.parallel_slots,
                         if server.parallel_slots == 1 { "" } else { "s" },
+                        per_slot_context,
                     );
                     let description = if system_backed_gpu_spill {
                         format!(
@@ -1578,6 +1592,13 @@ impl Runtime {
         let profile = crate::model_settings::load(&self.data_dir)
             .text(&model_id)
             .cloned();
+        // llama.cpp's slots are a launch-time reservation. Ordinary chat and
+        // unspecified OpenAI-compatible requests get one slot; only Agent mode
+        // opts into the model profile's parent + subagent allowance.
+        let effective_profile = profile_for_model_load(
+            profile.clone(),
+            request.brazier_mode.as_deref() == Some("agent"),
+        );
         match &backend {
             // Nothing to start: the server is someone else's, already running or
             // not, and the request will say which.
@@ -1590,7 +1611,7 @@ impl Runtime {
                 if let Err(error) = self
                     .ensure_server_for_model_with_profile(
                         std::path::Path::new(model_path),
-                        profile.as_ref(),
+                        effective_profile.as_ref(),
                     )
                     .await
                 {
@@ -1615,7 +1636,7 @@ impl Runtime {
                     tracing::warn!("{notice}");
                 }
                 if let Err(error) = self
-                    .ensure_mlx_server_for_model(&model_id, kind, profile.as_ref())
+                    .ensure_mlx_server_for_model(&model_id, kind, effective_profile.as_ref())
                     .await
                 {
                     let mut guard = self.mlx.lock().await;
@@ -1902,6 +1923,7 @@ impl Runtime {
     pub async fn prepare_model_stream(
         self: &Arc<Self>,
         model_id: &str,
+        agent_mode: bool,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<StreamEvent>>> {
         let runtime = Arc::clone(self);
         let request = ChatCompletionRequest {
@@ -1924,6 +1946,7 @@ impl Runtime {
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            brazier_mode: agent_mode.then(|| "agent".to_owned()),
         };
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         tokio::spawn(async move {
@@ -2547,6 +2570,24 @@ mod tests {
         assert!(!exceeds_gpu_capacity(49 * gib, None));
     }
 
+    #[test]
+    fn chat_disables_agent_slots_without_changing_the_saved_profile() {
+        let configured = crate::model_settings::TextProfile {
+            parallel_subagents: Some(true),
+            max_subagents: Some(2),
+            context_size: Some(131_072),
+            subagent_context_size: Some(262_144),
+            ..Default::default()
+        };
+        let chat = profile_for_model_load(Some(configured.clone()), false).unwrap();
+        let agent = profile_for_model_load(Some(configured.clone()), true).unwrap();
+        assert_eq!(crate::model_settings::llama_parallel_slots(Some(&chat)), 1);
+        assert_eq!(crate::model_settings::llama_parallel_slots(Some(&agent)), 3);
+        assert_eq!(chat.subagent_context_size, None);
+        assert_eq!(agent.subagent_context_size, Some(262_144));
+        assert_eq!(configured.parallel_subagents, Some(true));
+    }
+
     #[tokio::test]
     async fn generated_media_is_immediate_and_persisted_as_a_blob_reference() {
         let dir = tempdir().unwrap();
@@ -2872,6 +2913,7 @@ mod tests {
                 tool_choice: None,
                 builtin_tools: None,
                 builtin_tool_names: None,
+                brazier_mode: None,
             })
             .await
             .unwrap_err();
@@ -2903,6 +2945,7 @@ mod tests {
                 tool_choice: None,
                 builtin_tools: None,
                 builtin_tool_names: None,
+                brazier_mode: None,
             })
             .await
             .unwrap_err();

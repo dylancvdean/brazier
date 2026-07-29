@@ -363,7 +363,11 @@ class PiAgentSession implements AgentSession {
         })
         return streamSimple(model as Model<'openai-completions'>, context, {
           ...options,
-          headers: { ...options?.headers, ...progress.headers }
+          headers: {
+            ...options?.headers,
+            ...progress.headers,
+            'x-brazier-mode': 'agent'
+          }
         })
       },
       // The transcript only ever holds LLM messages, because the application

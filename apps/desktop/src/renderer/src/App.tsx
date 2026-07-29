@@ -58,6 +58,7 @@ import {
   type HardwareInfo,
   type LocalModel,
   type ModelProfile,
+  type ModelLoadMode,
   type ModelResidency,
   type PipelineFeatures,
   type PendingSwap,
@@ -604,7 +605,7 @@ export function App(): React.JSX.Element {
     })
   }
 
-  const selectModel = useCallback((modelId: string): void => {
+  const selectModel = useCallback((modelId: string, mode?: ModelLoadMode): void => {
     if (modelId.startsWith('whisper:') || modelId.startsWith('streaming-asr:')) {
       setError('ASR models are used for transcription, not chat. Pick a chat model instead.')
       return
@@ -626,6 +627,7 @@ export function App(): React.JSX.Element {
     prepareAbortRef.current = controller
     void prepareModel(modelId, {
       signal: controller.signal,
+      mode: mode ?? (appMode === 'agent' ? 'agent' : 'chat'),
       onLoad: (event) => {
         if (!controller.signal.aborted) setModelLoadStatus(event.message)
       }
@@ -650,7 +652,18 @@ export function App(): React.JSX.Element {
           setError(cause instanceof Error ? cause.message : String(cause))
         }
       })
-  }, [])
+  }, [appMode])
+
+  const switchAppMode = useCallback(
+    (next: 'chat' | 'agent' | 'generate' | 'voice'): void => {
+      if (next === appMode) return
+      setAppMode(next)
+      if ((next === 'chat' || next === 'agent') && selectedModel) {
+        selectModel(selectedModel, next)
+      }
+    },
+    [appMode, selectedModel, selectModel]
+  )
 
   const unloadSelectedModel = useCallback(async (): Promise<void> => {
     if (!selectedModel || modelUnloading) return
@@ -1676,7 +1689,7 @@ export function App(): React.JSX.Element {
                 role="tab"
                 className={appMode === id ? 'active' : ''}
                 aria-selected={appMode === id}
-                onClick={() => setAppMode(id)}
+                onClick={() => switchAppMode(id)}
               >
                 {label}
               </button>
