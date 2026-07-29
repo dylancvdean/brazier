@@ -308,6 +308,38 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'support', label: 'Support', icon: <ShieldAlert size={15} /> }
 ]
 
+type McpRecipe = {
+  id: string
+  name: string
+  command: string
+  args: string[]
+  description: string
+  setup: string
+}
+
+/**
+ * Well-known, local stdio server configurations. Applying a recipe only fills
+ * the editable form; it never installs or starts third-party code on its own.
+ */
+const MCP_RECIPES: McpRecipe[] = [
+  {
+    id: 'duckduckgo',
+    name: 'DuckDuckGo search',
+    command: 'uvx',
+    args: ['--with', 'duckduckgo-mcp-server[browser]', 'duckduckgo-mcp-server'],
+    description: 'Search the web and fetch readable page content without an API key.',
+    setup: 'Requires uvx. The browser extra lets searches fall back when DuckDuckGo blocks basic clients.'
+  },
+  {
+    id: 'blender',
+    name: 'Blender bridge',
+    command: 'blender-mcp-server',
+    args: [],
+    description: 'Control an open Blender scene: create objects, edit materials, render, and export.',
+    setup: 'Install blender-mcp-server and enable its Blender MCP Bridge add-on; the bridge must be listening locally.'
+  }
+]
+
 function progressLabel(event: ProgressEvent | null): string {
   if (!event) return 'Starting…'
   if (event.message) return event.message
@@ -3860,6 +3892,15 @@ function McpSection(props: SectionProps): React.JSX.Element {
     args: ''
   })
 
+  function applyRecipe(recipe: McpRecipe): void {
+    setDraft({
+      id: recipe.id,
+      name: recipe.name,
+      command: recipe.command,
+      args: recipe.args.join(',')
+    })
+  }
+
   async function reload(): Promise<void> {
     setLoading(true)
     props.onError(null)
@@ -4007,6 +4048,36 @@ function McpSection(props: SectionProps): React.JSX.Element {
                 </article>
               ))
             )}
+          </div>
+
+          <div className="settings-group">
+            <div className="section-label">Popular recipes</div>
+            <div className="runtime-offer-list">
+              {MCP_RECIPES.map((recipe) => {
+                const configured = servers.some((server) => server.id === recipe.id)
+                return (
+                  <article className="runtime-offer" key={recipe.id}>
+                    <div className="runtime-offer-info">
+                      <strong>{recipe.name}</strong>
+                      <span>{recipe.description}</span>
+                      <span>{recipe.setup}</span>
+                    </div>
+                    <button
+                      className="secondary-action"
+                      disabled={configured}
+                      onClick={() => applyRecipe(recipe)}
+                      title={configured ? 'This recipe is already configured' : 'Fill the editable server form'}
+                    >
+                      {configured ? 'Configured' : 'Use recipe'}
+                    </button>
+                  </article>
+                )
+              })}
+            </div>
+            <p className="model-help">
+              Recipes fill the form below. Review or change the command and arguments before adding a
+              server.
+            </p>
           </div>
 
           <form className="settings-group" onSubmit={(event) => void addServer(event)}>

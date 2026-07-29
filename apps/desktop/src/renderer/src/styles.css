@@ -2069,6 +2069,19 @@ a.inline-link {
   line-height: 1.5;
 }
 
+.runtime-offer > .secondary-action {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.runtime-offer > .secondary-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .library-card,
 .runtime-card {
   display: grid;
