@@ -423,6 +423,141 @@
       ]
     },
     {
+      "id": "z-image-turbo",
+      "label": "Z-Image Turbo",
+      "modality": "image",
+      "key": "tongyi-mai/z-image-turbo",
+      "summary": "A fast 6B image transformer with especially strong prompt following and text rendering. Its compact Qwen encoder and VAE are installed alongside the diffusion model.",
+      "license": "apache-2.0",
+      "featured": true,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 9,
+        "cfg_scale": 1.0,
+        "sampling_method": "euler"
+      },
+      "supports_init_image": false,
+      "components": [
+        {
+          "repo_id": "leejet/Z-Image-Turbo-GGUF",
+          "path": "z_image_turbo-Q4_K.gguf",
+          "role": "Diffusion model",
+          "flag": "diffusion-model",
+          "approx_bytes": 4140000000,
+          "variants": [
+            {
+              "label": "Q2_K",
+              "path": "z_image_turbo-Q2_K.gguf",
+              "approx_bytes": 2590000000,
+              "note": "Smallest; for very limited memory."
+            },
+            {
+              "label": "Q3_K",
+              "path": "z_image_turbo-Q3_K.gguf",
+              "approx_bytes": 3210000000,
+              "note": "Fits smaller machines."
+            },
+            {
+              "label": "Q4_K",
+              "path": "z_image_turbo-Q4_K.gguf",
+              "approx_bytes": 4140000000,
+              "note": "Recommended quality and size balance."
+            },
+            {
+              "label": "Q5_0",
+              "path": "z_image_turbo-Q5_0.gguf",
+              "approx_bytes": 4540000000,
+              "note": "Better fidelity."
+            },
+            {
+              "label": "Q6_K",
+              "path": "z_image_turbo-Q6_K.gguf",
+              "approx_bytes": 5260000000,
+              "note": "Near-full quality."
+            },
+            {
+              "label": "Q8_0",
+              "path": "z_image_turbo-Q8_0.gguf",
+              "approx_bytes": 6580000000,
+              "note": "Largest quantized option."
+            }
+          ]
+        },
+        {
+          "repo_id": "leejet/Z-Image-Turbo-GGUF",
+          "path": "ae.safetensors",
+          "role": "VAE",
+          "flag": "vae",
+          "approx_bytes": 168000000
+        },
+        {
+          "repo_id": "leejet/Z-Image-Turbo-GGUF",
+          "path": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+          "role": "Text encoder (Qwen3 4B)",
+          "flag": "llm",
+          "approx_bytes": 2540000000
+        }
+      ]
+    },
+    {
+      "id": "krea-2-turbo",
+      "label": "Krea 2 Turbo",
+      "modality": "image",
+      "key": "krea/krea-2-turbo",
+      "summary": "Krea's 12B distilled image model: eight steps, strong aesthetic output, and no separate encoder or VAE download.",
+      "license": "krea-2-community-license",
+      "featured": true,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 8,
+        "cfg_scale": 0.0,
+        "flow_shift": 1.15
+      },
+      "supports_init_image": false,
+      "components": [
+        {
+          "repo_id": "Abiray/Krea-2-Turbo-GGUF",
+          "path": "Krea-2-Turbo-Q4_K_M.gguf",
+          "role": "Checkpoint (diffusion model, VAE, and text encoder)",
+          "approx_bytes": 7490000000,
+          "variants": [
+            {
+              "label": "Q3_K_M",
+              "path": "Krea-2-Turbo-Q3_K_M.gguf",
+              "approx_bytes": 6010000000,
+              "note": "Lowest-memory option."
+            },
+            {
+              "label": "Q4_K_M",
+              "path": "Krea-2-Turbo-Q4_K_M.gguf",
+              "approx_bytes": 7490000000,
+              "note": "Recommended baseline."
+            },
+            {
+              "label": "Q5_K_M",
+              "path": "Krea-2-Turbo-Q5_K_M.gguf",
+              "approx_bytes": 8870000000,
+              "note": "Higher fidelity."
+            },
+            {
+              "label": "Q6_K",
+              "path": "Krea-2-Turbo-Q6_K.gguf",
+              "approx_bytes": 10600000000,
+              "note": "Near-lossless."
+            },
+            {
+              "label": "Q8_0",
+              "path": "Krea-2-Turbo-Q8_0.gguf",
+              "approx_bytes": 13700000000,
+              "note": "Largest quantized option."
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": "qwen-image",
       "label": "Qwen-Image",
       "modality": "image",

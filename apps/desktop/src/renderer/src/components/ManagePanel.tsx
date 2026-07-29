@@ -1057,6 +1057,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [hfTokenDraft, setHfTokenDraft] = useState('')
   const [savingHfToken, setSavingHfToken] = useState(false)
   const [downloadJobs, setDownloadJobs] = useState<DownloadJob[]>([])
+  const downloadJobsRefreshRef = useRef(0)
   const [openDescription, setOpenDescription] = useState<string | null>(null)
   const [descriptions, setDescriptions] = useState<Record<string, string>>({})
   const [descriptionLoading, setDescriptionLoading] = useState<string | null>(null)
@@ -1085,14 +1086,19 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       .catch(() => setHfTokenSource('none'))
   }, [])
 
-  useEffect(() => {
-    const refresh = (): void => {
-      void listDownloadJobs()
-        .then(setDownloadJobs)
-        .catch(() => setDownloadJobs([]))
+  async function refreshDownloadJobs(): Promise<void> {
+    const refreshId = ++downloadJobsRefreshRef.current
+    try {
+      const jobs = await listDownloadJobs()
+      if (refreshId === downloadJobsRefreshRef.current) setDownloadJobs(jobs)
+    } catch {
+      if (refreshId === downloadJobsRefreshRef.current) setDownloadJobs([])
     }
-    refresh()
-    const timer = window.setInterval(refresh, 2000)
+  }
+
+  useEffect(() => {
+    void refreshDownloadJobs()
+    const timer = window.setInterval(() => void refreshDownloadJobs(), 2000)
     return () => window.clearInterval(timer)
   }, [])
 
@@ -1408,6 +1414,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
 
   async function cancelJob(job: DownloadJob): Promise<void> {
     props.onError(null)
+    // Prevent a poll begun before this click from restoring its old queued
+    // snapshot after the cancellation response arrives.
+    downloadJobsRefreshRef.current += 1
     try {
       if (job.kind === 'runtime-build') {
         await cancelBuildJob(job.id)
@@ -1428,6 +1437,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
             : currentJob
         )
       )
+      void refreshDownloadJobs()
     } catch (cause) {
       props.onError(errorText(cause))
     }

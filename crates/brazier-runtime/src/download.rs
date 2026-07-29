@@ -1,7 +1,7 @@
 //! Hugging Face artifact download with resume, integrity hashing, and progress.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -1093,6 +1093,7 @@ pub async fn install_sdcpp_bundle_with_progress(
     // wrong even when their length happens to match.
     let mut sizes: HashMap<(String, String), Option<u64>> = HashMap::new();
     let mut hashes: HashMap<(String, String), Option<String>> = HashMap::new();
+    let mut metadata_repositories = HashSet::new();
     for component in &bundle.components {
         if let Some(source_url) = &component.source_url {
             let url = reqwest::Url::parse(source_url)
@@ -1112,7 +1113,10 @@ pub async fn install_sdcpp_bundle_with_progress(
             continue;
         }
         validate_repo_id(&component.repo_id)?;
-        if sizes.contains_key(&(component.repo_id.clone(), component.path.clone())) {
+        // All paths in a repository are requested together. Apart from
+        // avoiding duplicate API calls, this means a partial paths-info
+        // response is handled consistently for every component.
+        if !metadata_repositories.insert(component.repo_id.clone()) {
             continue;
         }
         let paths: Vec<String> = bundle
@@ -1140,11 +1144,27 @@ pub async fn install_sdcpp_bundle_with_progress(
                     continue;
                 }
             };
+        let missing: Vec<_> = paths
+            .iter()
+            .filter(|path| !infos.iter().any(|info| &info.path == *path))
+            .collect();
+        if !missing.is_empty() {
+            // Gated repositories sometimes omit files from paths-info even
+            // though an authenticated resolve request can download them. The
+            // metadata is optional, so do not turn that into an install
+            // failure; the actual transfer below reports access errors.
+            tracing::warn!(
+                repository = %component.repo_id,
+                paths = ?missing,
+                "Hugging Face metadata omitted bundle files; downloading without metadata"
+            );
+            continue;
+        }
         for path in &paths {
             let info = infos
                 .iter()
                 .find(|info| &info.path == path)
-                .with_context(|| format!("{path} is missing from {}", component.repo_id))?;
+                .expect("missing paths were checked above");
             let key = (component.repo_id.clone(), path.clone());
             sizes.insert(key.clone(), info.size);
             hashes.insert(key, info.sha256.clone());

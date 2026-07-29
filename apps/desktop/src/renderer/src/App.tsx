@@ -496,6 +496,10 @@ export function App(): React.JSX.Element {
   const abortRef = useRef<AbortController | undefined>(undefined)
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
   const conversationRefreshRef = useRef(0)
+  // Message requests can outlive a cancelled generation or a newly created
+  // chat. Keep a generation counter separate from the conversation list so a
+  // late response for the old chat cannot repaint the new one.
+  const messageRefreshRef = useRef(0)
   const fileInput = useRef<HTMLInputElement>(null)
   const importInput = useRef<HTMLInputElement>(null)
   const scrollAnchor = useRef<HTMLDivElement>(null)
@@ -526,7 +530,11 @@ export function App(): React.JSX.Element {
   const canAttachAudio = pipelineFeatures.asr || selectedNativeAudio
   const canAttachVideo =
     pipelineFeatures.video_preprocess && canAttachImage
-  const canAttach = canAttachImage || canAttachAudio || canAttachVideo
+  // Documents are converted to text before inference, so they do not need a
+  // vision-capable model. Keeping this separate from media capabilities also
+  // makes the picker usable with ordinary text-only chat models.
+  const canAttachDocuments = true
+  const canAttach = canAttachDocuments || canAttachImage || canAttachAudio || canAttachVideo
   const canUseTools = selectedCapabilities?.tools !== false
   const audioBadgeTitle = selectedNativeAudio
     ? 'Native audio: this chat model can consume audio directly; falls back to batch ASR if the engine rejects input_audio'
@@ -913,7 +921,9 @@ export function App(): React.JSX.Element {
   }
 
   async function refreshMessages(id: string, preferredTip?: string): Promise<void> {
+    const refreshId = ++messageRefreshRef.current
     const data = await listMessages(id)
+    if (refreshId !== messageRefreshRef.current || id !== conversationId) return
     setMessages(data)
     setTipId(preferredTip ?? data.at(-1)?.id ?? null)
   }
@@ -990,6 +1000,10 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    // A selected chat changed; any fetch started for the previous one is now
+    // stale, even if it completes after this effect has begun loading the new
+    // conversation.
+    messageRefreshRef.current += 1
     if (!conversationId) {
       setMessages([])
       setTipId(null)
@@ -1029,6 +1043,10 @@ export function App(): React.JSX.Element {
   async function newConversation(): Promise<void> {
     const conversation = await createConversation()
     await refreshConversations()
+    // Invalidate in-flight loads for the previous chat before clearing its
+    // display. This matters most after Stop, when a final fetch may still be
+    // resolving in the background.
+    messageRefreshRef.current += 1
     setConversationId(conversation.id)
     setMessages([])
     setTipId(null)
@@ -1441,6 +1459,9 @@ export function App(): React.JSX.Element {
             setShowWelcome(false)
           }}
           onOpenRuntimes={() => {
+            // Opening Runtimes leaves the walkthrough just like choosing
+            // Continue: do not show it again after an update.
+            markWelcomeCompleted()
             setManageSection('runtimes')
             setManageOpen(true)
             setShowWelcome(false)
@@ -2106,10 +2127,10 @@ export function App(): React.JSX.Element {
                 ref={fileInput}
                 type="file"
                 accept={[
+                  canAttachDocuments ? '.pdf,.txt,.md,.csv,.json,.xml,.html,.htm,text/*,application/pdf,application/json,application/xml' : null,
                   canAttachImage ? 'image/*' : null,
                   canAttachAudio ? 'audio/*' : null,
-                  canAttachVideo ? 'video/*' : null,
-                  'application/pdf,text/plain,text/markdown,text/csv,application/json,application/xml,.pdf,.txt,.md,.csv,.json,.xml'
+                  canAttachVideo ? 'video/*' : null
                 ]
                   .filter(Boolean)
                   .join(',') || 'image/*'}
@@ -2166,13 +2187,14 @@ export function App(): React.JSX.Element {
                 title={
                   canAttach
                     ? [
+                        canAttachDocuments ? 'documents' : null,
                         canAttachImage ? 'images' : null,
                         canAttachAudio ? 'audio' : null,
                         canAttachVideo ? 'video' : null
                       ]
                         .filter(Boolean)
                         .join(', ')
-                    : 'Attach media once vision and/or ASR pipelines are available'
+                    : 'Attach a document, or configure vision and/or ASR for media'
                 }
                 onClick={() => fileInput.current?.click()}
               >
