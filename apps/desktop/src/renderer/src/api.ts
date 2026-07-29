@@ -369,6 +369,14 @@ export async function resumeDownloadJob(jobId: string): Promise<void> {
   })
 }
 
+/** Cancel a source build represented by a row in the shared activity tray. */
+export async function cancelBuildJob(jobId: string): Promise<void> {
+  await request('/api/v1/runtimes/build/cancel-job', {
+    method: 'POST',
+    body: JSON.stringify({ job_id: jobId })
+  })
+}
+
 /** Queue a multi-file snapshot download (MLX, PersonaPlex, streaming ASR). */
 export async function queueSnapshotDownload(
   kind: 'mlx' | 'personaplex' | 'streaming-asr',
@@ -1231,6 +1239,40 @@ export function recordRecommendationInstall(
       model_id: modelId ?? null
     })
   })
+}
+
+export type RecommendationSetup = {
+  id: string
+  recommendation_id: string
+  categories: string[]
+  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
+  error?: string | null
+  steps: Array<{ label: string; kind: string; job_id?: string | null; status: string }>
+}
+
+type QueuedGgufWork = {
+  kind: 'gguf'
+  repo_id: string
+  filename: string
+  revision: string
+  engine: 'llama.cpp' | 'whisper.cpp'
+}
+
+export async function startRecommendationSetup(body: {
+  recommendation_id: string
+  categories: RecommendationCategory[]
+  works: QueuedGgufWork[]
+  required_bytes: number
+  build?: { engine: string; repository: string; revision: string; target: string; jobs?: number }
+}): Promise<RecommendationSetup> {
+  return (await request<{ setup: RecommendationSetup }>('/api/v1/recommendations/setups', {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })).setup
+}
+
+export async function listRecommendationSetups(): Promise<RecommendationSetup[]> {
+  return (await request<{ data: RecommendationSetup[] }>('/api/v1/recommendations/setups')).data
 }
 
 /** Stop mentioning changed recommendations, or decline one particular swap. */

@@ -1327,13 +1327,22 @@ impl Database {
         self.get_download_job(id).await
     }
 
-    /// Jobs that were mid-flight when the daemon stopped, so they can be
-    /// marked paused rather than appearing stuck as running forever.
+    /// Jobs that were mid-flight when the daemon stopped. Transfers can be
+    /// paused and resumed from their partial files; source builds cannot, so
+    /// their tray rows become failed rather than appearing stuck forever.
     pub async fn interrupt_running_download_jobs(&self) -> anyhow::Result<()> {
         sqlx::query(
             r#"UPDATE download_jobs
+               SET status = 'failed', error = 'Brazier restarted before this build completed',
+                   updated_at = datetime('now')
+               WHERE kind = 'runtime-build' AND status = 'downloading'"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"UPDATE download_jobs
                SET status = 'paused', updated_at = datetime('now')
-               WHERE status IN ('pending', 'downloading')"#,
+               WHERE kind != 'runtime-build' AND status IN ('pending', 'downloading')"#,
         )
         .execute(&self.pool)
         .await?;
@@ -1353,6 +1362,44 @@ impl Database {
         )
         .bind(bytes_downloaded as i64)
         .bind(total_bytes.map(|value| value as i64))
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Store a human-readable status for non-transfer work shown beside
+    /// downloads, such as a runtime source build.
+    pub async fn update_download_job_message(
+        &self,
+        job_id: &str,
+        message: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE download_jobs
+               SET error = ?, updated_at = datetime('now')
+               WHERE id = ? AND status IN ('pending', 'downloading')"#,
+        )
+        .bind(message)
+        .bind(job_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Associate an in-flight runtime build with the durable tray row so it
+    /// can be cancelled from anywhere in the application.
+    pub async fn set_download_job_payload(
+        &self,
+        job_id: &str,
+        payload: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE download_jobs
+               SET payload = ?, updated_at = datetime('now')
+               WHERE id = ? AND status = 'downloading'"#,
+        )
+        .bind(payload)
         .bind(job_id)
         .execute(&self.pool)
         .await?;

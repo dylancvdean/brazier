@@ -46,10 +46,10 @@ use crate::{
 
 type ApiResult<T> = Result<T, ApiError>;
 
-/// A streamed download still needs a durable job row: the HTTP stream is only
-/// how the current screen receives live progress, while the download tray is
-/// what lets the work remain visible after that screen goes away.
-async fn track_streamed_download(
+/// A direct download still needs a durable job row: the HTTP response is only
+/// how the current screen receives progress, while the download tray is what
+/// lets the work remain visible after that screen goes away.
+async fn track_resumable_download(
     state: &AppState,
     work: &crate::download_queue::QueuedWork,
 ) -> ApiResult<(String, std::sync::Arc<crate::active_downloads::StopFlag>)> {
@@ -63,7 +63,7 @@ async fn track_streamed_download(
             kind: work.kind(),
             payload: Some(&payload),
             label: Some(&work.label()),
-            status: "downloading",
+            status: "pending",
         })
         .await
         .map_err(ApiError::internal)?;
@@ -402,6 +402,7 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         )
         .route("/api/v1/runtimes/build", post(build_runtime))
         .route("/api/v1/runtimes/build/cancel", post(cancel_build))
+        .route("/api/v1/runtimes/build/cancel-job", post(cancel_build_job))
         .route("/api/v1/models/download", post(download_model))
         .route("/api/v1/models/download/mlx", post(download_mlx_model))
         .route(
@@ -455,6 +456,14 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         .route("/api/v1/models/settings/reset", post(reset_model_settings))
         .route("/api/v1/models/chat-template", get(model_chat_template))
         .route("/api/v1/recommendations", get(model_recommendations))
+        .route(
+            "/api/v1/recommendations/setups",
+            get(list_recommendation_setups).post(start_recommendation_setup),
+        )
+        .route(
+            "/api/v1/recommendations/setups/{id}/cancel",
+            post(cancel_recommendation_setup),
+        )
         .route(
             "/api/v1/recommendations/state",
             get(recommendation_state).put(update_recommendation_state),
@@ -1786,6 +1795,405 @@ async fn recommendation_state(State(state): State<AppState>) -> Json<Value> {
 }
 
 #[derive(Debug, Deserialize)]
+struct StartRecommendationSetupRequest {
+    recommendation_id: String,
+    categories: Vec<String>,
+    works: Vec<crate::download_queue::QueuedWork>,
+    required_bytes: u64,
+    #[serde(default)]
+    build: Option<builds::BuildRequest>,
+}
+
+fn available_disk_bytes(path: &std::path::Path) -> anyhow::Result<u64> {
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("df")
+            .args(["-Pk", path.to_string_lossy().as_ref()])
+            .output()
+            .context("check free disk space")?;
+        anyhow::ensure!(output.status.success(), "disk-space check failed");
+        let listing = String::from_utf8_lossy(&output.stdout);
+        let line = listing
+            .lines()
+            .nth(1)
+            .context("disk-space check returned no filesystem")?;
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let available_kib: u64 = fields
+            .get(3)
+            .context("disk-space check returned an unreadable filesystem")?
+            .parse()
+            .context("parse available disk space")?;
+        return Ok(available_kib.saturating_mul(1024));
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("Brazier cannot verify free disk space on this platform")
+}
+
+/// Persist an onboarding setup before any transfer is enqueued. Repeating the
+/// same request returns its live plan instead of creating duplicate downloads.
+async fn start_recommendation_setup(
+    State(state): State<AppState>,
+    Json(request): Json<StartRecommendationSetupRequest>,
+) -> ApiResult<Json<Value>> {
+    if request.categories.is_empty() {
+        return Err(ApiError::bad_request("choose at least one category"));
+    }
+    if request.works.is_empty() {
+        return Err(ApiError::bad_request("setup has no installable work"));
+    }
+    if let Some(build) = request.build.as_ref()
+        && build.engine == "llama.cpp"
+    {
+        builds::llama_cpp_build_preflight(
+            build
+                .target
+                .unwrap_or(crate::runtime_settings::RuntimeTarget::Cpu),
+        )
+        .map_err(ApiError::bad_request)?;
+    }
+    let required_bytes = request.required_bytes.saturating_add(
+        request
+            .build
+            .as_ref()
+            .map(|_| 10 * 1024 * 1024 * 1024_u64)
+            .unwrap_or(0),
+    );
+    let available = available_disk_bytes(&state.data_dir).map_err(ApiError::bad_request)?;
+    if available < required_bytes {
+        return Err(ApiError::bad_request(format!(
+            "Not enough free disk space: this setup needs {} but only {} is available.",
+            required_bytes, available
+        )));
+    }
+    let mut recorded = recommendations::load_state(&state.data_dir);
+    if let Some(existing) = recorded.setups.iter().find(|setup| {
+        setup.recommendation_id == request.recommendation_id
+            && setup.categories == request.categories
+            && matches!(setup.status.as_str(), "pending" | "running" | "paused")
+    }) {
+        return Ok(Json(json!({ "setup": existing, "existing": true })));
+    }
+    let now = epoch_seconds();
+    let mut steps: Vec<_> = request
+        .works
+        .iter()
+        .map(|work| recommendations::RecommendationSetupStep {
+            label: work.label(),
+            kind: work.kind().to_owned(),
+            payload: serde_json::to_value(work).unwrap_or(Value::Null),
+            job_id: None,
+            status: "pending".to_owned(),
+        })
+        .collect();
+    if let Some(build) = &request.build {
+        steps.push(recommendations::RecommendationSetupStep {
+            label: format!("Build {}", build.engine),
+            kind: "runtime-build".to_owned(),
+            payload: serde_json::to_value(build).map_err(ApiError::internal)?,
+            job_id: None,
+            status: "pending".to_owned(),
+        });
+    }
+    let mut setup = recommendations::RecommendationSetup {
+        id: Uuid::new_v4().to_string(),
+        recommendation_id: request.recommendation_id,
+        categories: request.categories,
+        status: "running".to_owned(),
+        steps,
+        error: None,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    for (step, work) in setup.steps.iter_mut().zip(request.works) {
+        let payload = serde_json::to_string(&work).map_err(ApiError::internal)?;
+        let job = state
+            .db
+            .create_queued_download_job(crate::db::QueuedDownloadJobInput {
+                repo_id: &work.repo_id(),
+                filename: &work.filename(),
+                revision: &work.revision(),
+                kind: work.kind(),
+                payload: Some(&payload),
+                label: Some(&work.label()),
+                status: "pending",
+            })
+            .await
+            .map_err(ApiError::internal)?;
+        state
+            .download_queue
+            .enqueue(crate::download_queue::QueuedDownload {
+                job_id: job.id.clone(),
+                work,
+            })
+            .await
+            .map_err(ApiError::internal)?;
+        step.job_id = Some(job.id);
+        step.status = "running".to_owned();
+    }
+    recorded.setups.push(setup.clone());
+    recommendations::save_state(&state.data_dir, &recorded)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "setup": setup, "existing": false })))
+}
+
+/// Reconcile persisted plans from the durable activity rows. Polling this is
+/// sufficient after a restart because downloads themselves already resume from
+/// those rows and no browser-local state is involved.
+async fn list_recommendation_setups(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let mut recorded = recommendations::load_state(&state.data_dir);
+    let mut changed = false;
+    let mut completed = Vec::new();
+    let mut builds_to_start = Vec::new();
+    for setup in &mut recorded.setups {
+        if !matches!(setup.status.as_str(), "pending" | "running" | "paused") {
+            continue;
+        }
+        let mut paused = false;
+        let mut failed = None;
+        let mut complete = true;
+        for step in &mut setup.steps {
+            let Some(job_id) = step.job_id.as_deref() else {
+                complete = false;
+                continue;
+            };
+            let Ok(job) = state.db.get_download_job_public(job_id).await else {
+                complete = false;
+                continue;
+            };
+            step.status = job.status.clone();
+            match job.status.as_str() {
+                "completed" => {}
+                "paused" => {
+                    paused = true;
+                    complete = false;
+                }
+                "failed" | "cancelled" => {
+                    failed = Some(job.error.unwrap_or_else(|| job.status));
+                    complete = false;
+                }
+                _ => complete = false,
+            }
+        }
+        let next = if let Some(error) = failed.as_ref() {
+            setup.error = Some(error.clone());
+            "failed"
+        } else if paused {
+            "paused"
+        } else if complete {
+            "completed"
+        } else {
+            "running"
+        };
+        if setup.status != next {
+            setup.status = next.to_owned();
+            setup.updated_at = epoch_seconds();
+            changed = true;
+        }
+        if setup.status == "completed" {
+            completed.push((setup.categories.clone(), setup.recommendation_id.clone()));
+            changed = true;
+        } else if failed.is_none()
+            && !paused
+            && setup
+                .steps
+                .iter()
+                .filter(|step| step.kind != "runtime-build")
+                .all(|step| step.status == "completed")
+        {
+            for (step_index, step) in setup.steps.iter().enumerate() {
+                if step.kind == "runtime-build" && step.job_id.is_none() {
+                    if let Ok(request) =
+                        serde_json::from_value::<builds::BuildRequest>(step.payload.clone())
+                    {
+                        builds_to_start.push((setup.id.clone(), step_index, request));
+                    }
+                }
+            }
+        }
+    }
+    for (setup_id, step_index, request) in builds_to_start {
+        match start_setup_build(&state, request).await {
+            Ok(job_id) => {
+                if let Some(setup) = recorded
+                    .setups
+                    .iter_mut()
+                    .find(|setup| setup.id == setup_id)
+                    && let Some(step) = setup.steps.get_mut(step_index)
+                {
+                    step.job_id = Some(job_id);
+                    step.status = "running".to_owned();
+                    setup.updated_at = epoch_seconds();
+                    changed = true;
+                }
+            }
+            Err(error) => {
+                if let Some(setup) = recorded
+                    .setups
+                    .iter_mut()
+                    .find(|setup| setup.id == setup_id)
+                {
+                    setup.status = "failed".to_owned();
+                    setup.error = Some(error.message);
+                    changed = true;
+                }
+            }
+        }
+    }
+    for (categories, recommendation_id) in completed {
+        for category in categories {
+            recommendations::record_install(
+                &mut recorded,
+                category,
+                recommendation_id.clone(),
+                None,
+                epoch_seconds(),
+            );
+        }
+    }
+    if changed {
+        recommendations::save_state(&state.data_dir, &recorded)
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    Ok(Json(json!({ "data": recorded.setups })))
+}
+
+/// Cancel every unfinished child of a recommendation plan. Completed files are
+/// deliberately retained so a later setup can reuse them safely.
+async fn cancel_recommendation_setup(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let mut recorded = recommendations::load_state(&state.data_dir);
+    let setup = recorded
+        .setups
+        .iter_mut()
+        .find(|setup| setup.id == id)
+        .ok_or_else(|| ApiError::bad_request("no such recommendation setup"))?;
+    if !matches!(setup.status.as_str(), "pending" | "running" | "paused") {
+        return Err(ApiError::bad_request(
+            "that recommendation setup is already settled",
+        ));
+    }
+    for step in &mut setup.steps {
+        let Some(job_id) = step.job_id.as_deref() else {
+            continue;
+        };
+        if let Ok(job) = state.db.get_download_job_public(job_id).await
+            && matches!(job.status.as_str(), "pending" | "downloading" | "paused")
+        {
+            if job.kind == "runtime-build" {
+                if let Some(build_id) = job.payload.as_deref() {
+                    state.active_builds.cancel(build_id);
+                }
+            } else {
+                state.active_downloads.cancel(job_id);
+            }
+            let _ = state.db.cancel_download_job(job_id).await;
+            step.status = "cancelled".to_owned();
+        }
+    }
+    setup.status = "cancelled".to_owned();
+    setup.updated_at = epoch_seconds();
+    recommendations::save_state(&state.data_dir, &recorded)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "cancelled": id })))
+}
+
+async fn start_setup_build(state: &AppState, request: builds::BuildRequest) -> ApiResult<String> {
+    let label = format!("Build {}", request.engine);
+    let job = state
+        .db
+        .create_queued_download_job(crate::db::QueuedDownloadJobInput {
+            repo_id: &request.repository,
+            filename: "runtime source build",
+            revision: &request.revision,
+            kind: "runtime-build",
+            payload: None,
+            label: Some(&label),
+            status: "pending",
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    let job_id = job.id.clone();
+    let db = state.db.clone();
+    let active_builds = state.active_builds.clone();
+    let build_slots = state.build_slots.clone();
+    let data_dir = state.data_dir.clone();
+    let runtime = state.runtime.clone();
+    tokio::spawn(async move {
+        let _ = db
+            .update_download_job_message(&job_id, "Waiting for the build slot")
+            .await;
+        let Ok(slot) = build_slots.acquire_owned().await else {
+            return;
+        };
+        if db
+            .get_download_job_public(&job_id)
+            .await
+            .is_ok_and(|job| job.status == "cancelled")
+        {
+            return;
+        }
+        let _ = db.start_download_job(&job_id).await;
+        let progress_db = db.clone();
+        let progress_id = job_id.clone();
+        let result = builds::run_build_with_progress(
+            &data_dir,
+            request,
+            &active_builds,
+            Box::new(move |event| {
+                let db = progress_db.clone();
+                let id = progress_id.clone();
+                if let Some(build_id) = event
+                    .result
+                    .as_ref()
+                    .and_then(|value| value.get("build_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                {
+                    tokio::spawn(async move {
+                        let _ = db.set_download_job_payload(&id, &build_id).await;
+                    });
+                } else if let Some(percent) = event.percent {
+                    tokio::spawn(async move {
+                        let _ = db
+                            .update_download_job_progress(&id, percent.round() as u64, Some(100))
+                            .await;
+                    });
+                } else if event.phase != "log"
+                    && let Some(message) = event.message
+                {
+                    tokio::spawn(async move {
+                        let _ = db.update_download_job_message(&id, &message).await;
+                    });
+                }
+            }),
+        )
+        .await;
+        match result {
+            Ok(binary) => {
+                let _ = db.complete_download_job(&job_id, "", 100).await;
+                let active = runtime.active_runtimes().await;
+                if let Some(entry) = runtimes::list(&data_dir, &active, None, false)
+                    .into_iter()
+                    .find(|entry| entry.path == binary.display().to_string())
+                {
+                    let _ = runtime.activate_runtime_entry(&entry).await;
+                }
+            }
+            Err(report) => {
+                let _ = db.fail_download_job(&job_id, &report.message).await;
+            }
+        }
+        drop(slot);
+    });
+    Ok(job.id)
+}
+
+#[derive(Debug, Deserialize)]
 struct UpdateRecommendationStateRequest {
     /// Stop mentioning changed recommendations entirely.
     #[serde(default)]
@@ -2753,22 +3161,99 @@ async fn build_runtime(
         };
     }
     let (tx, rx) = progress_channel();
+    let label = format!("Build {}", request.engine);
+    let job = match state
+        .db
+        .create_queued_download_job(crate::db::QueuedDownloadJobInput {
+            repo_id: &request.repository,
+            filename: "runtime source build",
+            revision: &request.revision,
+            kind: "runtime-build",
+            payload: None,
+            label: Some(&label),
+            status: "downloading",
+        })
+        .await
+    {
+        Ok(job) => job,
+        Err(error) => return ApiError::internal(error).into_response(),
+    };
     let data_dir = state.data_dir.clone();
+    let db = state.db.clone();
+    let progress_db = db.clone();
     let active_builds = state.active_builds.clone();
+    let build_slots = state.build_slots.clone();
     let cache_state = state.clone();
     tokio::spawn(async move {
         let progress_tx = tx.clone();
+        let job_id = job.id;
+        let progress_job_id = job_id.clone();
+        let _ = db
+            .update_download_job_message(&job_id, "Waiting for the build slot")
+            .await;
+        let Ok(slot) = build_slots.acquire_owned().await else {
+            let _ = db.fail_download_job(&job_id, "build queue is closed").await;
+            return;
+        };
+        if db
+            .get_download_job_public(&job_id)
+            .await
+            .is_ok_and(|job| job.status == "cancelled")
+        {
+            return;
+        }
+        let _ = db.start_download_job(&job_id).await;
         let result = builds::run_build_with_progress(
             &data_dir,
             request,
             &active_builds,
             Box::new(move |event| {
+                let db = progress_db.clone();
+                let job_id = progress_job_id.clone();
+                if let Some(build_id) = event
+                    .result
+                    .as_ref()
+                    .and_then(|value| value.get("build_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                {
+                    let task_db = db.clone();
+                    let task_job_id = job_id.clone();
+                    tokio::spawn(async move {
+                        let _ = task_db
+                            .set_download_job_payload(&task_job_id, &build_id)
+                            .await;
+                    });
+                } else if let Some(percent) = event.percent {
+                    let task_db = db.clone();
+                    let job_id = job_id.clone();
+                    tokio::spawn(async move {
+                        let _ = task_db
+                            .update_download_job_progress(
+                                &job_id,
+                                percent.round() as u64,
+                                Some(100),
+                            )
+                            .await;
+                    });
+                }
+                if event.phase != "log"
+                    && let Some(message) = event.message.as_deref()
+                {
+                    let task_db = db.clone();
+                    let job_id = job_id.clone();
+                    let message = message.to_owned();
+                    tokio::spawn(async move {
+                        let _ = task_db.update_download_job_message(&job_id, &message).await;
+                    });
+                }
                 push_progress(&progress_tx, event);
             }),
         )
         .await;
         match result {
             Ok(binary) => {
+                let _ = db.complete_download_job(&job_id, "", 100).await;
                 cache_state.invalidate_runtimes_cache().await;
                 push_progress(
                     &tx,
@@ -2779,6 +3264,7 @@ async fn build_runtime(
                 );
             }
             Err(report) => {
+                let _ = db.fail_download_job(&job_id, &report.message).await;
                 push_progress(
                     &tx,
                     ProgressEvent::build_failed(
@@ -2788,6 +3274,7 @@ async fn build_runtime(
                 );
             }
         }
+        drop(slot);
     });
     progress_sse(rx)
 }
@@ -2795,6 +3282,11 @@ async fn build_runtime(
 #[derive(Debug, Deserialize)]
 struct CancelBuildRequest {
     build_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CancelBuildJobRequest {
+    job_id: String,
 }
 
 async fn cancel_build(
@@ -2809,6 +3301,40 @@ async fn cancel_build(
             request.build_id
         )))
     }
+}
+
+/// Cancel a runtime build from its durable tray row.
+async fn cancel_build_job(
+    State(state): State<AppState>,
+    Json(request): Json<CancelBuildJobRequest>,
+) -> ApiResult<Json<Value>> {
+    let job = state
+        .db
+        .get_download_job_public(&request.job_id)
+        .await
+        .map_err(|_| ApiError::bad_request("no such build job"))?;
+    if job.kind != "runtime-build" {
+        return Err(ApiError::bad_request("that job is not a runtime build"));
+    }
+    if job.status == "pending" {
+        state
+            .db
+            .cancel_download_job(&request.job_id)
+            .await
+            .map_err(ApiError::internal)?;
+        return Ok(Json(
+            json!({ "cancelled": request.job_id, "queued_only": true }),
+        ));
+    }
+    let build_id = job
+        .payload
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("build is still starting; try again in a moment"))?;
+    if !state.active_builds.cancel(build_id) {
+        return Err(ApiError::bad_request("that build is no longer running"));
+    }
+    let _ = state.db.cancel_download_job(&request.job_id).await;
+    Ok(Json(json!({ "cancelled": request.job_id })))
 }
 
 fn format_build_failure(report: &builds::BuildFailureReport) -> String {
@@ -2834,34 +3360,44 @@ async fn download_model(
     Json(request): Json<download::DownloadRequest>,
 ) -> Response {
     if !query.stream {
-        let job_id = state
-            .db
-            .create_download_job(&request.repo_id, &request.filename, &request.revision)
-            .await
-            .ok()
-            .map(|entry| entry.id);
-        let cancel = job_id
-            .as_ref()
-            .map(|id| state.active_downloads.register(id));
-        let job_handle = job_id.as_ref().map(|id| (state.db.clone(), id.clone()));
+        // Keep the original request on the job row even for the older
+        // synchronous endpoint. The download tray can pause these jobs, and
+        // resume needs the engine as well as the repository and filename.
+        let tracked = match track_resumable_download(
+            &state,
+            &crate::download_queue::QueuedWork::Gguf(request.clone()),
+        )
+        .await
+        {
+            Ok(tracked) => tracked,
+            Err(error) => return error.into_response(),
+        };
+        let (job_id, cancel) = tracked;
         let result = download::download_gguf_with_progress(
             &state.http,
             &state.data_dir,
             request,
             Box::new(|_| {}),
-            job_handle,
-            cancel.clone(),
+            Some((state.db.clone(), job_id.clone())),
+            Some(cancel),
         )
         .await;
-        if let Some(id) = job_id.as_deref() {
-            state.active_downloads.finish(id);
-        }
-        if let (Some(job_id), Err(error)) = (job_id.as_deref(), &result) {
-            let message = error.to_string();
-            if message.contains("cancelled") {
-                let _ = state.db.cancel_download_job(job_id).await;
-            } else {
-                let _ = state.db.fail_download_job(job_id, &message).await;
+        let stop = state.active_downloads.stop_reason(&job_id);
+        state.active_downloads.finish(&job_id);
+        if let Err(error) = &result {
+            match stop {
+                Some(crate::active_downloads::StopReason::Pause) => {
+                    let _ = state.db.pause_download_job(&job_id).await;
+                }
+                Some(crate::active_downloads::StopReason::Cancel) => {
+                    let _ = state.db.cancel_download_job(&job_id).await;
+                }
+                None => {
+                    let _ = state
+                        .db
+                        .fail_download_job(&job_id, &error.to_string())
+                        .await;
+                }
             }
         }
         return match result {
@@ -2879,43 +3415,42 @@ async fn download_model(
     let db = state.db.clone();
     let active_downloads = state.active_downloads.clone();
     let cache_state = state.clone();
-    let repo_id = request.repo_id.clone();
-    let filename = request.filename.clone();
-    let revision = request.revision.clone();
+    let tracked = match track_resumable_download(
+        &state,
+        &crate::download_queue::QueuedWork::Gguf(request.clone()),
+    )
+    .await
+    {
+        Ok(tracked) => tracked,
+        Err(error) => return error.into_response(),
+    };
     tokio::spawn(async move {
         let progress_tx = tx.clone();
-        let job_id = db
-            .create_download_job(&repo_id, &filename, &revision)
-            .await
-            .ok()
-            .map(|entry| entry.id);
-        let cancel = job_id.as_ref().map(|id| active_downloads.register(id));
-        let job_handle = job_id.as_ref().map(|id| (db.clone(), id.clone()));
+        let (job_id, cancel) = tracked;
         let result = download::download_gguf_with_progress(
             &http,
             &data_dir,
-            download::DownloadRequest {
-                repo_id,
-                filename,
-                revision,
-                engine: "llama.cpp".into(),
-            },
+            request,
             Box::new(move |event| {
                 push_progress(&progress_tx, event);
             }),
-            job_handle,
-            cancel,
+            Some((db.clone(), job_id.clone())),
+            Some(cancel),
         )
         .await;
-        if let Some(id) = job_id.as_deref() {
-            active_downloads.finish(id);
-        }
-        if let (Some(job_id), Err(error)) = (job_id.as_deref(), &result) {
-            let message = error.to_string();
-            if message.contains("cancelled") {
-                let _ = db.cancel_download_job(job_id).await;
-            } else {
-                let _ = db.fail_download_job(job_id, &message).await;
+        let stop = active_downloads.stop_reason(&job_id);
+        active_downloads.finish(&job_id);
+        if let Err(error) = &result {
+            match stop {
+                Some(crate::active_downloads::StopReason::Pause) => {
+                    let _ = db.pause_download_job(&job_id).await;
+                }
+                Some(crate::active_downloads::StopReason::Cancel) => {
+                    let _ = db.cancel_download_job(&job_id).await;
+                }
+                None => {
+                    let _ = db.fail_download_job(&job_id, &error.to_string()).await;
+                }
             }
         }
         match result {
@@ -2963,7 +3498,7 @@ async fn download_mlx_model(
     let (tx, rx) = progress_channel();
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
-    let tracked = match track_streamed_download(
+    let tracked = match track_resumable_download(
         &state,
         &crate::download_queue::QueuedWork::Mlx(request.clone()),
     )
@@ -3534,7 +4069,7 @@ async fn download_streaming_asr_model(
     let (tx, rx) = progress_channel();
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
-    let tracked = match track_streamed_download(
+    let tracked = match track_resumable_download(
         &state,
         &crate::download_queue::QueuedWork::StreamingAsr(request.clone()),
     )
@@ -3620,7 +4155,7 @@ async fn download_personaplex_model(
     let (tx, rx) = progress_channel();
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
-    let tracked = match track_streamed_download(
+    let tracked = match track_resumable_download(
         &state,
         &crate::download_queue::QueuedWork::Personaplex(request.clone()),
     )
@@ -3829,7 +4364,7 @@ async fn install_sdcpp_bundle(
     let (tx, rx) = progress_channel();
     let http = state.http.clone();
     let data_dir = state.data_dir.clone();
-    let tracked = match track_streamed_download(
+    let tracked = match track_resumable_download(
         &state,
         &crate::download_queue::QueuedWork::SdcppBundle(bundle.clone()),
     )
@@ -5023,6 +5558,7 @@ mod tests {
             http,
             data_dir: data_dir.to_path_buf(),
             active_builds: Arc::new(builds::ActiveBuilds::new()),
+            build_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             active_downloads,
             download_queue,
             runtimes_cache: Arc::new(Mutex::new(None)),

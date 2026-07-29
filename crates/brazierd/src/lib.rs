@@ -30,6 +30,9 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub data_dir: PathBuf,
     pub active_builds: Arc<builds::ActiveBuilds>,
+    /// Source compilation is deliberately serialized: concurrent C++ builds
+    /// compete for every scarce local resource at once.
+    pub build_slots: Arc<tokio::sync::Semaphore>,
     pub active_downloads: Arc<ActiveDownloads>,
     pub download_queue: DownloadQueue,
     pub runtimes_cache: Arc<Mutex<Option<Vec<RuntimeEntry>>>>,

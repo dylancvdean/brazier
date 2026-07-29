@@ -423,6 +423,40 @@ pub struct RecommendationState {
     /// declined offer is not made again for the same model.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dismissed: Vec<String>,
+    /// Durable setup runs created by the welcome/recommendations flow. Keeping
+    /// this beside the installed-state record means leaving the screen or
+    /// restarting the daemon cannot turn a multi-step install into an orphaned
+    /// collection of downloads.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub setups: Vec<RecommendationSetup>,
+}
+
+/// A server-owned recommendation install workflow.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecommendationSetup {
+    pub id: String,
+    pub recommendation_id: String,
+    pub categories: Vec<String>,
+    /// `pending`, `running`, `paused`, `completed`, `failed`, or `cancelled`.
+    pub status: String,
+    pub steps: Vec<RecommendationSetupStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One durable child operation of a recommendation setup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecommendationSetupStep {
+    pub label: String,
+    /// A serialized queued-work request, or `runtime-build` for the optional
+    /// source-build/activation step.
+    pub kind: String,
+    pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    pub status: String,
 }
 
 pub fn state_path(data_dir: &Path) -> PathBuf {

@@ -125,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
         http,
         data_dir: data_dir.clone(),
         active_builds: Arc::new(builds::ActiveBuilds::new()),
+        build_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         active_downloads,
         download_queue,
         runtimes_cache: Arc::new(Mutex::new(None)),

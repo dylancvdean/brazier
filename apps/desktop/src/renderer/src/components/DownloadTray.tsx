@@ -1,10 +1,12 @@
-import { ChevronDown, ChevronRight, Download, Pause, Play, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, Download, Hammer, Pause, Play, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import {
   cancelDownloadJob,
+  cancelBuildJob,
   dismissDownloadJob,
   formatBytes,
   listDownloadJobs,
+  listRecommendationSetups,
   pauseDownloadJob,
   resumeDownloadJob,
   type DownloadJob
@@ -24,6 +26,10 @@ function jobPercent(job: DownloadJob): number | null {
   return Math.min(100, (job.bytes_downloaded / job.total_bytes) * 100)
 }
 
+function isRuntimeBuild(job: DownloadJob): boolean {
+  return job.kind === 'runtime-build'
+}
+
 /** Bytes per second, smoothed across polls; see {@link useTransferRates}. */
 type RateSample = { bytes: number; at: number; rate: number | null }
 
@@ -38,6 +44,12 @@ function formatEta(seconds: number): string {
 }
 
 function jobDetail(job: DownloadJob, rate: number | null): string {
+  if (isRuntimeBuild(job)) {
+    if (job.status === 'failed') return job.error ?? 'Build failed'
+    if (job.status === 'cancelled') return 'Cancelled'
+    if (job.status === 'completed') return 'Build complete'
+    return job.error ?? 'Preparing source build…'
+  }
   if (job.status === 'paused') return 'Paused — resumes where it left off'
   if (job.status === 'pending') return 'Waiting in queue'
   if (job.status === 'failed') return job.error ?? 'Failed'
@@ -106,7 +118,8 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
 
   async function refresh(): Promise<void> {
     try {
-      setJobs(await listDownloadJobs())
+      const [next] = await Promise.all([listDownloadJobs(), listRecommendationSetups()])
+      setJobs(next)
     } catch {
       // Daemon may still be starting; the next tick retries.
     }
@@ -160,7 +173,7 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
       >
         {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
         <Download size={13} />
-        <strong>Downloads</strong>
+        <strong>Activity</strong>
         <span className="download-tray-count">
           {active > 0 ? `${active} running` : 'idle'}
           {waiting > 0 ? ` · ${waiting} queued` : ''}
@@ -175,6 +188,7 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
             const pending = job.status === 'pending'
             const paused = job.status === 'paused'
             const finished = !OPEN_STATUSES.has(job.status)
+            const runtimeBuild = isRuntimeBuild(job)
             return (
               <div className={`download-tray-item ${job.status}`} key={job.id}>
                 <div className="download-tray-title">
@@ -196,7 +210,7 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
                 <div className="download-tray-row">
                   <span className="download-tray-detail">{jobDetail(job, rates[job.id] ?? null)}</span>
                   <div className="download-tray-actions">
-                    {(running || pending) && (
+                    {!runtimeBuild && (running || pending) && (
                       <button
                         title="Pause"
                         disabled={busy === job.id}
@@ -205,7 +219,7 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
                         <Pause size={12} />
                       </button>
                     )}
-                    {(paused || job.status === 'failed') && (
+                    {!runtimeBuild && (paused || job.status === 'failed') && (
                       <button
                         title="Resume"
                         disabled={busy === job.id}
@@ -218,10 +232,17 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
                       title={finished ? 'Dismiss' : 'Cancel'}
                       disabled={busy === job.id}
                       onClick={() =>
-                        void act(job, finished ? dismissDownloadJob : cancelDownloadJob)
+                        void act(
+                          job,
+                          finished
+                            ? dismissDownloadJob
+                            : runtimeBuild
+                              ? cancelBuildJob
+                              : cancelDownloadJob
+                        )
                       }
                     >
-                      <X size={12} />
+                      {runtimeBuild && !finished ? <Hammer size={12} /> : <X size={12} />}
                     </button>
                   </div>
                 </div>

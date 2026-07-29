@@ -19,7 +19,7 @@ import {
   LoaderCircle,
   Sparkles
 } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   downloadModel,
@@ -30,9 +30,12 @@ import {
   installSdcppBundle,
   listRuntimes,
   recordRecommendationInstall,
+  listRecommendationSetups,
+  startRecommendationSetup,
   type BundleRecommendation,
   type ProgressEvent,
   type RecommendationCategory,
+  type RecommendationSetup,
   type Recommendations,
   type RepoRecommendation,
   type VoiceRecommendationModel
@@ -161,6 +164,26 @@ export function RecommendedModels(props: Props): React.JSX.Element {
   const { recommendations, onInstalled, onError } = props
   const [states, setStates] = useState<Record<string, InstallState>>({})
   const [includeCompanions, setIncludeCompanions] = useState<Record<string, boolean>>({})
+  const [setups, setSetups] = useState<RecommendationSetup[]>([])
+  const announcedSetups = useRef(new Set<string>())
+
+  useEffect(() => {
+    const refresh = (): void => {
+      void listRecommendationSetups().then(setSetups).catch(() => {})
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 1500)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    for (const setup of setups) {
+      if (setup.status === 'completed' && !announcedSetups.current.has(setup.id)) {
+        announcedSetups.current.add(setup.id)
+        onInstalled?.()
+      }
+    }
+  }, [setups, onInstalled])
 
   const setState = useCallback((key: string, patch: Partial<InstallState>) => {
     setStates((current) => ({ ...current, [key]: { ...(current[key] ?? IDLE), ...patch } }))
@@ -215,7 +238,23 @@ export function RecommendedModels(props: Props): React.JSX.Element {
       (entryCategory) =>
         recommendations.state.installed[entryCategory]?.recommendation_id === entry.id
     )
-    const state = recordedForAll ? { ...(states[key] ?? IDLE), done: true } : states[key] ?? IDLE
+    const setup = setups.find(
+      (candidate) =>
+        candidate.recommendation_id === entry.id &&
+        categories.every((category) => candidate.categories.includes(category)) &&
+        ['pending', 'running', 'paused'].includes(candidate.status)
+    )
+    const state = recordedForAll
+      ? { ...(states[key] ?? IDLE), done: true }
+      : setup
+        ? {
+            ...(states[key] ?? IDLE),
+            busy: true,
+            progress: setup.status === 'paused'
+              ? { phase: 'paused', message: 'Paused — resume in Activity' }
+              : { phase: 'setup', message: 'Installing in Activity…' }
+          }
+        : states[key] ?? IDLE
     const files = entry.files ?? []
     const notes: Array<{ tone: 'warn' | 'plain'; text: string }> = []
     if (entry.substituted) notes.push({ tone: 'plain', text: entry.substituted })
@@ -288,48 +327,33 @@ export function RecommendedModels(props: Props): React.JSX.Element {
               label="Install"
               disabled={Boolean(entry.unresolved) || files.length === 0}
               onClick={() =>
-                void run(key, categories, entry.id, async (onProgress) => {
-                  let modelId: string | undefined
-                  // Every shard, in order — llama.cpp needs the whole set before
-                  // it can load the first one.
-                  for (const file of files) {
-                    const result = await downloadModel(entry.repo_id, file, onProgress)
-                    modelId ??= result.model_id
+                void (async () => {
+                  setState(key, { busy: true, progress: null })
+                  onError?.(null)
+                  try {
+                    await startRecommendationSetup({
+                      recommendation_id: entry.id,
+                      categories,
+                      required_bytes: entry.bytes ?? 0,
+                      build: entry.runtime_build
+                        ? { ...entry.runtime_build, jobs: 0 }
+                        : undefined,
+                      works: [...files, ...(includeCompanion ? companions : [])].map((filename) => ({
+                        kind: 'gguf' as const,
+                        repo_id: entry.repo_id,
+                        filename,
+                        revision: 'main',
+                        engine: 'llama.cpp' as const
+                      }))
+                    })
+                    // Activity owns the rest of the work; the card is no
+                    // longer allowed to create a second local sequence.
+                    setState(key, { busy: false })
+                  } catch (cause) {
+                    setState(key, { busy: false })
+                    onError?.(errorText(cause))
                   }
-                  // Companion files (vision projectors, etc.) go into the same
-                  // directory; llama.cpp auto-attaches any mmproj it finds there.
-                  if (includeCompanion) {
-                    for (const file of companions) {
-                      await downloadModel(entry.repo_id, file, onProgress)
-                    }
-                  }
-                  if (entry.runtime_build) {
-                    const existing = (await listRuntimes()).data.find(
-                      (runtime) =>
-                        runtime.kind === 'source' &&
-                        runtime.engine === entry.runtime_build?.engine &&
-                        runtime.repository === entry.runtime_build?.repository
-                    )
-                    if (existing) {
-                      await activateRuntime(existing.id)
-                    } else {
-                      const built = await buildRuntime(
-                        entry.runtime_build.engine,
-                        entry.runtime_build.repository,
-                        entry.runtime_build.revision,
-                        entry.runtime_build.target,
-                        0,
-                        onProgress
-                      )
-                      const runtime = (await listRuntimes()).data.find(
-                        (candidate) => candidate.path === built.binary
-                      )
-                      if (!runtime) throw new Error('PrismML llama.cpp built but could not be registered.')
-                      await activateRuntime(runtime.id)
-                    }
-                  }
-                  return modelId
-                })
+                })()
               }
             />
           </div>

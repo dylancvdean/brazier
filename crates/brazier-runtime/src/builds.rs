@@ -27,7 +27,7 @@ use crate::{
     toolchain_hints::{self, ToolchainPackage},
 };
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildRequest {
     pub engine: String,
     pub repository: String,

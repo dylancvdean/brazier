@@ -44,6 +44,7 @@ import {
   listConversations,
   listMessages,
   listModels,
+  listRecommendationSetups,
   listRuntimes,
   listRunSnapshots,
   listTools,
@@ -61,6 +62,7 @@ import {
   type RuntimeEntry,
   type RuntimeForkHint,
   type RuntimeSettings,
+  type RecommendationSetup,
   type ToolCallRecord,
   recordRun,
   saveRuntimeSettings,
@@ -452,6 +454,14 @@ export function App(): React.JSX.Element {
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
   const [showWelcome, setShowWelcome] = useState<boolean | null>(null)
   const [recommendationSwaps, setRecommendationSwaps] = useState<PendingSwap[]>([])
+  const [recommendationSetups, setRecommendationSetups] = useState<RecommendationSetup[]>([])
+
+  useEffect(() => {
+    const refresh = (): void => void listRecommendationSetups().then(setRecommendationSetups).catch(() => {})
+    refresh()
+    const timer = window.setInterval(refresh, 1500)
+    return () => window.clearInterval(timer)
+  }, [])
   const [appMode, setAppMode] = useState<'chat' | 'agent' | 'generate' | 'voice'>('chat')
   const [realtimeVoiceAvailable, setRealtimeVoiceAvailable] = useState(false)
   // Generate and Voice pick from their own model families; the top bar shows
@@ -2231,6 +2241,21 @@ export function App(): React.JSX.Element {
           onSaved={setModelProfiles}
           onClose={() => setConfiguringModel(null)}
         />
+      )}
+      {recommendationSetups.some((setup) => ['pending', 'running', 'paused', 'failed'].includes(setup.status)) && (
+        <aside className="recommendation-swaps" role="status">
+          <div>
+            <Sparkles size={15} />
+            <span>
+              {recommendationSetups.some((setup) => setup.status === 'failed')
+                ? 'A recommended setup needs attention. Open Activity or Recommended models to review it.'
+                : 'Recommended setup is continuing in Activity. You can keep using Brazier while it finishes.'}
+            </span>
+          </div>
+          <button type="button" className="chip-button" onClick={() => { setManageSection('recommended'); setManageOpen(true) }}>
+            Review
+          </button>
+        </aside>
       )}
       {recommendationSwaps.length > 0 && (
         <aside className="recommendation-swap-notice" aria-live="polite">

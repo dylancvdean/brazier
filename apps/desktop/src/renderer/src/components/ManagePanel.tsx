@@ -25,6 +25,7 @@ import {
   activateRuntime,
   buildRuntime,
   cancelBuild,
+  cancelBuildJob,
   cancelDownloadJob,
   dismissDownloadJob,
   dismissFinishedDownloadJobs,
@@ -1373,10 +1374,14 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     }
   }
 
-  async function cancelJob(jobId: string): Promise<void> {
+  async function cancelJob(job: DownloadJob): Promise<void> {
     props.onError(null)
     try {
-      await cancelDownloadJob(jobId)
+      if (job.kind === 'runtime-build') {
+        await cancelBuildJob(job.id)
+      } else {
+        await cancelDownloadJob(job.id)
+      }
       setDownloadJobs(await listDownloadJobs())
     } catch (cause) {
       props.onError(errorText(cause))
@@ -1584,7 +1589,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                   {job.error && <span className="run-error-text">{job.error}</span>}
                 </div>
                 <div className="download-job-actions">
-                  {job.status === 'failed' && (
+                  {job.status === 'failed' && job.kind !== 'runtime-build' && (
                     <button
                       type="button"
                       className="chip-button subtle"
@@ -1598,7 +1603,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                     <button
                       type="button"
                       className="chip-button subtle"
-                      onClick={() => void cancelJob(job.id)}
+                      onClick={() => void cancelJob(job)}
                     >
                       Cancel
                     </button>
