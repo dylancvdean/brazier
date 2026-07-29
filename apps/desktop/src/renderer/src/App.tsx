@@ -279,6 +279,17 @@ async function fileToAttachment(file: File): Promise<Attachment> {
   }
 }
 
+function isDocumentFile(file: File): boolean {
+  if (
+    ['application/pdf', 'application/json', 'application/xml', 'text/plain', 'text/markdown', 'text/csv', 'text/html'].includes(file.type) ||
+    file.type.startsWith('text/')
+  ) {
+    return true
+  }
+  const extension = file.name.split('.').pop()?.toLowerCase()
+  return ['pdf', 'txt', 'md', 'csv', 'json', 'xml', 'html', 'htm'].includes(extension ?? '')
+}
+
 function attachmentPart(attachment: Attachment): ContentPart {
   return {
     type: 'brazier_blob',
@@ -1159,7 +1170,7 @@ export function App(): React.JSX.Element {
         if (file.type.startsWith('image/')) return canAttachImage
         if (file.type.startsWith('audio/')) return canAttachAudio
         if (file.type.startsWith('video/')) return canAttachVideo
-        return false
+        return isDocumentFile(file)
       })
       if (accepted.length === 0 && files.length > 0) {
         const reasons: string[] = []
@@ -1171,7 +1182,7 @@ export function App(): React.JSX.Element {
               : 'batch ASR (whisper.cpp + Whisper model) or a native-audio chat model'
           )
         if (!canAttachVideo) reasons.push('ffmpeg + vision model for video')
-        setError(`Cannot attach that media yet. Need: ${reasons.join('; ')}.`)
+        setError(`Cannot attach that file yet. Need: ${reasons.join('; ')}.`)
         event.target.value = ''
         return
       }
@@ -2077,7 +2088,8 @@ export function App(): React.JSX.Element {
                 accept={[
                   canAttachImage ? 'image/*' : null,
                   canAttachAudio ? 'audio/*' : null,
-                  canAttachVideo ? 'video/*' : null
+                  canAttachVideo ? 'video/*' : null,
+                  'application/pdf,text/plain,text/markdown,text/csv,application/json,application/xml,.pdf,.txt,.md,.csv,.json,.xml'
                 ]
                   .filter(Boolean)
                   .join(',') || 'image/*'}

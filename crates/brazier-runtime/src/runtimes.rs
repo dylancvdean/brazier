@@ -36,6 +36,48 @@ fn llama_managed_label(target: &str) -> String {
     format!("llama.cpp · {}", llama_target_label(target))
 }
 
+fn default_llama_managed_label() -> String {
+    // The macOS release bundle contains Metal support in the same install
+    // location as the CPU fallback. Calling it "CPU" made a correctly
+    // installed Apple-Silicon runtime look like the wrong download.
+    #[cfg(target_os = "macos")]
+    {
+        llama_managed_label("metal")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        llama_managed_label("cpu")
+    }
+}
+
+fn source_label(record: &builds::BuildRecord) -> String {
+    let fork = crate::fork_hints::normalize_github_repo_url(&record.repository)
+        .and_then(|url| {
+            let mut parts = url.rsplit('/');
+            let repository = parts.next()?;
+            let owner = parts.next()?;
+            Some(if repository.eq_ignore_ascii_case("llama.cpp") {
+                format!("{owner} llama.cpp")
+            } else {
+                repository.to_owned()
+            })
+        })
+        .filter(|name| !name.eq_ignore_ascii_case("ggml-org llama.cpp"));
+    match fork {
+        Some(fork) => format!(
+            "llama.cpp · {} · Source · {} · {}",
+            fork,
+            record.revision,
+            build_stamp(record)
+        ),
+        None => format!(
+            "llama.cpp · Source · {} · {}",
+            record.revision,
+            build_stamp(record)
+        ),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ActiveRuntimes {
     pub llama: Option<PathBuf>,
@@ -175,8 +217,15 @@ pub fn list(
             id: "managed".to_owned(),
             engine: ENGINE.to_owned(),
             kind: "managed".to_owned(),
-            label: llama_managed_label("cpu"),
-            target: Some("cpu".to_owned()),
+            label: default_llama_managed_label(),
+            target: Some(
+                if cfg!(target_os = "macos") {
+                    "metal"
+                } else {
+                    "cpu"
+                }
+                .to_owned(),
+            ),
             version: read_version(&engine_dir),
             repository: None,
             path: default_binary.display().to_string(),
@@ -216,11 +265,7 @@ pub fn list(
             id: format!("source-{build_id}"),
             engine: ENGINE.to_owned(),
             kind: "source".to_owned(),
-            label: format!(
-                "llama.cpp · Source · {} · {}",
-                record.revision,
-                build_stamp(&record)
-            ),
+            label: source_label(&record),
             target: Some(record.target.clone()),
             version: Some(record.revision.clone()),
             repository: Some(record.repository.clone()),
@@ -271,8 +316,24 @@ pub fn list(
             id: "sdcpp-managed".to_owned(),
             engine: crate::sdcpp::ENGINE.to_owned(),
             kind: "managed".to_owned(),
-            label: "stable-diffusion.cpp · CPU".to_owned(),
-            target: Some("cpu".to_owned()),
+            // Like llama.cpp, the macOS release has Metal enabled in the
+            // default install location alongside its CPU fallback.
+            label: format!(
+                "stable-diffusion.cpp · {}",
+                if cfg!(target_os = "macos") {
+                    "Metal"
+                } else {
+                    "CPU"
+                }
+            ),
+            target: Some(
+                if cfg!(target_os = "macos") {
+                    "metal"
+                } else {
+                    "cpu"
+                }
+                .to_owned(),
+            ),
             version: read_version(&sdcpp_engine_dir),
             repository: None,
             path: sdcpp_default.display().to_string(),
@@ -1055,6 +1116,20 @@ mod tests {
             }),
             "undated"
         );
+    }
+
+    #[test]
+    fn source_labels_name_custom_llama_forks() {
+        let record = builds::BuildRecord {
+            engine: ENGINE.into(),
+            repository: "https://github.com/PrismML-Eng/llama.cpp".into(),
+            revision: "main".into(),
+            target: "metal".into(),
+            created_at: "0".into(),
+            binary: "/bin/llama-server".into(),
+            commit: None,
+        };
+        assert!(source_label(&record).contains("PrismML-Eng"));
     }
 
     #[test]

@@ -8,6 +8,22 @@ use sha2::{Digest, Sha256};
 pub const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 pub const MAX_AUDIO_BYTES: u64 = 20 * 1024 * 1024;
 pub const MAX_VIDEO_BYTES: u64 = 50 * 1024 * 1024;
+pub const MAX_DOCUMENT_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Files we can retain as chat documents. Text-based formats are provided to
+/// the model directly; PDFs are handled by the document-preparation pipeline.
+pub fn is_document_mime(mime_type: &str) -> bool {
+    matches!(
+        mime_type,
+        "application/pdf"
+            | "application/json"
+            | "application/xml"
+            | "text/plain"
+            | "text/markdown"
+            | "text/csv"
+            | "text/html"
+    ) || mime_type.starts_with("text/")
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StoredBlob {
@@ -41,8 +57,12 @@ fn max_bytes_for_mime(mime_type: &str) -> anyhow::Result<u64> {
         Ok(MAX_AUDIO_BYTES)
     } else if mime_type.starts_with("video/") {
         Ok(MAX_VIDEO_BYTES)
+    } else if is_document_mime(mime_type) {
+        Ok(MAX_DOCUMENT_BYTES)
     } else {
-        anyhow::bail!("unsupported attachment type `{mime_type}` (images, audio, and video only)")
+        anyhow::bail!(
+            "unsupported attachment type `{mime_type}` (images, audio, video, PDFs, and text documents are supported)"
+        )
     }
 }
 
@@ -214,6 +234,24 @@ mod tests {
             mime_type_from_bytes(b"\0\0\0\x18ftypisom").as_deref(),
             Some("video/mp4")
         );
+    }
+
+    #[tokio::test]
+    async fn stores_pdf_and_text_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = store_bytes(
+            dir.path(),
+            b"%PDF-1.7",
+            "application/pdf",
+            Some("notes.pdf"),
+        )
+        .await
+        .unwrap();
+        let text = store_bytes(dir.path(), b"hello", "text/markdown", Some("notes.md"))
+            .await
+            .unwrap();
+        assert_eq!(pdf.mime_type, "application/pdf");
+        assert_eq!(text.mime_type, "text/markdown");
     }
 
     #[tokio::test]

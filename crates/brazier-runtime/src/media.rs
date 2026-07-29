@@ -183,6 +183,13 @@ pub async fn prepare_messages(
                 emit("extract_frames", &format!("Sampling frames from {name}…"));
                 let prepared = prepare_video(ctx, sha256, mime, name, progress.as_ref()).await?;
                 next_parts.extend(prepared);
+            } else if blob_store::is_document_mime(mime) {
+                emit("read_document", &format!("Reading document {name}…"));
+                let text = document_text_from_blob(ctx.data_dir, sha256, mime, name).await?;
+                next_parts.push(json!({
+                    "type": "text",
+                    "text": format!("[Contents of {name}]\n{text}")
+                }));
             } else {
                 anyhow::bail!("unsupported attachment type `{mime}`");
             }
@@ -190,6 +197,40 @@ pub async fn prepare_messages(
         message.content = Value::Array(next_parts);
     }
     Ok(())
+}
+
+const MAX_DOCUMENT_TEXT_BYTES: usize = 1_000_000;
+
+async fn document_text_from_blob(
+    data_dir: &Path,
+    sha256: &str,
+    mime: &str,
+    name: &str,
+) -> anyhow::Result<String> {
+    if mime == "application/pdf" {
+        let pdftotext = crate::toolchain_hints::resolve_command("pdftotext").context(
+            "PDF attachments require the `pdftotext` utility. Install Poppler (for example `brew install poppler`, `apt install poppler-utils`, or `winget install oschwartz10612.Poppler`) and restart Brazier.",
+        )?;
+        let path = blob_store::blob_path(data_dir, sha256)?;
+        let path_string = path.display().to_string();
+        let output = Command::new(pdftotext)
+            .args(["-layout", &path_string, "-"])
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .with_context(|| format!("extract text from PDF {name}"))?;
+        anyhow::ensure!(
+            output.status.success(),
+            "could not read text from PDF {name}"
+        );
+        return String::from_utf8(output.stdout).context("PDF text was not UTF-8");
+    }
+    let (bytes, _) = blob_store::read_blob(data_dir, sha256).await?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_DOCUMENT_TEXT_BYTES,
+        "document `{name}` is too large to include in one chat message (limit is 1 MB of text)"
+    );
+    String::from_utf8(bytes).with_context(|| format!("document `{name}` is not UTF-8 text"))
 }
 
 /// Model-ready content parts for media a tool just produced.
