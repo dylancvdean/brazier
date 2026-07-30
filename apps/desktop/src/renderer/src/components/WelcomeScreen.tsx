@@ -267,8 +267,8 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         </p>
         <h1>Welcome to Brazier</h1>
         <p className="first-run-lede">
-          A private workbench for local models. Before you download weights, make sure this machine
-          has the tools each engine needs.
+          A private workbench for local models. You can start with a managed runtime and a model;
+          these optional tools only matter when you choose a feature that needs them.
         </p>
 
         <div className="first-run-platform">
@@ -286,7 +286,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
 
         <div className="first-run-section-head">
           <h2>
-            <Wrench size={15} /> System checklist
+            <Wrench size={15} /> Optional build tools
           </h2>
           <button
             type="button"
@@ -309,10 +309,10 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         ) : (
           <>
             <p className="first-run-score">
-              {readyCount}/{total} ready
+              {readyCount}/{total} available
               {missing.length > 0
-                ? ` · ${missing.length} to install for full coverage`
-                : ' · you can use every current engine path'}
+                ? ` · ${missing.length} unlock additional source builds or media features`
+                : ' · every optional integration is available'}
             </p>
             <ul className="welcome-checklist">
               {(toolchain?.tools ?? []).map((tool) => (

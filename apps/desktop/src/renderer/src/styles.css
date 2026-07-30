@@ -1001,7 +1001,7 @@ code {
 .first-run {
   min-height: 100vh;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   padding: 48px 20px 64px;
   overflow-y: auto;
@@ -1011,7 +1011,7 @@ code {
 }
 
 .first-run-card {
-  width: min(640px, 100%);
+  width: min(820px, 100%);
   padding: 36px 32px 28px;
   border: 1px solid #232323;
   border-radius: 18px;
@@ -1330,9 +1330,19 @@ code {
   list-style: none;
   margin: 0 0 22px;
   padding: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+@media (max-width: 680px) {
+  .first-run {
+    align-items: flex-start;
+  }
+
+  .welcome-checklist {
+    grid-template-columns: 1fr;
+  }
 }
 
 .welcome-check {
@@ -1412,6 +1422,33 @@ code {
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* The first-run tools are advisory. Keep their scan readable without making a
+   normal laptop-sized window scroll past the primary action. */
+@media (min-height: 760px) {
+  .first-run {
+    padding: 24px 20px;
+    align-items: center;
+  }
+
+  .first-run-card {
+    padding: 24px 28px 20px;
+  }
+
+  .welcome-logo {
+    width: 44px;
+    height: 44px;
+    margin-bottom: 10px;
+    border-radius: 14px;
+  }
+
+  .first-run-lede { margin: 8px auto 14px; }
+  .first-run-platform { margin-bottom: 14px; padding: 10px 12px; }
+  .welcome-checklist { gap: 5px; margin-bottom: 14px; }
+  .welcome-check { padding: 8px 10px; }
+  .welcome-check-body p { line-height: 1.35; }
+  .welcome-hint { margin-top: 5px; padding: 5px 8px; }
 }
 
 .first-run-next {

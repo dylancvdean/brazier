@@ -119,6 +119,7 @@ type BuildEngine =
   | 'llama.cpp'
   | 'mlx-lm'
   | 'mlx-vlm'
+  | 'vllm'
   | 'whisper.cpp'
   | 'streaming-asr'
   | 'stable-diffusion.cpp'
@@ -151,6 +152,7 @@ const DISCOVER_ENGINE_LABELS: Record<DiscoverEngine, string> = {
 /** Labels for build offers (includes engines that are not download categories). */
 const BUILD_ENGINE_LABELS: Record<BuildEngine, string> = {
   ...DISCOVER_ENGINE_LABELS,
+  vllm: 'Language · vLLM (experimental)',
   'personaplex-mlx': 'Voice · PersonaPlex MLX',
   whisperkit: 'ASR · WhisperKit'
 }
@@ -174,6 +176,10 @@ const BUILD_ENGINE_DEFAULTS: Record<
   },
   'mlx-vlm': {
     repository: 'https://github.com/Blaizzy/mlx-vlm',
+    revision: 'main'
+  },
+  vllm: {
+    repository: 'https://github.com/vllm-project/vllm',
     revision: 'main'
   },
   'whisper.cpp': {
@@ -2305,7 +2311,7 @@ type RuntimeTab = 'language' | 'speech' | 'media'
 
 /** Engines grouped by modality, mirroring the main UI's Chat/Voice/Generate split. */
 const RUNTIME_TAB_ENGINES: Record<RuntimeTab, string[]> = {
-  language: ['llama.cpp', 'mlx-lm', 'mlx-vlm'],
+  language: ['llama.cpp', 'mlx-lm', 'mlx-vlm', 'vllm'],
   speech: ['whisper.cpp', 'whisperkit', 'streaming-asr', 'personaplex', 'personaplex-mlx'],
   media: ['stable-diffusion.cpp']
 }
@@ -2321,6 +2327,7 @@ const RUNTIME_TABS: ReadonlyArray<readonly [RuntimeTab, string]> = [
 const BUILD_ENGINE_PLATFORMS: Partial<Record<BuildEngine, string[]>> = {
   'mlx-lm': ['macos-arm64'],
   'mlx-vlm': ['macos-arm64'],
+  vllm: ['linux-x64', 'linux-arm64', 'macos-arm64'],
   'streaming-asr': ['macos-arm64', 'macos-x64', 'linux-x64', 'linux-arm64'],
   'stable-diffusion.cpp': [
     'linux-x64',
@@ -2409,6 +2416,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     const candidates: BuildEngine[] = [
       'mlx-lm',
       'mlx-vlm',
+      'vllm',
       'streaming-asr',
       'stable-diffusion.cpp',
       'personaplex',
@@ -2461,7 +2469,14 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   function applyBuildEngine(engine: BuildEngine, repositoryOverride?: string): void {
     const defaults = BUILD_ENGINE_DEFAULTS[engine]
     setBuildEngine(engine)
-    setRepository(repositoryOverride ?? defaults.repository)
+    // vLLM's macOS CPU backend is intentionally not offered: Apple Silicon
+    // builds use the MLX-backed vLLM-Metal plugin, which installs vLLM core and
+    // its matching dependencies into the same isolated environment.
+    const platformDefault =
+      engine === 'vllm' && isAppleSilicon
+        ? 'https://github.com/vllm-project/vllm-metal'
+        : defaults.repository
+    setRepository(repositoryOverride ?? platformDefault)
     setRevision(defaults.revision)
   }
 
@@ -2674,6 +2689,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const isPythonBuild =
     buildEngine === 'mlx-lm' ||
     buildEngine === 'mlx-vlm' ||
+    buildEngine === 'vllm' ||
     buildEngine === 'streaming-asr' ||
     buildEngine === 'personaplex' ||
     buildEngine === 'personaplex-mlx'
@@ -3217,6 +3233,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                       'whisperkit',
                       'mlx-lm',
                       'mlx-vlm',
+                      'vllm',
                       'streaming-asr',
                       'stable-diffusion.cpp',
                       'personaplex',
