@@ -383,12 +383,22 @@ impl Runtime {
         // local scan: one round of requests per invalidation, not per page load.
         // A server that is asleep contributes nothing and costs nothing else.
         models.extend(remote::list_models(&self.http, &self.data_dir).await);
-        if let Some(model) = settings.vllm_model.as_deref()
-            && let Ok(id) = vllm::model_id(model)
-        {
+        let vllm_models: Vec<String> = if settings.vllm_models.is_empty() {
+            settings.vllm_model.iter().cloned().collect()
+        } else {
+            settings
+                .vllm_models
+                .iter()
+                .map(|entry| entry.repository.clone())
+                .collect()
+        };
+        for model in vllm_models {
+            let Ok(id) = vllm::model_id(&model) else {
+                continue;
+            };
             models.push(ModelDescriptor {
                 id,
-                name: model.to_owned(),
+                name: model,
                 engine: vllm::ENGINE.to_owned(),
                 capabilities: ModelCapabilities {
                     input_modalities: vec!["text".into()],

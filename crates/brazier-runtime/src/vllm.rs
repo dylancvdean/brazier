@@ -122,6 +122,38 @@ impl Server {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(configured) = settings
+            .vllm_models
+            .iter()
+            .find(|entry| entry.repository == model_ref)
+        {
+            if let Some(revision) = configured
+                .revision
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                command.args(["--revision", revision]);
+            }
+            if let Some(dtype) = configured
+                .dtype
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                command.args(["--dtype", dtype]);
+            }
+            if let Some(memory) = configured.gpu_memory_utilization {
+                command.args(["--gpu-memory-utilization", &memory.to_string()]);
+            }
+            if let Some(parallel) = configured.tensor_parallel_size {
+                command.args(["--tensor-parallel-size", &parallel.to_string()]);
+            }
+            if configured.trust_remote_code {
+                command.arg("--trust-remote-code");
+            }
+            for arg in &configured.extra_args {
+                command.arg(arg);
+            }
+        }
         for arg in profile.map(|p| p.extra_args.as_slice()).unwrap_or_default() {
             command.arg(arg);
         }

@@ -83,6 +83,7 @@ import {
   type RuntimeEntry,
   type RuntimeSettings,
   type RuntimeTarget,
+  type VllmModelSettings,
   saveRuntimeSettings,
   saveSupportBundle,
   searchHub,
@@ -1069,6 +1070,36 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
       </div>
     </section>
   )
+}
+
+function VllmServedModels({ settings, onSaved, onError }: { settings: RuntimeSettings; onSaved: (settings: RuntimeSettings) => void; onError: (message: string | null) => void }): React.JSX.Element {
+  const [models, setModels] = useState<VllmModelSettings[]>(settings.vllm_models ?? [])
+  const [draft, setDraft] = useState<VllmModelSettings>({ repository: '', revision: null, context_size: null, dtype: null, gpu_memory_utilization: null, tensor_parallel_size: null, trust_remote_code: false, extra_args: [] })
+  const [saving, setSaving] = useState(false)
+  useEffect(() => setModels(settings.vllm_models ?? []), [settings.vllm_models])
+  async function persist(next: VllmModelSettings[], active = settings.vllm_model): Promise<void> {
+    setSaving(true); onError(null)
+    try { const saved = await saveRuntimeSettings({ ...settings, vllm_models: next, vllm_model: active }); setModels(next); onSaved(saved) }
+    catch (cause) { onError(errorText(cause)) } finally { setSaving(false) }
+  }
+  return <div className="settings-group vllm-served-models">
+    <div className="section-label">Served models</div>
+    <p className="model-help">Each model keeps its own vLLM launch options. Activating or saving the active model restarts only vLLM.</p>
+    {models.map((model, index) => <details key={model.repository} className="runtime-card" open={model.repository === settings.vllm_model}>
+      <summary><strong>{model.repository}</strong>{model.repository === settings.vllm_model && <span className="active-badge">Active</span>}</summary>
+      <div className="settings-grid">
+        <label><span>Revision</span><input value={model.revision ?? ''} onChange={(e) => { const next=[...models]; next[index]={...model,revision:e.target.value||null}; setModels(next) }} placeholder="main" /></label>
+        <label><span>Context length</span><input type="number" min={512} value={model.context_size ?? ''} onChange={(e)=>{const next=[...models];next[index]={...model,context_size:e.target.value?Number(e.target.value):null};setModels(next)}} /></label>
+        <label><span>Precision</span><select value={model.dtype ?? ''} onChange={(e)=>{const next=[...models];next[index]={...model,dtype:e.target.value||null};setModels(next)}}><option value="">Auto</option><option value="auto">Auto</option><option value="bfloat16">bfloat16</option><option value="float16">float16</option><option value="float32">float32</option></select></label>
+        <label><span>GPU memory limit</span><input type="number" min={0.1} max={1} step={0.05} value={model.gpu_memory_utilization ?? ''} onChange={(e)=>{const next=[...models];next[index]={...model,gpu_memory_utilization:e.target.value?Number(e.target.value):null};setModels(next)}} placeholder="0.90" /></label>
+        <label><span>Tensor parallel GPUs</span><input type="number" min={1} value={model.tensor_parallel_size ?? ''} onChange={(e)=>{const next=[...models];next[index]={...model,tensor_parallel_size:e.target.value?Number(e.target.value):null};setModels(next)}} /></label>
+        <label className="settings-toggle"><input type="checkbox" checked={model.trust_remote_code} onChange={(e)=>{const next=[...models];next[index]={...model,trust_remote_code:e.target.checked};setModels(next)}} /><span>Trust remote code</span></label>
+        <label className="span-2"><span>Additional arguments (one token per line)</span><textarea value={model.extra_args.join('\n')} onChange={(e)=>{const next=[...models];next[index]={...model,extra_args:e.target.value.split('\n').map(x=>x.trim()).filter(Boolean)};setModels(next)}} /></label>
+      </div>
+      <div className="runtime-actions"><button className="chip-button" disabled={saving} onClick={()=>void persist(models,model.repository)}>Make active</button><button className="chip-button danger" disabled={saving} onClick={()=>void persist(models.filter((_,i)=>i!==index), settings.vllm_model===model.repository?null:settings.vllm_model)}>Remove</button><button className="primary-action" disabled={saving} onClick={()=>void persist(models)}>Save launch options</button></div>
+    </details>)}
+    <div className="settings-grid"><label><span>Add Hugging Face repository</span><input value={draft.repository} onChange={(e)=>setDraft({...draft,repository:e.target.value})} placeholder="org/model" /></label><div className="runtime-actions"><button className="chip-button" disabled={!draft.repository.trim()||saving||models.some(m=>m.repository===draft.repository.trim())} onClick={()=>{const next=[...models,{...draft,repository:draft.repository.trim()}];setDraft({...draft,repository:''});void persist(next)}}>Add model</button></div></div>
+  </div>
 }
 
 function DiscoverSection(props: SectionProps): React.JSX.Element {
@@ -3190,6 +3221,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                     </button>
                   ))}
               </div>
+              {runtime.engine === 'vllm' && runtime.active && props.settings && (
+                <VllmServedModels settings={props.settings} onSaved={props.onSettingsSaved} onError={props.onError} />
+              )}
             </article>
             )
           })}

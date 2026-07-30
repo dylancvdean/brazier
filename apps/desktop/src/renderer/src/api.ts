@@ -82,6 +82,9 @@ export type RuntimeSettings = {
   binary_override: string | null
   mlx_lm_python?: string | null
   mlx_vlm_python?: string | null
+  vllm_python?: string | null
+  vllm_model?: string | null
+  vllm_models?: VllmModelSettings[]
   whisper_binary?: string | null
   whisper_model?: string | null
   streaming_asr_python?: string | null
@@ -105,6 +108,17 @@ export type RuntimeSettings = {
   reload_llm_after_generation: boolean
   /** Chat `run_javascript` sandbox profile and optional limit overrides. */
   javascript_sandbox?: JavascriptSandboxSettings
+}
+
+export type VllmModelSettings = {
+  repository: string
+  revision?: string | null
+  context_size?: number | null
+  dtype?: string | null
+  gpu_memory_utilization?: number | null
+  tensor_parallel_size?: number | null
+  trust_remote_code: boolean
+  extra_args: string[]
 }
 
 export type JsSandboxProfile = 'strict' | 'default' | 'roomy' | 'custom'

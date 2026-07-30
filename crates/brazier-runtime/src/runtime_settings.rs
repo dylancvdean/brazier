@@ -81,6 +81,10 @@ pub struct RuntimeSettings {
     /// Hugging Face repository served by the active vLLM runtime.
     #[serde(default)]
     pub vllm_model: Option<String>,
+    /// Registered vLLM repositories and their launch configuration. vLLM owns
+    /// their snapshot cache; Brazier owns only the explicit served-model list.
+    #[serde(default)]
+    pub vllm_models: Vec<VllmModelSettings>,
     /// Absolute path of an activated whisper-cli binary.
     #[serde(default)]
     pub whisper_binary: Option<String>,
@@ -144,6 +148,34 @@ pub struct RuntimeSettings {
     pub javascript_sandbox: crate::js_sandbox::JavascriptSandboxSettings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VllmModelSettings {
+    pub repository: String,
+    pub revision: Option<String>,
+    pub context_size: Option<u32>,
+    pub dtype: Option<String>,
+    pub gpu_memory_utilization: Option<f32>,
+    pub tensor_parallel_size: Option<u32>,
+    pub trust_remote_code: bool,
+    pub extra_args: Vec<String>,
+}
+
+impl Default for VllmModelSettings {
+    fn default() -> Self {
+        Self {
+            repository: String::new(),
+            revision: None,
+            context_size: None,
+            dtype: None,
+            gpu_memory_utilization: None,
+            tensor_parallel_size: None,
+            trust_remote_code: false,
+            extra_args: Vec::new(),
+        }
+    }
+}
+
 pub fn default_build_jobs() -> u16 {
     std::thread::available_parallelism()
         .map(|count| (count.get() / 2).max(1) as u16)
@@ -181,6 +213,7 @@ impl Default for RuntimeSettings {
             mlx_vlm_python: None,
             vllm_python: None,
             vllm_model: None,
+            vllm_models: Vec::new(),
             whisper_binary: None,
             whisper_model: None,
             streaming_asr_python: None,
