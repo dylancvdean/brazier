@@ -426,6 +426,10 @@ export function App(): React.JSX.Element {
   const [streamingTools, setStreamingTools] = useState<ToolCallRecord[]>([])
   const [streamingToolOffsets, setStreamingToolOffsets] = useState<number[]>([])
   const [generationRate, setGenerationRate] = useState<number | null>(null)
+  const [generationTokens, setGenerationTokens] = useState<{
+    prompt: number | null
+    completion: number
+  } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [forkHints, setForkHints] = useState<RuntimeForkHint[]>([])
@@ -1310,6 +1314,7 @@ export function App(): React.JSX.Element {
     setStreamingTools([])
     setStreamingToolOffsets([])
     setGenerationRate(null)
+    setGenerationTokens(null)
     const controller = new AbortController()
     abortRef.current = controller
     const shouldGenerateTitle =
@@ -1386,6 +1391,10 @@ export function App(): React.JSX.Element {
             (result.generationStats.completion_tokens * 1000) /
             Math.max(1, result.generationStats.decode_duration_ms)
           setGenerationRate(latestGenerationRate)
+          setGenerationTokens({
+            prompt: result.generationStats.prompt_tokens ?? null,
+            completion: result.generationStats.completion_tokens
+          })
         }
         for (const entry of result.transcript) {
           const role = entry.role as Role
@@ -2247,6 +2256,14 @@ export function App(): React.JSX.Element {
                     title="Local engine decode rate, measured from its token stream."
                   >
                     {generationRate.toFixed(1)} tok/s
+                  </span>
+                ) : null}
+                {generationTokens ? (
+                  <span className="generation-tokens" title="Token usage reported by the inference server.">
+                    {generationTokens.prompt != null
+                      ? `${generationTokens.prompt.toLocaleString()} prompt · `
+                      : ''}
+                    {generationTokens.completion.toLocaleString()} output tokens
                   </span>
                 ) : null}
                 Local models can be inaccurate. Verify important information.

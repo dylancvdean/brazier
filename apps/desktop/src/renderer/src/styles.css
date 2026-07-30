@@ -1843,6 +1843,13 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
+.generation-tokens {
+  display: inline-block;
+  margin-right: 7px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .attachment-tray,
 .error-banner {
   display: flex;

@@ -574,9 +574,17 @@ pub struct StreamChunk {
     pub reasoning: Option<String>,
     pub tool_calls: Vec<ToolCallFragment>,
     pub finish_reason: Option<String>,
+    /// OpenAI-compatible final usage emitted by MLX servers.
+    pub usage: Option<StreamUsage>,
     /// llama.cpp prompt-evaluation progress. Other OpenAI-compatible servers
     /// simply omit this extension.
     pub prompt_progress: Option<PromptProgress>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -676,10 +684,22 @@ pub fn parse_stream_chunk(data: &str) -> ChunkParse {
         .and_then(|choice| choice.get("finish_reason"))
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned);
+    let usage = value
+        .get("usage")
+        .and_then(serde_json::Value::as_object)
+        .map(|usage| StreamUsage {
+            prompt_tokens: usage
+                .get("prompt_tokens")
+                .and_then(serde_json::Value::as_u64),
+            completion_tokens: usage
+                .get("completion_tokens")
+                .and_then(serde_json::Value::as_u64),
+        });
     if content.is_none()
         && reasoning.is_none()
         && tool_calls.is_empty()
         && finish_reason.is_none()
+        && usage.is_none()
         && prompt_progress.is_none()
     {
         return ChunkParse::Skip;
@@ -689,6 +709,7 @@ pub fn parse_stream_chunk(data: &str) -> ChunkParse {
         reasoning,
         tool_calls,
         finish_reason,
+        usage,
         prompt_progress,
     })
 }
@@ -2908,6 +2929,22 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
                     cache: 1024,
                     processed: 1536,
                     time_ms: 87,
+                })
+            ),
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_chunk_captures_final_usage_without_content() {
+        let data =
+            r#"{"usage":{"prompt_tokens":131072,"completion_tokens":42,"total_tokens":131114}}"#;
+        match parse_stream_chunk(data) {
+            ChunkParse::Chunk(chunk) => assert_eq!(
+                chunk.usage,
+                Some(StreamUsage {
+                    prompt_tokens: Some(131_072),
+                    completion_tokens: Some(42),
                 })
             ),
             other => panic!("unexpected parse result: {other:?}"),

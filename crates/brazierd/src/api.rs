@@ -4715,7 +4715,7 @@ async fn chat_completions(
                     });
                     yield Ok::<Event, Infallible>(Event::default().data(chunk.to_string()));
                 }
-                Ok(StreamEvent::GenerationStats { completion_tokens, decode_duration_ms }) => {
+                Ok(StreamEvent::GenerationStats { prompt_tokens, completion_tokens, decode_duration_ms }) => {
                     let chunk = json!({
                         "id": completion_id,
                         "object": "chat.completion.chunk",
@@ -4726,6 +4726,7 @@ async fn chat_completions(
                             "finish_reason": null
                         }],
                         "brazier": { "generation": {
+                            "prompt_tokens": prompt_tokens,
                             "completion_tokens": completion_tokens,
                             "decode_duration_ms": decode_duration_ms
                         }}

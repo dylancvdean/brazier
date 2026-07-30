@@ -581,7 +581,11 @@ export type StreamCompletionResult = {
   clientToolCalls: ClientToolCall[]
   transcript: TranscriptMessagePayload[]
   /** Present for local engines, measured from their token stream. */
-  generationStats?: { completion_tokens: number; decode_duration_ms: number }
+  generationStats?: {
+    prompt_tokens?: number | null
+    completion_tokens: number
+    decode_duration_ms: number
+  }
 }
 
 export type ToolCallRecord = {
@@ -736,7 +740,11 @@ export async function streamCompletion(
           fork_hints?: RuntimeForkHint[]
           load?: { phase: string; message: string }
           prefill?: PrefillProgress
-          generation?: { completion_tokens?: number; decode_duration_ms?: number }
+          generation?: {
+            prompt_tokens?: number | null
+            completion_tokens?: number
+            decode_duration_ms?: number
+          }
         }
         error?: { message?: string }
       }
@@ -751,6 +759,7 @@ export async function streamCompletion(
       typeof generation.decode_duration_ms === 'number'
       ) {
         generationStats = {
+          prompt_tokens: generation.prompt_tokens,
           completion_tokens: generation.completion_tokens,
           decode_duration_ms: generation.decode_duration_ms
         }

@@ -62,6 +62,7 @@ pub enum StreamEvent {
     /// Decode timing measured from the local engine's token stream. Remote
     /// OpenAI-compatible servers do not promise an equivalent metric.
     GenerationStats {
+        prompt_tokens: Option<u64>,
         completion_tokens: u64,
         decode_duration_ms: u64,
     },
@@ -2341,6 +2342,7 @@ async fn stream_tool_rounds(
     };
     let mut audio_fallback_attempted = false;
     let mut completion_tokens = 0u64;
+    let mut prompt_tokens = None;
     let mut first_token_at: Option<Instant> = None;
     // The fraction shown to the user must use the context the server actually
     // launched with, not merely the model's native maximum.
@@ -2364,6 +2366,9 @@ async fn stream_tool_rounds(
         );
         if last_round && let Some(object) = body.as_object_mut() {
             object.remove("tools");
+        }
+        if endpoint.dialect == llama::SamplerDialect::Mlx {
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
         }
         let mut chunks = match llama::open_chat_stream(
             &runtime.http,
@@ -2398,6 +2403,12 @@ async fn stream_tool_rounds(
         let mut pending_content = String::new();
         while let Some(item) = chunks.recv().await {
             let chunk = item?;
+            if let Some(usage) = chunk.usage {
+                prompt_tokens = usage.prompt_tokens.or(prompt_tokens);
+                if let Some(reported) = usage.completion_tokens {
+                    completion_tokens = reported;
+                }
+            }
             if let Some(progress) = chunk.prompt_progress
                 && tx
                     .send(Ok(StreamEvent::PrefillProgress {
@@ -2494,7 +2505,7 @@ async fn stream_tool_rounds(
             {
                 return Ok(());
             }
-            send_generation_end(tx, completion_tokens, first_token_at).await;
+            send_generation_end(tx, prompt_tokens, completion_tokens, first_token_at).await;
             return Ok(());
         }
         if legacy_call {
@@ -2546,24 +2557,26 @@ async fn stream_tool_rounds(
                 let _ = tx
                     .send(Ok(StreamEvent::ClientToolCalls(client_tool_calls)))
                     .await;
-                send_generation_end(tx, completion_tokens, first_token_at).await;
+                send_generation_end(tx, prompt_tokens, completion_tokens, first_token_at).await;
                 return Ok(());
             }
             AppendRoundOutcome::ChannelClosed => return Ok(()),
         }
     }
-    send_generation_end(tx, completion_tokens, first_token_at).await;
+    send_generation_end(tx, prompt_tokens, completion_tokens, first_token_at).await;
     Ok(())
 }
 
 async fn send_generation_end(
     tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
+    prompt_tokens: Option<u64>,
     completion_tokens: u64,
     first_token_at: Option<Instant>,
 ) {
     if let Some(started) = first_token_at {
         let _ = tx
             .send(Ok(StreamEvent::GenerationStats {
+                prompt_tokens,
                 completion_tokens,
                 decode_duration_ms: started.elapsed().as_millis() as u64,
             }))
