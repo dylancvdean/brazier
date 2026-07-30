@@ -52,6 +52,9 @@ fn default_llama_managed_label() -> String {
 }
 
 fn source_label(record: &builds::BuildRecord) -> String {
+    if let Some(name) = record.name.as_deref() {
+        return name.to_owned();
+    }
     let fork = crate::fork_hints::normalize_github_repo_url(&record.repository)
         .and_then(|url| {
             let mut parts = url.rsplit('/');

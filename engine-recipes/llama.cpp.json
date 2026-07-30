@@ -12,7 +12,7 @@
     {
       "label": "Configure",
       "program": "cmake",
-      "args": ["-S", "{source}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF", "-DLLAMA_BUILD_SERVER=ON", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_EXAMPLES=OFF", "{target_flags}"]
+      "args": ["-S", "{source}", "-B", "{build}", "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF", "-DLLAMA_BUILD_SERVER=ON", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_EXAMPLES=OFF", "-DGGML_CCACHE=OFF", "{target_flags}"]
     },
     {
       "label": "Build server",

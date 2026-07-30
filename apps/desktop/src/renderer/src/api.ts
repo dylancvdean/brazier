@@ -2183,6 +2183,7 @@ export async function buildRuntime(
   revision: string,
   target: string,
   jobs: number,
+  name: string | undefined,
   onProgress: (event: ProgressEvent) => void,
   options?: { onBuildId?: (buildId: string) => void }
 ): Promise<{ binary: string; build_id: string }> {
@@ -2194,6 +2195,7 @@ export async function buildRuntime(
         engine,
         repository,
         revision,
+        ...(name?.trim() ? { name: name.trim() } : {}),
         target,
         jobs
       })

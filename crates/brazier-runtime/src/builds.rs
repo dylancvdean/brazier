@@ -32,6 +32,9 @@ pub struct BuildRequest {
     pub engine: String,
     pub repository: String,
     pub revision: String,
+    /// Optional human-readable name shown in runtime inventory.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Acceleration flavor to configure (defaults to CPU-only).
     #[serde(default)]
     pub target: Option<RuntimeTarget>,
@@ -50,6 +53,8 @@ pub struct BuildRecord {
     pub target: String,
     pub created_at: String,
     pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Resolved upstream commit at build time (`git rev-parse HEAD`). Absent for
     /// builds made before commit capture, and for checkout-less Python recipes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1000,6 +1005,7 @@ pub async fn run_build_with_progress(
                         .as_secs()
                 ),
                 binary: binary.display().to_string(),
+                name: request.name.filter(|name| !name.trim().is_empty()).map(|name| name.trim().to_owned()),
                 commit: built_commit,
             };
             if let Ok(bytes) = serde_json::to_vec_pretty(&record) {

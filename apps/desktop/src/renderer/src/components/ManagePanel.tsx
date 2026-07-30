@@ -2473,6 +2473,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const [repository, setRepository] = useState(
     BUILD_ENGINE_DEFAULTS[isAppleSilicon ? 'mlx-lm' : 'llama.cpp'].repository
   )
+  const [buildName, setBuildName] = useState('')
   const [revision, setRevision] = useState(
     BUILD_ENGINE_DEFAULTS[isAppleSilicon ? 'mlx-lm' : 'llama.cpp'].revision
   )
@@ -2770,6 +2771,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         revision.trim(),
         buildTarget,
         buildJobs,
+        buildName,
         (progress) => {
           if (progress.phase === 'warning' && progress.message) {
             setBuildWarning(progress.message)
@@ -3310,6 +3312,12 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 </select>
               </label>
             ) : null}
+            {!isStreamingAsrBuild && (
+              <label>
+                <span>Build name</span>
+                <input value={buildName} onChange={(event) => setBuildName(event.target.value)} placeholder="Optional label" />
+              </label>
+            )}
             {!isStreamingAsrBuild && (
               <label>
                 <span>Repository</span>
