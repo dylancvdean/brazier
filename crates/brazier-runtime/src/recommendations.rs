@@ -165,6 +165,9 @@ pub struct VoiceModel {
     /// `personaplex` or `whisper`.
     pub kind: String,
     pub repo_id: String,
+    /// This snapshot requires a Hugging Face token and accepted access terms.
+    #[serde(default)]
+    pub gated: bool,
     #[serde(default)]
     pub filename: Option<String>,
     #[serde(default)]
@@ -636,6 +639,13 @@ mod tests {
         let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
         let sizes: Vec<u32> = catalog.tiers.iter().map(|tier| tier.min_gb).collect();
         assert_eq!(sizes, vec![8, 16, 24, 32, 48, 64, 96, 192]);
+        let personaplex = catalog
+            .voice
+            .as_ref()
+            .and_then(|voice| voice.models.iter().find(|model| model.id == "personaplex"))
+            .expect("the shipped voice recommendation includes PersonaPlex");
+        assert_eq!(personaplex.repo_id, "nvidia/personaplex-7b-v1");
+        assert!(personaplex.gated);
     }
 
     /// A machine between two tiers gets the smaller one; it cannot hold what

@@ -164,7 +164,7 @@ pub async fn prepare_messages(
                     }));
                 } else {
                     anyhow::bail!(
-                        "No audio path available. Either select a native-audio chat model (audio_input=native), or enable batch ASR by building whisper.cpp and downloading a Whisper model. Realtime voice (PersonaPlex / speech-to-speech) is not implemented yet."
+                        "No audio-attachment path is available. Either select a native-audio chat model (audio_input=native), or enable batch ASR by building whisper.cpp and downloading a Whisper model. Realtime Voice is separate: it uses a PersonaPlex runtime and model."
                     );
                 }
             } else if mime.starts_with("video/") {

@@ -182,7 +182,9 @@ export function RecommendedModels(props: Props): React.JSX.Element {
   const hasGatedRecommendation =
     hasGatedCategory ||
     (categories.includes('agent') &&
-      recommendations.agent_options?.some((entry) => entry.gated === true) === true)
+      recommendations.agent_options?.some((entry) => entry.gated === true) === true) ||
+    (categories.includes('voice') &&
+      recommendations.voice?.models.some((entry) => entry.gated === true) === true)
 
   useEffect(() => {
     const refresh = (): void => {
@@ -508,13 +510,11 @@ export function RecommendedModels(props: Props): React.JSX.Element {
             {models.map((model) => {
               const key = `voice:${model.id}`
               const state = states[key] ?? IDLE
-              const todo = model.repo_id.includes('TODO')
               return (
                 <InstallButton
                   key={key}
                   state={state}
                   label={model.label}
-                  disabled={todo}
                   onClick={() =>
                     void run(key, ['voice'], model.id, async (onProgress) => {
                       if (model.kind === 'personaplex') {

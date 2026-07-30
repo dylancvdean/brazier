@@ -282,8 +282,9 @@
         "id": "personaplex",
         "label": "PersonaPlex",
         "kind": "personaplex",
-        "repo_id": "TODO/personaplex-repo-here",
-        "summary": "TODO: the PersonaPlex snapshot to install. Full-duplex speech in and speech out."
+        "repo_id": "nvidia/personaplex-7b-v1",
+        "gated": true,
+        "summary": "Full-duplex speech in and speech out. Requires accepting the model license on Hugging Face."
       },
       {
         "id": "whisper-base-en",

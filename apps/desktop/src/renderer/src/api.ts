@@ -1223,6 +1223,8 @@ export type VoiceRecommendationModel = {
   /** `personaplex` or `whisper`. */
   kind: string
   repo_id: string
+  /** This snapshot requires a Hugging Face token and accepted access terms. */
+  gated?: boolean
   filename?: string | null
   summary?: string | null
 }
