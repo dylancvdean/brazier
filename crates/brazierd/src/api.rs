@@ -225,6 +225,7 @@ pub fn router(state: AppState) -> Router {
 /// The router, with the set of browser origins allowed to call it.
 pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router {
     let protected = Router::new()
+        .route("/api/v1/daemon/info", get(daemon_info))
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/support/bundle", get(support_bundle))
         .route(
@@ -546,6 +547,19 @@ async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         "database": "ok",
         "llama_server": llama,
     })))
+}
+
+/// The small, authenticated handshake a remote desktop client needs before it
+/// assumes a daemon speaks its management API. Keep this independent from the
+/// much larger capabilities response: compatibility must be checkable even
+/// while model discovery is slow or a remote engine is unavailable.
+async fn daemon_info() -> Json<Value> {
+    Json(json!({
+        "product": "brazier",
+        "version": env!("CARGO_PKG_VERSION"),
+        "management_api": { "major": 1, "minor": 0 },
+        "openai_api": { "chat_completions": "/v1/chat/completions", "responses": "/v1/responses" },
+    }))
 }
 
 async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -6390,6 +6404,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn daemon_info_is_authenticated_and_describes_the_versioned_boundary() {
+        let dir = tempdir().unwrap();
+        let mut state = test_state(dir.path()).await;
+        state.api_key = Some("test-service-key".into());
+        let app = router(state);
+
+        let (status, _) = get_request(&app, "/api/v1/daemon/info").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/daemon/info")
+                    .header("authorization", "Bearer test-service-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let info: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(info["product"], "brazier");
+        assert_eq!(info["management_api"]["major"], 1);
+        assert_eq!(info["openai_api"]["responses"], "/v1/responses");
+    }
+
+    #[tokio::test]
     async fn support_bundle_route_returns_a_reviewable_zip() {
         let dir = tempdir().unwrap();
         let app = router(test_state(dir.path()).await);
@@ -6576,8 +6618,10 @@ mod tests {
         // Whatever the host offers, the claim and the detail must agree.
         if isolated {
             assert_ne!(sandbox["backend"], "none");
+            assert_eq!(sandbox["sandboxed_execution"], json!(true));
         } else {
             assert_eq!(sandbox["backend"], "none");
+            assert_eq!(sandbox["sandboxed_execution"], json!(false));
             assert!(sandbox["detail"].as_str().unwrap().len() > 10);
         }
         assert!(

@@ -20,7 +20,7 @@ use crate::{
     tool_registry::{self, ToolContext},
     tools,
     types::{ChatCompletionRequest, ModelCapabilities, ModelDescriptor, OpenAiMessage},
-    voice, whisper,
+    vllm, voice, whisper,
 };
 
 #[derive(Debug, Clone)]
@@ -138,6 +138,11 @@ struct MlxState {
     server: Option<MlxServer>,
 }
 
+struct VllmState {
+    python: Option<PathBuf>,
+    server: Option<vllm::Server>,
+}
+
 struct WhisperState {
     binary: Option<PathBuf>,
 }
@@ -162,6 +167,7 @@ pub struct VoiceState {
 enum ActiveBackend {
     Llama(String),
     Mlx,
+    Vllm,
     /// A server someone else is running. Nothing is started or loaded here —
     /// the model is already up, or the request fails and says so.
     Remote {
@@ -247,6 +253,7 @@ pub struct Runtime {
     http: reqwest::Client,
     llama: Mutex<LlamaState>,
     mlx: Mutex<MlxState>,
+    vllm: Mutex<VllmState>,
     whisper: Mutex<WhisperState>,
     streaming_asr: Mutex<StreamingAsrState>,
     sdcpp: Mutex<SdCppState>,
@@ -303,6 +310,10 @@ impl Runtime {
             mlx: Mutex::new(MlxState {
                 lm_python: settings.mlx_lm_python.as_ref().map(PathBuf::from),
                 vlm_python: settings.mlx_vlm_python.as_ref().map(PathBuf::from),
+                server: None,
+            }),
+            vllm: Mutex::new(VllmState {
+                python: settings.vllm_python.as_ref().map(PathBuf::from),
                 server: None,
             }),
             whisper: Mutex::new(WhisperState {
@@ -372,6 +383,29 @@ impl Runtime {
         // local scan: one round of requests per invalidation, not per page load.
         // A server that is asleep contributes nothing and costs nothing else.
         models.extend(remote::list_models(&self.http, &self.data_dir).await);
+        if let Some(model) = settings.vllm_model.as_deref()
+            && let Ok(id) = vllm::model_id(model)
+        {
+            models.push(ModelDescriptor {
+                id,
+                name: model.to_owned(),
+                engine: vllm::ENGINE.to_owned(),
+                capabilities: ModelCapabilities {
+                    input_modalities: vec!["text".into()],
+                    output_modalities: vec!["text".into()],
+                    streaming: true,
+                    tools: true,
+                    reasoning: false,
+                    max_context_length: Some(settings.context_size),
+                    reasoning_modes: Vec::new(),
+                    harmony: false,
+                    audio_input: None,
+                },
+                size_bytes: None,
+                read_only: false,
+                library_label: None,
+            });
+        }
         *self.models_cache.lock().await = Some(models.clone());
         Ok(models)
     }
@@ -419,6 +453,8 @@ impl Runtime {
             "llama_probe": llama_probe,
             "mlx_lm_python": self.mlx.lock().await.lm_python.as_ref().map(|path| path.display().to_string()),
             "mlx_vlm_python": self.mlx.lock().await.vlm_python.as_ref().map(|path| path.display().to_string()),
+            "vllm_python": self.vllm.lock().await.python.as_ref().map(|path| path.display().to_string()),
+            "vllm_server": self.vllm.lock().await.server.as_ref().map(|server| serde_json::json!({"base_url": server.base_url, "model": server.model_ref})),
             "mlx_server": self.mlx_server_summary().await,
             "mlx_probe": mlx_probe,
             "managed_binary_path": llama::managed_binary_path(&self.data_dir).display().to_string(),
@@ -643,6 +679,7 @@ impl Runtime {
             llama,
             mlx_lm: mlx.lm_python.clone(),
             mlx_vlm: mlx.vlm_python.clone(),
+            vllm: self.vllm.lock().await.python.clone(),
             whisper,
             streaming_asr,
             sdcpp,
@@ -686,6 +723,11 @@ impl Runtime {
             }
             mlx.lm_python = settings.mlx_lm_python.as_ref().map(PathBuf::from);
             mlx.vlm_python = settings.mlx_vlm_python.as_ref().map(PathBuf::from);
+            let mut vllm_state = self.vllm.lock().await;
+            if let Some(mut server) = vllm_state.server.take() {
+                let _ = server.stop().await;
+            }
+            vllm_state.python = settings.vllm_python.as_ref().map(PathBuf::from);
             let mut whisper = self.whisper.lock().await;
             whisper.binary = settings
                 .whisper_binary
@@ -794,6 +836,31 @@ impl Runtime {
             MlxKind::Lm => mlx.lm_python = Some(path.clone()),
             MlxKind::Vlm => mlx.vlm_python = Some(path.clone()),
         }
+        Ok(path)
+    }
+
+    /// Pin a vLLM interpreter. A model remains an explicit setting because vLLM
+    /// loads Hugging Face repositories itself instead of Brazier's GGUF store.
+    pub async fn activate_vllm(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            path.is_file(),
+            "vLLM Python interpreter not found: {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            vllm::python_appears_runnable(&path),
+            "{} failed an import check for vLLM",
+            path.display()
+        );
+        let mut settings = self.settings.lock().await;
+        settings.vllm_python = Some(path.display().to_string());
+        runtime_settings::save(&self.data_dir, &settings).await?;
+        drop(settings);
+        let mut state = self.vllm.lock().await;
+        if let Some(mut server) = state.server.take() {
+            let _ = server.stop().await;
+        }
+        state.python = Some(path.clone());
         Ok(path)
     }
 
@@ -926,6 +993,19 @@ impl Runtime {
                 streaming_asr.python = None;
             }
         }
+        {
+            let mut vllm_state = self.vllm.lock().await;
+            let served_from_deleted = vllm_state
+                .server
+                .as_ref()
+                .is_some_and(|server| server.python == path);
+            if served_from_deleted && let Some(mut server) = vllm_state.server.take() {
+                let _ = server.stop().await;
+            }
+            if vllm_state.python.as_deref() == Some(path) {
+                vllm_state.python = None;
+            }
+        }
         let mut mlx = self.mlx.lock().await;
         let served_from_deleted = mlx
             .server
@@ -949,6 +1029,10 @@ impl Runtime {
         }
         if settings.mlx_vlm_python.as_deref() == Some(&path.display().to_string()) {
             settings.mlx_vlm_python = None;
+            changed = true;
+        }
+        if settings.vllm_python.as_deref() == Some(&path.display().to_string()) {
+            settings.vllm_python = None;
             changed = true;
         }
         if settings.whisper_binary.as_deref() == Some(&path.display().to_string()) {
@@ -1145,6 +1229,7 @@ impl Runtime {
             runtimes::ENGINE => self.activate_binary(path).await,
             "mlx-lm" => self.activate_python(MlxKind::Lm, path).await,
             "mlx-vlm" => self.activate_python(MlxKind::Vlm, path).await,
+            vllm::ENGINE => self.activate_vllm(path).await,
             crate::whisper::ENGINE | crate::whisperkit::ENGINE => self.activate_whisper(path).await,
             "streaming-asr" => self.activate_streaming_asr(path).await,
             crate::sdcpp::ENGINE => self.activate_sdcpp(path).await,
@@ -1533,6 +1618,40 @@ impl Runtime {
         Ok(())
     }
 
+    async fn ensure_vllm_server_for_model(
+        &self,
+        model_ref: &str,
+        profile: Option<&crate::model_settings::TextProfile>,
+    ) -> anyhow::Result<()> {
+        let settings = self.settings.lock().await.clone();
+        let python = self
+            .vllm
+            .lock()
+            .await
+            .python
+            .clone()
+            .filter(|path| path.is_file())
+            .ok_or_else(|| {
+                anyhow::anyhow!("no active vLLM runtime; build and activate one in Runtimes first")
+            })?;
+        let wanted_key = vllm::launch_key(&settings, profile);
+        let mut state = self.vllm.lock().await;
+        if state.server.as_mut().is_some_and(|server| {
+            server.model_ref == model_ref
+                && server.python == python
+                && server.launch_key == wanted_key
+                && server.is_running()
+        }) {
+            return Ok(());
+        }
+        if let Some(mut server) = state.server.take() {
+            let _ = server.stop().await;
+        }
+        state.server = Some(vllm::Server::start(&python, model_ref, &settings, profile).await?);
+        state.python = Some(python);
+        Ok(())
+    }
+
     fn resolve_model(
         &self,
         model: &str,
@@ -1582,8 +1701,12 @@ impl Runtime {
             }
             return Ok((ActiveBackend::Mlx, model.to_owned()));
         }
+        if let Ok(model_ref) = vllm::model_ref(model) {
+            let _ = model_ref;
+            return Ok((ActiveBackend::Vllm, model.to_owned()));
+        }
         anyhow::bail!(
-            "unknown model `{model}`; download a GGUF (`gguf:…`) or MLX (`mlx:…`) model, or add a remote connection"
+            "unknown model `{model}`; select a GGUF, MLX, configured vLLM, or remote model"
         );
     }
 
@@ -1666,6 +1789,20 @@ impl Runtime {
                     )
                     .await
                     .into());
+                }
+            }
+            ActiveBackend::Vllm => {
+                emit(&load_tx, "server", "Starting vLLM server…").await;
+                emit(&load_tx, "load", "Loading vLLM model weights…").await;
+                if let Err(error) = self
+                    .ensure_vllm_server_for_model(
+                        &model_id.strip_prefix("vllm:").unwrap_or(&model_id),
+                        effective_profile.as_ref(),
+                    )
+                    .await
+                {
+                    self.vllm.lock().await.server = None;
+                    return Err(error);
                 }
             }
         }
@@ -1848,6 +1985,19 @@ impl Runtime {
                     api_key: None,
                     model_alias: server.model_ref.clone(),
                     dialect: llama::SamplerDialect::Mlx,
+                })
+            }
+            ActiveBackend::Vllm => {
+                let state = self.vllm.lock().await;
+                let server = state
+                    .server
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("vLLM server is not running"))?;
+                Ok(Endpoint {
+                    base_url: server.base_url.clone(),
+                    api_key: None,
+                    model_alias: server.model_ref.clone(),
+                    dialect: llama::SamplerDialect::OpenAi,
                 })
             }
             ActiveBackend::Remote {
@@ -2870,7 +3020,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_engines_with_a_slot_can_be_activated() {
+    async fn vllm_runtimes_have_a_dedicated_activation_slot() {
         let dir = tempdir().unwrap();
         let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
         let error = runtime
@@ -2889,9 +3039,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        // Previously this fell through to the llama-server slot.
+        // This must reach vLLM's own validation rather than falling through to
+        // the llama-server slot.
         assert!(
-            error.contains("`vllm` runtimes cannot be activated"),
+            error.contains("vLLM Python interpreter not found"),
             "{error}"
         );
     }
@@ -2920,6 +3071,24 @@ mod tests {
         let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
         let models = runtime.models().await.unwrap();
         assert!(models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn configured_vllm_model_is_listed_and_resolves_to_its_own_backend() {
+        let dir = tempdir().unwrap();
+        let mut settings = runtime_settings::load(dir.path());
+        settings.vllm_model = Some("Qwen/Qwen3-8B".into());
+        runtime_settings::save(dir.path(), &settings).await.unwrap();
+        let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
+        let models = runtime.models().await.unwrap();
+        assert!(
+            models
+                .iter()
+                .any(|model| { model.id == "vllm:Qwen/Qwen3-8B" && model.engine == vllm::ENGINE })
+        );
+        let (backend, model_id) = runtime.resolve_model("vllm:Qwen/Qwen3-8B", &[]).unwrap();
+        assert!(matches!(backend, ActiveBackend::Vllm));
+        assert_eq!(model_id, "vllm:Qwen/Qwen3-8B");
     }
 
     #[tokio::test]

@@ -592,6 +592,7 @@ mod tests {
         let capabilities = SandboxBackendCapabilities {
             backend: "none".to_owned(),
             isolated: false,
+            sandboxed_execution: false,
             filesystem_scoping: false,
             network_isolation: false,
             process_isolation: false,
@@ -614,6 +615,7 @@ mod tests {
         let capabilities = SandboxBackendCapabilities {
             backend: "seatbelt".to_owned(),
             isolated: true,
+            sandboxed_execution: true,
             filesystem_scoping: true,
             network_isolation: true,
             process_isolation: false,
@@ -658,6 +660,7 @@ mod tests {
         let capabilities = SandboxBackendCapabilities {
             backend: "seatbelt".to_owned(),
             isolated: true,
+            sandboxed_execution: true,
             filesystem_scoping: true,
             network_isolation: true,
             process_isolation: false,

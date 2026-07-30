@@ -164,9 +164,12 @@ what is left is mostly the difference between working and trustworthy.
   model discovery and downloads, runtime installation and activation, media
   generation, voice, tools, MCP servers, and agent sessions should operate on
   the selected host, with that execution location visible anywhere it matters.
-- Add a persistent headless service mode with a stable endpoint, reconnect and
-  offline behavior, client/daemon protocol compatibility checks, and clear
-  multi-client semantics for shared runtime settings and active engines.
+- **Headless service foundation is in.** `brazierd --service` uses stable port
+  7614 unless overridden, retains an owner-only generated bearer key across
+  restarts when authentication is enabled, and writes an owner-only non-secret
+  ready descriptor (customizable with `--ready-file`). Authenticated clients
+  can check `/api/v1/daemon/info` before assuming management-API compatibility.
+  Reconnect/offline UI and shared-runtime multi-client semantics remain open.
 - Harden remote access before presenting it as a normal setup: pairing,
   revocable per-client credentials, scoped inference/management/agent
   permissions, encrypted or private-network transport, and remote-host context

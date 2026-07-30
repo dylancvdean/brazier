@@ -34,6 +34,7 @@ pub mod streaming_asr;
 pub mod tool_registry;
 pub mod toolchain_hints;
 pub mod tools;
+pub mod vllm;
 pub mod voice;
 pub mod whisper;
 pub mod whisperkit;

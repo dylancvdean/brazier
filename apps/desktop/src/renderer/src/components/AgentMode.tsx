@@ -990,6 +990,10 @@ export function AgentMode(props: Props): React.JSX.Element {
   async function changePermissionMode(mode: AgentPermissionMode): Promise<void> {
     setModeMenuOpen(false)
     if (!session) return
+    if (mode === 'sandbox-only' && !capabilities?.sandbox.sandboxed_execution) {
+      onError('Sandbox-only mode is unavailable because this host has no OS sandbox for agent commands.')
+      return
+    }
     try {
       const updated = await updateAgentSession(session.id, { permission_mode: mode })
       setSession(updated)
@@ -1454,10 +1458,20 @@ export function AgentMode(props: Props): React.JSX.Element {
                   key={mode}
                   type="button"
                   className={mode === permissionMode ? 'active' : ''}
+                  disabled={mode === 'sandbox-only' && !sandbox?.sandboxed_execution}
+                  title={
+                    mode === 'sandbox-only' && !sandbox?.sandboxed_execution
+                      ? 'Unavailable: this host has no OS sandbox for agent commands.'
+                      : undefined
+                  }
                   onClick={() => void changePermissionMode(mode)}
                 >
                   <strong>{PERMISSION_LABELS[mode].title}</strong>
-                  <span>{PERMISSION_LABELS[mode].detail}</span>
+                  <span>
+                    {mode === 'sandbox-only' && !sandbox?.sandboxed_execution
+                      ? 'Unavailable on this host: agent commands would have full user privileges.'
+                      : PERMISSION_LABELS[mode].detail}
+                  </span>
                 </button>
               ))}
             </div>

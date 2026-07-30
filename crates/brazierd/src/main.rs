@@ -22,8 +22,18 @@ use uuid::Uuid;
 struct Args {
     #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
     host: IpAddr,
-    #[arg(long, default_value_t = 0)]
-    port: u16,
+    /// TCP port. Service mode defaults to 7614; the desktop-oriented default
+    /// remains an ephemeral loopback port.
+    #[arg(long)]
+    port: Option<u16>,
+    /// Run as a persistent daemon: retain a generated bearer credential and
+    /// publish a stable, non-secret readiness descriptor.
+    #[arg(long)]
+    service: bool,
+    /// Override where service readiness metadata is written. It contains no
+    /// credential and is owner-only on Unix.
+    #[arg(long, requires = "service")]
+    ready_file: Option<PathBuf>,
     #[arg(long, env = "BRAZIER_API_KEY")]
     api_key: Option<String>,
     #[arg(long, conflicts_with = "api_key")]
@@ -101,6 +111,8 @@ async fn main() -> anyhow::Result<()> {
     db.interrupt_running_download_jobs().await?;
     let api_key = if args.no_auth {
         None
+    } else if args.service {
+        Some(brazierd::service::service_api_key(&data_dir, args.api_key)?)
     } else {
         Some(
             args.api_key
@@ -132,14 +144,27 @@ async fn main() -> anyhow::Result<()> {
         agent_broker: Arc::new(brazierd::agent_exec::AgentBroker::new()),
     };
 
-    let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.host, args.port))
+    let port = args.port.unwrap_or(if args.service {
+        brazierd::service::DEFAULT_SERVICE_PORT
+    } else {
+        0
+    });
+    let listener = tokio::net::TcpListener::bind(SocketAddr::new(args.host, port))
         .await
         .context("bind daemon listener")?;
     let address = listener.local_addr()?;
+    let address_url = format!("http://{address}");
+    if args.service {
+        let ready_path = args
+            .ready_file
+            .unwrap_or_else(|| brazierd::service::ready_path(&data_dir));
+        brazierd::service::write_ready_descriptor(&ready_path, &address_url)?;
+        tracing::info!(ready_file = %ready_path.display(), "wrote service readiness descriptor");
+    }
     println!(
         "BRAZIER_READY {}",
         serde_json::to_string(&serde_json::json!({
-            "address": format!("http://{address}"),
+            "address": address_url,
             "api_key": api_key
         }))?
     );
@@ -170,4 +195,31 @@ async fn shutdown_signal(runtime: Arc<Runtime>) {
         () = terminate => {},
     }
     runtime.shutdown().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_mode_has_a_stable_default_but_normal_launches_do_not() {
+        let service = Args::try_parse_from(["brazierd", "--service"]).unwrap();
+        assert!(service.service);
+        assert_eq!(service.port, None);
+        let normal = Args::try_parse_from(["brazierd"]).unwrap();
+        assert!(!normal.service);
+        assert_eq!(normal.port, None);
+    }
+
+    #[test]
+    fn custom_ready_file_requires_service_mode() {
+        assert!(Args::try_parse_from(["brazierd", "--ready-file", "/tmp/ready.json"]).is_err());
+        let service =
+            Args::try_parse_from(["brazierd", "--service", "--ready-file", "/tmp/ready.json"])
+                .unwrap();
+        assert_eq!(
+            service.ready_file.unwrap(),
+            PathBuf::from("/tmp/ready.json")
+        );
+    }
 }

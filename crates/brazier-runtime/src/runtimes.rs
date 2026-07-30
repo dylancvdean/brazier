@@ -15,6 +15,7 @@ const MANAGED_FLAVORS: &[&str] = &["cuda", "rocm", "vulkan"];
 const PYTHON_ENGINES: &[&str] = &[
     "mlx-lm",
     "mlx-vlm",
+    "vllm",
     "streaming-asr",
     "personaplex",
     "personaplex-mlx",
@@ -83,6 +84,7 @@ pub struct ActiveRuntimes {
     pub llama: Option<PathBuf>,
     pub mlx_lm: Option<PathBuf>,
     pub mlx_vlm: Option<PathBuf>,
+    pub vllm: Option<PathBuf>,
     pub whisper: Option<PathBuf>,
     pub streaming_asr: Option<PathBuf>,
     pub sdcpp: Option<PathBuf>,
@@ -281,6 +283,7 @@ pub fn list(
             let display = match *engine {
                 "mlx-lm" => "MLX-LM",
                 "mlx-vlm" => "MLX-VLM",
+                "vllm" => "vLLM",
                 "streaming-asr" => "Streaming ASR",
                 "personaplex" => "PersonaPlex",
                 "personaplex-mlx" => "PersonaPlex MLX",
@@ -289,6 +292,7 @@ pub fn list(
             let selected = match *engine {
                 "mlx-lm" => &active.mlx_lm,
                 "mlx-vlm" => &active.mlx_vlm,
+                "vllm" => &active.vllm,
                 "streaming-asr" => &active.streaming_asr,
                 "personaplex" | "personaplex-mlx" => &active.voice,
                 _ => &None,

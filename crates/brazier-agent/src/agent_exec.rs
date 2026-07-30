@@ -723,6 +723,7 @@ async fn workspace_info(
         "sandbox": {
             "backend": sandbox.backend,
             "isolated": sandbox.isolated,
+            "sandboxed_execution": sandbox.sandboxed_execution,
             "detail": sandbox.detail,
         },
         "platform": std::env::consts::OS,

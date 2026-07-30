@@ -88,6 +88,11 @@ impl SandboxBackendKind {
 pub struct SandboxBackendCapabilities {
     pub backend: String,
     pub isolated: bool,
+    /// Whether this host can run programs under an OS-enforced sandbox. This
+    /// is deliberately separate from the presence of the `sandbox-only`
+    /// permission mode: direct, workspace-scoped file tools still work without
+    /// a process sandbox, but command execution does not.
+    pub sandboxed_execution: bool,
     pub filesystem_scoping: bool,
     pub network_isolation: bool,
     pub process_isolation: bool,
@@ -238,6 +243,7 @@ impl SandboxBackend {
         SandboxBackendCapabilities {
             backend: self.kind.as_str().to_owned(),
             isolated: self.isolated(),
+            sandboxed_execution: self.isolated(),
             filesystem_scoping: self.isolated(),
             network_isolation: self.isolated(),
             process_isolation: matches!(self.kind, SandboxBackendKind::Bubblewrap),
@@ -729,6 +735,7 @@ mod tests {
         assert_eq!(described.backend, "none");
         assert!(!described.isolated);
         let capabilities = backend.capabilities();
+        assert!(!capabilities.sandboxed_execution);
         assert!(!capabilities.filesystem_scoping);
         assert!(!capabilities.network_isolation);
     }

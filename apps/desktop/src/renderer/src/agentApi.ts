@@ -42,6 +42,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export type AgentSandboxCapabilities = {
   backend: string
   isolated: boolean
+  /** Whether this daemon can execute programs in an OS-enforced sandbox. */
+  sandboxed_execution: boolean
   filesystem_scoping: boolean
   network_isolation: boolean
   process_isolation: boolean

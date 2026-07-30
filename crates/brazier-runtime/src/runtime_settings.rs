@@ -72,6 +72,12 @@ pub struct RuntimeSettings {
     /// Absolute path of an activated mlx-vlm Python interpreter.
     #[serde(default)]
     pub mlx_vlm_python: Option<String>,
+    /// Absolute path of an activated Linux vLLM Python interpreter.
+    #[serde(default)]
+    pub vllm_python: Option<String>,
+    /// Hugging Face repository served by the active vLLM runtime.
+    #[serde(default)]
+    pub vllm_model: Option<String>,
     /// Absolute path of an activated whisper-cli binary.
     #[serde(default)]
     pub whisper_binary: Option<String>,
@@ -169,6 +175,8 @@ impl Default for RuntimeSettings {
             binary_override: None,
             mlx_lm_python: None,
             mlx_vlm_python: None,
+            vllm_python: None,
+            vllm_model: None,
             whisper_binary: None,
             whisper_model: None,
             streaming_asr_python: None,
