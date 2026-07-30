@@ -270,8 +270,18 @@ function generationFit(
   return system == null ? 'unknown' : 'none'
 }
 
-function quantFit(file: HubFile, hardware: HardwareInfo | null, bytes = file.size): QuantFit {
-  return generationFit(bytes, hardware)
+/**
+ * One downloadable quantisation of a model. Split GGUFs publish one quant as
+ * several `-00001-of-0000N` shards; they are a single thing to pick and their
+ * size is the sum of the shards.
+ */
+export type QuantGroup = {
+  /** File path with any shard suffix stripped — unique per quantisation. */
+  key: string
+  /** Every file of the quant, in shard order. */
+  files: HubFile[]
+  /** Summed size across all files, or null when any part's size is unknown. */
+  size: number | null
 }
 
 function generationFitLabel(fit: QuantFit): string {
@@ -288,25 +298,50 @@ function quantGroup(path: string): string {
   return path.replace(/-\d{1,5}-of-\d{1,5}(?=\.gguf$)/i, '')
 }
 
-function quantSizes(files: HubFile[]): Map<string, number> {
-  const sizes = new Map<string, number>()
+/** Group a repository's quant files into downloadable quantisations. */
+export function groupQuants(files: HubFile[]): QuantGroup[] {
+  const byGroup = new Map<string, HubFile[]>()
   for (const file of files) {
-    if (file.size != null) {
-      const group = quantGroup(file.path)
-      sizes.set(group, (sizes.get(group) ?? 0) + file.size)
+    const key = quantGroup(file.path)
+    const group = byGroup.get(key)
+    if (group) {
+      group.push(file)
+    } else {
+      byGroup.set(key, [file])
     }
   }
-  return sizes
+  return [...byGroup.entries()].map(([key, groupFiles]) => {
+    // Shard order matters for the download: llama.cpp discovers siblings
+    // from the first shard's name.
+    const sorted = [...groupFiles].sort((left, right) => left.path.localeCompare(right.path))
+    let size: number | null = 0
+    for (const file of sorted) {
+      if (file.size == null) {
+        size = null
+        break
+      }
+      size += file.size
+    }
+    return { key, files: sorted, size }
+  })
 }
 
-function sortQuants(files: HubFile[], hardware: HardwareInfo | null): HubFile[] {
-  const sizes = quantSizes(files)
+/** Display name for a group: the file name a single-file quant would have. */
+export function quantGroupName(group: QuantGroup): string {
+  // The key keeps the original extension, so a sharded quant reads like the
+  // single file it stands in for and a whisper `.bin` keeps its own name.
+  return group.key.split('/').at(-1) ?? group.key
+}
+
+export function sortQuantGroups(
+  groups: QuantGroup[],
+  hardware: HardwareInfo | null
+): QuantGroup[] {
   const rank: Record<QuantFit, number> = { gpu: 0, system: 0, offload: 1, unknown: 2, none: 3 }
-  return [...files].sort((left, right) => {
+  return [...groups].sort((left, right) => {
     const fit =
-      rank[quantFit(left, hardware, sizes.get(quantGroup(left.path)))] -
-      rank[quantFit(right, hardware, sizes.get(quantGroup(right.path)))]
-    return fit || (right.size ?? 0) - (left.size ?? 0) || left.path.localeCompare(right.path)
+      rank[generationFit(left.size, hardware)] - rank[generationFit(right.size, hardware)]
+    return fit || (right.size ?? 0) - (left.size ?? 0) || left.key.localeCompare(right.key)
   })
 }
 
@@ -1313,11 +1348,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
             return lower.endsWith('.gguf') || lower.endsWith('.bin')
           })
           if (ggufs.length > 0) {
-            const sizes = quantSizes(ggufs)
-            const best = sortQuants(ggufs, props.hardware).find(
-              (file) => !file.path.toLowerCase().includes('mmproj')
+            const best = sortQuantGroups(groupQuants(ggufs), props.hardware).find(
+              (group) => !group.key.toLowerCase().includes('mmproj')
             )
-            return [model.id, generationFit(best ? sizes.get(quantGroup(best.path)) : null, props.hardware)] as const
+            return [model.id, generationFit(best?.size, props.hardware)] as const
           }
           const snapshotBytes = files
             .filter((file) => /\.(safetensors|onnx|bin)$/i.test(file.path))
@@ -1527,11 +1561,13 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   }
 
   /**
-   * Queue a single file. Every download takes this route, so each one has a
-   * job row that survives losing this panel — or the window — and can be
-   * paused and resumed from the tray.
+   * Queue a quant for download. Every file takes this route, so each one has
+   * a job row that survives losing this panel — or the window — and can be
+   * paused and resumed from the tray. A split GGUF is several files but one
+   * quant: all of its shards are queued, first shard first.
    */
-  async function downloadQuant(repoId: string, path: string): Promise<void> {
+  async function downloadQuant(repoId: string, paths: string[]): Promise<void> {
+    if (paths.length === 0) return
     const trust = trustByRepo[repoId]
     if (trust?.gated && hfTokenSource === 'none') {
       props.onError('This model is gated on Hugging Face. Save an access token above first.')
@@ -1544,7 +1580,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     props.onError(null)
     const engine = discoverEngine === 'whisper.cpp' ? 'whisper.cpp' : 'llama.cpp'
     try {
-      await queueModelDownload(repoId, path, 'main', engine)
+      for (const path of paths) {
+        await queueModelDownload(repoId, path, 'main', engine)
+      }
       setQueuedRepos((current) => ({ ...current, [repoId]: true }))
       setDownloadJobs(await listDownloadJobs())
     } catch (cause) {
@@ -2106,13 +2144,13 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         {(isSdcpp ? [] : hasSearched ? results : suggested).map((model) => {
           const expanded = expandedRepo === model.id
           const previewFit = fitPreviews[model.id] ?? 'unknown'
-          const files = sortQuants((repoFiles[model.id] ?? []).filter((file) => {
+          const groups = sortQuantGroups(groupQuants((repoFiles[model.id] ?? []).filter((file) => {
             const lower = file.path.toLowerCase()
             if (discoverEngine === 'whisper.cpp') {
               return lower.endsWith('.bin') || lower.endsWith('.gguf')
             }
             return lower.endsWith('.gguf')
-          }), props.hardware)
+          })), props.hardware)
           const preferred = preferredFiles[model.id]
           const filePickEngine =
             discoverEngine === 'llama.cpp' || discoverEngine === 'whisper.cpp'
@@ -2258,20 +2296,20 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                         </button>
                       </div>
                     </div>
-                  ) : files.length === 0 ? (
+                  ) : groups.length === 0 ? (
                     <p className="empty-models-inline">No GGUF files found in this repo.</p>
                   ) : (
-                    files.map((file) => {
-                    const basename = file.path.split('/').at(-1) ?? file.path
-                    const groupSizes = quantSizes(files)
-                    const groupBytes = groupSizes.get(quantGroup(file.path))
-                    const fit = quantFit(file, props.hardware, groupBytes)
+                    groups.map((group) => {
+                    const basename = quantGroupName(group)
+                    const fit = generationFit(group.size, props.hardware)
                     const isProjector = basename.toLowerCase().includes('mmproj')
                     const isPreferred =
                       preferred != null &&
-                      (file.path === preferred || file.path.endsWith(`/${preferred}`))
+                      group.files.some(
+                        (file) => file.path === preferred || file.path.endsWith(`/${preferred}`)
+                      )
                     return (
-                      <div className="quant-row" key={file.path}>
+                      <div className="quant-row" key={group.key}>
                         <div>
                           <strong>
                             {basename}
@@ -2284,15 +2322,16 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                             </span>
                           )}
                           <span>
-                            {file.path}
-                            {file.size != null ? ` · ${formatBytes(file.size)}` : ''}
+                            {group.key}
+                            {group.size != null ? ` · ${formatBytes(group.size)}` : ''}
+                            {group.files.length > 1 ? ` · ${group.files.length} parts` : ''}
                           </span>
                         </div>
                         <div className="quant-actions">
                           <button
                             type="button"
                             title="Downloads in the background; track it in the download tray"
-                            onClick={() => void downloadQuant(model.id, file.path)}
+                            onClick={() => void downloadQuant(model.id, group.files.map((file) => file.path))}
                           >
                             <Download size={14} />
                             {isProjector ? 'Add capability' : 'Download'}
