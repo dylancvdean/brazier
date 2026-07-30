@@ -1830,6 +1830,13 @@ export function activateRuntime(id: string): Promise<{ active_binary: string; id
   })
 }
 
+export function deactivateRuntime(id: string): Promise<{ id: string; deactivated: boolean }> {
+  return request('/api/v1/runtimes/deactivate', {
+    method: 'POST',
+    body: JSON.stringify({ id })
+  })
+}
+
 export type SourceRuntimeUpdate = {
   id: string
   engine: string

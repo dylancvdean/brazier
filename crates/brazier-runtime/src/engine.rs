@@ -1263,6 +1263,46 @@ impl Runtime {
         self.activate_runtime_entry(&entry).await.map(|_| ())
     }
 
+    /// Clear a runtime's explicit activation and stop its resident server.
+    pub async fn deactivate_runtime_entry(
+        &self,
+        entry: &runtimes::RuntimeEntry,
+    ) -> anyhow::Result<()> {
+        let mut settings = self.settings.lock().await;
+        match entry.engine.as_str() {
+            runtimes::ENGINE => settings.binary_override = None,
+            "mlx-lm" => settings.mlx_lm_python = None,
+            "mlx-vlm" => settings.mlx_vlm_python = None,
+            vllm::ENGINE => settings.vllm_python = None,
+            crate::whisper::ENGINE | crate::whisperkit::ENGINE => settings.whisper_binary = None,
+            "streaming-asr" => settings.streaming_asr_python = None,
+            crate::sdcpp::ENGINE => settings.sdcpp_binary = None,
+            voice::ENGINE | voice::ENGINE_MLX => settings.voice_python = None,
+            other => anyhow::bail!("`{other}` runtimes cannot be deactivated"),
+        }
+        runtime_settings::save(&self.data_dir, &settings).await?;
+        drop(settings);
+        match entry.engine.as_str() {
+            runtimes::ENGINE => {
+                if let Some(mut server) = self.llama.lock().await.server.take() {
+                    let _ = server.stop().await;
+                }
+            }
+            "mlx-lm" | "mlx-vlm" => {
+                if let Some(mut server) = self.mlx.lock().await.server.take() {
+                    let _ = server.stop().await;
+                }
+            }
+            vllm::ENGINE => {
+                if let Some(mut server) = self.vllm.lock().await.server.take() {
+                    let _ = server.stop().await;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     async fn apply_model_binding(&self, model_id: &str) -> anyhow::Result<()> {
         let bindings = model_bindings::load(&self.data_dir);
         let Some(runtime_id) = bindings.get(model_id) else {

@@ -1005,7 +1005,10 @@ pub async fn run_build_with_progress(
                         .as_secs()
                 ),
                 binary: binary.display().to_string(),
-                name: request.name.filter(|name| !name.trim().is_empty()).map(|name| name.trim().to_owned()),
+                name: request
+                    .name
+                    .filter(|name| !name.trim().is_empty())
+                    .map(|name| name.trim().to_owned()),
                 commit: built_commit,
             };
             if let Ok(bytes) = serde_json::to_vec_pretty(&record) {

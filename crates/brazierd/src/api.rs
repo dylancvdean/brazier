@@ -411,6 +411,7 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             get(list_runtimes).delete(delete_runtime),
         )
         .route("/api/v1/runtimes/activate", post(activate_runtime))
+        .route("/api/v1/runtimes/deactivate", post(deactivate_runtime))
         .route(
             "/api/v1/runtimes/check-updates",
             post(check_runtime_updates),
@@ -1444,6 +1445,35 @@ async fn activate_runtime(
         "engine": entry.engine,
         "id": entry.id
     })))
+}
+
+async fn deactivate_runtime(
+    State(state): State<AppState>,
+    Json(request): Json<RuntimeIdRequest>,
+) -> ApiResult<Json<Value>> {
+    let path_env = std::env::var("PATH").ok();
+    let active = state.runtime.active_runtimes().await;
+    let entry = runtimes::find(
+        &state.data_dir,
+        path_env.as_deref(),
+        &request.id,
+        false,
+        &active,
+    )
+    .ok_or_else(|| ApiError::bad_request(format!("unknown runtime `{}`", request.id)))?;
+    if !entry.active {
+        return Err(ApiError::bad_request(format!(
+            "runtime `{}` is not active",
+            request.id
+        )));
+    }
+    state
+        .runtime
+        .deactivate_runtime_entry(&entry)
+        .await
+        .map_err(ApiError::bad_request)?;
+    state.invalidate_runtimes_cache().await;
+    Ok(Json(json!({ "id": entry.id, "deactivated": true })))
 }
 
 async fn delete_runtime(

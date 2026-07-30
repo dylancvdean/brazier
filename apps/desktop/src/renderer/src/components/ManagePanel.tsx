@@ -24,6 +24,7 @@ import {
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   activateRuntime,
+  deactivateRuntime,
   buildRuntime,
   cancelBuild,
   cancelBuildJob,
@@ -2666,6 +2667,18 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     }
   }
 
+  async function deactivate(id: string): Promise<void> {
+    setBusyRuntime(id)
+    try {
+      await deactivateRuntime(id)
+      await refreshRuntimes()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setBusyRuntime(null)
+    }
+  }
+
   async function remove(id: string): Promise<void> {
     setBusyRuntime(id)
     props.onError(null)
@@ -3224,6 +3237,15 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                     ) : (
                       'Activate'
                     )}
+                  </button>
+                )}
+                {runtime.active && (
+                  <button
+                    className="chip-button subtle"
+                    disabled={busyRuntime != null}
+                    onClick={() => void deactivate(runtime.id)}
+                  >
+                    {busyRuntime === runtime.id ? <LoaderCircle className="spin" size={13} /> : 'Deactivate'}
                   </button>
                 )}
                 {runtime.deletable &&
