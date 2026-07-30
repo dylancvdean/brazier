@@ -470,6 +470,14 @@ fn install_python_env(venv: &Path, engine: &str) -> anyhow::Result<PathBuf> {
         );
         return Ok(python);
     }
+    if engine == crate::vllm::ENGINE {
+        anyhow::ensure!(
+            crate::vllm::python_appears_runnable(&python),
+            "Python environment at {} failed an import check for vLLM",
+            python.display()
+        );
+        return Ok(python);
+    }
     let kind = crate::mlx::MlxKind::from_engine_id(engine)
         .ok_or_else(|| anyhow::anyhow!("unsupported Python engine `{engine}`"))?;
     anyhow::ensure!(

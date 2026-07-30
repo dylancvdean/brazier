@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -74,6 +77,10 @@ pub struct BuildRecipe {
     pub supported_platforms: Vec<String>,
     #[serde(default)]
     pub skip_checkout: bool,
+    /// Reviewed commands required only on a particular platform, run after the
+    /// environment exists and before the selected source is installed.
+    #[serde(default)]
+    pub platform_pre_steps: HashMap<String, Vec<RecipeStep>>,
     pub steps: Vec<RecipeStep>,
 }
 
@@ -156,7 +163,7 @@ pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
         valid_revision(&request.revision),
         "revision contains unsupported characters"
     );
-    let recipe = recipe(&request.engine)?;
+    let mut recipe = recipe(&request.engine)?;
     anyhow::ensure!(
         recipe
             .supported_platforms
@@ -237,7 +244,16 @@ pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
     let skip_checkout = recipe.skip_checkout;
     let build = recipe
         .steps
-        .into_iter()
+        .iter()
+        .take(1)
+        .cloned()
+        .chain(
+            recipe
+                .platform_pre_steps
+                .remove(&request.platform)
+                .unwrap_or_default(),
+        )
+        .chain(recipe.steps.iter().skip(1).cloned())
         .map(|step| PlannedCommand {
             label: step.label,
             program: step.program,
