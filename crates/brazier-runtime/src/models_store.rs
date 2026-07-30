@@ -539,12 +539,29 @@ fn gguf_capabilities(has_projector: bool, model_key: &str, model_path: &Path) ->
         streaming: true,
         tools: true,
         reasoning,
-        max_context_length: gguf_context_length(model_path)
-            .or_else(|| infer_gguf_context_hint(model_key)),
+        max_context_length: advertised_gguf_context_length(model_key, model_path),
         reasoning_modes,
         harmony: crate::harmony::is_harmony_model(model_key),
         audio_input: native_audio.then(|| "native".to_owned()),
     }
+}
+
+/// The current Laguna S 2.1 GGUFs advertise their conservative 256K default,
+/// although the checkpoint supports 1M with its documented YaRN launch
+/// settings.  Expose the trained maximum so the inference control can offer
+/// it; `llama::LaunchPlan` adds those settings when the user selects it.
+fn advertised_gguf_context_length(model_key: &str, model_path: &Path) -> Option<u32> {
+    if let Some(context) = advertised_laguna_s_2_1_context(model_key) {
+        return Some(context);
+    }
+    gguf_context_length(model_path).or_else(|| infer_gguf_context_hint(model_key))
+}
+
+fn advertised_laguna_s_2_1_context(model_key: &str) -> Option<u32> {
+    model_key
+        .to_ascii_lowercase()
+        .contains("laguna-s-2.1")
+        .then_some(1_048_576)
 }
 
 fn gguf_context_length(model_path: &Path) -> Option<u32> {
@@ -820,7 +837,8 @@ fn mlx_capabilities(kind: MlxKind, dir: &Path, model_key: &str) -> ModelCapabili
         streaming: true,
         tools: true,
         reasoning,
-        max_context_length: config_value.as_ref().and_then(max_context_from_config),
+        max_context_length: advertised_laguna_s_2_1_context(model_key)
+            .or_else(|| config_value.as_ref().and_then(max_context_from_config)),
         reasoning_modes,
         harmony: crate::harmony::is_harmony_model(model_key),
         audio_input: native_audio.then(|| "native".to_owned()),
@@ -1248,6 +1266,39 @@ mod tests {
         std::fs::write(&file, gguf_with_context("llama", 98_304)).unwrap();
         let models = list_gguf_models(dir.path()).unwrap();
         assert_eq!(models[0].capabilities.max_context_length, Some(98_304));
+    }
+
+    #[test]
+    fn advertises_laguna_s_2_1_full_context_with_a_256k_gguf_default() {
+        let dir = tempdir().unwrap();
+        let file = download_destination(
+            dir.path(),
+            "unsloth/Laguna-S-2.1-GGUF",
+            "Laguna-S-2.1-UD-Q4_K_M.gguf",
+        )
+        .unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, gguf_with_context("laguna", 262_144)).unwrap();
+
+        let models = list_gguf_models(dir.path()).unwrap();
+        assert_eq!(models[0].capabilities.max_context_length, Some(1_048_576));
+    }
+
+    #[test]
+    fn advertises_laguna_s_2_1_mlx_full_context_with_a_256k_default() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings":262144}"#,
+        )
+        .unwrap();
+
+        let capabilities = mlx_capabilities(
+            MlxKind::Lm,
+            dir.path(),
+            "mlx-community/Laguna-S-2.1-oQ4e-fast",
+        );
+        assert_eq!(capabilities.max_context_length, Some(1_048_576));
     }
 
     #[test]

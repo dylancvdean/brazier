@@ -1758,86 +1758,8 @@ export function App(): React.JSX.Element {
           >
             <SlidersHorizontal size={17} />
           </button>
-          <div className="capabilities">
-            {/* Icons only: with four modes in the bar there is no room for
-                labels. Every value that used to be printed here moved into the
-                tooltip, which also carries the reason a capability is off. */}
-            <span
-              title={`Acceleration target: ${runtime?.target ?? 'auto'}`}
-              aria-label={`Acceleration target: ${runtime?.target ?? 'auto'}`}
-            >
-              <Cpu size={14} />
-            </span>
-            <span
-              title={`Context window: ${runtime?.context_size?.toLocaleString() ?? '4,096'} tokens${
-                selectedCapabilities?.max_context_length
-                  ? ` · ${selectedCapabilities.max_context_length.toLocaleString()} supported by this model`
-                  : ''
-              }`}
-              aria-label="Context window"
-            >
-              <Gauge size={14} />
-            </span>
-            <span
-              className={
-                (selectedCapabilities?.reasoning_modes?.length ??
-                  (selectedCapabilities?.reasoning ? 1 : 0)) > 0
-                  ? ''
-                  : 'unavailable'
-              }
-              title={
-                (selectedCapabilities?.reasoning_modes?.length ??
-                  (selectedCapabilities?.reasoning ? 1 : 0)) > 0
-                  ? 'Reasoning: this model can think before answering'
-                  : 'Reasoning: not advertised by this model'
-              }
-              aria-label="Reasoning"
-            >
-              <Brain size={14} />
-            </span>
-            <span
-              className={canAttachImage ? '' : 'unavailable'}
-              title={`Vision — ${visionCapabilityTitle(selectedModel, localModels, canAttachImage)}`}
-              aria-label="Vision"
-            >
-              <Image size={14} />
-            </span>
-            <span
-              className={canAttachAudio ? '' : 'unavailable'}
-              title={`${
-                selectedNativeAudio ? 'Native audio' : pipelineFeatures.asr ? 'ASR' : 'Audio'
-              } — ${audioBadgeTitle}`}
-              aria-label={
-                selectedNativeAudio ? 'Native audio' : pipelineFeatures.asr ? 'ASR' : 'Audio'
-              }
-            >
-              <AudioLines size={14} />
-            </span>
-            <span
-              className={canAttachVideo ? '' : 'unavailable'}
-              title={
-                canAttachVideo
-                  ? 'Video: sampled with ffmpeg and transcribed when ASR is available'
-                  : 'Video: needs ffmpeg plus a vision model (and whisper.cpp for the soundtrack)'
-              }
-              aria-label="Video"
-            >
-              <Video size={14} />
-            </span>
-            <span
-              className={selectedCapabilities?.tools ? '' : 'unavailable'}
-              title={
-                selectedCapabilities?.tools
-                  ? 'Tools: this model advertises tool calling'
-                  : 'Tools: not advertised by this model'
-              }
-              aria-label="Tools"
-            >
-              <Wrench size={14} />
-            </span>
-          </div>
           <button
-            className="icon-button"
+            className="icon-button manage-button"
             title="Manage models, runtimes, and engine configuration"
             onClick={() => openManage('library')}
           >
@@ -2328,6 +2250,81 @@ export function App(): React.JSX.Element {
                   </span>
                 ) : null}
                 Local models can be inaccurate. Verify important information.
+                <span className="capabilities" aria-label="Model capabilities">
+                  <span
+                    title={`Acceleration target: ${runtime?.target ?? 'auto'}`}
+                    aria-label={`Acceleration target: ${runtime?.target ?? 'auto'}`}
+                  >
+                    <Cpu size={14} />
+                  </span>
+                  <span
+                    title={`Context window: ${runtime?.context_size?.toLocaleString() ?? '4,096'} tokens${
+                      selectedCapabilities?.max_context_length
+                        ? ` · ${selectedCapabilities.max_context_length.toLocaleString()} supported by this model`
+                        : ''
+                    }`}
+                    aria-label="Context window"
+                  >
+                    <Gauge size={14} />
+                  </span>
+                  <span
+                    className={
+                      (selectedCapabilities?.reasoning_modes?.length ??
+                        (selectedCapabilities?.reasoning ? 1 : 0)) > 0
+                        ? ''
+                        : 'unavailable'
+                    }
+                    title={
+                      (selectedCapabilities?.reasoning_modes?.length ??
+                        (selectedCapabilities?.reasoning ? 1 : 0)) > 0
+                        ? 'Reasoning: this model can think before answering'
+                        : 'Reasoning: not advertised by this model'
+                    }
+                    aria-label="Reasoning"
+                  >
+                    <Brain size={14} />
+                  </span>
+                  <span
+                    className={canAttachImage ? '' : 'unavailable'}
+                    title={`Vision — ${visionCapabilityTitle(selectedModel, localModels, canAttachImage)}`}
+                    aria-label="Vision"
+                  >
+                    <Image size={14} />
+                  </span>
+                  <span
+                    className={canAttachAudio ? '' : 'unavailable'}
+                    title={`${
+                      selectedNativeAudio ? 'Native audio' : pipelineFeatures.asr ? 'ASR' : 'Audio'
+                    } — ${audioBadgeTitle}`}
+                    aria-label={
+                      selectedNativeAudio ? 'Native audio' : pipelineFeatures.asr ? 'ASR' : 'Audio'
+                    }
+                  >
+                    <AudioLines size={14} />
+                  </span>
+                  <span
+                    className={canAttachVideo ? '' : 'unavailable'}
+                    title={
+                      canAttachVideo
+                        ? 'Video: sampled with ffmpeg and transcribed when ASR is available'
+                        : 'Video: needs ffmpeg plus a vision model (and whisper.cpp for the soundtrack)'
+                    }
+                    aria-label="Video"
+                  >
+                    <Video size={14} />
+                  </span>
+                  <span
+                    className={selectedCapabilities?.tools ? '' : 'unavailable'}
+                    title={
+                      selectedCapabilities?.tools
+                        ? 'Tools: this model advertises tool calling'
+                        : 'Tools: not advertised by this model'
+                    }
+                    aria-label="Tools"
+                  >
+                    <Wrench size={14} />
+                  </span>
+                </span>
                 {toolsEnabled && canUseTools ? ' Tools are enabled (bundled + MCP).' : ''}
                 {selectedCapabilities?.harmony
                   ? ' This model uses OpenAI Harmony (gpt-oss); reasoning is routed automatically.'

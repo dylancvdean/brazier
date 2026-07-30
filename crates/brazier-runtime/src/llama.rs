@@ -1383,6 +1383,8 @@ struct LaunchPlan {
     rope_freq_base: Option<f32>,
     rope_freq_scale: Option<f32>,
     yarn_orig_ctx: Option<u32>,
+    /// Laguna S 2.1's 1M YaRN configuration uses llama.cpp's `--rope-scale`.
+    rope_scale: Option<f32>,
     n_cpu_moe: Option<u32>,
     main_gpu: Option<u32>,
     tensor_split: Option<String>,
@@ -1419,8 +1421,10 @@ impl LaunchPlan {
         let field = |get: &dyn Fn(&TextProfile) -> Option<u32>, fallback: u32| {
             profile.and_then(get).unwrap_or(fallback)
         };
+        let context_size = field(&|profile| profile.context_size, settings.context_size);
+        let laguna_1m = model_path.is_some_and(is_laguna_s_2_1) && context_size > 262_144;
         Self {
-            context_size: field(&|profile| profile.context_size, settings.context_size),
+            context_size,
             batch_size: field(&|profile| profile.batch_size, settings.batch_size),
             ubatch_size: profile.and_then(|profile| profile.ubatch_size),
             threads: profile
@@ -1441,10 +1445,15 @@ impl LaunchPlan {
                 .unwrap_or(settings.jinja),
             mlock: profile.and_then(|profile| profile.mlock).unwrap_or(false),
             no_mmap: profile.and_then(|profile| profile.no_mmap).unwrap_or(false),
-            rope_scaling: profile.and_then(|profile| profile.rope_scaling.clone()),
+            rope_scaling: profile
+                .and_then(|profile| profile.rope_scaling.clone())
+                .or_else(|| laguna_1m.then(|| "yarn".to_owned())),
             rope_freq_base: profile.and_then(|profile| profile.rope_freq_base),
             rope_freq_scale: profile.and_then(|profile| profile.rope_freq_scale),
-            yarn_orig_ctx: profile.and_then(|profile| profile.yarn_orig_ctx),
+            yarn_orig_ctx: profile
+                .and_then(|profile| profile.yarn_orig_ctx)
+                .or_else(|| laguna_1m.then_some(8_192)),
+            rope_scale: laguna_1m.then_some(128.0),
             n_cpu_moe: profile.and_then(|profile| profile.n_cpu_moe),
             main_gpu: profile.and_then(|profile| profile.main_gpu),
             tensor_split: profile.and_then(|profile| profile.tensor_split.clone()),
@@ -1489,7 +1498,7 @@ impl LaunchPlan {
             })
             .unwrap_or_default();
         format!(
-            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|mtp={}:{}|{}|jinja|rf={}|tpl={}|{}",
+            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|mtp={}:{}|{}|jinja|rf={}|tpl={}|{}",
             self.context_size,
             self.batch_size,
             self.ubatch_size,
@@ -1505,6 +1514,7 @@ impl LaunchPlan {
             self.rope_freq_base,
             self.rope_freq_scale,
             self.yarn_orig_ctx,
+            self.rope_scale,
             self.n_cpu_moe,
             self.main_gpu,
             self.tensor_split,
@@ -1571,6 +1581,9 @@ impl LaunchPlan {
         if let Some(value) = self.yarn_orig_ctx {
             command.arg("--yarn-orig-ctx").arg(value.to_string());
         }
+        if let Some(value) = self.rope_scale {
+            command.arg("--rope-scale").arg(value.to_string());
+        }
         if let Some(value) = self.n_cpu_moe {
             command.arg("--n-cpu-moe").arg(value.to_string());
         }
@@ -1606,6 +1619,12 @@ impl LaunchPlan {
             command.arg(arg);
         }
     }
+}
+
+fn is_laguna_s_2_1(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().contains("laguna-s-2.1"))
 }
 
 /// Pick the safe default for a model when the runtime has not been explicitly
@@ -2602,6 +2621,25 @@ mod tests {
             None,
         );
         assert_eq!(legacy_child_context.aggregate_context_size(), 393_216);
+    }
+
+    #[test]
+    fn laguna_s_2_1_uses_documented_yarn_settings_above_256k() {
+        let settings = RuntimeSettings {
+            context_size: 1_048_576,
+            ..RuntimeSettings::default()
+        };
+        let plan = LaunchPlan::resolve(
+            &settings,
+            None,
+            Vec::new(),
+            RuntimeTarget::Metal,
+            false,
+            Some(Path::new("/models/Laguna-S-2.1-UD-Q4_K_M.gguf")),
+        );
+        assert_eq!(plan.rope_scaling.as_deref(), Some("yarn"));
+        assert_eq!(plan.yarn_orig_ctx, Some(8_192));
+        assert_eq!(plan.rope_scale, Some(128.0));
     }
 
     #[test]

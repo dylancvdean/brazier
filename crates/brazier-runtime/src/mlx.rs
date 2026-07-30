@@ -99,6 +99,7 @@ pub struct MlxServer {
 
 /// The fingerprint a server started with these inputs would carry.
 pub fn launch_key(
+    kind: MlxKind,
     settings: &RuntimeSettings,
     profile: Option<&crate::model_settings::TextProfile>,
     adapter: Option<&Path>,
@@ -109,7 +110,26 @@ pub fn launch_key(
     let extra = profile
         .map(|profile| profile.extra_args.join(" "))
         .unwrap_or_default();
-    format!("{max_tokens:?}|{adapter:?}|{extra}")
+    format!(
+        "{max_tokens:?}|{:?}|{adapter:?}|{extra}",
+        max_kv_size(kind, settings, profile)
+    )
+}
+
+/// MLX-VLM's server accepts an explicit token cap for its KV cache. Apply
+/// Brazier's selected per-model/global context so its capability label and the
+/// running server agree. MLX-LM's pinned HTTP server does not accept this
+/// option; it follows the model's native configuration instead.
+fn max_kv_size(
+    kind: MlxKind,
+    settings: &RuntimeSettings,
+    profile: Option<&crate::model_settings::TextProfile>,
+) -> Option<u32> {
+    (kind == MlxKind::Vlm).then(|| {
+        profile
+            .and_then(|profile| profile.context_size)
+            .unwrap_or(settings.context_size)
+    })
 }
 
 impl MlxServer {
@@ -176,6 +196,9 @@ impl MlxServer {
         {
             command.arg("--max-tokens").arg(max_tokens.to_string());
         }
+        if let Some(max_kv_size) = max_kv_size(kind, settings, profile) {
+            command.arg("--max-kv-size").arg(max_kv_size.to_string());
+        }
         if let Some(adapter) = adapter {
             command.arg("--adapter-path").arg(adapter);
         }
@@ -228,7 +251,7 @@ impl MlxServer {
             model_ref: model_ref.to_owned(),
             python: python.to_path_buf(),
             kind,
-            launch_key: launch_key(settings, profile, adapter),
+            launch_key: launch_key(kind, settings, profile, adapter),
         })
     }
 
@@ -273,5 +296,15 @@ mod tests {
             Some(MlxKind::Vlm)
         );
         assert_eq!(MlxKind::from_model_id("gguf:demo.gguf"), None);
+    }
+
+    #[test]
+    fn only_vlm_server_uses_the_selected_context_as_its_kv_limit() {
+        let settings = RuntimeSettings {
+            context_size: 1_048_576,
+            ..RuntimeSettings::default()
+        };
+        assert_eq!(max_kv_size(MlxKind::Vlm, &settings, None), Some(1_048_576));
+        assert_eq!(max_kv_size(MlxKind::Lm, &settings, None), None);
     }
 }

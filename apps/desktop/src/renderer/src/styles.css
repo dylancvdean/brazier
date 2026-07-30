@@ -849,6 +849,12 @@ code {
   flex-shrink: 0;
 }
 
+/* Keep the Manage launcher at the far edge now that capabilities live below
+   the composer rather than competing for header space. */
+.topbar > .manage-button {
+  margin-left: auto;
+}
+
 .model-picker:hover {
   background: #0a0a0a;
 }
@@ -876,9 +882,10 @@ code {
 }
 
 .capabilities {
-  display: flex;
+  display: inline-flex;
   gap: 5px;
-  margin-left: auto;
+  margin-left: 8px;
+  vertical-align: middle;
 }
 
 .capabilities span,
@@ -3762,10 +3769,6 @@ a.inline-link {
 }
 
 @media (max-width: 980px) {
-  .capabilities span {
-    display: none;
-  }
-
   /* Narrow windows: the sidebar becomes a bottom panel in the layout flow,
      so expanding it shifts the workspace (and composer) up instead of
      covering them. The topbar hamburger is replaced by .sidebar-handle,

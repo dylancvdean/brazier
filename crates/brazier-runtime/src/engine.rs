@@ -110,6 +110,10 @@ fn exceeds_gpu_capacity(gpu_bytes: u64, capacity: Option<u64>) -> bool {
     capacity.is_some_and(|capacity| gpu_bytes > capacity)
 }
 
+fn uses_apple_unified_memory(os: &str, gpu_layers: i32) -> bool {
+    os == "macos" && gpu_layers != 0
+}
+
 type LoadNotifier = Option<tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>>;
 
 /// Maximum model round-trips when the model keeps requesting tools.
@@ -194,9 +198,10 @@ struct Endpoint {
     api_key: Option<String>,
     /// What to call the model in the request body.
     ///
-    /// A local server holds one model and answers to `local` whatever it is
-    /// called; a remote server holds several and needs its own name for the one
-    /// being asked, which is not the id Brazier stores.
+    /// llama.cpp accepts `local` for its single loaded model. MLX servers use
+    /// the request's model field to resolve a repo or local snapshot path, so
+    /// they need the same model reference used at launch. Remote servers hold
+    /// several models and likewise need their own name, not Brazier's id.
     model_alias: String,
     /// Which sampler names this server understands. Someone else's server gets
     /// the standard fields alone.
@@ -490,7 +495,15 @@ impl Runtime {
                     let hardware = crate::hardware::detect();
                     let gpu_capacity = hardware.gpu_offload_memory_bytes.or(hardware.vram_bytes);
                     let system_backed_gpu_spill = exceeds_gpu_capacity(gpu_bytes, gpu_capacity);
-                    let fully_gpu = weights_on_gpu && kv_on_gpu && !system_backed_gpu_spill;
+                    // Metal on Apple Silicon uses unified memory: Metal can
+                    // directly address buffers that llama.cpp labels CPU or
+                    // CPU_Mapped.  That is not CPU offload in the discrete-GPU
+                    // sense, so show green whenever Metal is enabled.  A
+                    // deliberate CPU-only launch remains CPU resident.
+                    let apple_unified_memory =
+                        uses_apple_unified_memory(hardware.os, server.gpu_layers);
+                    let fully_gpu = apple_unified_memory
+                        || (weights_on_gpu && kv_on_gpu && !system_backed_gpu_spill);
                     let allocation_detail = if gpu_bytes > 0 || cpu_bytes > 0 {
                         format!(
                             " Reported allocations: {} GPU ({} KV) and {} CPU ({} KV).",
@@ -511,7 +524,11 @@ impl Runtime {
                         if server.parallel_slots == 1 { "" } else { "s" },
                         per_slot_context,
                     );
-                    let description = if system_backed_gpu_spill {
+                    let description = if apple_unified_memory {
+                        format!(
+                            "GPU-addressable unified memory — Metal can directly access model weights and KV cache without CPU offload.{reservation}{allocation_detail}"
+                        )
+                    } else if system_backed_gpu_spill {
                         format!(
                             "System-memory spill active — llama.cpp reported {} of GPU buffers, above the {} dedicated GPU-memory budget, so the excess is system-backed.{reservation}{allocation_detail}",
                             residency_bytes(gpu_bytes),
@@ -1483,7 +1500,7 @@ impl Runtime {
         let extra = self.extra_library_paths().await;
         let model_ref = models_store::mlx_server_model_ref(&self.data_dir, model_id, &extra)?;
 
-        let wanted_key = mlx::launch_key(&settings, profile, adapter.as_deref());
+        let wanted_key = mlx::launch_key(kind, &settings, profile, adapter.as_deref());
         let mut guard = self.mlx.lock().await;
         if let Some(server) = guard.server.as_mut() {
             if server.kind == kind
@@ -1828,7 +1845,7 @@ impl Runtime {
                 Ok(Endpoint {
                     base_url: server.base_url.clone(),
                     api_key: None,
-                    model_alias: LOCAL_MODEL_ALIAS.to_owned(),
+                    model_alias: server.model_ref.clone(),
                     dialect: llama::SamplerDialect::Mlx,
                 })
             }
@@ -2567,6 +2584,14 @@ mod tests {
         assert!(exceeds_gpu_capacity(49 * gib, Some(16 * gib)));
         assert!(!exceeds_gpu_capacity(12 * gib, Some(16 * gib)));
         assert!(!exceeds_gpu_capacity(49 * gib, None));
+    }
+
+    #[test]
+    fn metal_on_apple_silicon_is_not_cpu_offload() {
+        assert!(uses_apple_unified_memory("macos", -1));
+        assert!(uses_apple_unified_memory("macos", 1));
+        assert!(!uses_apple_unified_memory("macos", 0));
+        assert!(!uses_apple_unified_memory("linux", -1));
     }
 
     #[test]
