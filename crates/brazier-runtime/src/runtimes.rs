@@ -949,6 +949,7 @@ mod tests {
                 target: "cpu".into(),
                 created_at: "1".into(),
                 binary: build_binary.display().to_string(),
+                name: None,
                 commit: None,
             })
             .unwrap(),
@@ -1019,6 +1020,7 @@ mod tests {
                 target: "cpu".into(),
                 created_at: "1".into(),
                 binary: build_binary.display().to_string(),
+                name: None,
                 commit: Some(sha.into()),
             })
             .unwrap(),
@@ -1097,6 +1099,7 @@ mod tests {
             target: "metal".into(),
             created_at: "1785015875".into(),
             binary: "/venv/bin/python".into(),
+            name: None,
             commit: None,
         };
         assert_eq!(build_stamp(&record), "2026-07-25 21:44");
@@ -1134,6 +1137,7 @@ mod tests {
             target: "metal".into(),
             created_at: "0".into(),
             binary: "/bin/llama-server".into(),
+            name: None,
             commit: None,
         };
         assert!(source_label(&record).contains("PrismML-Eng"));
@@ -1154,6 +1158,7 @@ mod tests {
                 target: "cpu".into(),
                 created_at: "1".into(),
                 binary: build_binary.display().to_string(),
+                name: None,
                 commit: None,
             })
             .unwrap(),

@@ -53,7 +53,7 @@
       {
         "label": "Install vLLM ROCm build and runtime dependencies",
         "program": "uv",
-        "args": ["pip", "install", "--python", "{python}", "--requirements", "{source}/requirements/build/rocm.txt", "--requirements", "{source}/requirements/rocm.txt"]
+        "args": ["pip", "install", "--python", "{python}", "--index-strategy", "unsafe-best-match", "--requirements", "{source}/requirements/build/rocm.txt", "--requirements", "{source}/requirements/rocm.txt"]
       },
       {
         "label": "Build and install selected vLLM ROCm source",

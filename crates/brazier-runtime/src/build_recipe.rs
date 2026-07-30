@@ -446,6 +446,29 @@ mod tests {
     }
 
     #[test]
+    fn vllm_rocm_considers_pypi_when_the_pytorch_index_has_an_old_package() {
+        let plan = plan(BuildPlanRequest {
+            engine: "vllm".into(),
+            repository: "https://github.com/vllm-project/vllm".into(),
+            revision: "main".into(),
+            platform: "linux-x64".into(),
+            target: "rocm".into(),
+        })
+        .unwrap();
+        let dependency_step = plan
+            .build
+            .iter()
+            .find(|step| step.label.contains("ROCm build and runtime dependencies"))
+            .unwrap();
+        assert!(
+            dependency_step
+                .args
+                .windows(2)
+                .any(|args| { args == ["--index-strategy", "unsafe-best-match"] })
+        );
+    }
+
+    #[test]
     fn vllm_metal_installs_core_then_builds_plugin_artifacts() {
         let plan = plan(BuildPlanRequest {
             engine: "vllm".into(),

@@ -1264,6 +1264,7 @@ mod tests {
                 target: "cpu".into(),
                 created_at: "1".into(),
                 binary: binary.display().to_string(),
+                name: None,
                 commit: None,
             })
             .unwrap(),

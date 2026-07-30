@@ -1284,19 +1284,50 @@ impl Runtime {
         drop(settings);
         match entry.engine.as_str() {
             runtimes::ENGINE => {
-                if let Some(mut server) = self.llama.lock().await.server.take() {
+                let mut state = self.llama.lock().await;
+                if let Some(mut server) = state.server.take() {
                     let _ = server.stop().await;
                 }
+                state.binary = None;
             }
-            "mlx-lm" | "mlx-vlm" => {
-                if let Some(mut server) = self.mlx.lock().await.server.take() {
+            "mlx-lm" => {
+                let mut state = self.mlx.lock().await;
+                if let Some(mut server) = state.server.take() {
                     let _ = server.stop().await;
                 }
+                state.lm_python = None;
+            }
+            "mlx-vlm" => {
+                let mut state = self.mlx.lock().await;
+                if let Some(mut server) = state.server.take() {
+                    let _ = server.stop().await;
+                }
+                state.vlm_python = None;
             }
             vllm::ENGINE => {
-                if let Some(mut server) = self.vllm.lock().await.server.take() {
+                let mut state = self.vllm.lock().await;
+                if let Some(mut server) = state.server.take() {
                     let _ = server.stop().await;
                 }
+                state.python = None;
+            }
+            crate::whisper::ENGINE | crate::whisperkit::ENGINE => {
+                self.whisper.lock().await.binary = None;
+            }
+            "streaming-asr" => {
+                let mut state = self.streaming_asr.lock().await;
+                state.worker = None;
+                state.python = None;
+            }
+            crate::sdcpp::ENGINE => {
+                self.sdcpp.lock().await.binary = None;
+            }
+            voice::ENGINE | voice::ENGINE_MLX => {
+                let mut state = self.voice.lock().await;
+                if let Some(mut server) = state.server.take() {
+                    let _ = server.stop().await;
+                }
+                state.python = None;
             }
             _ => {}
         }
@@ -2238,6 +2269,9 @@ impl Runtime {
         if let Some(mut server) = self.mlx.lock().await.server.take() {
             let _ = server.stop().await;
         }
+        if let Some(mut server) = self.vllm.lock().await.server.take() {
+            let _ = server.stop().await;
+        }
     }
 
     /// Stop any child inference servers (called on daemon shutdown).
@@ -3147,6 +3181,87 @@ mod tests {
             error.contains("vLLM Python interpreter not found"),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn deactivating_runtimes_clears_their_live_activation_slots() {
+        let dir = tempdir().unwrap();
+        let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
+        let engines = [
+            runtimes::ENGINE,
+            "mlx-lm",
+            "mlx-vlm",
+            vllm::ENGINE,
+            crate::whisper::ENGINE,
+            "streaming-asr",
+            crate::sdcpp::ENGINE,
+            voice::ENGINE,
+        ];
+
+        for engine in engines {
+            let path = dir.path().join(format!("{engine}-runtime"));
+            {
+                let mut settings = runtime.settings.lock().await;
+                match engine {
+                    runtimes::ENGINE => settings.binary_override = Some(path.display().to_string()),
+                    "mlx-lm" => settings.mlx_lm_python = Some(path.display().to_string()),
+                    "mlx-vlm" => settings.mlx_vlm_python = Some(path.display().to_string()),
+                    vllm::ENGINE => settings.vllm_python = Some(path.display().to_string()),
+                    crate::whisper::ENGINE => {
+                        settings.whisper_binary = Some(path.display().to_string())
+                    }
+                    "streaming-asr" => {
+                        settings.streaming_asr_python = Some(path.display().to_string())
+                    }
+                    crate::sdcpp::ENGINE => {
+                        settings.sdcpp_binary = Some(path.display().to_string())
+                    }
+                    voice::ENGINE => settings.voice_python = Some(path.display().to_string()),
+                    _ => unreachable!(),
+                }
+            }
+            match engine {
+                runtimes::ENGINE => runtime.llama.lock().await.binary = Some(path.clone()),
+                "mlx-lm" => runtime.mlx.lock().await.lm_python = Some(path.clone()),
+                "mlx-vlm" => runtime.mlx.lock().await.vlm_python = Some(path.clone()),
+                vllm::ENGINE => runtime.vllm.lock().await.python = Some(path.clone()),
+                crate::whisper::ENGINE => runtime.whisper.lock().await.binary = Some(path.clone()),
+                "streaming-asr" => runtime.streaming_asr.lock().await.python = Some(path.clone()),
+                crate::sdcpp::ENGINE => runtime.sdcpp.lock().await.binary = Some(path.clone()),
+                voice::ENGINE => runtime.voice.lock().await.python = Some(path.clone()),
+                _ => unreachable!(),
+            }
+
+            runtime
+                .deactivate_runtime_entry(&runtimes::RuntimeEntry {
+                    id: format!("{engine}-test"),
+                    engine: engine.into(),
+                    kind: "source".into(),
+                    label: engine.into(),
+                    target: None,
+                    version: None,
+                    repository: None,
+                    path: path.display().to_string(),
+                    active: true,
+                    deletable: true,
+                })
+                .await
+                .unwrap();
+
+            let active = runtime.active_runtimes().await;
+            let still_active = match engine {
+                runtimes::ENGINE => active.llama,
+                "mlx-lm" => active.mlx_lm,
+                "mlx-vlm" => active.mlx_vlm,
+                vllm::ENGINE => active.vllm,
+                crate::whisper::ENGINE => active.whisper,
+                "streaming-asr" => active.streaming_asr,
+                crate::sdcpp::ENGINE => active.sdcpp,
+                voice::ENGINE => active.voice,
+                _ => unreachable!(),
+            };
+            assert_eq!(still_active, None, "{engine} remained active");
+        }
     }
 
     #[tokio::test]
