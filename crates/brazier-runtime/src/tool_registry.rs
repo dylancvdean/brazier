@@ -14,6 +14,8 @@ pub struct ToolContext<'a> {
     /// use these for image-to-video and image-to-image, so a user can attach a
     /// photo and ask the model to animate it.
     pub images: Vec<ConversationImage>,
+    /// Document blobs the model may pass to `doc_read`, oldest first.
+    pub documents: Vec<ConversationDocument>,
 }
 
 /// An image the model can refer to when calling a generation tool.
@@ -21,6 +23,14 @@ pub struct ToolContext<'a> {
 pub struct ConversationImage {
     pub sha256: String,
     pub mime_type: String,
+}
+
+/// A document attachment available to `doc_read`.
+#[derive(Debug, Clone)]
+pub struct ConversationDocument {
+    pub sha256: String,
+    pub mime_type: String,
+    pub name: String,
 }
 
 /// Collect image attachments from a request's messages, oldest first.
@@ -52,6 +62,42 @@ pub fn conversation_images(
         }
     }
     images
+}
+
+/// Collect PDF / Office attachments the model can read with `doc_read`.
+pub fn conversation_documents(
+    request: &crate::types::ChatCompletionRequest,
+) -> Vec<ConversationDocument> {
+    let mut documents = Vec::new();
+    for message in &request.messages {
+        let serde_json::Value::Array(parts) = &message.content else {
+            continue;
+        };
+        for part in parts {
+            let Some(blob) = part.get("brazier_blob") else {
+                continue;
+            };
+            let mime = blob
+                .get("mime_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let name = blob
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("document");
+            if !crate::documents::is_supported_document(mime, name) {
+                continue;
+            }
+            if let Some(sha256) = blob.get("sha256").and_then(serde_json::Value::as_str) {
+                documents.push(ConversationDocument {
+                    sha256: sha256.to_owned(),
+                    mime_type: mime.to_owned(),
+                    name: name.to_owned(),
+                });
+            }
+        }
+    }
+    documents
 }
 
 /// Merge bundled, request, and MCP tool definitions into one OpenAI-style array.
@@ -134,6 +180,7 @@ pub async fn execute(
             ctx.http,
             Some(ctx.data_dir),
             &ctx.images,
+            &ctx.documents,
             call_id,
             &logical,
             arguments,
@@ -210,6 +257,31 @@ mod context_tests {
     fn a_text_only_conversation_offers_no_images() {
         let request = request_with(serde_json::json!([{ "type": "text", "text": "hello" }]));
         assert!(conversation_images(&request).is_empty());
+    }
+
+    #[test]
+    fn conversation_documents_collect_supported_formats_only() {
+        let request = request_with(serde_json::json!([
+            { "type": "text", "text": "summarize" },
+            { "type": "brazier_blob", "brazier_blob": {
+                "sha256": "aaa", "mime_type": "application/pdf", "name": "a.pdf"
+            }},
+            { "type": "brazier_blob", "brazier_blob": {
+                "sha256": "bbb", "mime_type": "text/plain", "name": "notes.txt"
+            }},
+            { "type": "brazier_blob", "brazier_blob": {
+                "sha256": "ccc", "mime_type": "application/octet-stream", "name": "letter.docx"
+            }}
+        ]));
+        let documents = conversation_documents(&request);
+        assert_eq!(
+            documents
+                .iter()
+                .map(|doc| doc.sha256.as_str())
+                .collect::<Vec<_>>(),
+            ["aaa", "ccc"]
+        );
+        assert_eq!(documents[1].name, "letter.docx");
     }
 }
 

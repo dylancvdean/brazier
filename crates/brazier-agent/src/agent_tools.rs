@@ -40,6 +40,7 @@ fn label(name: &str) -> &'static str {
         "workspace_info" => "Workspace",
         "fs_list" => "List",
         "fs_read" => "Read",
+        "doc_read" => "Read document",
         "fs_stat" => "Stat",
         "fs_search" => "Search",
         "fs_write" => "Write",
@@ -126,6 +127,24 @@ fn raw_definitions() -> Vec<RawDefinition> {
                     "path": path_property(workspace_relative),
                     "start_line": { "type": "integer", "description": "First line to return, 1-based.", "minimum": 1 },
                     "line_count": { "type": "integer", "description": "How many lines to return.", "minimum": 1 }
+                }),
+                vec!["path"],
+            ),
+        ),
+        (
+            "doc_read",
+            "Read a PDF, RTF, DOC, or DOCX in the workspace. For PDFs, pass start_page/end_page \
+             (default: first 3 pages) or set render_pages to true to get page images for scanned \
+             documents or layout-sensitive reading. For RTF/DOC/DOCX, pass start_line/end_line. \
+             Prefer this over shelling out to pdftotext.",
+            object(
+                json!({
+                    "path": path_property(workspace_relative),
+                    "start_page": { "type": "integer", "description": "First PDF page, 1-based. Default 1.", "minimum": 1 },
+                    "end_page": { "type": "integer", "description": "Last PDF page, inclusive. Defaults to start_page + 2.", "minimum": 1 },
+                    "start_line": { "type": "integer", "description": "First line for non-PDF documents, 1-based.", "minimum": 1 },
+                    "end_line": { "type": "integer", "description": "Last line for non-PDF documents, inclusive.", "minimum": 1 },
+                    "render_pages": { "type": "boolean", "description": "Render PDF pages as images instead of extracting text. Max 4 pages." }
                 }),
                 vec!["path"],
             ),
@@ -446,6 +465,7 @@ pub fn system_prompt_components(
             format!(
                 "How to work:\n\
                  - Investigate before changing anything. Read the files you are about to edit.\n\
+                 - Use doc_read for PDF/RTF/DOC/DOCX; use fs_read for ordinary text files.\n\
                  - Prefer fs_patch over fs_write for existing files, and keep edits minimal.\n\
                  - Run the project's own checks when you change code, and report failures \
                    honestly instead of claiming success.\n\

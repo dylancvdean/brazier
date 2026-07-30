@@ -20,6 +20,11 @@ import type {
 /** How long each wait for a user decision blocks before re-checking. */
 const APPROVAL_WAIT_MS = 60_000
 
+export type ToolImage = {
+  mimeType: string
+  data: string
+}
+
 export type ToolExecutionOutcome = {
   output: string
   isError: boolean
@@ -33,6 +38,8 @@ export type ToolExecutionOutcome = {
   artifactId?: string
   executionId?: string
   durationMs: number
+  /** Page renders and similar images for vision models. */
+  images: ToolImage[]
 }
 
 export type ExecuteToolRequest = {
@@ -235,7 +242,11 @@ export class AgentToolExecutor {
         truncated: Boolean(response.truncated),
         artifactId: response.artifact_id,
         executionId: response.execution_id,
-        durationMs: response.duration_ms
+        durationMs: response.duration_ms,
+        images: (response.images ?? []).map((image) => ({
+          mimeType: image.mime_type,
+          data: image.data
+        }))
       }
 
       if (outcome.isError) {
@@ -330,7 +341,8 @@ export class AgentToolExecutor {
       sandbox,
       changedPaths: [],
       truncated: false,
-      durationMs
+      durationMs,
+      images: []
     }
   }
 }

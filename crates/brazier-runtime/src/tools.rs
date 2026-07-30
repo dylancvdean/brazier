@@ -166,6 +166,47 @@ pub fn definitions() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "doc_read",
+                "description": "Read a PDF, RTF, DOC, or DOCX the user attached. Pass the document id from the attachment notice. For PDFs, choose a page range (default: first 3 pages) or set render_pages to true to receive page images — use that for scanned PDFs with no text layer, or when layout matters. For RTF/DOC/DOCX, choose a line range instead. Output is truncated when too long; narrow the range and call again.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "document": {
+                            "type": "string",
+                            "description": "Document blob id (sha256) from the attachment notice."
+                        },
+                        "start_page": {
+                            "type": "integer",
+                            "description": "First PDF page to read, 1-based. Default 1.",
+                            "minimum": 1
+                        },
+                        "end_page": {
+                            "type": "integer",
+                            "description": "Last PDF page to read, inclusive. Defaults to start_page + 2 (three pages). Max window is 25 pages for text, 4 for render_pages.",
+                            "minimum": 1
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "First line for non-PDF documents, 1-based. Default 1.",
+                            "minimum": 1
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "Last line for non-PDF documents, inclusive.",
+                            "minimum": 1
+                        },
+                        "render_pages": {
+                            "type": "boolean",
+                            "description": "If true, render PDF pages as images instead of extracting text. Max 4 pages per call."
+                        }
+                    },
+                    "required": ["document"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "generate_image",
                 "description": "Generate an image with the configured local stable-diffusion.cpp model. Returns a brazier_blob reference the user can view. Requires an installed sd-cli runtime and a default image generation model.",
                 "parameters": {
@@ -274,6 +315,13 @@ fn catalog_for_config(js_config: &crate::js_sandbox::JsSandboxConfig) -> Value {
                 "source": "builtin"
             },
             {
+                "name": "doc_read",
+                "title": "Read document",
+                "description": "Read attached PDF, RTF, DOC, or DOCX by page or line range; render PDF pages as images when needed (Poppler for PDFs).",
+                "network": false,
+                "source": "builtin"
+            },
+            {
                 "name": "generate_image",
                 "title": "Generate image",
                 "description": "Local image generation via stable-diffusion.cpp (requires runtime + default model).",
@@ -298,6 +346,7 @@ pub fn is_builtin(name: &str) -> bool {
             | "calculator"
             | "fetch_url"
             | "run_javascript"
+            | "doc_read"
             | "generate_image"
             | "generate_video"
     )
@@ -311,7 +360,7 @@ pub async fn execute(
     name: &str,
     arguments: &str,
 ) -> ToolInvocation {
-    execute_with_context(client, None, &[], call_id, name, arguments).await
+    execute_with_context(client, None, &[], &[], call_id, name, arguments).await
 }
 
 pub async fn execute_with_data_dir(
@@ -321,21 +370,27 @@ pub async fn execute_with_data_dir(
     name: &str,
     arguments: &str,
 ) -> ToolInvocation {
-    execute_with_context(client, data_dir, &[], call_id, name, arguments).await
+    execute_with_context(client, data_dir, &[], &[], call_id, name, arguments).await
 }
 
-/// Run a built-in tool with the conversation's images available, so generation
-/// tools can start from a photo the user already attached.
+/// Run a built-in tool with the conversation's images and documents available.
 pub async fn execute_with_context(
     client: &reqwest::Client,
     data_dir: Option<&std::path::Path>,
     images: &[crate::tool_registry::ConversationImage],
+    documents: &[crate::tool_registry::ConversationDocument],
     call_id: &str,
     name: &str,
     arguments: &str,
 ) -> ToolInvocation {
     let parsed: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     let result: anyhow::Result<ToolOutput> = match name {
+        "doc_read" => match data_dir {
+            Some(dir) => doc_read_tool(dir, &parsed, documents).await,
+            None => Err(anyhow::anyhow!(
+                "doc_read requires daemon data directory context"
+            )),
+        },
         "generate_image" => match data_dir {
             Some(dir) => generate_image_tool(dir, &parsed, images).await,
             None => Err(anyhow::anyhow!(
@@ -462,6 +517,128 @@ fn describe_generation_failure(error: anyhow::Error) -> anyhow::Error {
         );
     }
     error
+}
+
+async fn doc_read_tool(
+    data_dir: &std::path::Path,
+    args: &Value,
+    documents: &[crate::tool_registry::ConversationDocument],
+) -> anyhow::Result<ToolOutput> {
+    let requested = args
+        .get("document")
+        .and_then(Value::as_str)
+        .context("doc_read requires a `document` string (the attachment blob id)")?
+        .trim();
+    let sha256 = requested
+        .strip_prefix("brazier_blob:")
+        .unwrap_or(requested);
+    let document = documents
+        .iter()
+        .find(|doc| doc.sha256.eq_ignore_ascii_case(sha256))
+        .context(
+            "that document is not in this conversation — use the blob id from an attachment notice",
+        )?;
+    let kind = crate::documents::kind_for_mime(&document.mime_type, &document.name).context(
+        "that attachment is not a PDF, RTF, DOC, or DOCX document",
+    )?;
+    let path = crate::blob_store::blob_path(data_dir, &document.sha256)
+        .context("document blob is missing")?;
+    anyhow::ensure!(path.is_file(), "that document is no longer stored locally");
+
+    let render = args
+        .get("render_pages")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if render {
+        anyhow::ensure!(
+            kind == crate::documents::DocumentKind::Pdf,
+            "render_pages only applies to PDFs"
+        );
+        let start = args
+            .get("start_page")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .unwrap_or(1)
+            .max(1);
+        let end = args
+            .get("end_page")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .unwrap_or(start + crate::documents::DEFAULT_PAGE_COUNT - 1)
+            .max(start);
+        let count = (end - start + 1).min(crate::documents::MAX_RENDER_PAGES);
+        let rendered =
+            crate::documents::render_pages(data_dir, &path, start, count).await?;
+        let pages: Vec<String> = rendered
+            .iter()
+            .map(|page| format!("page {}", page.page))
+            .collect();
+        return Ok(ToolOutput {
+            text: format!(
+                "Rendered {} of {} ({}) as images. The pages are included below for a vision model.",
+                document.name,
+                kind.label(),
+                pages.join(", ")
+            ),
+            media: rendered
+                .into_iter()
+                .map(|page| ToolMedia {
+                    sha256: page.sha256,
+                    mime_type: page.mime_type,
+                })
+                .collect(),
+        });
+    }
+
+    let pages = if kind == crate::documents::DocumentKind::Pdf {
+        let start = args
+            .get("start_page")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .unwrap_or(1)
+            .max(1);
+        let end = args
+            .get("end_page")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .unwrap_or(start + crate::documents::DEFAULT_PAGE_COUNT - 1)
+            .max(start);
+        anyhow::ensure!(
+            end - start + 1 <= crate::documents::MAX_TEXT_PAGES,
+            "PDF text window is limited to {} pages; narrow start_page/end_page",
+            crate::documents::MAX_TEXT_PAGES
+        );
+        Some((start, end))
+    } else {
+        None
+    };
+    let lines = if kind == crate::documents::DocumentKind::Pdf {
+        None
+    } else {
+        match (
+            args.get("start_line").and_then(Value::as_u64),
+            args.get("end_line").and_then(Value::as_u64),
+        ) {
+            (None, None) => None,
+            (start, end) => {
+                let start = start.unwrap_or(1).max(1) as usize;
+                let end = end
+                    .map(|value| value as usize)
+                    .unwrap_or(start.saturating_add(199))
+                    .max(start);
+                Some((start, end))
+            }
+        }
+    };
+    let extraction = crate::documents::extract_text(
+        &path,
+        kind,
+        pages,
+        lines,
+        crate::documents::MAX_EXTRACTION_CHARS,
+    )
+    .await?;
+    Ok(ToolOutput::from(extraction.describe()))
 }
 
 /// An init image resolved to both its file and the blob it came from.
@@ -1208,6 +1385,7 @@ exit 0
             &reqwest::Client::new(),
             Some(dir.path()),
             &images,
+            &[],
             "call-1",
             "generate_video",
             r#"{"prompt":"make it move","init_image":"latest"}"#,
@@ -1237,6 +1415,7 @@ exit 0
             &reqwest::Client::new(),
             Some(dir.path()),
             &images,
+            &[],
             "call-2",
             "generate_video",
             r#"{"prompt":"make it move","init_image":"latest"}"#,
@@ -1256,6 +1435,7 @@ exit 0
         let invocation = execute_with_context(
             &reqwest::Client::new(),
             Some(dir.path()),
+            &[],
             &[],
             "call-3",
             "generate_video",

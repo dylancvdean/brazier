@@ -183,13 +183,24 @@ pub async fn prepare_messages(
                 emit("extract_frames", &format!("Sampling frames from {name}…"));
                 let prepared = prepare_video(ctx, sha256, mime, name, progress.as_ref()).await?;
                 next_parts.extend(prepared);
+            } else if crate::documents::is_supported_document(mime, name) {
+                // PDF / Office: tell the model the document exists and how long
+                // it is, then let doc_read pull ranges on demand.
+                emit("prepare_document", &format!("Preparing document {name}…"));
+                let path = blob_store::blob_path(ctx.data_dir, sha256)?;
+                let pages = if crate::documents::kind_for_mime(mime, name)
+                    == Some(crate::documents::DocumentKind::Pdf)
+                {
+                    crate::documents::page_count(&path).await.unwrap_or(None)
+                } else {
+                    None
+                };
+                next_parts.push(crate::documents::attachment_notice(
+                    name, mime, sha256, pages,
+                ));
             } else if blob_store::is_document_mime(mime) {
                 emit("read_document", &format!("Reading document {name}…"));
-                let text = document_text_from_blob(ctx.data_dir, sha256, mime, name).await?;
-                next_parts.push(json!({
-                    "type": "text",
-                    "text": format!("[Contents of {name}]\n{text}")
-                }));
+                next_parts.push(inline_text_document(ctx.data_dir, sha256, name).await?);
             } else {
                 anyhow::bail!("unsupported attachment type `{mime}`");
             }
@@ -199,38 +210,37 @@ pub async fn prepare_messages(
     Ok(())
 }
 
-const MAX_DOCUMENT_TEXT_BYTES: usize = 1_000_000;
-
-async fn document_text_from_blob(
+/// Inline a plain-text attachment, naming its length so the model knows how
+/// much it is holding and whether the content was cut to the budget.
+async fn inline_text_document(
     data_dir: &Path,
     sha256: &str,
-    mime: &str,
     name: &str,
-) -> anyhow::Result<String> {
-    if mime == "application/pdf" {
-        let pdftotext = crate::toolchain_hints::resolve_command("pdftotext").context(
-            "PDF attachments require the `pdftotext` utility. Install Poppler (for example `brew install poppler`, `apt install poppler-utils`, or `winget install oschwartz10612.Poppler`) and restart Brazier.",
-        )?;
-        let path = blob_store::blob_path(data_dir, sha256)?;
-        let path_string = path.display().to_string();
-        let output = Command::new(pdftotext)
-            .args(["-layout", &path_string, "-"])
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .with_context(|| format!("extract text from PDF {name}"))?;
-        anyhow::ensure!(
-            output.status.success(),
-            "could not read text from PDF {name}"
-        );
-        return String::from_utf8(output.stdout).context("PDF text was not UTF-8");
-    }
+) -> anyhow::Result<Value> {
     let (bytes, _) = blob_store::read_blob(data_dir, sha256).await?;
-    anyhow::ensure!(
-        bytes.len() <= MAX_DOCUMENT_TEXT_BYTES,
-        "document `{name}` is too large to include in one chat message (limit is 1 MB of text)"
+    let text = String::from_utf8(bytes)
+        .with_context(|| format!("document `{name}` is not UTF-8 text"))?;
+    let total_chars = text.chars().count();
+    let total_lines = text.lines().count();
+    let (body, truncated) = if text.len() <= crate::documents::MAX_INLINE_CHARS {
+        (text, false)
+    } else {
+        let mut cut = crate::documents::MAX_INLINE_CHARS;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        (text[..cut].trim_end().to_owned(), true)
+    };
+    let mut header = format!(
+        "[Contents of {name} — {total_lines} lines, {total_chars} characters]"
     );
-    String::from_utf8(bytes).with_context(|| format!("document `{name}` is not UTF-8 text"))
+    if truncated {
+        header.push_str(" [truncated to fit the attachment budget]");
+    }
+    Ok(json!({
+        "type": "text",
+        "text": format!("{header}\n{body}")
+    }))
 }
 
 /// Model-ready content parts for media a tool just produced.
@@ -915,6 +925,107 @@ mod tests {
         assert_eq!(parts[1]["type"], "image_url");
         let url = parts[1]["image_url"]["url"].as_str().unwrap();
         assert!(url.starts_with("data:image/png;base64,"));
+    }
+
+    #[tokio::test]
+    async fn pdf_attachments_become_notices_with_length_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = blob_store::store_bytes(dir.path(), b"%PDF-1.7", "application/pdf", Some("a.pdf"))
+            .await
+            .unwrap();
+        let caps = ModelCapabilities {
+            input_modalities: vec!["text".into()],
+            output_modalities: vec!["text".into()],
+            streaming: true,
+            tools: true,
+            reasoning: false,
+            max_context_length: None,
+            reasoning_modes: Vec::new(),
+            harmony: false,
+            audio_input: None,
+        };
+        let ctx = MediaContext {
+            data_dir: dir.path(),
+            model_caps: &caps,
+            features: PipelineFeatures {
+                asr: false,
+                video_preprocess: false,
+            },
+            whisper_binary: None,
+            whisper_model: None,
+            whisper_model_pref: None,
+            whisper_profile: None,
+        };
+        let mut messages = vec![OpenAiMessage {
+            role: "user".into(),
+            content: json!([{
+                "type": "brazier_blob",
+                "brazier_blob": {
+                    "sha256": stored.sha256,
+                    "mime_type": "application/pdf",
+                    "name": "a.pdf"
+                }
+            }]),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        prepare_messages(&ctx, &mut messages, None).await.unwrap();
+        let text = messages[0].content[0]["text"].as_str().unwrap();
+        assert!(text.contains("Attached PDF document"), "{text}");
+        assert!(text.contains(&stored.sha256), "{text}");
+        assert!(text.contains("doc_read"), "{text}");
+        assert!(!text.contains("[Contents of"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn plain_text_attachments_are_inlined_with_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "alpha\nbeta\ngamma\n";
+        let stored = blob_store::store_bytes(dir.path(), body.as_bytes(), "text/plain", Some("n.txt"))
+            .await
+            .unwrap();
+        let caps = ModelCapabilities {
+            input_modalities: vec!["text".into()],
+            output_modalities: vec!["text".into()],
+            streaming: true,
+            tools: false,
+            reasoning: false,
+            max_context_length: None,
+            reasoning_modes: Vec::new(),
+            harmony: false,
+            audio_input: None,
+        };
+        let ctx = MediaContext {
+            data_dir: dir.path(),
+            model_caps: &caps,
+            features: PipelineFeatures {
+                asr: false,
+                video_preprocess: false,
+            },
+            whisper_binary: None,
+            whisper_model: None,
+            whisper_model_pref: None,
+            whisper_profile: None,
+        };
+        let mut messages = vec![OpenAiMessage {
+            role: "user".into(),
+            content: json!([{
+                "type": "brazier_blob",
+                "brazier_blob": {
+                    "sha256": stored.sha256,
+                    "mime_type": "text/plain",
+                    "name": "n.txt"
+                }
+            }]),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        prepare_messages(&ctx, &mut messages, None).await.unwrap();
+        let text = messages[0].content[0]["text"].as_str().unwrap();
+        assert!(text.contains("3 lines"), "{text}");
+        assert!(text.contains("alpha"), "{text}");
     }
 
     #[tokio::test]

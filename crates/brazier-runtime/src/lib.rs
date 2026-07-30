@@ -4,6 +4,7 @@ pub mod active_downloads;
 pub mod adapters;
 pub mod build_recipe;
 pub mod builds;
+pub mod documents;
 pub mod download;
 pub mod download_queue;
 pub mod engine;

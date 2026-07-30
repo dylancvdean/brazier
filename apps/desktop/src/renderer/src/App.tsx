@@ -286,13 +286,27 @@ async function fileToAttachment(file: File): Promise<Attachment> {
 
 function isDocumentFile(file: File): boolean {
   if (
-    ['application/pdf', 'application/json', 'application/xml', 'text/plain', 'text/markdown', 'text/csv', 'text/html'].includes(file.type) ||
+    [
+      'application/pdf',
+      'application/json',
+      'application/xml',
+      'application/rtf',
+      'text/rtf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain',
+      'text/markdown',
+      'text/csv',
+      'text/html'
+    ].includes(file.type) ||
     file.type.startsWith('text/')
   ) {
     return true
   }
   const extension = file.name.split('.').pop()?.toLowerCase()
-  return ['pdf', 'txt', 'md', 'csv', 'json', 'xml', 'html', 'htm'].includes(extension ?? '')
+  return ['pdf', 'rtf', 'doc', 'docx', 'txt', 'md', 'csv', 'json', 'xml', 'html', 'htm'].includes(
+    extension ?? ''
+  )
 }
 
 function attachmentPart(attachment: Attachment): ContentPart {
@@ -2140,7 +2154,29 @@ export function App(): React.JSX.Element {
                 ref={fileInput}
                 type="file"
                 accept={[
-                  canAttachDocuments ? '.pdf,.txt,.md,.csv,.json,.xml,.html,.htm,text/*,application/pdf,application/json,application/xml' : null,
+                  canAttachDocuments
+                    ? [
+                        '.pdf',
+                        '.rtf',
+                        '.doc',
+                        '.docx',
+                        '.txt',
+                        '.md',
+                        '.csv',
+                        '.json',
+                        '.xml',
+                        '.html',
+                        '.htm',
+                        'text/*',
+                        'application/pdf',
+                        'application/rtf',
+                        'text/rtf',
+                        'application/msword',
+                        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                        'application/json',
+                        'application/xml'
+                      ].join(',')
+                    : null,
                   canAttachImage ? 'image/*' : null,
                   canAttachAudio ? 'audio/*' : null,
                   canAttachVideo ? 'video/*' : null

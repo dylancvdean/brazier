@@ -352,7 +352,8 @@ describe('AgentToolExecutor', () => {
       sandbox,
       changedPaths: [],
       truncated: false,
-      durationMs: 12
+      durationMs: 12,
+      images: []
     }))
 
     const outcome = await executor.execute({

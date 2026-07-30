@@ -2310,6 +2310,7 @@ impl Engine for Runtime {
             data_dir: &self.data_dir,
             http: &self.http,
             images: tool_registry::conversation_images(&request),
+            documents: tool_registry::conversation_documents(&request),
         };
         let mut audio_fallback_attempted = false;
         for round in 0..MAX_TOOL_ROUNDS {
@@ -2530,12 +2531,13 @@ struct GeneratedMediaContext {
     persisted: OpenAiMessage,
 }
 
-/// Build immediate system context carrying whatever a tool just generated,
-/// when the model can see it and the setting allows.
+/// Build immediate system context carrying whatever a tool just produced as
+/// media, when the model can see it.
 ///
 /// The live message contains engine-ready image parts. The transcript keeps
 /// blob references so the conversation remains small and can be hydrated again
-/// when it is loaded later.
+/// when it is loaded later. Document page renders are always handed back when
+/// the model asked for them; generation tools honour the show-to-model setting.
 async fn generated_media_context_messages(
     data_dir: &std::path::Path,
     model_caps: &crate::types::ModelCapabilities,
@@ -2552,10 +2554,13 @@ async fn generated_media_context_messages(
     {
         return None;
     }
+    let from_doc_read = invocation.name == "doc_read";
     let mut persisted_parts = Vec::new();
     let mut live_parts = Vec::new();
     for media in &invocation.media {
-        let allowed = if media.mime_type.starts_with("video/") {
+        let allowed = if from_doc_read {
+            true
+        } else if media.mime_type.starts_with("video/") {
             settings.show_generated_video_to_model
         } else {
             settings.show_generated_images_to_model
@@ -2563,7 +2568,9 @@ async fn generated_media_context_messages(
         if !allowed {
             continue;
         }
-        let name = if media.mime_type.starts_with("video/") {
+        let name = if from_doc_read {
+            "document-page"
+        } else if media.mime_type.starts_with("video/") {
             "generated-video"
         } else {
             "generated-image"
@@ -2585,9 +2592,14 @@ async fn generated_media_context_messages(
     if persisted_parts.is_empty() {
         return None;
     }
+    let status_text = if from_doc_read {
+        "The requested document pages were rendered as images and are included below. Read them, then call doc_read again with another range if you need more."
+    } else {
+        "The requested media was generated successfully and has already been displayed to the user. It is included here so you can see the completed result. Do not call a media-generation tool again unless the user explicitly asks for another version or requests a change. Briefly confirm completion."
+    };
     let status = serde_json::json!({
         "type": "text",
-        "text": "The requested media was generated successfully and has already been displayed to the user. It is included here so you can see the completed result. Do not call a media-generation tool again unless the user explicitly asks for another version or requests a change. Briefly confirm completion."
+        "text": status_text
     });
     persisted_parts.insert(0, status.clone());
     live_parts.insert(0, status);
@@ -2621,11 +2633,12 @@ async fn stream_tool_rounds(
     tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
 ) -> anyhow::Result<()> {
     let model_caps = runtime.model_capabilities(&request.model).await;
-    let ctx = ToolContext {
-        data_dir: &runtime.data_dir,
-        http: &runtime.http,
-        images: tool_registry::conversation_images(&request),
-    };
+        let ctx = ToolContext {
+            data_dir: &runtime.data_dir,
+            http: &runtime.http,
+            images: tool_registry::conversation_images(&request),
+            documents: tool_registry::conversation_documents(&request),
+        };
     let mut audio_fallback_attempted = false;
     let mut completion_tokens = 0u64;
     let mut prompt_tokens = None;

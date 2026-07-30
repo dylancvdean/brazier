@@ -443,7 +443,14 @@ class PiAgentSession implements AgentSession {
               signal
             })
             return {
-              content: [{ type: 'text', text: outcome.output }],
+              content: [
+                { type: 'text' as const, text: outcome.output },
+                ...outcome.images.map((image) => ({
+                  type: 'image' as const,
+                  data: image.data,
+                  mimeType: image.mimeType
+                }))
+              ],
               details: {
                 environment: outcome.environment,
                 sandbox: outcome.sandbox,
@@ -823,7 +830,8 @@ export class PiAgentRuntime implements AgentRuntime {
       sandbox,
       changedPaths: [],
       truncated: false,
-      durationMs: Date.now() - started
+      durationMs: Date.now() - started,
+      images: []
     })
 
     if (isSubagentSession(parentState.runtimeMetadata)) {
@@ -896,7 +904,8 @@ export class PiAgentRuntime implements AgentRuntime {
       sandbox,
       changedPaths: [],
       truncated: false,
-      durationMs: Date.now() - started
+      durationMs: Date.now() - started,
+      images: []
     }
   }
 

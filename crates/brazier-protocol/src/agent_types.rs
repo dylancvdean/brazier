@@ -274,6 +274,14 @@ pub enum ToolExecStatus {
     ApprovalRequired,
 }
 
+/// An image a tool produced for a vision-capable agent model.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolImage {
+    pub mime_type: String,
+    /// Raw base64 (no data-URL prefix).
+    pub data: String,
+}
+
 /// Result of a broker call, including approval state when execution is held.
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolExecResponse {
@@ -295,6 +303,9 @@ pub struct ToolExecResponse {
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub changed_paths: Vec<String>,
+    /// Page renders and similar images for the model (e.g. `doc_read`).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub images: Vec<ToolImage>,
     pub duration_ms: u64,
     /// Present when `status` is `approval_required`.
     #[serde(skip_serializing_if = "Option::is_none")]

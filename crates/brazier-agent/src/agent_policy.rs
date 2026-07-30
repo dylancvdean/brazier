@@ -31,6 +31,7 @@ pub const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { name: "workspace_info", risk: ToolRiskLevel::Safe, executes: false, needs_workspace: false },
     ToolSpec { name: "fs_list", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
     ToolSpec { name: "fs_read", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
+    ToolSpec { name: "doc_read", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
     ToolSpec { name: "fs_stat", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
     ToolSpec { name: "fs_search", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
     ToolSpec { name: "fs_write", risk: ToolRiskLevel::Write, executes: false, needs_workspace: true },
@@ -509,7 +510,7 @@ pub fn requested_paths(
     data_dir: &Path,
 ) -> Vec<RequestedPath> {
     let fields: &[(&str, bool)] = match tool {
-        "fs_read" | "fs_list" | "fs_stat" | "fs_search" => &[("path", false)],
+        "fs_read" | "doc_read" | "fs_list" | "fs_stat" | "fs_search" => &[("path", false)],
         "fs_write" | "fs_patch" | "fs_mkdir" => &[("path", true)],
         "fs_delete" => &[("path", true)],
         "fs_move" => &[("from", true), ("to", true)],

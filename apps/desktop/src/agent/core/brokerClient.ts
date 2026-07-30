@@ -24,6 +24,12 @@ export type BrokerConnection = {
 
 export type ToolExecStatus = 'completed' | 'failed' | 'denied' | 'approval_required'
 
+export type ToolImage = {
+  mime_type: string
+  /** Raw base64, without a data-URL prefix. */
+  data: string
+}
+
 export type ToolExecResponse = {
   status: ToolExecStatus
   tool: string
@@ -37,6 +43,7 @@ export type ToolExecResponse = {
   artifact_id?: string
   exit_code?: number | null
   changed_paths?: string[]
+  images?: ToolImage[]
   duration_ms: number
   approval?: AgentApproval
   denied_reason?: string

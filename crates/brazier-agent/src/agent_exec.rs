@@ -31,7 +31,7 @@ use crate::{
 };
 use brazier_protocol::agent_types::{
     AgentEnvironment, AgentSessionRecord, ApprovalScope, ApprovalStatus, SandboxDescription,
-    ToolExecRequest, ToolExecResponse, ToolExecStatus, ToolRiskLevel, arguments_hash,
+    ToolExecRequest, ToolExecResponse, ToolExecStatus, ToolImage, ToolRiskLevel, arguments_hash,
 };
 use brazier_storage::agent_store::{NewApproval, NewToolExecution};
 
@@ -269,6 +269,7 @@ async fn execute_inner(
                     artifact_id: None,
                     exit_code: None,
                     changed_paths: Vec::new(),
+                    images: Vec::new(),
                     duration_ms: started.elapsed().as_millis() as u64,
                     approval: Some(approval),
                     denied_reason: None,
@@ -343,6 +344,7 @@ async fn execute_inner(
                 artifact_id,
                 exit_code: outcome.exit_code,
                 changed_paths: outcome.changed_paths,
+                images: outcome.images,
                 duration_ms: started.elapsed().as_millis() as u64,
                 approval: None,
                 denied_reason: None,
@@ -362,6 +364,7 @@ async fn execute_inner(
             artifact_id: None,
             exit_code: None,
             changed_paths: Vec::new(),
+            images: Vec::new(),
             duration_ms: started.elapsed().as_millis() as u64,
             approval: None,
             denied_reason: None,
@@ -459,6 +462,7 @@ fn denied(
         artifact_id: None,
         exit_code: None,
         changed_paths: Vec::new(),
+        images: Vec::new(),
         duration_ms: started.elapsed().as_millis() as u64,
         approval: None,
         denied_reason: Some(reason),
@@ -569,6 +573,7 @@ struct ToolOutcome {
     is_error: bool,
     exit_code: Option<i32>,
     changed_paths: Vec<String>,
+    images: Vec<ToolImage>,
 }
 
 impl ToolOutcome {
@@ -578,6 +583,7 @@ impl ToolOutcome {
             is_error: false,
             exit_code: None,
             changed_paths: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -587,6 +593,17 @@ impl ToolOutcome {
             is_error: false,
             exit_code: None,
             changed_paths: paths,
+            images: Vec::new(),
+        }
+    }
+
+    fn with_images(output: impl Into<String>, images: Vec<ToolImage>) -> Self {
+        Self {
+            output: output.into(),
+            is_error: false,
+            exit_code: None,
+            changed_paths: Vec::new(),
+            images,
         }
     }
 }
@@ -603,6 +620,7 @@ async fn run_tool(
         "workspace_info" => workspace_info(context, workspace).await,
         "fs_list" => fs_list(context, plan, workspace, arguments).await,
         "fs_read" => fs_read(context, plan, workspace, arguments).await,
+        "doc_read" => doc_read(context, plan, workspace, arguments).await,
         "fs_stat" => fs_stat(context, plan, workspace, arguments).await,
         "fs_search" => fs_search(context, plan, workspace, arguments).await,
         "fs_write" => fs_write(context, plan, workspace, arguments).await,
@@ -658,6 +676,7 @@ async fn mcp_tool(
         is_error: invocation.is_error,
         exit_code: None,
         changed_paths: Vec::new(),
+        images: Vec::new(),
     })
 }
 
@@ -870,6 +889,120 @@ async fn fs_read(
         return Ok(ToolOutcome::text("(no lines in that range)"));
     }
     Ok(ToolOutcome::text(numbered.join("\n")))
+}
+
+async fn doc_read(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let path = checked_path(context, plan, workspace, arguments, "path", false)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("document");
+    let kind = brazier_runtime::documents::kind_for_name(name).with_context(|| {
+        format!(
+            "{} is not a PDF, RTF, DOC, or DOCX — use fs_read for text files",
+            relative_display(workspace, &path)
+        )
+    })?;
+
+    let render = arguments
+        .get("render_pages")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if render {
+        anyhow::ensure!(
+            kind == brazier_runtime::documents::DocumentKind::Pdf,
+            "render_pages only applies to PDFs"
+        );
+        let start = arguments
+            .get("start_page")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .unwrap_or(1)
+            .max(1);
+        let end = arguments
+            .get("end_page")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .unwrap_or(start + brazier_runtime::documents::DEFAULT_PAGE_COUNT - 1)
+            .max(start);
+        let count = (end - start + 1).min(brazier_runtime::documents::MAX_RENDER_PAGES);
+        let rendered =
+            brazier_runtime::documents::render_pages(context.data_dir, &path, start, count).await?;
+        let pages: Vec<String> = rendered
+            .iter()
+            .map(|page| format!("page {}", page.page))
+            .collect();
+        let images = rendered
+            .into_iter()
+            .map(|page| ToolImage {
+                data: page.base64_data(),
+                mime_type: page.mime_type,
+            })
+            .collect::<Vec<_>>();
+        return Ok(ToolOutcome::with_images(
+            format!(
+                "Rendered {} ({}) as images. The pages are included for a vision model.",
+                relative_display(workspace, &path),
+                pages.join(", ")
+            ),
+            images,
+        ));
+    }
+
+    let pages = if kind == brazier_runtime::documents::DocumentKind::Pdf {
+        let start = arguments
+            .get("start_page")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .unwrap_or(1)
+            .max(1);
+        let end = arguments
+            .get("end_page")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .unwrap_or(start + brazier_runtime::documents::DEFAULT_PAGE_COUNT - 1)
+            .max(start);
+        anyhow::ensure!(
+            end - start + 1 <= brazier_runtime::documents::MAX_TEXT_PAGES,
+            "PDF text window is limited to {} pages; narrow start_page/end_page",
+            brazier_runtime::documents::MAX_TEXT_PAGES
+        );
+        Some((start, end))
+    } else {
+        None
+    };
+    let lines = if kind == brazier_runtime::documents::DocumentKind::Pdf {
+        None
+    } else {
+        match (
+            arguments.get("start_line").and_then(Value::as_u64),
+            arguments.get("end_line").and_then(Value::as_u64),
+        ) {
+            (None, None) => None,
+            (start, end) => {
+                let start = start.unwrap_or(1).max(1) as usize;
+                let end = end
+                    .map(|value| value as usize)
+                    .unwrap_or(start.saturating_add(199))
+                    .max(start);
+                Some((start, end))
+            }
+        }
+    };
+    let extraction = brazier_runtime::documents::extract_text(
+        &path,
+        kind,
+        pages,
+        lines,
+        brazier_runtime::documents::MAX_EXTRACTION_CHARS,
+    )
+    .await?;
+    Ok(ToolOutcome::text(extraction.describe()))
 }
 
 async fn fs_stat(
@@ -1314,6 +1447,7 @@ async fn shell_run(
                 is_error: true,
                 exit_code: None,
                 changed_paths: Vec::new(),
+                images: Vec::new(),
             });
         }
     };
@@ -1344,6 +1478,7 @@ async fn shell_run(
         is_error: code != Some(0),
         exit_code: code,
         changed_paths: Vec::new(),
+        images: Vec::new(),
     })
 }
 
@@ -1747,6 +1882,36 @@ mod tests {
             .await
             .expect("read file");
         assert!(after.contains("changed line"));
+    }
+
+    #[tokio::test]
+    async fn doc_read_extracts_rtf_by_line_range() {
+        let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        let rtf = br"{\rtf1\ansi Alpha\par Beta\par Gamma\par}";
+        tokio::fs::write(harness.workspace.path().join("letter.rtf"), rtf)
+            .await
+            .expect("write rtf");
+
+        let response = harness
+            .call(
+                "doc_read",
+                json!({ "path": "letter.rtf", "start_line": 1, "end_line": 2 }),
+            )
+            .await;
+        assert_eq!(
+            response.status,
+            ToolExecStatus::Completed,
+            "{}",
+            response.output
+        );
+        assert!(response.output.contains("Alpha"), "{}", response.output);
+        assert!(response.output.contains("Beta"), "{}", response.output);
+        assert!(
+            response.output.contains("lines 1–2"),
+            "{}",
+            response.output
+        );
+        assert!(!response.output.contains("Gamma"), "{}", response.output);
     }
 
     #[tokio::test]

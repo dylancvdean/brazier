@@ -11,18 +11,36 @@ pub const MAX_VIDEO_BYTES: u64 = 50 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 25 * 1024 * 1024;
 
 /// Files we can retain as chat documents. Text-based formats are provided to
-/// the model directly; PDFs are handled by the document-preparation pipeline.
+/// the model directly; PDFs and Office documents are handled by the
+/// document-preparation pipeline.
 pub fn is_document_mime(mime_type: &str) -> bool {
     matches!(
         mime_type,
         "application/pdf"
             | "application/json"
             | "application/xml"
+            | "application/rtf"
+            | "text/rtf"
+            | "application/msword"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             | "text/plain"
             | "text/markdown"
             | "text/csv"
             | "text/html"
     ) || mime_type.starts_with("text/")
+}
+
+/// Browsers do not always report a type for Office documents; when the upload
+/// arrives as a generic stream, trust the file extension instead.
+fn document_mime_for_name(name: &str) -> Option<&'static str> {
+    let extension = name.rsplit('.').next()?.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "pdf" => "application/pdf",
+        "rtf" => "application/rtf",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -61,7 +79,7 @@ fn max_bytes_for_mime(mime_type: &str) -> anyhow::Result<u64> {
         Ok(MAX_DOCUMENT_BYTES)
     } else {
         anyhow::bail!(
-            "unsupported attachment type `{mime_type}` (images, audio, video, PDFs, and text documents are supported)"
+            "unsupported attachment type `{mime_type}` (images, audio, video, PDFs, Office documents, and text are supported)"
         )
     }
 }
@@ -79,6 +97,13 @@ pub async fn store_bytes(
 ) -> anyhow::Result<StoredBlob> {
     let mime_type = mime_type.trim();
     anyhow::ensure!(!mime_type.is_empty(), "mime_type is required");
+    let mime_type = if mime_type == "application/octet-stream" {
+        original_name
+            .and_then(document_mime_for_name)
+            .unwrap_or(mime_type)
+    } else {
+        mime_type
+    };
     let max = max_bytes_for_mime(mime_type)?;
     anyhow::ensure!(
         bytes.len() as u64 <= max,
