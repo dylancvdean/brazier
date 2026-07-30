@@ -138,7 +138,8 @@ pub fn catalog(data_dir: &Path) -> Value {
                         "title": tool.name,
                         "description": tool.description,
                         "network": true,
-                        "source": "mcp"
+                        "source": "mcp",
+                        "server_name": server.name
                     })
                 }).collect::<Vec<_>>()
             })

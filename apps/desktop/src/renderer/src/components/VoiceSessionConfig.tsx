@@ -27,6 +27,7 @@ import {
   fetchModelSettings,
   listAdapters,
   listRuntimes,
+  listTools,
   saveModelProfile,
   saveRuntimeSettings,
   type Adapter,
@@ -42,10 +43,12 @@ import {
   createAgentSession,
   fetchAgentCapabilities,
   fetchAgentSession,
+  fetchAgentTools,
   sandboxBadge,
   updateAgentSession,
   type AgentSandboxCapabilities,
-  type AgentSessionSummary
+  type AgentSessionSummary,
+  type AgentToolCatalogEntry
 } from '../agentApi'
 import type { AgentPermissionMode } from '../../../agent/core/types'
 import { resolveAsrEngine, type AsrPreference, type VoiceSessionTarget } from '../session/config'
@@ -105,6 +108,38 @@ function shortPath(path: string | null | undefined): string {
   if (!path) return 'No workspace chosen'
   const parts = path.split('/').filter(Boolean)
   return parts.length <= 2 ? path : `…/${parts.slice(-2).join('/')}`
+}
+
+type ChatToolGroup = { key: string; label: string; tools: BundledTool[] }
+
+function groupChatTools(tools: BundledTool[]): ChatToolGroup[] {
+  const bundled: BundledTool[] = []
+  const mcp = new Map<string, ChatToolGroup>()
+  for (const tool of tools) {
+    if (tool.source !== 'mcp' && !tool.name.startsWith('mcp/')) {
+      bundled.push(tool)
+      continue
+    }
+    const serverId = tool.name.split('/')[1] ?? 'mcp'
+    const key = `mcp:${serverId}`
+    const group = mcp.get(key) ?? {
+      key,
+      label: tool.server_name ?? serverId,
+      tools: []
+    }
+    group.tools.push(tool)
+    mcp.set(key, group)
+  }
+  return [
+    ...(bundled.length > 0 ? [{ key: 'bundled', label: 'Built-in', tools: bundled }] : []),
+    ...mcp.values()
+  ]
+}
+
+function chatToolLabel(tool: BundledTool): string {
+  return tool.source === 'mcp' || tool.name.startsWith('mcp/')
+    ? tool.name.replace(/^mcp\//, '')
+    : tool.title
 }
 
 /** The pending agent setup a session will be created from, when none is bound. */
@@ -195,6 +230,9 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
   const [runtimes, setRuntimes] = useState<RuntimeEntry[]>([])
   const [sandbox, setSandbox] = useState<AgentSandboxCapabilities | null>(null)
   const [agentSession, setAgentSession] = useState<AgentSessionSummary | null>(null)
+  const [agentTools, setAgentTools] = useState<AgentToolCatalogEntry[]>([])
+  const [pendingAgentTools, setPendingAgentTools] = useState<string[] | null>(null)
+  const [chatTools, setChatTools] = useState<BundledTool[]>(props.tools)
   const [pending, setPending] = useState<PendingAgentSetup>({
     workspacePath: null,
     permissionMode: 'ask'
@@ -229,6 +267,15 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
     void refreshRuntimes()
   }, [refreshRuntimes])
 
+  // The app-level catalog is a useful initial value, but MCP tools can be
+  // added while this window is open. Refresh on entering the Chat setup so the
+  // list describes the tools a spoken turn can actually call.
+  useEffect(() => {
+    if (props.target !== 'chat') return
+    setChatTools(props.tools)
+    void listTools().then(setChatTools).catch(() => undefined)
+  }, [props.target, props.tools])
+
   const refreshAdapters = useCallback(() => {
     void listAdapters()
       .then(setAdapters)
@@ -249,9 +296,15 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
 
   useEffect(() => {
     if (props.target !== 'agent') return
-    void fetchAgentCapabilities()
-      .then((capabilities) => setSandbox(capabilities.sandbox))
-      .catch(() => setSandbox(null))
+    void Promise.all([fetchAgentCapabilities(), fetchAgentTools()])
+      .then(([capabilities, tools]) => {
+        setSandbox(capabilities.sandbox)
+        setAgentTools(tools)
+      })
+      .catch(() => {
+        setSandbox(null)
+        setAgentTools([])
+      })
   }, [props.target])
 
   const agentSessionId = props.agentSessionId
@@ -303,7 +356,8 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
       title: 'Voice session',
       workspace_path: selected,
       model: props.chatModelId,
-      permission_mode: pending.permissionMode
+      permission_mode: pending.permissionMode,
+      ...(pendingAgentTools ? { enabled_tools: pendingAgentTools } : {})
     })
     setAgentSession(created)
     setPending((current) => ({ ...current, workspacePath: selected }))
@@ -317,6 +371,27 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
       return
     }
     setPending((current) => ({ ...current, permissionMode: mode }))
+  }
+
+  const availableAgentToolNames = agentTools.map((tool) => tool.name)
+  const enabledAgentTools = (
+    agentSession?.enabled_tools ?? pendingAgentTools ?? availableAgentToolNames
+  ).filter((name) => availableAgentToolNames.includes(name))
+
+  async function setAgentTool(name: string, enabled: boolean): Promise<void> {
+    const next = enabled
+      ? Array.from(new Set([...enabledAgentTools, name]))
+      : enabledAgentTools.filter((entry) => entry !== name)
+    if (!agentSession) {
+      setPendingAgentTools(next)
+      return
+    }
+    const updated = await updateAgentSession(agentSession.id, { enabled_tools: next })
+    setAgentSession(updated)
+    // The utility process caches a session's tool definitions. Reopen it now
+    // so a selection made here is what the next spoken turn actually receives.
+    await window.brazier.agent.closeSession(updated.id)
+    await window.brazier.agent.openSession(updated.id)
   }
 
   // Resolved by the same function the session uses, so what is shown is what
@@ -488,29 +563,34 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
             <span className="section-label">
               <Wrench size={12} /> Tools
             </span>
-            {props.tools.length === 0 ? (
+            {chatTools.length === 0 ? (
               <p className="voice-notice">No tools available.</p>
             ) : (
               <div className="voice-tool-list">
-                {props.tools.map((tool) => {
-                  const on = props.enabledTools.includes(tool.name)
-                  return (
-                    <label key={tool.name} title={tool.description}>
-                      <input
-                        type="checkbox"
-                        checked={on}
-                        onChange={() =>
-                          props.onEnabledToolsChange(
-                            on
-                              ? props.enabledTools.filter((name) => name !== tool.name)
-                              : [...props.enabledTools, tool.name]
-                          )
-                        }
-                      />
-                      {tool.title}
-                    </label>
-                  )
-                })}
+                {groupChatTools(chatTools).map((group) => (
+                  <div key={group.key} className="voice-tool-group">
+                    <span className="section-label">{group.label}</span>
+                    {group.tools.map((tool) => {
+                      const on = props.enabledTools.includes(tool.name)
+                      return (
+                        <label key={tool.name} title={tool.description}>
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() =>
+                              props.onEnabledToolsChange(
+                                on
+                                  ? props.enabledTools.filter((name) => name !== tool.name)
+                                  : [...props.enabledTools, tool.name]
+                              )
+                            }
+                          />
+                          {chatToolLabel(tool)}
+                        </label>
+                      )
+                    })}
+                  </div>
+                ))}
               </div>
             )}
           </section>
@@ -559,6 +639,35 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
               ))}
             </div>
             <p className="voice-notice">{PERMISSION_LABELS[permissionMode].detail}</p>
+          </div>
+
+          <div className="voice-field">
+            <span className="section-label">
+              <Wrench size={12} /> Agent tools
+            </span>
+            {agentTools.length === 0 ? (
+              <p className="voice-notice">No agent tools available.</p>
+            ) : (
+              <div className="voice-tool-list">
+                {agentTools.map((tool) => {
+                  const on = enabledAgentTools.includes(tool.name)
+                  return (
+                    <label key={tool.name} title={tool.description}>
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        disabled={busy}
+                        onChange={() => void guard(() => setAgentTool(tool.name, !on))}
+                      />
+                      {tool.label}
+                    </label>
+                  )
+                })}
+              </div>
+            )}
+            <p className="voice-notice">
+              Includes user-added MCP tools. Changes apply to the next spoken turn.
+            </p>
           </div>
 
           {sandbox ? (

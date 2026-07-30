@@ -15,6 +15,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import type { BundledTool, LocalModel, RuntimeSettings } from '../api'
 import { SPEECH_THRESHOLD } from '../audio/utterance'
+import { primeVoiceAudio } from '../audio/voiceStream'
 import { modelDisplayName } from '../model-utils'
 import { VOICE_BACKGROUND_ROUTING_OPTIONS } from '../session/backgroundRouting'
 import type { VoiceSessionTarget } from '../session/config'
@@ -81,7 +82,7 @@ const TARGETS: Array<[VoiceSessionTarget, string, string]> = [
   [
     'agent',
     'Agent',
-    'Spoken turns go to the agent session bound to this conversation. With no task bound, a turn is refused rather than answered without the workspace and tools you expected.'
+    'Spoken turns go to the agent session bound to this conversation. Its results are saved in this shared conversation and tagged Agent. With no task bound, a turn is refused rather than answered without the workspace and tools you expected.'
   ],
   [
     'neither',
@@ -579,7 +580,10 @@ export function VoiceMode(props: Props): React.JSX.Element {
               type="button"
               className="primary voice-start"
               disabled={starting || blocked}
-              onClick={() => void guard(() => session.startVoice())}
+              onClick={() => {
+                primeVoiceAudio()
+                void guard(() => session.startVoice())
+              }}
             >
               {starting ? <LoaderCircle className="spin" size={16} /> : <Mic size={16} />}
               Start conversation

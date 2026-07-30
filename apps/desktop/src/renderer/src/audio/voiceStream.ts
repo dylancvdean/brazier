@@ -47,6 +47,20 @@ export function voiceStreamSupported(): boolean {
   )
 }
 
+/**
+ * Unlock Web Audio while the Start button still has a user gesture. The voice
+ * runtime and its model may take long enough to start that creating the real
+ * capture context afterwards no longer counts as user-initiated in Electron.
+ */
+export function primeVoiceAudio(): void {
+  if (typeof AudioContext === 'undefined') return
+  const context = new AudioContext()
+  void context
+    .resume()
+    .catch(() => undefined)
+    .finally(() => context.close().catch(() => undefined))
+}
+
 function rms(samples: Float32Array): number {
   let sum = 0
   for (let index = 0; index < samples.length; index += 1) sum += samples[index] * samples[index]

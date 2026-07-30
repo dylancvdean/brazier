@@ -1110,11 +1110,14 @@ export class SessionCoordinator {
       return
     }
 
-    const routesToBackground = shouldRouteVoiceToBackground(
-      trimmed,
-      this.config.voiceBackgroundRouting,
-      { taskActive: this.activeCorrelationId !== null }
-    )
+    // Agent is an explicit destination, not a hint for the background-routing
+    // classifier. Otherwise the screen can say "Agent" while lightweight
+    // turns are silently left with PersonaPlex.
+    const routesToBackground =
+      this.config.voiceSessionTarget === 'agent' ||
+      shouldRouteVoiceToBackground(trimmed, this.config.voiceBackgroundRouting, {
+        taskActive: this.activeCorrelationId !== null
+      })
     if (!routesToBackground) {
       this.releasePersonaPlexRoutingHold()
       // PersonaPlex already heard this turn and is answering it. Do not record a

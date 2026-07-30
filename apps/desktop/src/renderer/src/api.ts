@@ -1962,6 +1962,8 @@ export type BundledTool = {
   description?: string
   network: boolean
   source?: string
+  /** Display name of the MCP server that supplied this tool. */
+  server_name?: string
 }
 
 export type McpServer = {

@@ -5970,6 +5970,22 @@ label.span-2 {
   font-size: 12px;
 }
 
+.voice-tool-group {
+  display: grid;
+  gap: 4px;
+}
+
+.voice-tool-group + .voice-tool-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.voice-tool-group .section-label {
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .voice-tool-list input {
   width: auto;
   margin: 0;

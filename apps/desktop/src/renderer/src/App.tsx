@@ -2165,7 +2165,10 @@ export function App(): React.JSX.Element {
                         ? `Tools: ${enabledTools.length} enabled`
                         : 'Choose tools (bundled + MCP)'
                   }
-                  onClick={() => setToolsMenuOpen((open) => !open)}
+                  onClick={() => {
+                    void refreshTools()
+                    setToolsMenuOpen((open) => !open)
+                  }}
                 >
                   <Wrench size={17} />
                   {toolsEnabled && <span className="tool-count">{enabledTools.length}</span>}

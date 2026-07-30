@@ -214,8 +214,9 @@ describe('adapter connection', () => {
 })
 
 describe('what the voice session is connected to', () => {
-  it('leaves lightweight auto-routed turns with PersonaPlex', async () => {
+  it('leaves lightweight auto-routed chat turns with PersonaPlex', async () => {
     const { coordinator, agent, voice, chat } = await live({
+      voiceSessionTarget: 'chat',
       voiceBackgroundRouting: 'auto'
     })
     speak(voice, 'utt-1', 'How are you?')
@@ -224,6 +225,16 @@ describe('what the voice session is connected to', () => {
     expect(agent.submitted).toHaveLength(0)
     expect(chat.messages).toHaveLength(0)
     expect(coordinator.snapshot().notice).toContain('background model not called')
+  })
+
+  it('always sends Agent-targeted speech to the bound agent', async () => {
+    const { agent, voice } = await live({ voiceBackgroundRouting: 'auto' })
+
+    speak(voice, 'utt-1', 'How are you?')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(agent.submitted).toHaveLength(1)
+    expect(agent.submitted[0].text).toBe('How are you?')
   })
 
   it('still sends work cues through the background in auto mode', async () => {
@@ -238,7 +249,8 @@ describe('what the voice session is connected to', () => {
   })
 
   it('only sends explicit work cues in explicit mode', async () => {
-    const { agent, voice, chat } = await live({
+    const { agent, responder, voice, chat } = await live({
+      voiceSessionTarget: 'chat',
       voiceBackgroundRouting: 'explicit'
     })
     speak(
@@ -252,7 +264,8 @@ describe('what the voice session is connected to', () => {
 
     speak(voice, 'utt-2', 'Check the repository')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(agent.submitted).toHaveLength(1)
+    expect(agent.submitted).toHaveLength(0)
+    expect(responder.replies).toHaveLength(1)
   })
 
   it('sends spoken turns to the agent when that is the destination', async () => {
@@ -361,6 +374,7 @@ describe('PersonaPlex before a background handoff', () => {
   it('reopens a speculative mute when the final turn stays local', async () => {
     const { agent, voice } = await live({
       ...restart,
+      voiceSessionTarget: 'chat',
       personaplexPreHandoffMode: 'mute-on-route'
     })
     voice.emit({ type: 'userTranscriptPartial', utteranceId: 'utt-1', text: 'Check the thing' })
