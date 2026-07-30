@@ -22,11 +22,56 @@
       "label": "Create isolated environment",
       "program": "uv",
       "args": ["venv", "--python", "3.12", "{venv}"]
-    },
-    {
-      "label": "Build and install selected source with its reviewed dependencies",
-      "program": "uv",
-      "args": ["pip", "install", "--python", "{python}", "{source}"]
     }
-  ]
+  ],
+  "target_steps": {
+    "cpu": [
+      {
+        "label": "Install vLLM CPU build and runtime dependencies",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "--requirements", "{source}/requirements/build/cpu.txt", "--requirements", "{source}/requirements/cpu.txt"]
+      },
+      {
+        "label": "Build and install selected vLLM CPU source",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "--no-build-isolation", "--no-deps", "{source}"]
+      }
+    ],
+    "cuda": [
+      {
+        "label": "Install vLLM CUDA build and runtime dependencies",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "--requirements", "{source}/requirements/build/cuda.txt", "--requirements", "{source}/requirements/cuda.txt"]
+      },
+      {
+        "label": "Build and install selected vLLM CUDA source",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "--no-build-isolation", "--no-deps", "{source}"]
+      }
+    ],
+    "rocm": [
+      {
+        "label": "Install vLLM ROCm build and runtime dependencies",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "--requirements", "{source}/requirements/build/rocm.txt", "--requirements", "{source}/requirements/rocm.txt"]
+      },
+      {
+        "label": "Build and install selected vLLM ROCm source",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "--no-build-isolation", "--no-deps", "{source}"]
+      }
+    ],
+    "metal": [
+      {
+        "label": "Build and install selected vLLM-Metal source",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "{source}"]
+      },
+      {
+        "label": "Compile vLLM-Metal native artifacts",
+        "program": "{python}",
+        "args": ["-m", "vllm_metal.metal.build"]
+      }
+    ]
+  }
 }

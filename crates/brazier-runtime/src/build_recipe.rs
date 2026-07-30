@@ -81,6 +81,10 @@ pub struct BuildRecipe {
     /// environment exists and before the selected source is installed.
     #[serde(default)]
     pub platform_pre_steps: HashMap<String, Vec<RecipeStep>>,
+    /// Build steps selected by acceleration target. Recipes which define this
+    /// map must provide an entry for every target they accept.
+    #[serde(default)]
+    pub target_steps: HashMap<String, Vec<RecipeStep>>,
     pub steps: Vec<RecipeStep>,
 }
 
@@ -97,6 +101,7 @@ pub struct BuildPlanRequest {
     pub repository: String,
     pub revision: String,
     pub platform: String,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +247,19 @@ pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
         checkout
     };
     let skip_checkout = recipe.skip_checkout;
+    let target_steps = if recipe.target_steps.is_empty() {
+        Vec::new()
+    } else {
+        recipe
+            .target_steps
+            .remove(&request.target)
+            .with_context(|| {
+                format!(
+                    "{} has no build steps for target {}",
+                    recipe.display_name, request.target
+                )
+            })?
+    };
     let build = recipe
         .steps
         .iter()
@@ -254,6 +272,7 @@ pub fn plan(request: BuildPlanRequest) -> anyhow::Result<BuildPlan> {
                 .unwrap_or_default(),
         )
         .chain(recipe.steps.iter().skip(1).cloned())
+        .chain(target_steps)
         .map(|step| PlannedCommand {
             label: step.label,
             program: step.program,
@@ -285,6 +304,7 @@ mod tests {
             repository: "https://github.com/example/llama.cpp".into(),
             revision: "feature/new-model".into(),
             platform: "linux-x64".into(),
+            target: "cpu".into(),
         })
         .unwrap();
         assert!(!plan.trusted_origin);
@@ -299,6 +319,7 @@ mod tests {
             repository: "https://github.com/ggml-org/llama.cpp.git".into(),
             revision: "main".into(),
             platform: "macos-arm64".into(),
+            target: "cpu".into(),
         })
         .unwrap();
         assert!(plan.trusted_origin);
@@ -312,6 +333,7 @@ mod tests {
             repository: "https://github.com/leejet/stable-diffusion.cpp.git".into(),
             revision: "master".into(),
             platform: "linux-x64".into(),
+            target: "cpu".into(),
         })
         .unwrap();
 
@@ -350,6 +372,7 @@ mod tests {
             repository: "https://github.com/example/llama.cpp".into(),
             revision: "--upload-pack=bad".into(),
             platform: "linux-x64".into(),
+            target: "cpu".into(),
         });
         assert!(result.is_err());
     }
@@ -361,6 +384,7 @@ mod tests {
             repository: "https://github.com/example/llama.cpp".into(),
             revision: String::new(),
             platform: "linux-x64".into(),
+            target: "cpu".into(),
         })
         .unwrap();
         assert_eq!(
@@ -384,6 +408,7 @@ mod tests {
             repository: "https://github.com/huggingface/transformers.git".into(),
             revision: "bundled".into(),
             platform: "macos-arm64".into(),
+            target: "cpu".into(),
         })
         .unwrap();
         assert!(plan.skip_checkout);
@@ -394,6 +419,57 @@ mod tests {
                 .iter()
                 .any(|step| step.label.contains("streaming ASR"))
         );
+    }
+
+    #[test]
+    fn vllm_uses_target_specific_requirements_and_non_isolated_builds() {
+        for target in ["cpu", "cuda", "rocm"] {
+            let plan = plan(BuildPlanRequest {
+                engine: "vllm".into(),
+                repository: "https://github.com/vllm-project/vllm".into(),
+                revision: "main".into(),
+                platform: "linux-x64".into(),
+                target: target.into(),
+            })
+            .unwrap();
+            let args = plan
+                .build
+                .iter()
+                .flat_map(|step| step.args.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            assert!(args.contains(&format!("{{source}}/requirements/build/{target}.txt")));
+            assert!(args.contains(&format!("{{source}}/requirements/{target}.txt")));
+            assert!(args.contains(&"--no-build-isolation".into()));
+            assert!(args.contains(&"--no-deps".into()));
+        }
+    }
+
+    #[test]
+    fn vllm_metal_installs_core_then_builds_plugin_artifacts() {
+        let plan = plan(BuildPlanRequest {
+            engine: "vllm".into(),
+            repository: "https://github.com/vllm-project/vllm-metal".into(),
+            revision: "main".into(),
+            platform: "macos-arm64".into(),
+            target: "metal".into(),
+        })
+        .unwrap();
+        let labels = plan
+            .build
+            .iter()
+            .map(|step| step.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "Create isolated environment",
+                "Install vLLM core macOS arm64 wheel",
+                "Build and install selected vLLM-Metal source",
+                "Compile vLLM-Metal native artifacts",
+            ]
+        );
+        assert_eq!(plan.build[3].program, "{python}");
     }
 
     #[test]

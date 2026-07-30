@@ -2479,10 +2479,12 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const [buildTarget, setBuildTarget] = useState<RuntimeTarget>('cpu')
   const buildTargets = useMemo(
     () =>
-      sourceBuildTargets(props.hardware).filter((target) =>
-        targetSupportedByBuildEngine(buildEngine, target)
+      sourceBuildTargets(props.hardware).filter(
+        (target) =>
+          targetSupportedByBuildEngine(buildEngine, target) &&
+          !(buildEngine === 'vllm' && isAppleSilicon && target !== 'metal')
       ),
-    [props.hardware?.os, buildEngine]
+    [props.hardware?.os, buildEngine, isAppleSilicon]
   )
   const managedTargets = useMemo(
     () => (props.hardware?.targets ?? []).filter((target) => target.managed_install),
@@ -2632,7 +2634,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
 
   useEffect(() => {
     if (!buildTargets.includes(buildTarget)) {
-      setBuildTarget('cpu')
+      setBuildTarget(buildTargets[0] ?? 'cpu')
     }
   }, [buildTarget, buildTargets])
 

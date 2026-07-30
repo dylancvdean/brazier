@@ -186,6 +186,10 @@ pub fn resolve_command_args(args: &[String], context: &CommandArgsContext<'_>) -
     resolved
 }
 
+fn resolve_command_program(program: &str, context: &CommandArgsContext<'_>) -> String {
+    program.replace("{python}", &context.python.display().to_string())
+}
+
 /// Find a host build tool. macOS GUI apps do not source a login shell, so they
 /// commonly miss Homebrew's prefix even though `cmake` works in Terminal.
 fn command_path(program: &str) -> Option<PathBuf> {
@@ -348,19 +352,97 @@ async fn run_step(
 /// environment. That environment can contain a CUDA-flavored PyTorch even on a
 /// ROCm host, which sends setup.py through its CUDA version probe and fails on
 /// a machine that correctly has no CUDA_HOME.
-fn build_environment(engine: &str, target: RuntimeTarget) -> Vec<(String, String)> {
-    if engine == crate::vllm::ENGINE && target == RuntimeTarget::Rocm {
-        vec![("VLLM_TARGET_DEVICE".into(), "rocm".into())]
-    } else {
-        Vec::new()
+fn rocm_torch_backend() -> String {
+    let version = std::fs::read_to_string("/opt/rocm/.info/version").unwrap_or_default();
+    rocm_torch_backend_for_version(&version)
+}
+
+fn rocm_torch_backend_for_version(version: &str) -> String {
+    let numeric = version
+        .trim()
+        .split_once('-')
+        .map_or(version.trim(), |(version, _)| version);
+    // uv's PyTorch indexes are usually versioned by ROCm major/minor, with a
+    // few historical patch-specific indexes. Fall back to hardware detection
+    // for layouts which do not expose the standard ROCm version file.
+    if numeric.starts_with("6.2.4") {
+        return "rocm6.2.4".into();
+    }
+    if numeric.starts_with("5.1.1") {
+        return "rocm5.1.1".into();
+    }
+    if numeric.starts_with("4.0.1") {
+        return "rocm4.0.1".into();
+    }
+    let mut parts = numeric.split('.');
+    let backend = match (parts.next(), parts.next()) {
+        (Some(major), Some(minor))
+            if major.chars().all(|c| c.is_ascii_digit())
+                && minor.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            format!("rocm{major}.{minor}")
+        }
+        _ => "auto".into(),
+    };
+    match backend.as_str() {
+        "rocm4.1" | "rocm4.2" | "rocm5.2" | "rocm5.3" | "rocm5.4" | "rocm5.5" | "rocm5.6"
+        | "rocm5.7" | "rocm6.0" | "rocm6.1" | "rocm6.2" | "rocm6.3" | "rocm6.4" | "rocm7.0"
+        | "rocm7.1" | "rocm7.2" => backend,
+        _ => "auto".into(),
     }
 }
 
-fn validate_engine_target(engine: &str, target: RuntimeTarget) -> anyhow::Result<()> {
+fn build_environment(engine: &str, target: RuntimeTarget) -> Vec<(String, String)> {
+    if engine != crate::vllm::ENGINE {
+        return Vec::new();
+    }
+    match target {
+        RuntimeTarget::Cpu => vec![
+            ("VLLM_TARGET_DEVICE".into(), "cpu".into()),
+            ("UV_TORCH_BACKEND".into(), "cpu".into()),
+        ],
+        RuntimeTarget::Cuda => vec![
+            ("VLLM_TARGET_DEVICE".into(), "cuda".into()),
+            ("UV_TORCH_BACKEND".into(), "auto".into()),
+        ],
+        RuntimeTarget::Rocm => vec![
+            ("VLLM_TARGET_DEVICE".into(), "rocm".into()),
+            ("UV_TORCH_BACKEND".into(), rocm_torch_backend()),
+        ],
+        // vLLM-Metal uses the macOS CPU vLLM core wheel plus its MLX plugin.
+        RuntimeTarget::Metal => vec![("UV_TORCH_BACKEND".into(), "cpu".into())],
+        RuntimeTarget::Auto => vec![("UV_TORCH_BACKEND".into(), "auto".into())],
+        RuntimeTarget::Vulkan => Vec::new(),
+    }
+}
+
+fn validate_engine_target(
+    engine: &str,
+    target: RuntimeTarget,
+    platform: &str,
+) -> anyhow::Result<()> {
+    if engine != crate::vllm::ENGINE {
+        return Ok(());
+    }
     anyhow::ensure!(
-        !(engine == crate::vllm::ENGINE && target == RuntimeTarget::Vulkan),
+        target != RuntimeTarget::Vulkan,
         "vLLM does not support a Vulkan backend; use ROCm or CPU on AMD hardware"
     );
+    anyhow::ensure!(
+        target != RuntimeTarget::Auto,
+        "vLLM source builds require an explicit CPU, CUDA, ROCm, or Metal target"
+    );
+    if platform == "macos-arm64" {
+        anyhow::ensure!(
+            target == RuntimeTarget::Metal,
+            "vLLM on Apple Silicon uses the vLLM-Metal plugin; select the Metal target"
+        );
+    } else {
+        anyhow::ensure!(
+            target != RuntimeTarget::Metal,
+            "the vLLM Metal target requires Apple Silicon and the vLLM-Metal repository"
+        );
+    }
     Ok(())
 }
 
@@ -692,13 +774,14 @@ pub async fn run_build_with_progress(
         repository: request.repository.clone(),
         revision: request.revision.clone(),
         platform: platform.to_owned(),
+        target: target.as_str().to_owned(),
     }) {
         Ok(plan) => plan,
         Err(error) => return Err(fail(error.to_string(), None, "")),
     };
     let python_engine = build_recipe::is_python_engine(&plan.engine);
     let swift_engine = build_recipe::is_swift_engine(&plan.engine);
-    if let Err(error) = validate_engine_target(&plan.engine, target) {
+    if let Err(error) = validate_engine_target(&plan.engine, target, platform) {
         return Err(fail(error.to_string(), Some("Preflight"), ""));
     }
     if python_engine {
@@ -823,19 +906,18 @@ pub async fn run_build_with_progress(
                 anyhow::bail!("build cancelled");
             }
             failed_step = Some(step.label.clone());
-            let args = resolve_command_args(
-                &step.args,
-                &CommandArgsContext {
-                    source: &source,
-                    build: &build,
-                    install: &install,
-                    venv: &venv,
-                    python: &python,
-                    recipe: &recipe_dir,
-                    flags: &flags,
-                    parallel_jobs,
-                },
-            );
+            let context = CommandArgsContext {
+                source: &source,
+                build: &build,
+                install: &install,
+                venv: &venv,
+                python: &python,
+                recipe: &recipe_dir,
+                flags: &flags,
+                parallel_jobs,
+            };
+            let args = resolve_command_args(&step.args, &context);
+            let program = resolve_command_program(&step.program, &context);
             progress(ProgressEvent::build_step(
                 index + 1,
                 total,
@@ -843,7 +925,7 @@ pub async fn run_build_with_progress(
             ));
             run_step(
                 &step.label,
-                &step.program,
+                &program,
                 &args,
                 &environment,
                 &root,
@@ -1031,6 +1113,24 @@ mod tests {
     }
 
     #[test]
+    fn resolves_the_virtualenv_python_as_a_step_program() {
+        let context = CommandArgsContext {
+            source: Path::new("/s"),
+            build: Path::new("/b"),
+            install: Path::new("/i"),
+            venv: Path::new("/v"),
+            python: Path::new("/v/bin/python"),
+            recipe: Path::new("/recipes"),
+            flags: &[],
+            parallel_jobs: 2,
+        };
+        assert_eq!(
+            resolve_command_program("{python}", &context),
+            "/v/bin/python"
+        );
+    }
+
+    #[test]
     fn build_ids_are_filesystem_safe() {
         assert_eq!(
             sanitize_id_segment("feature/new model"),
@@ -1040,21 +1140,49 @@ mod tests {
     }
 
     #[test]
-    fn vllm_rocm_builds_do_not_fall_back_to_cuda_detection() {
+    fn vllm_builds_select_the_matching_torch_backend() {
+        let rocm = build_environment("vllm", RuntimeTarget::Rocm);
+        assert!(rocm.contains(&("VLLM_TARGET_DEVICE".into(), "rocm".into())));
+        assert!(rocm.iter().any(|(key, value)| key == "UV_TORCH_BACKEND"
+            && (value == "auto" || value.starts_with("rocm"))));
         assert_eq!(
-            build_environment("vllm", RuntimeTarget::Rocm),
-            vec![("VLLM_TARGET_DEVICE".into(), "rocm".into())]
+            build_environment("vllm", RuntimeTarget::Cpu),
+            vec![
+                ("VLLM_TARGET_DEVICE".into(), "cpu".into()),
+                ("UV_TORCH_BACKEND".into(), "cpu".into())
+            ]
         );
-        assert!(build_environment("vllm", RuntimeTarget::Cuda).is_empty());
+        assert_eq!(
+            build_environment("vllm", RuntimeTarget::Cuda),
+            vec![
+                ("VLLM_TARGET_DEVICE".into(), "cuda".into()),
+                ("UV_TORCH_BACKEND".into(), "auto".into())
+            ]
+        );
+        assert_eq!(
+            build_environment("vllm", RuntimeTarget::Metal),
+            vec![("UV_TORCH_BACKEND".into(), "cpu".into())]
+        );
         assert!(build_environment("llama.cpp", RuntimeTarget::Rocm).is_empty());
     }
 
     #[test]
+    fn rocm_versions_select_only_uv_supported_torch_indexes() {
+        assert_eq!(rocm_torch_backend_for_version("7.2.4\n"), "rocm7.2");
+        assert_eq!(rocm_torch_backend_for_version("6.2.4-12345"), "rocm6.2.4");
+        assert_eq!(rocm_torch_backend_for_version("7.3.0"), "auto");
+        assert_eq!(rocm_torch_backend_for_version("unknown"), "auto");
+    }
+
+    #[test]
     fn vllm_rejects_vulkan_without_disabling_other_engines() {
-        assert!(validate_engine_target("vllm", RuntimeTarget::Vulkan).is_err());
-        assert!(validate_engine_target("vllm", RuntimeTarget::Rocm).is_ok());
-        assert!(validate_engine_target("vllm", RuntimeTarget::Cpu).is_ok());
-        assert!(validate_engine_target("llama.cpp", RuntimeTarget::Vulkan).is_ok());
+        assert!(validate_engine_target("vllm", RuntimeTarget::Vulkan, "linux-x64").is_err());
+        assert!(validate_engine_target("vllm", RuntimeTarget::Rocm, "linux-x64").is_ok());
+        assert!(validate_engine_target("vllm", RuntimeTarget::Cpu, "linux-x64").is_ok());
+        assert!(validate_engine_target("vllm", RuntimeTarget::Metal, "macos-arm64").is_ok());
+        assert!(validate_engine_target("vllm", RuntimeTarget::Cpu, "macos-arm64").is_err());
+        assert!(validate_engine_target("vllm", RuntimeTarget::Metal, "linux-x64").is_err());
+        assert!(validate_engine_target("llama.cpp", RuntimeTarget::Vulkan, "linux-x64").is_ok());
     }
 
     #[test]
