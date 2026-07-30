@@ -1417,7 +1417,6 @@ export type TextProfile = {
   /** Model id for agent subagents. Null/unset means the parent model. */
   subagent_model?: string | null
   /** Per-subagent context. Null/unset inherits the parent context. */
-  subagent_context_size?: number | null
   /** Max concurrent subagents. Null inherits the default of 2. */
   max_subagents?: number | null
   /**

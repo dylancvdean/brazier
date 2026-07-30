@@ -700,7 +700,6 @@ function AgentFields(props: {
   profile: TextProfile
   onChange: <K extends keyof TextProfile>(key: K, value: TextProfile[K]) => void
   excludeModelId: string
-  parentContext?: number
   /** Parallel slots only apply to llama.cpp launches. */
   isLlama: boolean
 }): React.JSX.Element {
@@ -753,14 +752,6 @@ function AgentFields(props: {
         </select>
       </label>
       <NumberField
-        label="Subagent context"
-        hint="Context available to each child. Unset uses the same context as the parent."
-        inherited={props.profile.context_size ?? props.parentContext}
-        min={512}
-        value={props.profile.subagent_context_size}
-        onChange={(value) => props.onChange('subagent_context_size', value)}
-      />
-      <NumberField
         label="Max subagents"
         hint="How many child agents may run at once. Default 2."
         inherited={2}
@@ -772,7 +763,7 @@ function AgentFields(props: {
       {props.isLlama ? (
         <ToggleField
           label="Parallel subagents"
-          hint={`Off keeps one llama.cpp slot (safest on memory). On starts the server with --parallel ${parallelSlots} (1 + max subagents) so concurrent children can continuous-batch. Each slot gets the configured per-agent context, so KV memory grows with the slot count and a reload is required. Turn off or lower either context setting if launch runs out of memory.`}
+          hint={`Off keeps one llama.cpp slot (safest on memory). On starts the server with --parallel ${parallelSlots} (1 + max subagents) so concurrent children can continuous-batch. Every slot gets the model's context size, so KV memory grows with the slot count and a reload is required. Turn this off or lower the context size if launch runs out of memory.`}
           inherited={false}
           value={props.profile.parallel_subagents}
           onChange={(value) => props.onChange('parallel_subagents', value)}
@@ -988,7 +979,6 @@ function TextFields(props: SectionProps<TextProfile>): React.JSX.Element {
         profile={profile}
         onChange={set}
         excludeModelId={props.modelId}
-        parentContext={props.inherited.contextSize}
         isLlama={isLlama}
       />
 

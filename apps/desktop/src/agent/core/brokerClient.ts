@@ -195,7 +195,6 @@ export class BrokerClient {
   async textProfile(modelId: string): Promise<{
     subagent_model?: string | null
     context_size?: number | null
-    subagent_context_size?: number | null
     max_tokens?: number | null
     max_subagents?: number | null
   } | null> {
@@ -206,7 +205,6 @@ export class BrokerClient {
           kind?: string
           subagent_model?: string | null
           context_size?: number | null
-          subagent_context_size?: number | null
           max_tokens?: number | null
           max_subagents?: number | null
         }
@@ -217,7 +215,6 @@ export class BrokerClient {
     return {
       subagent_model: profile.subagent_model,
       context_size: profile.context_size,
-      subagent_context_size: profile.subagent_context_size,
       max_tokens: profile.max_tokens,
       max_subagents: profile.max_subagents
     }

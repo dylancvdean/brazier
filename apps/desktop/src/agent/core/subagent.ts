@@ -13,20 +13,7 @@ export const DEFAULT_MAX_SUBAGENTS = 2
 export type SubagentProfileDefaults = {
   subagent_model?: string | null
   context_size?: number | null
-  subagent_context_size?: number | null
   max_subagents?: number | null
-}
-
-/** An unset child limit inherits the context available to its parent. */
-export function resolveSubagentContext(
-  profile: SubagentProfileDefaults | null | undefined,
-  parentContext: number | undefined
-): number | undefined {
-  const configured = profile?.subagent_context_size
-  if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 512) {
-    return Math.trunc(configured)
-  }
-  return parentContext
 }
 
 export type SubagentRuntimeMetadata = {

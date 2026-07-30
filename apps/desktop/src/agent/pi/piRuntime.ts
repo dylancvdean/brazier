@@ -32,7 +32,6 @@ import {
   collectSpawnPrompts,
   isSubagentSession,
   resolveMaxSubagents,
-  resolveSubagentContext,
   resolveSubagentModel,
   SPAWN_SUBAGENT_TOOL,
   summarizeSubagentResult
@@ -853,7 +852,7 @@ export class PiAgentRuntime implements AgentRuntime {
     }
 
     const modelId = resolveSubagentModel(request.args.model, profile, parentState.model.id)
-    const contextWindow = resolveSubagentContext(profile, parentState.model.contextWindow)
+    const contextWindow = parentState.model.contextWindow
     const catalog = await this.broker.tools()
     const parentToolNames =
       parentState.enabledTools ?? catalog.map((tool) => tool.name)

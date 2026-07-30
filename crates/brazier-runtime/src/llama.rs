@@ -1367,11 +1367,8 @@ pub struct LlamaServer {
 /// What llama-server is actually started with, once the model's overrides have
 /// been laid over the global settings.
 struct LaunchPlan {
-    /// Context promised to one parent request.
+    /// Context promised to every request slot.
     context_size: u32,
-    /// Optional logical limit for each child request. llama.cpp gives every
-    /// parallel slot the same physical size, so the largest logical limit wins.
-    subagent_context_size: Option<u32>,
     batch_size: u32,
     ubatch_size: Option<u32>,
     threads: Option<u16>,
@@ -1404,11 +1401,7 @@ struct LaunchPlan {
 
 impl LaunchPlan {
     fn aggregate_context_size(&self) -> u64 {
-        let per_slot_context = self
-            .subagent_context_size
-            .unwrap_or(self.context_size)
-            .max(self.context_size);
-        u64::from(per_slot_context) * u64::from(self.parallel)
+        u64::from(self.context_size) * u64::from(self.parallel)
     }
 
     fn kv_offload_enabled(&self) -> bool {
@@ -1428,7 +1421,6 @@ impl LaunchPlan {
         };
         Self {
             context_size: field(&|profile| profile.context_size, settings.context_size),
-            subagent_context_size: profile.and_then(|profile| profile.subagent_context_size),
             batch_size: field(&|profile| profile.batch_size, settings.batch_size),
             ubatch_size: profile.and_then(|profile| profile.ubatch_size),
             threads: profile
@@ -1497,9 +1489,8 @@ impl LaunchPlan {
             })
             .unwrap_or_default();
         format!(
-            "{}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|mtp={}:{}|{}|jinja|rf={}|tpl={}|{}",
+            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|mtp={}:{}|{}|jinja|rf={}|tpl={}|{}",
             self.context_size,
-            self.subagent_context_size,
             self.batch_size,
             self.ubatch_size,
             self.threads,
@@ -2597,7 +2588,7 @@ mod tests {
         assert_eq!(one_large_stream.parallel, 1);
         assert_ne!(plan.key(false), one_large_stream.key(false));
 
-        let larger_children = LaunchPlan::resolve(
+        let legacy_child_context = LaunchPlan::resolve(
             &settings,
             Some(&TextProfile {
                 subagent_context_size: Some(262_144),
@@ -2610,7 +2601,7 @@ mod tests {
             false,
             None,
         );
-        assert_eq!(larger_children.aggregate_context_size(), 786_432);
+        assert_eq!(legacy_child_context.aggregate_context_size(), 393_216);
     }
 
     #[test]

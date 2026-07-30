@@ -184,7 +184,6 @@ fn profile_for_model_load(
 ) -> Option<crate::model_settings::TextProfile> {
     if !agent_mode && let Some(profile) = profile.as_mut() {
         profile.parallel_subagents = Some(false);
-        profile.subagent_context_size = None;
     }
     profile
 }
@@ -2576,15 +2575,12 @@ mod tests {
             parallel_subagents: Some(true),
             max_subagents: Some(2),
             context_size: Some(131_072),
-            subagent_context_size: Some(262_144),
             ..Default::default()
         };
         let chat = profile_for_model_load(Some(configured.clone()), false).unwrap();
         let agent = profile_for_model_load(Some(configured.clone()), true).unwrap();
         assert_eq!(crate::model_settings::llama_parallel_slots(Some(&chat)), 1);
         assert_eq!(crate::model_settings::llama_parallel_slots(Some(&agent)), 3);
-        assert_eq!(chat.subagent_context_size, None);
-        assert_eq!(agent.subagent_context_size, Some(262_144));
         assert_eq!(configured.parallel_subagents, Some(true));
     }
 
