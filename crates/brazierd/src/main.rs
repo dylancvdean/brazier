@@ -36,6 +36,9 @@ struct Args {
     ready_file: Option<PathBuf>,
     #[arg(long, env = "BRAZIER_API_KEY")]
     api_key: Option<String>,
+    /// Whether API requests may load a non-resident local model on demand.
+    #[arg(long)]
+    jit_loading: Option<bool>,
     #[arg(long, conflicts_with = "api_key")]
     no_auth: bool,
     #[arg(long, requires = "no_auth")]
@@ -105,6 +108,11 @@ async fn main() -> anyhow::Result<()> {
     // on GitHub just to show what is installed.
     brazierd::github_releases::set_cache_dir(data_dir.join("state"));
     let db = Database::open(&data_dir.join("brazier.sqlite")).await?;
+    if let Some(jit_loading) = args.jit_loading {
+        let mut settings = brazierd::runtime_settings::load(&data_dir);
+        settings.jit_loading = jit_loading;
+        brazierd::runtime_settings::save(&data_dir, &settings).await?;
+    }
     // Downloads do not survive a restart, but their partial files do; mark any
     // that were mid-flight as paused so they can be resumed rather than
     // appearing to still be running.

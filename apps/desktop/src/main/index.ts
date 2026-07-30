@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, renameSync, type WriteStream } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, type WriteStream } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -73,6 +74,61 @@ if (process.platform === 'linux') {
 type Connection = {
   address: string
   api_key: string | null
+}
+
+export type ServerSettings = {
+  enabled: boolean
+  port: number
+  apiKeyEnabled: boolean
+  hasApiKey: boolean
+  jitLoading: boolean
+}
+
+type StoredServerSettings = Omit<ServerSettings, 'hasApiKey'> & { apiKey: string | null }
+
+const DEFAULT_SERVER_SETTINGS: StoredServerSettings = {
+  enabled: false,
+  port: 7614,
+  apiKeyEnabled: true,
+  apiKey: null,
+  jitLoading: true
+}
+
+function serverSettingsPath(): string {
+  return join(app.getPath('userData'), 'server-settings.json')
+}
+
+function loadServerSettings(): StoredServerSettings {
+  try {
+    const parsed = JSON.parse(readFileSync(serverSettingsPath(), 'utf8')) as Partial<StoredServerSettings>
+    const port = Number(parsed.port)
+    return {
+      enabled: parsed.enabled === true,
+      port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : DEFAULT_SERVER_SETTINGS.port,
+      apiKeyEnabled: parsed.apiKeyEnabled !== false,
+      apiKey: typeof parsed.apiKey === 'string' && parsed.apiKey.trim() ? parsed.apiKey : null,
+      jitLoading: parsed.jitLoading !== false
+    }
+  } catch {
+    return { ...DEFAULT_SERVER_SETTINGS }
+  }
+}
+
+function publicServerSettings(settings: StoredServerSettings): ServerSettings {
+  const { apiKey: _apiKey, ...publicSettings } = settings
+  return { ...publicSettings, hasApiKey: Boolean(settings.apiKey) }
+}
+
+function saveServerSettings(settings: StoredServerSettings): void {
+  const path = serverSettingsPath()
+  mkdirSync(app.getPath('userData'), { recursive: true })
+  const temporary = `${path}.${randomBytes(6).toString('hex')}.tmp`
+  writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 })
+  renameSync(temporary, path)
+}
+
+function generatedApiKey(): string {
+  return `brazier_${randomBytes(32).toString('base64url')}`
 }
 
 let daemon: ChildProcessWithoutNullStreams | undefined
@@ -214,6 +270,23 @@ function startDaemon(): Promise<Connection> {
   const args = (installedApp || useInstalledDaemon)
     ? ['--data-dir', directory]
     : ['run', '-q', '-p', 'brazierd', '--', '--data-dir', directory]
+  const serverSettings = loadServerSettings()
+  if (serverSettings.enabled) {
+    args.push('--host', '0.0.0.0', '--port', String(serverSettings.port))
+    if (serverSettings.apiKeyEnabled) {
+      const apiKey = serverSettings.apiKey ?? generatedApiKey()
+      args.push('--api-key', apiKey)
+      // Keep an auto-generated key stable across desktop restarts; otherwise
+      // every configured OpenAI client would be revoked without warning.
+      if (!serverSettings.apiKey) {
+        serverSettings.apiKey = apiKey
+        saveServerSettings(serverSettings)
+      }
+    } else {
+      args.push('--no-auth', '--allow-insecure-remote')
+    }
+    args.push('--jit-loading', String(serverSettings.jitLoading))
+  }
   const child = spawn(command, args, {
     cwd: installedApp || useInstalledDaemon ? undefined : repositoryRoot(),
     env: {
@@ -461,6 +534,28 @@ app.whenReady().then(async () => {
   }
   connection = startDaemon()
   ipcMain.handle('brazier:connection', () => connection)
+  ipcMain.handle('brazier:server-settings', (): ServerSettings => publicServerSettings(loadServerSettings()))
+  ipcMain.handle(
+    'brazier:save-server-settings',
+    (_event, requested: Omit<ServerSettings, 'hasApiKey'> & { apiKey?: string | null }) => {
+      const port = Number(requested.port)
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error('Server port must be between 1 and 65535.')
+      }
+      const current = loadServerSettings()
+      const apiKey = requested.apiKey === undefined ? current.apiKey : requested.apiKey?.trim() || null
+      const next: StoredServerSettings = {
+        enabled: requested.enabled === true,
+        port,
+        apiKeyEnabled: requested.apiKeyEnabled !== false,
+        jitLoading: requested.jitLoading !== false,
+        apiKey
+      }
+      saveServerSettings(next)
+      return publicServerSettings(next)
+    }
+  )
+  ipcMain.handle('brazier:generate-server-api-key', (): string => generatedApiKey())
   ipcMain.handle('brazier:flags', () => ({
     forceWelcome: forceWelcomeRequested()
   }))

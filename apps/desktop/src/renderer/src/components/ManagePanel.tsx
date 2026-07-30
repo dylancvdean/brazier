@@ -9,6 +9,7 @@ import {
   Globe,
   Hammer,
   HardDrive,
+  KeyRound,
   LoaderCircle,
   Plug,
   RefreshCw,
@@ -307,6 +308,7 @@ export type ManageSection =
   | 'discover'
   | 'runtimes'
   | 'engine'
+  | 'server'
   | 'mcp'
   | 'remote'
   | 'support'
@@ -342,6 +344,7 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
   { id: 'remote', label: 'Remote servers', icon: <Globe size={15} /> },
   { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> },
+  { id: 'server', label: 'OpenAI server', icon: <KeyRound size={15} /> },
   { id: 'support', label: 'Support', icon: <ShieldAlert size={15} /> }
 ]
 
@@ -559,6 +562,7 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
             {props.section === 'mcp' && <McpSection {...props} onError={setError} />}
             {props.section === 'remote' && <RemoteSection {...props} onError={setError} />}
             {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
+            {props.section === 'server' && <ServerSection {...props} onError={setError} />}
             {props.section === 'support' && <SupportSection {...props} onError={setError} />}
           </div>
         </div>
@@ -3737,6 +3741,89 @@ function EngineSection(props: SectionProps): React.JSX.Element {
           {saving ? <LoaderCircle className="spin" size={15} /> : 'Apply & restart'}
         </button>
       </div>
+    </section>
+  )
+}
+
+/** Configure Brazier's own OpenAI-compatible daemon without exposing secrets to React state. */
+function ServerSection(props: SectionProps): React.JSX.Element {
+  const [settings, setSettings] = useState<Awaited<ReturnType<typeof window.brazier.getServerSettings>> | null>(null)
+  const [apiKey, setApiKey] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  useEffect(() => {
+    void window.brazier.getServerSettings().then(setSettings).catch((cause) => props.onError(errorText(cause)))
+  }, [])
+
+  async function generateKey(): Promise<void> {
+    try {
+      setApiKey(await window.brazier.generateServerApiKey())
+      setNotice('New key generated. Save settings to use it after restart.')
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function save(): Promise<void> {
+    if (!settings) return
+    setSaving(true)
+    props.onError(null)
+    try {
+      const saved = await window.brazier.saveServerSettings({
+        enabled: settings.enabled,
+        port: settings.port,
+        apiKeyEnabled: settings.apiKeyEnabled,
+        jitLoading: settings.jitLoading,
+        ...(apiKey ? { apiKey } : {})
+      })
+      setSettings(saved)
+      setApiKey('')
+      setNotice('Saved. Restart Brazier to apply server exposure, port, authentication, or JIT changes.')
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!settings) return <section><div className="manage-placeholder"><LoaderCircle className="spin" size={16} />Loading server settings…</div></section>
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>OpenAI-compatible server</h2>
+        <p>Expose Brazier’s Chat Completions, Responses, Models, transcription, and generation APIs to clients that speak the OpenAI protocol.</p>
+      </header>
+      <div className="settings-group">
+        <div className="section-label">Network access</div>
+        <label className="settings-toggle">
+          <input type="checkbox" checked={settings.enabled} onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })} />
+          <span>Enable network server<small>Off keeps the daemon private to this desktop app. On listens on every local network interface.</small></span>
+        </label>
+        <div className="settings-grid">
+          <label><span>Port</span><input type="number" min={1} max={65535} disabled={!settings.enabled} value={settings.port} onChange={(event) => setSettings({ ...settings, port: Number(event.target.value) })} /></label>
+          <label><span>Base URL</span><input readOnly value={settings.enabled ? `http://<this-machine>:${settings.port}/v1` : 'Private to Brazier desktop'} /></label>
+        </div>
+      </div>
+      <div className="settings-group">
+        <div className="section-label">Authentication</div>
+        <label className="settings-toggle">
+          <input type="checkbox" checked={settings.apiKeyEnabled} disabled={!settings.enabled} onChange={(event) => setSettings({ ...settings, apiKeyEnabled: event.target.checked })} />
+          <span>Require API key<small>{settings.hasApiKey ? 'A key is stored securely in the desktop configuration.' : 'Generate or enter a key before enabling the server.'}</small></span>
+        </label>
+        {settings.apiKeyEnabled && <><label className="setting-row"><span>API key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={settings.hasApiKey ? 'Stored — enter a replacement to rotate' : 'Required'} autoComplete="off" /></label><div className="runtime-actions"><button className="chip-button" onClick={() => void generateKey()}>Generate key</button></div></>}
+        {!settings.apiKeyEnabled && settings.enabled && <p className="settings-warning">Anyone on your network can call Brazier, including agent and management APIs. Keep this off only on an isolated, trusted network.</p>}
+      </div>
+      <div className="settings-group">
+        <div className="section-label">Model loading</div>
+        <label className="settings-toggle">
+          <input type="checkbox" checked={settings.jitLoading} onChange={(event) => setSettings({ ...settings, jitLoading: event.target.checked })} />
+          <span>Enable JIT model loading<small>Allow API requests to start the selected local model when it is not already resident.</small></span>
+        </label>
+      </div>
+      {notice && <p className="model-help">{notice}</p>}
+      <div className="runtime-actions"><button className="primary-action" disabled={saving || (settings.apiKeyEnabled && settings.enabled && !settings.hasApiKey && !apiKey)} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={15} /> : 'Save server settings'}</button></div>
     </section>
   )
 }

@@ -60,6 +60,9 @@ pub struct RuntimeSettings {
     pub top_p: f32,
     pub max_tokens: Option<u32>,
     pub enable_reasoning: bool,
+    /// Whether requests may start or replace a local model that is not resident.
+    #[serde(default = "default_true")]
+    pub jit_loading: bool,
     /// Token cap for thinking models when reasoning mode is `budget`.
     #[serde(default)]
     pub reasoning_budget_tokens: Option<u32>,
@@ -171,6 +174,7 @@ impl Default for RuntimeSettings {
             top_p: 0.95,
             max_tokens: None,
             enable_reasoning: true,
+            jit_loading: true,
             reasoning_budget_tokens: None,
             binary_override: None,
             mlx_lm_python: None,

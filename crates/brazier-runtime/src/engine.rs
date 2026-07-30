@@ -1739,6 +1739,12 @@ impl Runtime {
             profile.clone(),
             request.brazier_mode.as_deref() == Some("agent"),
         );
+        let jit_loading = self.settings.lock().await.jit_loading;
+        if !jit_loading && !self.model_is_resident(&backend, &model_id, &extra).await {
+            anyhow::bail!(
+                "JIT model loading is disabled and `{model_id}` is not resident; load it in Brazier before sending API requests"
+            );
+        }
         match &backend {
             // Nothing to start: the server is someone else's, already running or
             // not, and the request will say which.
@@ -1871,6 +1877,52 @@ impl Runtime {
             profile,
             request,
         })
+    }
+
+    /// A disabled JIT policy must not quietly replace a different resident
+    /// model. Remote connections are already independently managed.
+    async fn model_is_resident(
+        &self,
+        backend: &ActiveBackend,
+        model_id: &str,
+        extra: &[PathBuf],
+    ) -> bool {
+        match backend {
+            ActiveBackend::Remote { .. } => true,
+            ActiveBackend::Llama(path) => {
+                self.llama
+                    .lock()
+                    .await
+                    .server
+                    .as_mut()
+                    .is_some_and(|server| {
+                        server.model_path.display().to_string() == *path && server.is_running()
+                    })
+            }
+            ActiveBackend::Mlx => {
+                let Some(kind) = MlxKind::from_model_id(model_id) else {
+                    return false;
+                };
+                let Ok(reference) =
+                    models_store::mlx_server_model_ref(&self.data_dir, model_id, extra)
+                else {
+                    return false;
+                };
+                self.mlx.lock().await.server.as_mut().is_some_and(|server| {
+                    server.kind == kind && server.model_ref == reference && server.is_running()
+                })
+            }
+            ActiveBackend::Vllm => self
+                .vllm
+                .lock()
+                .await
+                .server
+                .as_mut()
+                .is_some_and(|server| {
+                    server.model_ref == model_id.strip_prefix("vllm:").unwrap_or(model_id)
+                        && server.is_running()
+                }),
+        }
     }
 
     /// Decoding options for whichever ASR model transcription will use.

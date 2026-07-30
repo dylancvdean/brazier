@@ -13,6 +13,27 @@ declare global {
         address: string
         api_key: string | null
       }>
+      getServerSettings(): Promise<{
+        enabled: boolean
+        port: number
+        apiKeyEnabled: boolean
+        hasApiKey: boolean
+        jitLoading: boolean
+      }>
+      saveServerSettings(settings: {
+        enabled: boolean
+        port: number
+        apiKeyEnabled: boolean
+        jitLoading: boolean
+        apiKey?: string | null
+      }): Promise<{
+        enabled: boolean
+        port: number
+        apiKeyEnabled: boolean
+        hasApiKey: boolean
+        jitLoading: boolean
+      }>
+      generateServerApiKey(): Promise<string>
       getFlags(): Promise<{
         forceWelcome: boolean
       }>

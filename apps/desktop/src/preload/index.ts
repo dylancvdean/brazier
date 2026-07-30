@@ -12,6 +12,14 @@ export type BrazierFlags = {
   forceWelcome: boolean
 }
 
+export type BrazierServerSettings = {
+  enabled: boolean
+  port: number
+  apiKeyEnabled: boolean
+  hasApiKey: boolean
+  jitLoading: boolean
+}
+
 const invokeAgent = (command: WorkerCommandInput): Promise<unknown> =>
   ipcRenderer.invoke(AGENT_IPC.invoke, command)
 
@@ -45,6 +53,11 @@ const agent = {
 
 contextBridge.exposeInMainWorld('brazier', {
   getConnection: (): Promise<BrazierConnection> => ipcRenderer.invoke('brazier:connection'),
+  getServerSettings: (): Promise<BrazierServerSettings> => ipcRenderer.invoke('brazier:server-settings'),
+  saveServerSettings: (
+    settings: Omit<BrazierServerSettings, 'hasApiKey'> & { apiKey?: string | null }
+  ): Promise<BrazierServerSettings> => ipcRenderer.invoke('brazier:save-server-settings', settings),
+  generateServerApiKey: (): Promise<string> => ipcRenderer.invoke('brazier:generate-server-api-key'),
   getFlags: (): Promise<BrazierFlags> => ipcRenderer.invoke('brazier:flags'),
   checkForUpdates: (): Promise<{ supported: boolean }> => ipcRenderer.invoke('brazier:check-for-updates'),
   platform: process.platform,
