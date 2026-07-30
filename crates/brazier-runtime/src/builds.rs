@@ -256,6 +256,7 @@ async fn run_step(
     label: &str,
     program: &str,
     args: &[String],
+    environment: &[(String, String)],
     workdir: &Path,
     log: &mut String,
     progress: &mut ProgressCallback,
@@ -269,6 +270,7 @@ async fn run_step(
     let executable = command_path(program).unwrap_or_else(|| PathBuf::from(program));
     let mut child = tokio::process::Command::new(&executable)
         .args(args)
+        .envs(environment.iter().map(|(key, value)| (key, value)))
         .current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -337,6 +339,28 @@ async fn run_step(
         anyhow::bail!("build cancelled");
     }
     anyhow::ensure!(status.success(), "{label} failed with {status}");
+    Ok(())
+}
+
+/// Environment overrides required by an engine's native build backend.
+///
+/// vLLM otherwise infers its target from the temporary PEP 517 build
+/// environment. That environment can contain a CUDA-flavored PyTorch even on a
+/// ROCm host, which sends setup.py through its CUDA version probe and fails on
+/// a machine that correctly has no CUDA_HOME.
+fn build_environment(engine: &str, target: RuntimeTarget) -> Vec<(String, String)> {
+    if engine == crate::vllm::ENGINE && target == RuntimeTarget::Rocm {
+        vec![("VLLM_TARGET_DEVICE".into(), "rocm".into())]
+    } else {
+        Vec::new()
+    }
+}
+
+fn validate_engine_target(engine: &str, target: RuntimeTarget) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !(engine == crate::vllm::ENGINE && target == RuntimeTarget::Vulkan),
+        "vLLM does not support a Vulkan backend; use ROCm or CPU on AMD hardware"
+    );
     Ok(())
 }
 
@@ -674,6 +698,9 @@ pub async fn run_build_with_progress(
     };
     let python_engine = build_recipe::is_python_engine(&plan.engine);
     let swift_engine = build_recipe::is_swift_engine(&plan.engine);
+    if let Err(error) = validate_engine_target(&plan.engine, target) {
+        return Err(fail(error.to_string(), Some("Preflight"), ""));
+    }
     if python_engine {
         if !command_available("uv") {
             return Err(fail(
@@ -784,6 +811,7 @@ pub async fn run_build_with_progress(
     };
 
     let flags = target_flags(target);
+    let environment = build_environment(&plan.engine, target);
     let mut log = String::new();
     let mut failed_step: Option<String> = None;
     let mut built_commit: Option<String> = None;
@@ -817,6 +845,7 @@ pub async fn run_build_with_progress(
                 &step.label,
                 &step.program,
                 &args,
+                &environment,
                 &root,
                 &mut log,
                 &mut progress,
@@ -1008,6 +1037,24 @@ mod tests {
             "feature-new-model"
         );
         assert_eq!(sanitize_id_segment("--evil"), "evil");
+    }
+
+    #[test]
+    fn vllm_rocm_builds_do_not_fall_back_to_cuda_detection() {
+        assert_eq!(
+            build_environment("vllm", RuntimeTarget::Rocm),
+            vec![("VLLM_TARGET_DEVICE".into(), "rocm".into())]
+        );
+        assert!(build_environment("vllm", RuntimeTarget::Cuda).is_empty());
+        assert!(build_environment("llama.cpp", RuntimeTarget::Rocm).is_empty());
+    }
+
+    #[test]
+    fn vllm_rejects_vulkan_without_disabling_other_engines() {
+        assert!(validate_engine_target("vllm", RuntimeTarget::Vulkan).is_err());
+        assert!(validate_engine_target("vllm", RuntimeTarget::Rocm).is_ok());
+        assert!(validate_engine_target("vllm", RuntimeTarget::Cpu).is_ok());
+        assert!(validate_engine_target("llama.cpp", RuntimeTarget::Vulkan).is_ok());
     }
 
     #[test]

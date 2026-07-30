@@ -423,6 +423,39 @@ function emptyJobProgress(headline: string): JobProgressState {
   return { headline, step: null, percent: null, phase: 'starting', logLines: [], hints: [] }
 }
 
+export function appendBuildDiagnostics(
+  lines: string[],
+  diagnostics: Record<string, unknown> | undefined
+): string[] {
+  if (!diagnostics) return lines
+  const hints = diagnostics.hints
+  const excerpt = diagnostics.log_excerpt
+  let next = [...lines]
+  if (typeof excerpt === 'string' && excerpt.trim()) {
+    const excerptLines = excerpt.trimEnd().split('\n')
+    // Build output is streamed live before the terminal failure event includes
+    // its full tail. Replace the overlapping streamed tail with that complete
+    // excerpt instead of displaying the same output a second time.
+    const recentStart = Math.max(0, next.length - 100)
+    const overlap = excerptLines
+      .filter((line) => line.length > 0)
+      .map((line) => next.lastIndexOf(line))
+      .find((index) => index >= recentStart)
+    if (overlap != null && overlap >= recentStart) {
+      next = [...next.slice(0, overlap), ...excerptLines]
+    } else {
+      next.push('', '--- last log lines ---', ...excerptLines)
+    }
+  }
+  if (Array.isArray(hints) && hints.length > 0) {
+    next.push('', 'Suggested fixes:')
+    for (const hint of hints) {
+      if (typeof hint === 'string') next.push(`• ${hint}`)
+    }
+  }
+  return next
+}
+
 function stepFromEvent(event: ProgressEvent): BuildStep | null {
   const result = event.result as { step?: number; total?: number; label?: string } | undefined
   if (result?.step && result.total && result.label) {
@@ -465,10 +498,12 @@ function applyJobProgress(current: JobProgressState, event: ProgressEvent): JobP
 
 function JobProgressPanel({
   progress,
-  active
+  active,
+  showLog = true
 }: {
   progress: JobProgressState
   active: boolean
+  showLog?: boolean
 }): React.JSX.Element | null {
   if (!active && progress.logLines.length === 0) return null
   return (
@@ -502,7 +537,7 @@ function JobProgressPanel({
           ))}
         </ul>
       )}
-      {progress.logLines.length > 0 && (
+      {showLog && progress.logLines.length > 0 && (
         <pre className="build-log compact">{progress.logLines.slice(-12).join('\n')}</pre>
       )}
     </div>
@@ -2293,6 +2328,13 @@ function sourceBuildTargets(hardware: HardwareInfo | null): RuntimeTarget[] {
   }
 }
 
+export function targetSupportedByBuildEngine(
+  engine: BuildEngine,
+  target: RuntimeTarget
+): boolean {
+  return engine !== 'vllm' || target !== 'vulkan'
+}
+
 const BUILD_TARGET_LABELS: Record<RuntimeTarget, string> = {
   auto: 'Auto',
   cpu: 'CPU',
@@ -2436,8 +2478,11 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   )
   const [buildTarget, setBuildTarget] = useState<RuntimeTarget>('cpu')
   const buildTargets = useMemo(
-    () => sourceBuildTargets(props.hardware),
-    [props.hardware?.os]
+    () =>
+      sourceBuildTargets(props.hardware).filter((target) =>
+        targetSupportedByBuildEngine(buildEngine, target)
+      ),
+    [props.hardware?.os, buildEngine]
   )
   const managedTargets = useMemo(
     () => (props.hardware?.targets ?? []).filter((target) => target.managed_install),
@@ -2695,26 +2740,6 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   function openBuildForEngine(engine: BuildEngine): void {
     applyBuildEngine(engine)
     setBuildOpen(true)
-  }
-
-  function appendBuildDiagnostics(
-    lines: string[],
-    diagnostics: Record<string, unknown> | undefined
-  ): string[] {
-    if (!diagnostics) return lines
-    const hints = diagnostics.hints
-    const excerpt = diagnostics.log_excerpt
-    const next = [...lines]
-    if (typeof excerpt === 'string' && excerpt.trim()) {
-      next.push('', '--- last log lines ---', excerpt)
-    }
-    if (Array.isArray(hints) && hints.length > 0) {
-      next.push('', 'Suggested fixes:')
-      for (const hint of hints) {
-        if (typeof hint === 'string') next.push(`• ${hint}`)
-      }
-    }
-    return next
   }
 
   const isPythonBuild =
@@ -3308,8 +3333,8 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 machine has, with the command to fix it. A build that fails
                 twenty minutes in because cmake is missing is a worse way to
                 learn it, and nothing here elevates or installs on its own. */}
-            <ToolchainChecklist tools={toolchainTools} />
-            {!isPythonBuild && !isSwiftBuild && (
+              <ToolchainChecklist tools={toolchainTools} />
+              {(buildEngine === 'vllm' || (!isPythonBuild && !isSwiftBuild)) && (
                 <label>
                   <span>Target</span>
                   <select
@@ -3389,7 +3414,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 </button>
               )}
             </div>
-            <JobProgressPanel progress={buildProgress} active={building} />
+            <JobProgressPanel progress={buildProgress} active={building} showLog={false} />
             {(building || buildProgress.logLines.length > 0) && (
               <pre className="build-log" ref={logRef}>
                 {buildProgress.logLines.join('\n')}
