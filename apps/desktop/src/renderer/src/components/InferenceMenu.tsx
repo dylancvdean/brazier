@@ -340,6 +340,26 @@ export function InferenceMenu({
                 </p>
               </>
             )}
+            <label className="settings-toggle inference-toggle">
+              <input
+                type="checkbox"
+                checked={draft.drop_reasoning_between_turns ?? false}
+                onChange={(event) =>
+                  setDraft({
+                    ...draft,
+                    drop_reasoning_between_turns: event.target.checked
+                  })
+                }
+              />
+              <span>
+                Drop reasoning between turns
+                <small>
+                  Applies to chat and agent on the next turn. Omits prior-turn thinking from the
+                  model request to save context; leave off to keep it (default). Reasoning still
+                  shows in the UI either way.
+                </small>
+              </span>
+            </label>
             <button
               className="popover-apply"
               disabled={!dirty || saving}

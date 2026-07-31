@@ -729,8 +729,21 @@ fn collapse_blank_lines(text: &str) -> String {
     collapsed.trim_end().to_owned()
 }
 
+/// How many hex characters of a blob id the model is shown / asked to echo.
+///
+/// Full SHA-256 digests are 64 characters; models truncate or invent them.
+/// A short unique prefix from the attachment notice is enough for `doc_read`
+/// to resolve against the conversation's document list.
+pub const DOCUMENT_ID_PREFIX_LEN: usize = 12;
+
+/// Short id shown in attachment notices for `doc_read`.
+pub fn short_document_id(sha256: &str) -> &str {
+    let end = DOCUMENT_ID_PREFIX_LEN.min(sha256.len());
+    &sha256[..end]
+}
+
 /// Attachment notice: what the model needs to call `doc_read` for this
-/// document — its name, format, page count when known, and blob id.
+/// document — its name, format, page count when known, and a short blob id.
 pub fn attachment_notice(
     name: &str,
     mime_type: &str,
@@ -750,11 +763,12 @@ pub fn attachment_notice(
         }
         _ => "pick a line range with start_line and end_line",
     };
+    let document_id = short_document_id(sha256);
     serde_json::json!({
         "type": "text",
         "text": format!(
             "[Attached {format} document: {name}{length}. Its contents are not included here. \
-             Use the doc_read tool with document \"{sha256}\" to read it — {how}.]"
+             Use the doc_read tool with document \"{document_id}\" to read it — {how}.]"
         )
     })
 }
@@ -879,12 +893,14 @@ mod tests {
     }
 
     #[test]
-    fn notices_name_the_format_pages_and_blob() {
-        let notice = attachment_notice("scan.pdf", "application/pdf", "abc123", Some(12));
+    fn notices_name_the_format_pages_and_short_blob_id() {
+        let digest = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let notice = attachment_notice("scan.pdf", "application/pdf", digest, Some(12));
         let text = notice["text"].as_str().unwrap();
         assert!(text.contains("scan.pdf"), "{text}");
         assert!(text.contains("12 pages"), "{text}");
-        assert!(text.contains("abc123"), "{text}");
+        assert!(text.contains(short_document_id(digest)), "{text}");
+        assert!(!text.contains(digest), "full digest should not be shown: {text}");
         assert!(text.contains("PDF"), "{text}");
 
         let docx = attachment_notice(
@@ -896,5 +912,12 @@ mod tests {
         let text = docx["text"].as_str().unwrap();
         assert!(text.contains("DOCX"), "{text}");
         assert!(!text.contains("pages"), "{text}");
+    }
+
+    #[test]
+    fn short_document_id_takes_a_stable_prefix() {
+        let digest = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        assert_eq!(short_document_id(digest), &digest[..DOCUMENT_ID_PREFIX_LEN]);
+        assert_eq!(short_document_id("abc"), "abc");
     }
 }

@@ -187,6 +187,11 @@ struct Prepared {
     /// The selected model's advanced configuration, when it has any.
     profile: Option<crate::model_settings::TextProfile>,
     request: ChatCompletionRequest,
+    /// Image attachments collected before media hydration rewrites blob parts.
+    images: Vec<tool_registry::ConversationImage>,
+    /// Document attachments collected before media hydration replaces them
+    /// with `doc_read` notices (so the tool can still resolve those ids).
+    documents: Vec<tool_registry::ConversationDocument>,
 }
 
 fn profile_for_model_load(
@@ -1946,6 +1951,11 @@ impl Runtime {
         } else {
             None
         };
+        // Collect blob references before hydration rewrites them into notices /
+        // inline media. Tools like `doc_read` and `latest` image init need the
+        // original ids even though the model only sees the rewritten parts.
+        let images = tool_registry::conversation_images(&request);
+        let documents = tool_registry::conversation_documents(&request);
         media::prepare_messages(&media_ctx, &mut request.messages, progress).await?;
         emit(&load_tx, "ready", "Model ready — generating…").await;
         let harmony = crate::harmony::is_harmony_model(&model_id);
@@ -1957,6 +1967,8 @@ impl Runtime {
             settings,
             profile,
             request,
+            images,
+            documents,
         })
     }
 
@@ -2181,6 +2193,8 @@ impl Runtime {
                 settings,
                 profile,
                 request,
+                images,
+                documents,
             } = match prepared {
                 Ok(value) => value,
                 Err(error) => {
@@ -2209,6 +2223,8 @@ impl Runtime {
                 profile,
                 tools_active,
                 local_generation,
+                images,
+                documents,
                 &tx,
             )
             .await
@@ -2296,6 +2312,8 @@ impl Engine for Runtime {
             settings,
             profile,
             mut request,
+            images,
+            documents,
         } = self.prepare_generation(request, None).await?;
         let endpoint = self.backend_endpoint(&backend).await?;
         let tools_active = tool_registry::tools_enabled(
@@ -2309,8 +2327,8 @@ impl Engine for Runtime {
         let ctx = ToolContext {
             data_dir: &self.data_dir,
             http: &self.http,
-            images: tool_registry::conversation_images(&request),
-            documents: tool_registry::conversation_documents(&request),
+            images,
+            documents,
         };
         let mut audio_fallback_attempted = false;
         for round in 0..MAX_TOOL_ROUNDS {
@@ -2630,14 +2648,16 @@ async fn stream_tool_rounds(
     profile: Option<crate::model_settings::TextProfile>,
     tools_active: bool,
     local_generation: bool,
+    images: Vec<tool_registry::ConversationImage>,
+    documents: Vec<tool_registry::ConversationDocument>,
     tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
 ) -> anyhow::Result<()> {
     let model_caps = runtime.model_capabilities(&request.model).await;
         let ctx = ToolContext {
             data_dir: &runtime.data_dir,
             http: &runtime.http,
-            images: tool_registry::conversation_images(&request),
-            documents: tool_registry::conversation_documents(&request),
+            images,
+            documents,
         };
     let mut audio_fallback_attempted = false;
     let mut completion_tokens = 0u64;

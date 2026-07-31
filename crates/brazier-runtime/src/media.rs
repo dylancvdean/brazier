@@ -973,7 +973,14 @@ mod tests {
         prepare_messages(&ctx, &mut messages, None).await.unwrap();
         let text = messages[0].content[0]["text"].as_str().unwrap();
         assert!(text.contains("Attached PDF document"), "{text}");
-        assert!(text.contains(&stored.sha256), "{text}");
+        assert!(
+            text.contains(crate::documents::short_document_id(&stored.sha256)),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&stored.sha256),
+            "full digest should not be shown: {text}"
+        );
         assert!(text.contains("doc_read"), "{text}");
         assert!(!text.contains("[Contents of"), "{text}");
     }
