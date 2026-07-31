@@ -1145,7 +1145,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
 
 function VllmServedModels({ settings, onSaved, onError }: { settings: RuntimeSettings; onSaved: (settings: RuntimeSettings) => void; onError: (message: string | null) => void }): React.JSX.Element {
   const [models, setModels] = useState<VllmModelSettings[]>(settings.vllm_models ?? [])
-  const [draft, setDraft] = useState<VllmModelSettings>({ repository: '', revision: null, context_size: null, dtype: null, gpu_memory_utilization: null, tensor_parallel_size: null, trust_remote_code: false, extra_args: [] })
+  const [draft, setDraft] = useState<VllmModelSettings>({ repository: '', revision: null, context_size: null, dtype: null, gpu_memory_utilization: null, tensor_parallel_size: null, trust_remote_code: false, prefix_caching: true, extra_args: [] })
   const [saving, setSaving] = useState(false)
   useEffect(() => setModels(settings.vllm_models ?? []), [settings.vllm_models])
   async function persist(next: VllmModelSettings[], active = settings.vllm_model): Promise<void> {
@@ -1165,6 +1165,7 @@ function VllmServedModels({ settings, onSaved, onError }: { settings: RuntimeSet
         <label><span>GPU memory limit</span><input type="number" min={0.1} max={1} step={0.05} value={model.gpu_memory_utilization ?? ''} onChange={(e)=>{const next=[...models];next[index]={...model,gpu_memory_utilization:e.target.value?Number(e.target.value):null};setModels(next)}} placeholder="0.90" /></label>
         <label><span>Tensor parallel GPUs</span><input type="number" min={1} value={model.tensor_parallel_size ?? ''} onChange={(e)=>{const next=[...models];next[index]={...model,tensor_parallel_size:e.target.value?Number(e.target.value):null};setModels(next)}} /></label>
         <label className="settings-toggle"><input type="checkbox" checked={model.trust_remote_code} onChange={(e)=>{const next=[...models];next[index]={...model,trust_remote_code:e.target.checked};setModels(next)}} /><span>Trust remote code</span></label>
+        <label className="settings-toggle"><input type="checkbox" checked={model.prefix_caching ?? true} onChange={(e)=>{const next=[...models];next[index]={...model,prefix_caching:e.target.checked};setModels(next)}} /><span>Prefix caching</span></label>
         <label className="span-2"><span>Additional arguments (one token per line)</span><textarea value={model.extra_args.join('\n')} onChange={(e)=>{const next=[...models];next[index]={...model,extra_args:e.target.value.split('\n').map(x=>x.trim()).filter(Boolean)};setModels(next)}} /></label>
       </div>
       <div className="runtime-actions"><button className="chip-button" disabled={saving} onClick={()=>void persist(models,model.repository)}>Make active</button><button className="chip-button danger" disabled={saving} onClick={()=>void persist(models.filter((_,i)=>i!==index), settings.vllm_model===model.repository?null:settings.vllm_model)}>Remove</button><button className="primary-action" disabled={saving} onClick={()=>void persist(models)}>Save launch options</button></div>
@@ -3992,7 +3993,7 @@ function RemoteSection(props: SectionProps): React.JSX.Element {
   const [results, setResults] = useState<
     Record<string, { reachable: boolean; models: string[]; error?: string }>
   >({})
-  const [draft, setDraft] = useState({ id: '', label: '', base_url: '', api_key: '' })
+  const [draft, setDraft] = useState({ id: '', label: '', base_url: '', api_key: '', llama_cpp_compatible: false })
 
   async function reload(): Promise<void> {
     setLoading(true)
@@ -4023,10 +4024,11 @@ function RemoteSection(props: SectionProps): React.JSX.Element {
         // Sent only when typed: an empty field means "leave it alone", which is
         // what editing an existing connection needs.
         ...(draft.api_key.trim() ? { api_key: draft.api_key.trim() } : {}),
-        enabled: true
+        enabled: true,
+        llama_cpp_compatible: draft.llama_cpp_compatible
       })
       setConnections(next)
-      setDraft({ id: '', label: '', base_url: '', api_key: '' })
+      setDraft({ id: '', label: '', base_url: '', api_key: '', llama_cpp_compatible: false })
       // The model list has different contents now.
       void props.refreshModels()
       await test(draft.id.trim())
@@ -4045,10 +4047,31 @@ function RemoteSection(props: SectionProps): React.JSX.Element {
           id: connection.id,
           label: connection.label,
           base_url: connection.base_url,
-          enabled: !connection.enabled
+          enabled: !connection.enabled,
+          llama_cpp_compatible: connection.llama_cpp_compatible
         })
       )
       void props.refreshModels()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function setLlamaCppCompatible(
+    connection: RemoteConnection,
+    llama_cpp_compatible: boolean
+  ): Promise<void> {
+    props.onError(null)
+    try {
+      setConnections(
+        await saveRemoteConnection({
+          id: connection.id,
+          label: connection.label,
+          base_url: connection.base_url,
+          enabled: connection.enabled,
+          llama_cpp_compatible
+        })
+      )
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -4110,6 +4133,7 @@ function RemoteSection(props: SectionProps): React.JSX.Element {
                       <span>{connection.base_url}</span>
                       <span>
                         {connection.has_api_key ? 'API key stored' : 'No API key'}
+                        {connection.llama_cpp_compatible ? ' · llama.cpp KV hints' : ''}
                         {result
                           ? result.reachable
                             ? ` · ${result.models.length} model${
@@ -4120,6 +4144,16 @@ function RemoteSection(props: SectionProps): React.JSX.Element {
                       </span>
                     </div>
                     <div className="library-card-actions">
+                      <label className="chip-button subtle" title="Send llama.cpp cache_prompt and id_slot on requests">
+                        <input
+                          type="checkbox"
+                          checked={connection.llama_cpp_compatible}
+                          onChange={(event) =>
+                            void setLlamaCppCompatible(connection, event.target.checked)
+                          }
+                        />
+                        llama.cpp
+                      </label>
                       <label className="chip-button subtle" title="Use this server">
                         <input
                           type="checkbox"
@@ -4186,6 +4220,16 @@ function RemoteSection(props: SectionProps): React.JSX.Element {
                 onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}
                 placeholder="Optional"
               />
+            </label>
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={draft.llama_cpp_compatible}
+                onChange={(event) =>
+                  setDraft({ ...draft, llama_cpp_compatible: event.target.checked })
+                }
+              />
+              <span>llama.cpp server (send KV cache slot hints)</span>
             </label>
             <p className="model-help">
               Requests leave this machine. A server reached over plain HTTP carries your

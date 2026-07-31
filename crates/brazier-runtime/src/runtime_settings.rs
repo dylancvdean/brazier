@@ -162,6 +162,9 @@ pub struct VllmModelSettings {
     pub gpu_memory_utilization: Option<f32>,
     pub tensor_parallel_size: Option<u32>,
     pub trust_remote_code: bool,
+    /// When true (default), pass `--enable-prefix-caching` at launch.
+    #[serde(default = "default_true")]
+    pub prefix_caching: bool,
     pub extra_args: Vec<String>,
 }
 
@@ -175,6 +178,7 @@ impl Default for VllmModelSettings {
             gpu_memory_utilization: None,
             tensor_parallel_size: None,
             trust_remote_code: false,
+            prefix_caching: true,
             extra_args: Vec::new(),
         }
     }

@@ -37,6 +37,10 @@ pub struct StoredConnection {
     pub api_key: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// When true, treat this server as llama.cpp and send `cache_prompt` /
+    /// `id_slot` on chat requests (for KV slot pinning with parallel subagents).
+    #[serde(default)]
+    pub llama_cpp_compatible: bool,
 }
 
 fn default_true() -> bool {
@@ -52,6 +56,7 @@ pub struct PublicConnection {
     pub enabled: bool,
     /// Whether a key is stored. Never the key itself.
     pub has_api_key: bool,
+    pub llama_cpp_compatible: bool,
 }
 
 impl From<&StoredConnection> for PublicConnection {
@@ -62,6 +67,7 @@ impl From<&StoredConnection> for PublicConnection {
             base_url: connection.base_url.clone(),
             enabled: connection.enabled,
             has_api_key: connection.api_key.is_some(),
+            llama_cpp_compatible: connection.llama_cpp_compatible,
         }
     }
 }
@@ -303,6 +309,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn llama_cpp_compatible_defaults_off() {
+        let connection: StoredConnection = serde_json::from_str(
+            r#"{"id":"work","label":"Work","base_url":"http://127.0.0.1:8080"}"#,
+        )
+        .unwrap();
+        assert!(!connection.llama_cpp_compatible);
+        let public = PublicConnection::from(&connection);
+        assert!(!public.llama_cpp_compatible);
+    }
+
     #[tokio::test]
     async fn editing_a_connection_keeps_the_key_it_was_not_told() {
         let dir = tempfile::tempdir().unwrap();
@@ -314,6 +331,7 @@ mod tests {
                 base_url: "http://10.0.0.4:8000".into(),
                 api_key: Some("secret".into()),
                 enabled: true,
+                llama_cpp_compatible: false,
             },
         )
         .await
@@ -326,6 +344,7 @@ mod tests {
                 base_url: "http://10.0.0.5:8000/v1".into(),
                 api_key: None,
                 enabled: false,
+                llama_cpp_compatible: false,
             },
         )
         .await
@@ -352,6 +371,7 @@ mod tests {
             base_url: "http://10.0.0.4:8000".into(),
             api_key: Some("secret".into()),
             enabled: true,
+            llama_cpp_compatible: false,
         };
         upsert(dir.path(), connection.clone()).await.unwrap();
         upsert(
@@ -418,6 +438,7 @@ mod tests {
                 base_url,
                 api_key: Some("sk-test".into()),
                 enabled: true,
+                llama_cpp_compatible: false,
             },
         )
         .await
@@ -447,6 +468,7 @@ mod tests {
                 base_url: base_url.clone(),
                 api_key: None,
                 enabled: true,
+                llama_cpp_compatible: false,
             },
         )
         .await
@@ -478,6 +500,7 @@ mod tests {
                 base_url,
                 api_key: None,
                 enabled: false,
+                llama_cpp_compatible: false,
             },
         )
         .await

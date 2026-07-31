@@ -97,6 +97,34 @@ pub struct MlxServer {
     pub launch_key: String,
 }
 
+/// mlx-lm prompt-cache and batching limits when parallel subagents are on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MlxLmAgentCacheArgs {
+    pub prompt_cache_size: u32,
+    pub decode_concurrency: u32,
+    pub prompt_concurrency: u32,
+}
+
+/// Match llama-server slot count: one LRU cache entry and one batch lane per
+/// concurrent session (parent + subagents). Off when parallel subagents is off.
+pub fn mlx_lm_agent_cache_args(
+    kind: MlxKind,
+    profile: Option<&crate::model_settings::TextProfile>,
+) -> Option<MlxLmAgentCacheArgs> {
+    if kind != MlxKind::Lm {
+        return None;
+    }
+    let slots = crate::model_settings::llama_parallel_slots(profile);
+    if slots <= 1 {
+        return None;
+    }
+    Some(MlxLmAgentCacheArgs {
+        prompt_cache_size: slots,
+        decode_concurrency: slots,
+        prompt_concurrency: slots,
+    })
+}
+
 /// The fingerprint a server started with these inputs would carry.
 pub fn launch_key(
     kind: MlxKind,
@@ -110,8 +138,16 @@ pub fn launch_key(
     let extra = profile
         .map(|profile| profile.extra_args.join(" "))
         .unwrap_or_default();
+    let agent = mlx_lm_agent_cache_args(kind, profile)
+        .map(|args| {
+            format!(
+                "{}|{}|{}",
+                args.prompt_cache_size, args.decode_concurrency, args.prompt_concurrency
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "{max_tokens:?}|{:?}|{adapter:?}|{extra}",
+        "{max_tokens:?}|{:?}|{adapter:?}|{agent}|{extra}",
         max_kv_size(kind, settings, profile)
     )
 }
@@ -198,6 +234,15 @@ impl MlxServer {
         }
         if let Some(max_kv_size) = max_kv_size(kind, settings, profile) {
             command.arg("--max-kv-size").arg(max_kv_size.to_string());
+        }
+        if let Some(args) = mlx_lm_agent_cache_args(kind, profile) {
+            command
+                .arg("--prompt-cache-size")
+                .arg(args.prompt_cache_size.to_string())
+                .arg("--decode-concurrency")
+                .arg(args.decode_concurrency.to_string())
+                .arg("--prompt-concurrency")
+                .arg(args.prompt_concurrency.to_string());
         }
         if let Some(adapter) = adapter {
             command.arg("--adapter-path").arg(adapter);
@@ -306,5 +351,39 @@ mod tests {
         };
         assert_eq!(max_kv_size(MlxKind::Vlm, &settings, None), Some(1_048_576));
         assert_eq!(max_kv_size(MlxKind::Lm, &settings, None), None);
+    }
+
+    #[test]
+    fn mlx_lm_agent_cache_follows_parallel_subagent_slots() {
+        use crate::model_settings::TextProfile;
+
+        assert_eq!(mlx_lm_agent_cache_args(MlxKind::Vlm, None), None);
+        assert_eq!(mlx_lm_agent_cache_args(MlxKind::Lm, None), None);
+        assert_eq!(
+            mlx_lm_agent_cache_args(
+                MlxKind::Lm,
+                Some(&TextProfile {
+                    parallel_subagents: Some(false),
+                    max_subagents: Some(4),
+                    ..TextProfile::default()
+                })
+            ),
+            None
+        );
+        assert_eq!(
+            mlx_lm_agent_cache_args(
+                MlxKind::Lm,
+                Some(&TextProfile {
+                    parallel_subagents: Some(true),
+                    max_subagents: Some(2),
+                    ..TextProfile::default()
+                })
+            ),
+            Some(MlxLmAgentCacheArgs {
+                prompt_cache_size: 3,
+                decode_concurrency: 3,
+                prompt_concurrency: 3,
+            })
+        );
     }
 }

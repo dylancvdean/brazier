@@ -175,6 +175,7 @@ enum ActiveBackend {
         api_key: Option<String>,
         /// The name the remote knows this model by, which is not our model id.
         model: String,
+        llama_cpp_compatible: bool,
     },
 }
 
@@ -1730,7 +1731,7 @@ impl Runtime {
             .ok_or_else(|| {
                 anyhow::anyhow!("no active vLLM runtime; build and activate one in Runtimes first")
             })?;
-        let wanted_key = vllm::launch_key(&settings, profile);
+        let wanted_key = vllm::launch_key(&settings, model_ref, profile);
         let mut state = self.vllm.lock().await;
         if state.server.as_mut().is_some_and(|server| {
             server.model_ref == model_ref
@@ -1780,6 +1781,7 @@ impl Runtime {
                     base_url: connection.base_url,
                     api_key: connection.api_key,
                     model: remote_model,
+                    llama_cpp_compatible: connection.llama_cpp_compatible,
                 },
                 model.to_owned(),
             ));
@@ -2160,11 +2162,16 @@ impl Runtime {
                 base_url,
                 api_key,
                 model,
+                llama_cpp_compatible,
             } => Ok(Endpoint {
                 base_url: base_url.clone(),
                 api_key: api_key.clone(),
                 model_alias: model.clone(),
-                dialect: llama::SamplerDialect::OpenAi,
+                dialect: if *llama_cpp_compatible {
+                    llama::SamplerDialect::LlamaCpp
+                } else {
+                    llama::SamplerDialect::OpenAi
+                },
             }),
         }
     }
@@ -3157,6 +3164,7 @@ mod tests {
                 base_url: "http://10.0.0.4:8000".into(),
                 api_key: Some("sk-test".into()),
                 enabled: true,
+                llama_cpp_compatible: false,
             },
         )
         .await
@@ -3170,6 +3178,31 @@ mod tests {
         assert_eq!(endpoint.base_url, "http://10.0.0.4:8000");
         assert_eq!(endpoint.api_key.as_deref(), Some("sk-test"));
         assert_eq!(endpoint.model_alias, "qwen3-8b");
+        assert_eq!(endpoint.dialect, llama::SamplerDialect::OpenAi);
+    }
+
+    #[tokio::test]
+    async fn a_remote_llama_cpp_connection_uses_llama_dialect() {
+        let dir = tempdir().unwrap();
+        remote::upsert(
+            dir.path(),
+            remote::StoredConnection {
+                id: "work".into(),
+                label: "Workstation".into(),
+                base_url: "http://10.0.0.4:8080".into(),
+                api_key: None,
+                enabled: true,
+                llama_cpp_compatible: true,
+            },
+        )
+        .await
+        .unwrap();
+        let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
+        let (backend, _) = runtime
+            .resolve_model("remote:work/demo", &[])
+            .expect("a configured remote must resolve");
+        let endpoint = runtime.backend_endpoint(&backend).await.unwrap();
+        assert_eq!(endpoint.dialect, llama::SamplerDialect::LlamaCpp);
     }
 
     #[tokio::test]
@@ -3191,6 +3224,7 @@ mod tests {
                 base_url: "http://10.0.0.4:8000".into(),
                 api_key: None,
                 enabled: false,
+                llama_cpp_compatible: false,
             },
         )
         .await

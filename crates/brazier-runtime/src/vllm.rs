@@ -67,15 +67,30 @@ pub struct Server {
 
 pub fn launch_key(
     settings: &RuntimeSettings,
+    model_ref: &str,
     profile: Option<&crate::model_settings::TextProfile>,
 ) -> String {
     let context = profile
         .and_then(|p| p.context_size)
         .unwrap_or(settings.context_size);
+    let configured = settings
+        .vllm_models
+        .iter()
+        .find(|entry| entry.repository == model_ref);
+    let prefix_caching = configured.map(|entry| entry.prefix_caching).unwrap_or(true);
     let extra = profile
         .map(|p| p.extra_args.join("\u{1f}"))
         .unwrap_or_default();
-    format!("{context}|{extra}")
+    format!("{context}|{prefix_caching}|{extra}")
+}
+
+fn prefix_caching_enabled(settings: &RuntimeSettings, model_ref: &str) -> bool {
+    settings
+        .vllm_models
+        .iter()
+        .find(|entry| entry.repository == model_ref)
+        .map(|entry| entry.prefix_caching)
+        .unwrap_or(true)
 }
 
 impl Server {
@@ -122,6 +137,11 @@ impl Server {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if prefix_caching_enabled(settings, model_ref) {
+            command.arg("--enable-prefix-caching");
+        } else {
+            command.arg("--no-enable-prefix-caching");
+        }
         if let Some(configured) = settings
             .vllm_models
             .iter()
@@ -199,7 +219,7 @@ impl Server {
             base_url,
             model_ref: model_ref.into(),
             python: python.into(),
-            launch_key: launch_key(settings, profile),
+            launch_key: launch_key(settings, model_ref, profile),
         })
     }
     pub fn is_running(&mut self) -> bool {
@@ -228,5 +248,26 @@ mod tests {
         assert_eq!(model_id("Qwen/Qwen3-8B").unwrap(), "vllm:Qwen/Qwen3-8B");
         assert!(model_ref("vllm:../../etc").is_err());
         assert!(model_ref("mlx:Qwen/Qwen3").is_err());
+    }
+
+    #[test]
+    fn prefix_caching_defaults_on_without_a_model_entry() {
+        let settings = RuntimeSettings::default();
+        assert!(prefix_caching_enabled(&settings, "Qwen/Qwen3-8B"));
+        assert!(launch_key(&settings, "Qwen/Qwen3-8B", None).contains("true"));
+    }
+
+    #[test]
+    fn prefix_caching_can_be_turned_off_per_model() {
+        let settings = RuntimeSettings {
+            vllm_models: vec![crate::runtime_settings::VllmModelSettings {
+                repository: "Qwen/Qwen3-8B".into(),
+                prefix_caching: false,
+                ..Default::default()
+            }],
+            ..RuntimeSettings::default()
+        };
+        assert!(!prefix_caching_enabled(&settings, "Qwen/Qwen3-8B"));
+        assert!(launch_key(&settings, "Qwen/Qwen3-8B", None).contains("false"));
     }
 }

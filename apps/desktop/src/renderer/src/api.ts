@@ -120,6 +120,8 @@ export type VllmModelSettings = {
   gpu_memory_utilization?: number | null
   tensor_parallel_size?: number | null
   trust_remote_code: boolean
+  /** When true (default), vLLM starts with prefix caching enabled. */
+  prefix_caching?: boolean
   extra_args: string[]
 }
 
@@ -2025,6 +2027,8 @@ export type RemoteConnection = {
   base_url: string
   enabled: boolean
   has_api_key: boolean
+  /** When true, Brazier sends llama.cpp KV cache hints (`cache_prompt`, `id_slot`). */
+  llama_cpp_compatible: boolean
 }
 
 export async function listRemoteConnections(): Promise<RemoteConnection[]> {
@@ -2038,6 +2042,7 @@ export async function saveRemoteConnection(connection: {
   /** Omit to keep the stored key; empty string clears it. */
   api_key?: string
   enabled: boolean
+  llama_cpp_compatible?: boolean
 }): Promise<RemoteConnection[]> {
   return (
     await request<{ data: RemoteConnection[] }>('/api/v1/remote/connections', {

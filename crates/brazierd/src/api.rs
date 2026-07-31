@@ -986,6 +986,8 @@ struct RemoteConnectionRequest {
     api_key: Option<String>,
     #[serde(default = "default_enabled")]
     enabled: bool,
+    #[serde(default)]
+    llama_cpp_compatible: bool,
 }
 
 fn default_enabled() -> bool {
@@ -1012,6 +1014,7 @@ async fn save_remote_connection(
             base_url: request.base_url,
             api_key: request.api_key,
             enabled: request.enabled,
+            llama_cpp_compatible: request.llama_cpp_compatible,
         },
     )
     .await
