@@ -210,6 +210,10 @@ pub struct ChatCompletionRequest {
     /// the configured continuous-batching slots.
     #[serde(default)]
     pub brazier_mode: Option<String>,
+    /// llama-server KV slot (`id_slot`). Parent agent sessions use 0; subagents
+    /// use 1..N when parallel subagents are enabled on the model profile.
+    #[serde(default)]
+    pub llama_slot: Option<u32>,
 }
 
 impl ChatCompletionRequest {

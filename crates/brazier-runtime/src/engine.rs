@@ -2273,6 +2273,7 @@ impl Runtime {
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            llama_slot: None,
             brazier_mode: agent_mode.then(|| "agent".to_owned()),
         };
         let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -3379,6 +3380,7 @@ mod tests {
                 tool_choice: None,
                 builtin_tools: None,
                 builtin_tool_names: None,
+                llama_slot: None,
                 brazier_mode: None,
             })
             .await
@@ -3411,6 +3413,7 @@ mod tests {
                 tool_choice: None,
                 builtin_tools: None,
                 builtin_tool_names: None,
+                llama_slot: None,
                 brazier_mode: None,
             })
             .await

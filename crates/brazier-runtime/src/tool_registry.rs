@@ -308,6 +308,7 @@ mod tests {
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            llama_slot: None,
             brazier_mode: None,
         };
         assert!(merge_definitions(dir.path(), &request, false).is_none());
@@ -350,6 +351,7 @@ mod tests {
             tool_choice: None,
             builtin_tools: Some(true),
             builtin_tool_names: None,
+            llama_slot: None,
             brazier_mode: None,
         };
         let merged = merge_definitions(dir.path(), &request, false).unwrap();
@@ -380,6 +382,7 @@ mod tests {
             tool_choice: None,
             builtin_tools: Some(true),
             builtin_tool_names: Some(vec!["calculator".into()]),
+            llama_slot: None,
             brazier_mode: None,
         };
         let merged = merge_definitions(dir.path(), &request, false).unwrap();
@@ -432,6 +435,7 @@ mod tests {
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            llama_slot: None,
             brazier_mode: None,
         };
         let merged = merge_definitions(dir.path(), &request, false).unwrap();

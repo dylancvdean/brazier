@@ -486,11 +486,11 @@ pub fn translate_chat_request(
     if dialect == SamplerDialect::LlamaCpp && stream {
         body["return_progress"] = serde_json::json!(true);
     }
-    // Prefix-cache the prompt and pin slot 0 so multi-round tool loops reuse KV
-    // state instead of landing on different parallel slots each request.
+    // Prefix-cache the prompt and pin a slot so multi-round tool loops (and
+    // concurrent subagents on their own slots) reuse KV state predictably.
     if dialect == SamplerDialect::LlamaCpp {
         body["cache_prompt"] = serde_json::json!(true);
-        body["id_slot"] = serde_json::json!(0);
+        body["id_slot"] = serde_json::json!(request.llama_slot.unwrap_or(0));
     }
     if let Some(budget) = request
         .reasoning_budget_tokens
@@ -2385,6 +2385,7 @@ mod tests {
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            llama_slot: None,
             brazier_mode: None,
         };
         let settings = RuntimeSettings::default();
@@ -2431,6 +2432,7 @@ mod tests {
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            llama_slot: None,
             brazier_mode: None,
         }
     }
@@ -2613,6 +2615,7 @@ mod tests {
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            llama_slot: None,
             brazier_mode: None,
         };
         let body = translate_chat_request(
@@ -3153,6 +3156,7 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            llama_slot: None,
             brazier_mode: None,
         };
         let settings = RuntimeSettings {
@@ -3214,6 +3218,7 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
             tool_choice: None,
             builtin_tools: None,
             builtin_tool_names: None,
+            llama_slot: None,
             brazier_mode: None,
         };
         let settings = RuntimeSettings {
@@ -3235,5 +3240,24 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
         assert_eq!(messages[1]["reasoning_content"], "prior tool thought");
         assert_eq!(body["cache_prompt"], true);
         assert_eq!(body["id_slot"], 0);
+    }
+
+    #[test]
+    fn llama_slot_from_request_pins_kv_cache() {
+        let mut request = plain_request();
+        request.llama_slot = Some(2);
+        let body = translate_chat_request(
+            &request,
+            ChatContext {
+                settings: &RuntimeSettings::default(),
+                profile: None,
+                dialect: SamplerDialect::LlamaCpp,
+                model_alias: "local",
+                stream: false,
+                harmony: false,
+            },
+        );
+        assert_eq!(body["id_slot"], 2);
+        assert_eq!(body["cache_prompt"], true);
     }
 }

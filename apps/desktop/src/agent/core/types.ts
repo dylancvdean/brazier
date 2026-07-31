@@ -386,6 +386,8 @@ export type CreateAgentSessionOptions = {
   /** Prior transcript, when resuming. */
   messages?: AgentMessage[]
   capabilities: AgentModelCapabilities
+  /** llama-server KV slot. Parent sessions use 0; subagents use 1..N. */
+  llamaSlot?: number
   /** Skip duplicate daemon fetches when the worker already loaded the session. */
   preloaded?: PreloadedAgentSession
   preloadedInference?: PreloadedInferenceSettings

@@ -6,6 +6,7 @@ import {
   collectSpawnPrompts,
   DEFAULT_MAX_SUBAGENTS,
   isSubagentSession,
+  llamaParallelSlots,
   resolveMaxSubagents,
   resolveSubagentModel,
   SPAWN_SUBAGENT_TOOL,
@@ -19,6 +20,12 @@ describe('subagent helpers', () => {
     expect(resolveMaxSubagents({ max_subagents: 4 })).toBe(4)
     expect(resolveMaxSubagents({ max_subagents: 0 })).toBe(1)
     expect(resolveMaxSubagents({ max_subagents: 99 })).toBe(8)
+  })
+
+  it('derives llama parallel slot count from the profile toggle', () => {
+    expect(llamaParallelSlots(null)).toBe(1)
+    expect(llamaParallelSlots({ parallel_subagents: false, max_subagents: 4 })).toBe(1)
+    expect(llamaParallelSlots({ parallel_subagents: true, max_subagents: 2 })).toBe(3)
   })
 
   it('resolves model as tool arg → profile → parent', () => {

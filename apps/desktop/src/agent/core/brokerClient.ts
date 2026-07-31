@@ -217,6 +217,7 @@ export class BrokerClient {
     context_size?: number | null
     max_tokens?: number | null
     max_subagents?: number | null
+    parallel_subagents?: boolean | null
   } | null> {
     const payload = await this.request<{
       models: Record<
@@ -227,6 +228,7 @@ export class BrokerClient {
           context_size?: number | null
           max_tokens?: number | null
           max_subagents?: number | null
+          parallel_subagents?: boolean | null
         }
       >
     }>('/api/v1/models/settings')
@@ -236,7 +238,8 @@ export class BrokerClient {
       subagent_model: profile.subagent_model,
       context_size: profile.context_size,
       max_tokens: profile.max_tokens,
-      max_subagents: profile.max_subagents
+      max_subagents: profile.max_subagents,
+      parallel_subagents: profile.parallel_subagents
     }
   }
 

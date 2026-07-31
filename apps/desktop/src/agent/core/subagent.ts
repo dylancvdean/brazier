@@ -14,6 +14,15 @@ export type SubagentProfileDefaults = {
   subagent_model?: string | null
   context_size?: number | null
   max_subagents?: number | null
+  parallel_subagents?: boolean | null
+}
+
+/** llama-server `--parallel` slot count implied by a text profile. */
+export function llamaParallelSlots(
+  profile: SubagentProfileDefaults | null | undefined
+): number {
+  if (!profile?.parallel_subagents) return 1
+  return 1 + resolveMaxSubagents(profile)
 }
 
 export type SubagentRuntimeMetadata = {

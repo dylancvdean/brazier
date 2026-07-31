@@ -66,11 +66,12 @@ export async function requestModelSummary(request: SummaryRequest): Promise<stri
   try {
     const response = await fetchImpl(`${request.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${request.apiKey}`,
-        'x-brazier-mode': 'agent'
-      },
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${request.apiKey}`,
+          'x-brazier-mode': 'agent',
+          'x-brazier-slot': '0'
+        },
       signal: controller.signal,
       body: JSON.stringify({
         model: request.model,

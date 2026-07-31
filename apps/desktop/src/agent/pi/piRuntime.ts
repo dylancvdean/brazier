@@ -31,6 +31,7 @@ import {
   childEnabledTools,
   collectSpawnPrompts,
   isSubagentSession,
+  llamaParallelSlots,
   resolveMaxSubagents,
   resolveSubagentModel,
   SPAWN_SUBAGENT_TOOL,
@@ -356,6 +357,7 @@ class PiAgentSession implements AgentSession {
   private readonly sandbox: SandboxDescription
   private readonly maxToolsPerTurn?: number
   private readonly harmony: boolean
+  private readonly llamaSlot: number
   private readonly spawnSubagent: (
     parent: PiAgentSession,
     request: ExecuteToolRequest
@@ -391,6 +393,7 @@ class PiAgentSession implements AgentSession {
     ) => Promise<ToolExecutionOutcome>
     cancelChildren: () => Promise<void>
     onDisposed: () => void
+    llamaSlot?: number
   }) {
     this.id = options.state.id
     this.broker = options.broker
@@ -400,6 +403,7 @@ class PiAgentSession implements AgentSession {
     this.sandbox = options.sandbox
     this.maxToolsPerTurn = options.capabilities.maxToolsPerTurn
     this.harmony = options.capabilities.harmony
+    this.llamaSlot = options.llamaSlot ?? 0
     this.reasoningEnabled = options.reasoningEnabled
     this.dropReasoningBetweenTurns = options.dropReasoningBetweenTurns
     this.spawnSubagent = options.spawnSubagent
@@ -437,7 +441,8 @@ class PiAgentSession implements AgentSession {
           headers: {
             ...options?.headers,
             ...progress.headers,
-            'x-brazier-mode': 'agent'
+            'x-brazier-mode': 'agent',
+            'x-brazier-slot': String(this.llamaSlot)
           }
         })
       },
@@ -899,6 +904,8 @@ export class PiAgentRuntime implements AgentRuntime {
   private readonly sessions = new Map<string, PiAgentSession>()
   /** In-flight child session ids keyed by parent session id. */
   private readonly childrenByParent = new Map<string, Set<string>>()
+  /** llama-server KV slot per child session (parent always uses slot 0). */
+  private readonly childLlamaSlots = new Map<string, number>()
   private sandbox?: SandboxDescription
 
   constructor(broker: BrokerClient) {
@@ -929,6 +936,20 @@ export class PiAgentRuntime implements AgentRuntime {
     if (!set) return
     set.delete(childId)
     if (set.size === 0) this.childrenByParent.delete(parentId)
+  }
+
+  /** Pick a free llama slot in 1..maxExclusive-1 for a new subagent session. */
+  private allocateChildLlamaSlot(maxExclusive: number): number {
+    if (maxExclusive <= 1) return 0
+    const used = new Set(this.childLlamaSlots.values())
+    for (let slot = 1; slot < maxExclusive; slot += 1) {
+      if (!used.has(slot)) return slot
+    }
+    return 0
+  }
+
+  private releaseChildLlamaSlot(childId: string): void {
+    this.childLlamaSlots.delete(childId)
   }
 
   async cancelChildren(parentId: string): Promise<void> {
@@ -993,6 +1014,7 @@ export class PiAgentRuntime implements AgentRuntime {
 
     const modelId = resolveSubagentModel(request.args.model, profile, parentState.model.id)
     const contextWindow = parentState.model.contextWindow
+    const parallelSlots = llamaParallelSlots(profile)
     const catalog = await this.broker.tools()
     const parentToolNames =
       parentState.enabledTools ?? catalog.map((tool) => tool.name)
@@ -1013,7 +1035,8 @@ export class PiAgentRuntime implements AgentRuntime {
           contextWindow,
           enabled,
           childTools,
-          capabilities
+          capabilities,
+          parallelSlots
         })
       )
     )
@@ -1052,6 +1075,7 @@ export class PiAgentRuntime implements AgentRuntime {
     enabled: string[]
     childTools: AgentToolDefinition[]
     capabilities: CreateAgentSessionOptions['capabilities']
+    parallelSlots: number
   }): Promise<{ status: 'completed' | 'failed' | 'cancelled'; summary: string }> {
     const { parent, request, prompt, modelId, contextWindow } = options
     const parentState = parent.getState()
@@ -1083,6 +1107,8 @@ export class PiAgentRuntime implements AgentRuntime {
       }
     }
 
+    const llamaSlot = this.allocateChildLlamaSlot(options.parallelSlots)
+    this.childLlamaSlots.set(childRecord.id, llamaSlot)
     this.trackChild(parent.id, childRecord.id)
     parent.forwardEvent({
       type: 'subagent-started',
@@ -1111,7 +1137,8 @@ export class PiAgentRuntime implements AgentRuntime {
           systemPrompt: promptPayload.system_prompt,
           tools: options.childTools,
           messages: [],
-          capabilities: options.capabilities
+          capabilities: options.capabilities,
+          llamaSlot
         })) as PiAgentSession
 
         const abortChild = (): void => {
@@ -1157,6 +1184,7 @@ export class PiAgentRuntime implements AgentRuntime {
       })
     } finally {
       this.untrackChild(parent.id, childRecord.id)
+      this.releaseChildLlamaSlot(childRecord.id)
     }
 
     parent.forwardEvent({
@@ -1245,7 +1273,9 @@ export class PiAgentRuntime implements AgentRuntime {
       cancelChildren: () => this.cancelChildren(options.sessionId),
       onDisposed: () => {
         this.sessions.delete(options.sessionId)
-      }
+        this.releaseChildLlamaSlot(options.sessionId)
+      },
+      llamaSlot: options.llamaSlot ?? 0
     })
     this.sessions.set(session.id, session)
     return session

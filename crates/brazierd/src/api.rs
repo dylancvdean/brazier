@@ -4573,6 +4573,13 @@ async fn chat_completions(
     {
         request.brazier_mode = Some("agent".to_owned());
     }
+    if let Some(raw) = headers
+        .get("x-brazier-slot")
+        .and_then(|value| value.to_str().ok())
+        && let Ok(slot) = raw.parse::<u32>()
+    {
+        request.llama_slot = Some(slot);
+    }
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
 
     if !request.stream {
@@ -4906,6 +4913,7 @@ async fn responses(
         tool_choice: request.tool_choice,
         builtin_tools: request.builtin_tools,
         builtin_tool_names: None,
+        llama_slot: None,
         brazier_mode: None,
     };
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
