@@ -1572,7 +1572,7 @@ impl Runtime {
     }
 
     async fn ensure_server_for_model(&self, model_path: &std::path::Path) -> anyhow::Result<()> {
-        self.ensure_server_for_model_with_profile(model_path, None)
+        self.ensure_server_for_model_with_profile(model_path, None, None)
             .await
     }
 
@@ -1587,9 +1587,19 @@ impl Runtime {
         &self,
         model_path: &std::path::Path,
         profile: Option<&crate::model_settings::TextProfile>,
+        model_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let settings = self.settings.lock().await.clone();
-        let harmony = crate::harmony::is_harmony_model(&model_path.to_string_lossy());
+        let harmony = model_id
+            .map(crate::harmony::is_harmony_model)
+            .unwrap_or_else(|| {
+                crate::harmony::is_harmony_model(&model_path.to_string_lossy())
+                    || models_store::model_id_for_path(
+                        &models_store::gguf_root(&self.data_dir),
+                        model_path,
+                    )
+                    .is_ok_and(|id| crate::harmony::is_harmony_model(&id))
+            });
         let loras: Vec<(PathBuf, f32)> = profile
             .map(|profile| {
                 crate::model_settings::resolve_loras(
@@ -1844,6 +1854,7 @@ impl Runtime {
                     .ensure_server_for_model_with_profile(
                         std::path::Path::new(model_path),
                         effective_profile.as_ref(),
+                        Some(&model_id),
                     )
                     .await
                 {
@@ -2341,6 +2352,7 @@ impl Engine for Runtime {
                     dialect: endpoint.dialect,
                     model_alias: &endpoint.model_alias,
                     stream: false,
+                    harmony: crate::harmony::is_harmony_model(&request.model),
                 },
             );
             if last_round && let Some(object) = body.as_object_mut() {
@@ -2681,6 +2693,7 @@ async fn stream_tool_rounds(
                 dialect: endpoint.dialect,
                 model_alias: &endpoint.model_alias,
                 stream: true,
+                harmony: crate::harmony::is_harmony_model(&request.model),
             },
         );
         if last_round && let Some(object) = body.as_object_mut() {

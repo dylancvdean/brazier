@@ -662,6 +662,11 @@ export async function fetchForkHints(repoId: string): Promise<RuntimeForkHint[]>
   return response.fork_hints ?? []
 }
 
+function isHarmonyModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase()
+  return lower.includes('gpt-oss') || lower.includes('gpt_oss') || lower.includes('gptoss')
+}
+
 export async function streamCompletion(
   messages: Message[],
   model: string,
@@ -707,7 +712,10 @@ export async function streamCompletion(
         ? { builtin_tool_names: options.builtinToolNames }
         : {}),
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
-      messages: messagesForCompletion(messages, { dropReasoningBetweenTurns })
+      messages: messagesForCompletion(messages, {
+        dropReasoningBetweenTurns,
+        harmony: isHarmonyModel(model)
+      })
     })
   })
   if (!response.ok || !response.body) {
@@ -2128,6 +2136,8 @@ export type MessagesForCompletionOptions = {
    * user turn. Current-turn tool-round reasoning is kept for Jinja.
    */
   dropReasoningBetweenTurns?: boolean
+  /** gpt-oss / Harmony models need reasoning on prior tool-call turns too. */
+  harmony?: boolean
 }
 
 export function messagesForCompletion(
@@ -2209,9 +2219,16 @@ export function messagesForCompletion(
     if (lastUser >= 0) {
       for (let index = 0; index <= lastUser; index += 1) {
         const entry = payload[index]
-        if (entry && 'reasoning_content' in entry) {
-          delete entry.reasoning_content
+        if (!entry || !('reasoning_content' in entry)) continue
+        if (
+          options.harmony &&
+          entry.role === 'assistant' &&
+          entry.tool_calls &&
+          entry.tool_calls.length > 0
+        ) {
+          continue
         }
+        delete entry.reasoning_content
       }
     }
   }

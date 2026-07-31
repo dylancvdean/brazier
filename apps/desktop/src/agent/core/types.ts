@@ -97,6 +97,8 @@ export type AgentModelCapabilities = {
   nativeToolCalling: boolean
   parallelToolCalling: boolean
   supportsReasoningStream: boolean
+  /** gpt-oss / OpenAI Harmony wire format (functions.* tool names). */
+  harmony: boolean
   reliableJson: boolean
   maxToolsPerTurn?: number
 }
@@ -384,6 +386,33 @@ export type CreateAgentSessionOptions = {
   /** Prior transcript, when resuming. */
   messages?: AgentMessage[]
   capabilities: AgentModelCapabilities
+  /** Skip duplicate daemon fetches when the worker already loaded the session. */
+  preloaded?: PreloadedAgentSession
+  preloadedInference?: PreloadedInferenceSettings
+}
+
+/** Session metadata already fetched by the worker during open-session. */
+export type PreloadedAgentSession = {
+  session: {
+    id: string
+    title: string
+    workspace_path?: string | null
+    permission_mode: AgentPermissionMode
+    permission_settings: AgentPermissionSettings
+    enabled_tools?: string[] | null
+    created_at: string
+    updated_at: string
+    runtime_metadata?: Record<string, unknown> | null
+  }
+  tool_executions: ToolExecutionRecord[]
+  sandbox: SandboxDescription
+}
+
+export type PreloadedInferenceSettings = {
+  context_size: number
+  max_tokens?: number | null
+  enable_reasoning?: boolean
+  drop_reasoning_between_turns?: boolean
 }
 
 export interface AgentSession {

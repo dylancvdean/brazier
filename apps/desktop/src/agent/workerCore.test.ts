@@ -50,14 +50,32 @@ describe('AgentWorkerCore.openSession', () => {
       session: vi.fn(async () => ({
         session: {
           id: 'sess-1',
+          title: 'Task',
           model: 'model-a',
+          permission_mode: 'ask',
+          permission_settings: {
+            auto_approve_host_actions: false,
+            auto_approve_sandboxed_actions: true
+          },
           enabled_tools: null,
-          workspace_path: '/tmp'
+          workspace_path: '/tmp',
+          created_at: '2026-01-01',
+          updated_at: '2026-01-01'
         },
         messages: [{ payload: { role: 'user', text: 'daemon', timestamp: 't' } }],
         tool_executions: [],
         pending_approvals: [],
-        grants: []
+        grants: [],
+        sandbox: {
+          backend: 'test',
+          isolated: true,
+          sandboxed_execution: true,
+          filesystem_scoping: true,
+          network_isolation: true,
+          process_isolation: true,
+          profiles: [],
+          detail: 'test sandbox'
+        }
       })),
       systemPrompt: vi.fn(async () => ({ system_prompt: 'prompt' })),
       tools: vi.fn(async () => []),
@@ -97,14 +115,32 @@ describe('AgentWorkerCore.openSession', () => {
       session: vi.fn(async () => ({
         session: {
           id: 'sess-2',
+          title: 'Task',
           model: 'model-a',
+          permission_mode: 'ask',
+          permission_settings: {
+            auto_approve_host_actions: false,
+            auto_approve_sandboxed_actions: true
+          },
           enabled_tools: null,
-          workspace_path: '/tmp'
+          workspace_path: '/tmp',
+          created_at: '2026-01-01',
+          updated_at: '2026-01-01'
         },
         messages: [],
         tool_executions: [],
         pending_approvals: [],
-        grants: []
+        grants: [],
+        sandbox: {
+          backend: 'test',
+          isolated: true,
+          sandboxed_execution: true,
+          filesystem_scoping: true,
+          network_isolation: true,
+          process_isolation: true,
+          profiles: [],
+          detail: 'test sandbox'
+        }
       })),
       systemPrompt: vi.fn(async () => ({ system_prompt: 'prompt' })),
       tools: vi.fn(async () => []),

@@ -382,6 +382,8 @@ pub struct ChatContext<'a> {
     pub dialect: SamplerDialect,
     pub model_alias: &'a str,
     pub stream: bool,
+    /// gpt-oss / Harmony models expect `functions.*` tool names on the wire.
+    pub harmony: bool,
 }
 
 impl<'a> ChatContext<'a> {
@@ -393,6 +395,7 @@ impl<'a> ChatContext<'a> {
             dialect: SamplerDialect::LlamaCpp,
             model_alias,
             stream,
+            harmony: false,
         }
     }
 }
@@ -415,6 +418,7 @@ pub fn translate_chat_request(
         dialect,
         model_alias,
         stream,
+        harmony,
     } = context;
     let drop_prior_reasoning = settings.drop_reasoning_between_turns;
     let last_user_index = request
@@ -428,10 +432,19 @@ pub fn translate_chat_request(
         .map(|(index, message)| {
             // Prior-turn reasoning can be dropped to save context; keep anything
             // after the latest user message so in-turn tool rounds still round-trip
-            // thinking for Jinja / chat templates.
-            let include_reasoning = !drop_prior_reasoning
-                || last_user_index.is_none_or(|user_index| index > user_index);
-            message_to_openai_json_with_reasoning(message, include_reasoning)
+            // thinking for Jinja / chat templates. Harmony also needs reasoning on
+            // every prior assistant tool-call turn for reliable multi-round tools.
+            let include_reasoning = crate::harmony::include_reasoning_on_message(
+                message
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|text| !text.is_empty()),
+                crate::harmony::has_tool_calls(&message.tool_calls),
+                last_user_index.is_none_or(|user_index| index > user_index),
+                drop_prior_reasoning,
+                harmony,
+            );
+            message_to_openai_json_with_reasoning(message, include_reasoning, harmony)
         })
         .collect();
     // A model's own system prompt leads the conversation rather than replacing
@@ -472,6 +485,12 @@ pub fn translate_chat_request(
     // MLX and remote OpenAI-compatible servers may reject unknown fields.
     if dialect == SamplerDialect::LlamaCpp && stream {
         body["return_progress"] = serde_json::json!(true);
+    }
+    // Prefix-cache the prompt and pin slot 0 so multi-round tool loops reuse KV
+    // state instead of landing on different parallel slots each request.
+    if dialect == SamplerDialect::LlamaCpp {
+        body["cache_prompt"] = serde_json::json!(true);
+        body["id_slot"] = serde_json::json!(0);
     }
     if let Some(budget) = request
         .reasoning_budget_tokens
@@ -533,7 +552,7 @@ pub fn translate_chat_request(
         body["tools"] = value.clone();
     }
     if let Some(value) = &request.tool_choice {
-        body["tool_choice"] = value.clone();
+        body["tool_choice"] = crate::harmony::adapt_tool_choice(value, harmony);
     }
     body
 }
@@ -963,7 +982,10 @@ pub fn tool_call_fragment_to_delta(fragment: &ToolCallFragment) -> serde_json::V
     }
     let mut function = serde_json::Map::new();
     if let Some(name) = &fragment.name {
-        function.insert("name".into(), serde_json::Value::String(name.clone()));
+        function.insert(
+            "name".into(),
+            serde_json::Value::String(crate::harmony::logical_tool_name(name)),
+        );
     }
     if let Some(arguments) = &fragment.arguments {
         function.insert(
@@ -978,12 +1000,13 @@ pub fn tool_call_fragment_to_delta(fragment: &ToolCallFragment) -> serde_json::V
 }
 
 fn message_to_openai_json(message: &OpenAiMessage) -> serde_json::Value {
-    message_to_openai_json_with_reasoning(message, true)
+    message_to_openai_json_with_reasoning(message, true, false)
 }
 
 fn message_to_openai_json_with_reasoning(
     message: &OpenAiMessage,
     include_reasoning: bool,
+    harmony: bool,
 ) -> serde_json::Value {
     let content = match &message.content {
         serde_json::Value::String(text) => serde_json::Value::String(text.clone()),
@@ -1017,7 +1040,7 @@ fn message_to_openai_json_with_reasoning(
         "content": content
     });
     if let Some(tool_calls) = &message.tool_calls {
-        json["tool_calls"] = tool_calls.clone();
+        json["tool_calls"] = crate::harmony::wire_tool_calls(tool_calls, harmony);
     }
     if let Some(tool_call_id) = &message.tool_call_id {
         json["tool_call_id"] = serde_json::json!(tool_call_id);
@@ -2433,6 +2456,7 @@ mod tests {
                 dialect: SamplerDialect::LlamaCpp,
                 model_alias: "local",
                 stream: false,
+                harmony: false,
             },
         );
         assert_eq!(as_f32(&body["temperature"]), 0.2);
@@ -2464,6 +2488,7 @@ mod tests {
                 dialect: SamplerDialect::OpenAi,
                 model_alias: "gpt-oss",
                 stream: false,
+                harmony: false,
             },
         );
         assert!(body.get("top_k").is_none());
@@ -2489,6 +2514,7 @@ mod tests {
                 dialect: SamplerDialect::Mlx,
                 model_alias: "local",
                 stream: false,
+                harmony: false,
             },
         );
         assert_eq!(as_f32(&body["repetition_penalty"]), 1.15);
@@ -2515,6 +2541,7 @@ mod tests {
                 dialect: SamplerDialect::LlamaCpp,
                 model_alias: "local",
                 stream: false,
+                harmony: false,
             },
         );
         assert_eq!(as_f32(&body["temperature"]), 1.4);
@@ -2535,11 +2562,74 @@ mod tests {
                 dialect: SamplerDialect::LlamaCpp,
                 model_alias: "local",
                 stream: false,
+                harmony: false,
             },
         );
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][0]["content"], "Answer in French.");
         assert_eq!(body["messages"][1]["content"], "Hello");
+    }
+
+    #[test]
+    fn harmony_models_receive_wired_tool_names_in_history() {
+        let settings = RuntimeSettings::default();
+        let request = ChatCompletionRequest {
+            model: "gguf:openai/gpt-oss-20b/model.gguf".into(),
+            messages: vec![
+                OpenAiMessage {
+                    role: "assistant".into(),
+                    content: json!(""),
+                    tool_calls: Some(json!([{
+                        "id": "call_0",
+                        "type": "function",
+                        "function": { "name": "calculator", "arguments": "{}" }
+                    }])),
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                OpenAiMessage {
+                    role: "tool".into(),
+                    content: json!("42"),
+                    tool_calls: None,
+                    tool_call_id: Some("call_0".into()),
+                    reasoning_content: None,
+                },
+                OpenAiMessage {
+                    role: "user".into(),
+                    content: json!("Thanks"),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+            ],
+            stream: false,
+            tools: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            seed: None,
+            enable_reasoning: None,
+            reasoning_budget_tokens: None,
+            tool_choice: None,
+            builtin_tools: None,
+            builtin_tool_names: None,
+            brazier_mode: None,
+        };
+        let body = translate_chat_request(
+            &request,
+            ChatContext {
+                settings: &settings,
+                profile: None,
+                dialect: SamplerDialect::LlamaCpp,
+                model_alias: "local",
+                stream: false,
+                harmony: true,
+            },
+        );
+        assert_eq!(
+            body["messages"][0]["tool_calls"][0]["function"]["name"],
+            "functions.calculator"
+        );
     }
 
     /// Every launch setting is fixed when the process starts, so a change to one
@@ -3073,5 +3163,77 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
         let messages = body["messages"].as_array().expect("messages");
         assert!(messages[1].get("reasoning_content").is_none());
         assert_eq!(messages[3]["reasoning_content"], "current thought");
+    }
+
+    #[test]
+    fn harmony_keeps_prior_tool_reasoning_when_dropping_between_turns() {
+        let request = ChatCompletionRequest {
+            model: "gguf:openai/gpt-oss-20b/model.gguf".into(),
+            messages: vec![
+                OpenAiMessage {
+                    role: "user".into(),
+                    content: json!("first"),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                OpenAiMessage {
+                    role: "assistant".into(),
+                    content: json!(""),
+                    tool_calls: Some(json!([{
+                        "id": "call_0",
+                        "type": "function",
+                        "function": { "name": "calculator", "arguments": "{}" }
+                    }])),
+                    tool_call_id: None,
+                    reasoning_content: Some("prior tool thought".into()),
+                },
+                OpenAiMessage {
+                    role: "tool".into(),
+                    content: json!("42"),
+                    tool_calls: None,
+                    tool_call_id: Some("call_0".into()),
+                    reasoning_content: None,
+                },
+                OpenAiMessage {
+                    role: "user".into(),
+                    content: json!("second"),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+            ],
+            stream: false,
+            tools: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            seed: None,
+            enable_reasoning: None,
+            reasoning_budget_tokens: None,
+            tool_choice: None,
+            builtin_tools: None,
+            builtin_tool_names: None,
+            brazier_mode: None,
+        };
+        let settings = RuntimeSettings {
+            drop_reasoning_between_turns: true,
+            ..RuntimeSettings::default()
+        };
+        let body = translate_chat_request(
+            &request,
+            ChatContext {
+                settings: &settings,
+                profile: None,
+                dialect: SamplerDialect::LlamaCpp,
+                model_alias: "local",
+                stream: false,
+                harmony: true,
+            },
+        );
+        let messages = body["messages"].as_array().expect("messages");
+        assert_eq!(messages[1]["reasoning_content"], "prior tool thought");
+        assert_eq!(body["cache_prompt"], true);
+        assert_eq!(body["id_slot"], 0);
     }
 }

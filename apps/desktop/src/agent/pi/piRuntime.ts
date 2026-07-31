@@ -180,19 +180,32 @@ function stripThinkingParts(message: PiMessage): PiMessage {
   return { ...message, content }
 }
 
+function assistantHasToolCalls(message: AssistantMessage): boolean {
+  return message.content.some((part) => part.type === 'toolCall')
+}
+
 /**
  * Omit thinking from turns before the latest user message. Matches the daemon's
  * drop_reasoning_between_turns rule so in-turn tool rounds still keep thinking.
+ * Harmony models also keep thinking on prior assistant tool-call turns.
  */
-function stripPriorTurnThinking(messages: PiMessage[]): PiMessage[] {
+function stripPriorTurnThinking(messages: PiMessage[], harmony: boolean): PiMessage[] {
   let lastUser = -1
   for (let index = 0; index < messages.length; index += 1) {
     if (messages[index]?.role === 'user') lastUser = index
   }
   if (lastUser < 0) return messages
-  return messages.map((message, index) =>
-    index <= lastUser ? stripThinkingParts(message) : message
-  )
+  return messages.map((message, index) => {
+    if (index > lastUser) return message
+    if (
+      harmony &&
+      message.role === 'assistant' &&
+      assistantHasToolCalls(message)
+    ) {
+      return message
+    }
+    return stripThinkingParts(message)
+  })
 }
 
 /** Text of an assistant message, ignoring thinking and tool calls. */
@@ -342,6 +355,7 @@ class PiAgentSession implements AgentSession {
   private enabledTools: string[]
   private readonly sandbox: SandboxDescription
   private readonly maxToolsPerTurn?: number
+  private readonly harmony: boolean
   private readonly spawnSubagent: (
     parent: PiAgentSession,
     request: ExecuteToolRequest
@@ -385,6 +399,7 @@ class PiAgentSession implements AgentSession {
     this.enabledTools = options.state.enabledTools ?? options.definitions.map((tool) => tool.name)
     this.sandbox = options.sandbox
     this.maxToolsPerTurn = options.capabilities.maxToolsPerTurn
+    this.harmony = options.capabilities.harmony
     this.reasoningEnabled = options.reasoningEnabled
     this.dropReasoningBetweenTurns = options.dropReasoningBetweenTurns
     this.spawnSubagent = options.spawnSubagent
@@ -433,7 +448,9 @@ class PiAgentSession implements AgentSession {
       // so toggling the setting takes effect on the next model call.
       convertToLlm: (messages) => {
         const llm = messages.filter(isLlmMessage)
-        return this.dropReasoningBetweenTurns ? stripPriorTurnThinking(llm) : llm
+        return this.dropReasoningBetweenTurns
+          ? stripPriorTurnThinking(llm, this.harmony)
+          : llm
       },
       getApiKey: () => options.broker.apiKey(),
       sessionId: options.state.id,
@@ -1176,16 +1193,36 @@ export class PiAgentRuntime implements AgentRuntime {
         return existing
       }
     }
-    const remote = await this.broker.session(options.sessionId)
-    const sandbox = await this.sandboxDescription()
-    const defaults = await this.broker.runtimeInferenceSettings()
+    const remote = options.preloaded
+      ? {
+          session: options.preloaded.session,
+          tool_executions: options.preloaded.tool_executions,
+          sandbox: options.preloaded.sandbox
+        }
+      : await this.broker.session(options.sessionId).then((payload) => ({
+          session: payload.session,
+          tool_executions: payload.tool_executions,
+          sandbox: {
+            backend: payload.sandbox.backend,
+            profile: 'workspace',
+            isolated: payload.sandbox.isolated,
+            network: false,
+            detail: payload.sandbox.detail
+          } satisfies SandboxDescription
+        }))
+    const sandbox = options.preloaded?.sandbox ?? (remote.sandbox as SandboxDescription)
+    if (options.preloaded) {
+      this.sandbox = sandbox
+    }
+    const defaults =
+      options.preloadedInference ?? (await this.broker.runtimeInferenceSettings())
     const state: AgentSessionState = {
       id: remote.session.id,
       title: remote.session.title,
       workspacePath: remote.session.workspace_path ?? null,
       model: options.model,
       runtimeId: DESCRIPTOR.id,
-      messages: messages ?? remote.messages.map((record) => record.payload),
+      messages: messages ?? [],
       toolExecutions: remote.tool_executions,
       permissionMode: remote.session.permission_mode,
       permissionSettings: remote.session.permission_settings,

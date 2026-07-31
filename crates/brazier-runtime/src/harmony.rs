@@ -50,6 +50,35 @@ pub fn adapt_tool_definition(def: &Value, harmony: bool) -> Value {
     adapted
 }
 
+/// Rewrite tool names inside an assistant `tool_calls` array from logical → wire form.
+pub fn wire_tool_calls(value: &Value, harmony: bool) -> Value {
+    if !harmony {
+        return value.clone();
+    }
+    let Some(items) = value.as_array() else {
+        return value.clone();
+    };
+    Value::Array(
+        items
+            .iter()
+            .map(|call| {
+                let mut wired = call.clone();
+                if let Some(name) = wired
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .map(|logical| wire_tool_name(logical, true))
+                    && let Some(function) = wired
+                        .pointer_mut("/function")
+                        .and_then(Value::as_object_mut)
+                {
+                    function.insert("name".into(), Value::String(name));
+                }
+                wired
+            })
+            .collect(),
+    )
+}
+
 /// Rewrite tool names inside an assistant `tool_calls` array from wire → logical form.
 pub fn normalize_tool_calls(value: &Value) -> Value {
     let Some(items) = value.as_array() else {
@@ -76,6 +105,56 @@ pub fn normalize_tool_calls(value: &Value) -> Value {
     )
 }
 
+/// True when an assistant message carries one or more tool calls.
+pub fn has_tool_calls(tool_calls: &Option<Value>) -> bool {
+    tool_calls
+        .as_ref()
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+}
+
+/// Whether `reasoning_content` should travel on this message.
+///
+/// Harmony models need reasoning preserved on every assistant tool-call turn —
+/// llama.cpp's parser assumes the client resends it — even when prior-turn
+/// reasoning is otherwise dropped to save context.
+pub fn include_reasoning_on_message(
+    has_reasoning: bool,
+    has_tool_calls: bool,
+    after_last_user: bool,
+    drop_prior_reasoning: bool,
+    harmony: bool,
+) -> bool {
+    if !has_reasoning {
+        return false;
+    }
+    if !drop_prior_reasoning || after_last_user {
+        return true;
+    }
+    harmony && has_tool_calls
+}
+
+/// Rewrite `tool_choice` so named functions use the Harmony wire namespace.
+pub fn adapt_tool_choice(value: &Value, harmony: bool) -> Value {
+    if !harmony {
+        return value.clone();
+    }
+    let Some(name) = value.pointer("/function/name").and_then(Value::as_str) else {
+        return value.clone();
+    };
+    let mut adapted = value.clone();
+    if let Some(function) = adapted
+        .pointer_mut("/function")
+        .and_then(Value::as_object_mut)
+    {
+        function.insert(
+            "name".into(),
+            Value::String(wire_tool_name(name, true)),
+        );
+    }
+    adapted
+}
+
 /// llama-server flag value when launching Harmony models.
 pub fn llama_reasoning_format() -> &'static str {
     "auto"
@@ -96,5 +175,48 @@ mod tests {
         assert_eq!(wire_tool_name("calculator", true), "functions.calculator");
         assert_eq!(logical_tool_name("functions.calculator"), "calculator");
         assert_eq!(wire_tool_name("mcp/demo/ping", true), "mcp/demo/ping");
+    }
+
+    #[test]
+    fn wire_tool_calls_rewrites_assistant_history() {
+        let logical = serde_json::json!([{
+            "id": "call_0",
+            "type": "function",
+            "function": { "name": "calculator", "arguments": "{}" }
+        }]);
+        let wired = wire_tool_calls(&logical, true);
+        assert_eq!(
+            wired[0]["function"]["name"],
+            "functions.calculator"
+        );
+        assert_eq!(wire_tool_calls(&logical, false), logical);
+    }
+
+    #[test]
+    fn harmony_keeps_reasoning_on_prior_tool_turns_when_dropping() {
+        assert!(include_reasoning_on_message(
+            true,
+            true,
+            false,
+            true,
+            true
+        ));
+        assert!(!include_reasoning_on_message(
+            true,
+            false,
+            false,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn adapt_tool_choice_wires_function_name() {
+        let choice = serde_json::json!({
+            "type": "function",
+            "function": { "name": "calculator" }
+        });
+        let wired = adapt_tool_choice(&choice, true);
+        assert_eq!(wired["function"]["name"], "functions.calculator");
     }
 }

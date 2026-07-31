@@ -195,7 +195,29 @@ export class AgentWorkerCore {
       systemPrompt: prompt.system_prompt,
       tools,
       messages,
-      capabilities: inferModelCapabilities(remote.session.model)
+      capabilities: inferModelCapabilities(remote.session.model),
+      preloaded: {
+        session: {
+          id: remote.session.id,
+          title: remote.session.title,
+          workspace_path: remote.session.workspace_path,
+          permission_mode: remote.session.permission_mode,
+          permission_settings: remote.session.permission_settings,
+          enabled_tools: remote.session.enabled_tools,
+          created_at: remote.session.created_at,
+          updated_at: remote.session.updated_at,
+          runtime_metadata: remote.session.runtime_metadata as Record<string, unknown> | null
+        },
+        tool_executions: remote.tool_executions,
+        sandbox: {
+          backend: remote.sandbox.backend,
+          profile: 'workspace',
+          isolated: remote.sandbox.isolated,
+          network: false,
+          detail: remote.sandbox.detail
+        }
+      },
+      preloadedInference: defaults
     })
     await session.refreshInferencePrefs()
     this.sessions.set(sessionId, session)

@@ -35,10 +35,12 @@ export function inferModelCapabilities(modelId: string): AgentModelCapabilities 
   const id = modelId.toLowerCase()
   const strong = STRONG_TOOL_FAMILIES.some((family) => id.includes(family))
   const reasoning = REASONING_FAMILIES.some((family) => id.includes(family))
+  const harmony = id.includes('gpt-oss') || id.includes('gpt_oss') || id.includes('gptoss')
   return {
     nativeToolCalling: true,
     parallelToolCalling: strong,
     supportsReasoningStream: reasoning,
+    harmony,
     reliableJson: strong,
     // One call per turn keeps a weak model's mistakes cheap to recover from.
     maxToolsPerTurn: strong ? undefined : 1

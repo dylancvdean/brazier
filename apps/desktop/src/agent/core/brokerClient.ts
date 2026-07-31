@@ -115,6 +115,8 @@ export class BrokerError extends Error {
   }
 }
 
+const REQUEST_TIMEOUT_MS = 30_000
+
 export class BrokerClient {
   private readonly connection: BrokerConnection
 
@@ -124,14 +126,23 @@ export class BrokerClient {
 
   private async request<T>(
     path: string,
-    init?: RequestInit & { signal?: AbortSignal }
+    init?: RequestInit & { signal?: AbortSignal; timeoutMs?: number }
   ): Promise<T> {
     const headers = new Headers(init?.headers)
     headers.set('content-type', 'application/json')
     if (this.connection.apiKey) {
       headers.set('authorization', `Bearer ${this.connection.apiKey}`)
     }
-    const response = await fetch(`${this.connection.address}${path}`, { ...init, headers })
+    const timeoutMs = init?.timeoutMs ?? REQUEST_TIMEOUT_MS
+    const signal =
+      init?.signal ??
+      AbortSignal.timeout(timeoutMs)
+    const { timeoutMs: _timeout, ...fetchInit } = init ?? {}
+    const response = await fetch(`${this.connection.address}${path}`, {
+      ...fetchInit,
+      headers,
+      signal
+    })
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as {
         error?: { message?: string }

@@ -178,6 +178,7 @@ describe('inferModelCapabilities', () => {
     expect(capabilities.parallelToolCalling).toBe(true)
     expect(capabilities.maxToolsPerTurn).toBeUndefined()
     expect(capabilities.supportsReasoningStream).toBe(true)
+    expect(capabilities.harmony).toBe(true)
   })
 
   it('always assumes native tool calling, since the daemon validates anyway', () => {
