@@ -25,6 +25,7 @@ export function AgentSessionSidebar({ controls }: Props): React.JSX.Element {
           const haystack = [
             session.title,
             session.workspace_path ?? '',
+            session.runtime_id ?? '',
             session.runtime_metadata?.worktree?.source_path ?? '',
             session.runtime_metadata?.worktree?.branch ?? '',
             session.last_run_status
@@ -90,6 +91,7 @@ export function AgentSessionSidebar({ controls }: Props): React.JSX.Element {
                   <button type="button" onClick={() => controls.select(entry.id)}>
                     <strong>{entry.title}</strong>
                     <span>
+                      {entry.runtime_id === 'omp' ? 'OMP · ' : 'Pi · '}
                       {worktree
                         ? `Worktree · ${worktree.branch} · ${entry.last_run_status}`
                         : entry.last_run_status}

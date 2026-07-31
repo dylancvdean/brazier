@@ -188,6 +188,10 @@ impl Database {
         let id = Uuid::new_v4().to_string();
         let settings = request.permission_settings.unwrap_or_default();
         let mode = request.permission_mode.unwrap_or(AgentPermissionMode::Ask);
+        let runtime_id = request
+            .runtime_id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "pi".to_owned());
         if let Some(workspace) = request.workspace_path.as_deref() {
             self.remember_agent_workspace(workspace).await?;
         }
@@ -201,7 +205,7 @@ impl Database {
         .bind(request.title.unwrap_or_else(|| "Agent task".to_owned()))
         .bind(&request.workspace_path)
         .bind(&request.model)
-        .bind(&request.runtime_id)
+        .bind(&runtime_id)
         .bind(mode.as_str())
         .bind(serde_json::to_string(&settings)?)
         .bind(
@@ -836,7 +840,7 @@ mod tests {
             title: Some("Test task".to_owned()),
             workspace_path: workspace.map(str::to_owned),
             model: "gguf:test".to_owned(),
-            runtime_id: "pi".to_owned(),
+            runtime_id: Some("pi".to_owned()),
             permission_mode: None,
             permission_settings: None,
             enabled_tools: None,

@@ -52,18 +52,30 @@ export type AgentSandboxCapabilities = {
   program?: string | null
 }
 
+export type AgentRuntimeInfo = {
+  id: string
+  name: string
+  /** Version of the adapter contract, not of the runtime package. */
+  adapter_api_version: number
+  available?: boolean
+  /** `broker` for Pi; `privileged_harness` for Oh My Pi. */
+  trust?: 'broker' | 'privileged_harness' | string
+  binary_path?: string | null
+  unavailable_reason?: string | null
+  capabilities: Record<string, boolean>
+}
+
 export type AgentCapabilities = {
   schema_version: number
   sandbox: AgentSandboxCapabilities
   permission_modes: AgentPermissionMode[]
-  runtimes: Array<{
-    id: string
-    name: string
-    /** Version of the adapter contract, not of the runtime package. */
-    adapter_api_version: number
-    capabilities: Record<string, boolean>
-  }>
+  runtimes: AgentRuntimeInfo[]
+  default_runtime_id?: string
   tool_output_limit_chars: number
+}
+
+export type AgentPreference = {
+  default_runtime_id: string
 }
 
 export type AgentSessionSummary = {
@@ -136,6 +148,17 @@ export async function fetchAgentCapabilities(): Promise<AgentCapabilities> {
   return request('/api/v1/agent/capabilities')
 }
 
+export async function fetchAgentPreference(): Promise<AgentPreference> {
+  return request('/api/v1/preferences/agent')
+}
+
+export async function saveAgentPreference(preference: AgentPreference): Promise<AgentPreference> {
+  return request('/api/v1/preferences/agent', {
+    method: 'PUT',
+    body: JSON.stringify(preference)
+  })
+}
+
 export async function fetchAgentTools(): Promise<AgentToolCatalogEntry[]> {
   const payload = await request<{ data: AgentToolCatalogEntry[] }>('/api/v1/agent/tools')
   return payload.data
@@ -150,6 +173,8 @@ export async function createAgentSession(input: {
   title?: string
   workspace_path?: string | null
   model: string
+  /** Agent framework adapter (`pi` or `omp`). Defaults to the saved preference. */
+  runtime_id?: string
   permission_mode?: AgentPermissionMode
   permission_settings?: AgentPermissionSettings
   enabled_tools?: string[]

@@ -404,6 +404,7 @@ export type PreloadedAgentSession = {
     enabled_tools?: string[] | null
     created_at: string
     updated_at: string
+    runtime_id?: string
     runtime_metadata?: Record<string, unknown> | null
   }
   tool_executions: ToolExecutionRecord[]

@@ -276,27 +276,48 @@ application. It reuses model selection, engines, persistence, and the daemon
 API. Four processes are involved:
 
 ```text
-renderer (sandboxed)  →  main  →  agent worker (utilityProcess)  →  brazierd
-                                         Pi runtime                 policy broker
-                                                                    sandbox / exec
+renderer (sandboxed)  →  main  →  agent worker (utilityProcess)
+                                      │
+                         ┌────────────┴────────────┐
+                         │                         │
+                    Pi adapter                 OMP adapter
+                 (broker tools)            (omp --mode rpc)
+                         │                         │
+                         └────────────┬────────────┘
+                                      ▼
+                                   brazierd
+                              policy / sandbox / models
 ```
 
-The agent runtime is a dependency, not a component of Brazier. `Pi`
-(`@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, MIT) owns only the
-orchestration loop: tool-call parsing, streaming, context tracking, cancellation,
-and completion detection. It is reached exclusively through the adapter in
-`apps/desktop/src/agent/pi/`; a test fails the build if any Pi import appears
-outside that directory. Everything else — tool definitions, permission policy,
-sandboxing, execution, persistence, and the event stream — is Brazier's, in
-application-owned types under `apps/desktop/src/agent/core/`. Replacing the
-runtime means writing a sibling adapter and registering it.
+Agent frameworks are pluggable runtimes selected by `runtime_id` (default `pi`).
+Stock options:
 
-The worker process holds no privileges. It cannot touch the filesystem, spawn a
-shell, or read the environment for credentials: its only route to the machine is
-`POST /api/v1/agent/exec` on the daemon, and the daemon decides. Tool schemas and
-the agent system prompt are served by the daemon too
+- **Pi** (`@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, MIT) — orchestration
+  loop only: tool-call parsing, streaming, context tracking, cancellation, and
+  completion detection. Reached exclusively through `apps/desktop/src/agent/pi/`.
+  Everything else — tool definitions, permission policy, sandboxing, execution,
+  persistence, and the event stream — is Brazier's under
+  `apps/desktop/src/agent/core/`.
+- **Oh My Pi (OMP)** — optional fuller coding harness driven as
+  `omp --mode rpc`. Reached exclusively through `apps/desktop/src/agent/omp/`.
+  OMP owns hashline edits, LSP/DAP, embedded shell, and task subagents. It is a
+  privileged sidecar: built-in tool effects are not mediated by brazierd's
+  broker. Manage → Agent explains that trust difference and lets the operator
+  pick the default. Brazier does not ship OMP's native package closure; the
+  daemon advertises OMP only when an `omp` binary is on PATH (or
+  `BRAZIER_OMP_PATH`).
+
+A boundary test fails the build if framework imports escape their adapter
+directories. The worker selects an adapter per session from
+`session.runtime_id`.
+
+For Pi sessions the worker holds no host privileges: its only route to the
+machine is `POST /api/v1/agent/exec` on the daemon, and the daemon decides.
+Tool schemas and the agent system prompt are served by the daemon too
 (`/api/v1/agent/tools`, `/api/v1/agent/sessions/{id}/prompt`), so the contract a
-model sees always matches the executor and the policy behind it.
+Pi model sees always matches the executor and the policy behind it. OMP sessions
+still persist transcripts through the daemon for UI continuity and may register
+Brazier-only MCP tools as RPC host tools.
 
 Agent system prompts are workspace-scoped settings in the daemon database, so
 all tasks grouped under the same workspace share one override. Agent mode's

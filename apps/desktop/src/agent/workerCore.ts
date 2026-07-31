@@ -2,8 +2,10 @@
  * Command handling for the agent worker, independent of Electron so it can be
  * exercised directly in tests.
  *
- * The worker holds sessions, forwards their events, and does nothing else. It
- * owns no policy: every tool call goes to the daemon, which decides.
+ * The worker holds sessions, forwards their events, and does nothing else for
+ * the Pi stock runtime: every tool call goes to the daemon, which decides.
+ * The OMP stock runtime owns its own tool surface in a sidecar process; the
+ * worker still selects that adapter by `session.runtime_id`.
  */
 
 import { BrokerClient } from './core/brokerClient'
@@ -18,7 +20,7 @@ export class AgentWorkerCore {
   private readonly post: PostMessage
   private readonly runtimeFactory: (broker: BrokerClient, id: string) => AgentRuntime
   private broker?: BrokerClient
-  private runtime?: AgentRuntime
+  private readonly runtimes = new Map<string, AgentRuntime>()
   private tools?: AgentToolDefinition[]
   private readonly sessions = new Map<string, AgentSession>()
   /** Runs in flight, so a cancel can reach the right session. */
@@ -50,14 +52,16 @@ export class AgentWorkerCore {
           address: command.connection.address,
           apiKey: command.connection.apiKey
         })
-        this.runtime = this.runtimeFactory(this.broker, DEFAULT_RUNTIME_ID)
+        // Eagerly warm the default runtime so ready reports something useful;
+        // sessions may still open a different adapter via runtime_id.
+        const defaultRuntime = this.runtimeFor(DEFAULT_RUNTIME_ID)
         this.tools = await this.broker.tools()
         this.post({
           type: 'ready',
-          runtimeId: this.runtime.descriptor.id,
-          runtimeVersion: this.runtime.descriptor.version
+          runtimeId: defaultRuntime.descriptor.id,
+          runtimeVersion: defaultRuntime.descriptor.version
         })
-        return { runtime: this.runtime.descriptor, tools: this.tools }
+        return { runtime: defaultRuntime.descriptor, tools: this.tools }
       }
       case 'open-session': {
         // Explicit open always rehydrates from the daemon so a mode switch or
@@ -121,7 +125,10 @@ export class AgentWorkerCore {
           await session.dispose()
         }
         this.sessions.clear()
-        await this.runtime?.dispose()
+        for (const runtime of this.runtimes.values()) {
+          await runtime.dispose()
+        }
+        this.runtimes.clear()
         return { shutdown: true }
       }
       default: {
@@ -136,10 +143,22 @@ export class AgentWorkerCore {
     return this.broker
   }
 
+  private runtimeFor(runtimeId: string): AgentRuntime {
+    const broker = this.requireBroker()
+    const id = runtimeId.trim() || DEFAULT_RUNTIME_ID
+    let runtime = this.runtimes.get(id)
+    if (!runtime) {
+      runtime = this.runtimeFactory(broker, id)
+      this.runtimes.set(id, runtime)
+    }
+    return runtime
+  }
+
   /**
    * Load a session, building its runtime state from what the daemon stored. The
    * system prompt and tool catalog come from the daemon so the model always
-   * sees the live sandbox and permission state.
+   * sees the live sandbox and permission state (Pi). OMP sessions still receive
+   * the prompt for Brazier UI continuity; their tool surface is OMP-owned.
    *
    * When `rehydrate` is true (explicit open/resume), refresh transcript + prompt
    * from the daemon even if the session is cached — otherwise switching modes
@@ -157,14 +176,14 @@ export class AgentWorkerCore {
       existing = undefined
     }
     if (existing && !options.rehydrate) return existing
-    // Rehydrating mid-run replaces Pi's live transcript and can crash the worker.
+    // Rehydrating mid-run replaces the live transcript and can crash the worker.
     if (existing && options.rehydrate && this.running.has(sessionId)) {
       return existing
     }
 
     const broker = this.requireBroker()
-    if (!this.runtime) throw new Error('The agent worker has no runtime.')
     const remote = await broker.session(sessionId)
+    const runtime = this.runtimeFor(remote.session.runtime_id || DEFAULT_RUNTIME_ID)
     const prompt = await broker.systemPrompt(sessionId)
     // MCP configuration can change while the utility process remains alive.
     // Refresh when opening a session so newly enabled server tools do not
@@ -184,7 +203,7 @@ export class AgentWorkerCore {
       await existing.refreshInferencePrefs()
       return existing
     }
-    const session = await this.runtime.createSession({
+    const session = await runtime.createSession({
       sessionId,
       model: {
         id: remote.session.model,
@@ -206,6 +225,7 @@ export class AgentWorkerCore {
           enabled_tools: remote.session.enabled_tools,
           created_at: remote.session.created_at,
           updated_at: remote.session.updated_at,
+          runtime_id: remote.session.runtime_id,
           runtime_metadata: remote.session.runtime_metadata as Record<string, unknown> | null
         },
         tool_executions: remote.tool_executions,

@@ -74,17 +74,16 @@
   ASR worker keeps its model loaded
   between utterances (3.1 s to 0.18 s a turn).
 - **Agent mode** — interactive coding and system agent as a fourth workspace
-  mode. Pi (`@earendil-works/pi-*`, MIT) is the first runtime, installed as a
-  pinned dependency and reachable only through an adapter whose boundary a test
-  enforces. Brazier owns the rest: 19 filesystem, shell, workspace, and
-  permission tools with daemon-served schemas; a policy broker with `ask`,
-  `sandbox-only`, and `skip-permissions` modes; approvals bound to a session,
-  tool, and argument hash; Seatbelt and Bubblewrap sandboxes that report their
-  isolation honestly (and refuse to pretend when there is none); session,
-  transcript, tool-ledger, approval, grant, and artifact persistence;
-  cancellation, compaction, and argument repair for weak local models. The agent
-  runtime runs in its own `utilityProcess` and reaches the machine only through
-  `POST /api/v1/agent/exec`.
+  mode. Agent frameworks are modular stock runtimes selected by `runtime_id`
+  (default `pi`). Pi (`@earendil-works/pi-*`, MIT) is the broker-sandboxed
+  default: orchestration only, with Brazier owning 19 filesystem/shell/workspace
+  tools, the policy broker (`ask` / `sandbox-only` / `skip-permissions`),
+  argument-hash approvals, Seatbelt/Bubblewrap, and persistence. Oh My Pi (OMP)
+  is an optional second stock runtime driven via `omp --mode rpc` for a fuller
+  coding surface; Manage → Agent documents the privileged-harness trust
+  difference. Adapters live under `apps/desktop/src/agent/{pi,omp}/` with a
+  boundary test. The worker runs in its own `utilityProcess` and selects the
+  adapter per session.
 
 ## Alpha
 

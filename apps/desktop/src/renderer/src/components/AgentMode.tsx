@@ -33,6 +33,7 @@ import {
   deleteAgentSession,
   fetchAgentArtifact,
   fetchAgentCapabilities,
+  fetchAgentPreference,
   fetchAgentSession,
   fetchAgentTools,
   fetchAgentWorktreeStatus,
@@ -151,6 +152,11 @@ const PERMISSION_LABELS: Record<AgentPermissionMode, { title: string; detail: st
     title: 'Skip permissions',
     detail: 'No prompts for sandboxed work. Host actions still need the separate opt-in.'
   }
+}
+
+function runtimeLabel(runtimeId: string | undefined | null): string {
+  if (runtimeId === 'omp') return 'Oh My Pi'
+  return 'Pi'
 }
 
 function errorText(cause: unknown): string {
@@ -648,6 +654,7 @@ function shortModelLabel(modelId: string): string {
 export function AgentMode(props: Props): React.JSX.Element {
   const { onError, onSessionBound } = props
   const [capabilities, setCapabilities] = useState<AgentCapabilities | null>(null)
+  const [defaultRuntimeId, setDefaultRuntimeId] = useState('pi')
   const [tools, setTools] = useState<AgentToolCatalogEntry[]>([])
   const [sessions, setSessions] = useState<AgentSessionSummary[]>([])
   const [session, setSession] = useState<AgentSessionSummary | null>(null)
@@ -691,6 +698,8 @@ export function AgentMode(props: Props): React.JSX.Element {
   const confinedToWorktree = Boolean(worktree) || (!session && pendingConfineToWorktree)
   const permissionMode: AgentPermissionMode =
     session?.permission_mode ?? pendingPermissionMode
+  const activeRuntimeId = session?.runtime_id ?? defaultRuntimeId
+  const ompRuntime = activeRuntimeId === 'omp'
   const availableToolNames = useMemo(() => tools.map((tool) => tool.name), [tools])
   const enabledToolNames = useMemo(() => {
     const selected = session?.enabled_tools ?? pendingEnabledTools ?? availableToolNames
@@ -708,8 +717,14 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   useEffect(() => {
     void fetchAgentCapabilities()
-      .then(setCapabilities)
+      .then((caps) => {
+        setCapabilities(caps)
+        if (caps.default_runtime_id) setDefaultRuntimeId(caps.default_runtime_id)
+      })
       .catch((cause: unknown) => onError(errorText(cause)))
+    void fetchAgentPreference()
+      .then((preference) => setDefaultRuntimeId(preference.default_runtime_id || 'pi'))
+      .catch(() => undefined)
     void fetchAgentTools().then(setTools).catch(() => setTools([]))
     void listAgentSessions()
       .then((entries) =>
@@ -1129,6 +1144,12 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   async function changePermissionMode(mode: AgentPermissionMode): Promise<void> {
     setModeMenuOpen(false)
+    if (mode === 'sandbox-only' && ompRuntime) {
+      onError(
+        'Sandbox-only mode is unavailable for Oh My Pi. That runtime uses a privileged harness, not Brazier\'s OS sandbox.'
+      )
+      return
+    }
     if (mode === 'sandbox-only' && !capabilities?.sandbox.sandboxed_execution) {
       onError('Sandbox-only mode is unavailable because this host has no OS sandbox for agent commands.')
       return
@@ -1190,6 +1211,7 @@ export function AgentMode(props: Props): React.JSX.Element {
           title: text.slice(0, 60),
           workspace_path: workspace,
           model: props.modelId,
+          runtime_id: defaultRuntimeId,
           permission_mode: pendingPermissionMode,
           ...(pendingEnabledTools ? { enabled_tools: pendingEnabledTools } : {}),
           confine_to_worktree: requestedWorktree
@@ -1625,6 +1647,17 @@ export function AgentMode(props: Props): React.JSX.Element {
             />
           )}
         </div>
+        <span
+          className={ompRuntime ? 'agent-runtime-badge omp' : 'agent-runtime-badge'}
+          title={
+            ompRuntime
+              ? 'Oh My Pi owns its tool surface in a privileged sidecar. Change the default under Manage → Agent.'
+              : 'Pi orchestration with Brazier broker tools and OS sandbox. Change the default under Manage → Agent.'
+          }
+        >
+          <Bot size={13} />
+          {runtimeLabel(activeRuntimeId)}
+        </span>
         {sandbox && <SandboxBadge sandbox={sandbox} />}
         <div className="agent-mode-select">
           <button
@@ -1642,14 +1675,20 @@ export function AgentMode(props: Props): React.JSX.Element {
           </button>
           {modeMenuOpen && (
             <div className="agent-mode-menu">
-              {(Object.keys(PERMISSION_LABELS) as AgentPermissionMode[]).map((mode) => (
+              {(Object.keys(PERMISSION_LABELS) as AgentPermissionMode[]).map((mode) => {
+                const sandboxUnavailable =
+                  mode === 'sandbox-only' &&
+                  (ompRuntime || !sandbox?.sandboxed_execution)
+                return (
                 <button
                   key={mode}
                   type="button"
                   className={mode === permissionMode ? 'active' : ''}
-                  disabled={mode === 'sandbox-only' && !sandbox?.sandboxed_execution}
+                  disabled={sandboxUnavailable}
                   title={
-                    mode === 'sandbox-only' && !sandbox?.sandboxed_execution
+                    mode === 'sandbox-only' && ompRuntime
+                      ? 'Unavailable for Oh My Pi: that runtime is a privileged harness.'
+                      : mode === 'sandbox-only' && !sandbox?.sandboxed_execution
                       ? 'Unavailable: this host has no OS sandbox for agent commands.'
                       : undefined
                   }
@@ -1657,12 +1696,15 @@ export function AgentMode(props: Props): React.JSX.Element {
                 >
                   <strong>{PERMISSION_LABELS[mode].title}</strong>
                   <span>
-                    {mode === 'sandbox-only' && !sandbox?.sandboxed_execution
+                    {mode === 'sandbox-only' && ompRuntime
+                      ? 'Unavailable for Oh My Pi. Use Ask first, or switch the default runtime to Pi in Manage → Agent.'
+                      : mode === 'sandbox-only' && !sandbox?.sandboxed_execution
                       ? 'Unavailable on this host: agent commands would have full user privileges.'
                       : PERMISSION_LABELS[mode].detail}
                   </span>
                 </button>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>
@@ -1683,14 +1725,26 @@ export function AgentMode(props: Props): React.JSX.Element {
         </button>
       </header>
 
-      {sandbox && !sandbox.isolated && (
+      {ompRuntime ? (
         <div className="agent-warning">
           <AlertTriangle size={15} />
           <span>
-            No sandbox on this host: {sandbox.detail} Commands would run with your full privileges,
-            so each one is held for approval and refused in sandbox-only mode.
+            Oh My Pi runs as a privileged harness. Built-in tools execute in the omp sidecar with
+            your user privileges — not through Brazier&apos;s OS sandbox. Change the default under
+            Manage → Agent.
           </span>
         </div>
+      ) : (
+        sandbox &&
+        !sandbox.isolated && (
+          <div className="agent-warning">
+            <AlertTriangle size={15} />
+            <span>
+              No sandbox on this host: {sandbox.detail} Commands would run with your full privileges,
+              so each one is held for approval and refused in sandbox-only mode.
+            </span>
+          </div>
+        )
       )}
 
       <div className="agent-transcript">
@@ -1701,9 +1755,9 @@ export function AgentMode(props: Props): React.JSX.Element {
             </div>
             <h2>Give the agent a task</h2>
             <p>
-              It reads and edits files in the workspace and runs commands there. Everything runs
-              through Brazier's own policy layer: {executeTools} of {tools.length} tools can execute
-              programs, and each needs your approval unless you change the mode above.
+              {ompRuntime
+                ? 'Oh My Pi owns a fuller coding tool surface (edit, shell, LSP/DAP, subagents) in a privileged sidecar. New tasks use the default framework from Manage → Agent.'
+                : `It reads and edits files in the workspace and runs commands there. Everything runs through Brazier's own policy layer: ${executeTools} of ${tools.length} tools can execute programs, and each needs your approval unless you change the mode above.`}
             </p>
             <div className="agent-suggestions">
               <button type="button" onClick={() => props.onSuggestPrompt?.('Summarize this repository: layout, build commands, and test entry points.')}>

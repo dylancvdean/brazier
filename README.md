@@ -1,7 +1,7 @@
 # Brazier
 
 Brazier is an MIT-licensed desktop client and local API for running open weight AI
-models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and video models with stable-diffusion.cpp (and tool integration for LLMs to call them); bidirectional voice with PersonaPlex, and contains an integrated Pi-based agent harness.
+models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and video models with stable-diffusion.cpp (and tool integration for LLMs to call them); bidirectional voice with PersonaPlex, and contains a modular agent harness (Pi by default, optional Oh My Pi).
 
 <p align="center">
   <img src="assets/chat-screenshot.png" alt="Brazier chat workspace" width="49%" />
@@ -76,7 +76,9 @@ guide](docs/releasing.md) for release credentials and signature verification.
 Brazier collects no telemetry. Non-upstream forks,
 remote-code models, network tools, and code execution require explicit trust.
 
-Agent mode runs model-chosen commands on your machine. It defaults to asking
-before anything writes, executes, or leaves the workspace, and the interface
-states plainly when no OS sandbox is available. On Windows there is none yet. `skip-permissions` mode exists and
+Agent mode runs model-chosen commands on your machine. It defaults to the Pi
+runtime (broker + OS sandbox when available) and asks before anything writes,
+executes, or leaves the workspace. Manage → Agent can select optional Oh My Pi
+for a fuller tool surface; that path is a privileged harness and is labeled as
+such. On Windows there is no OS sandbox yet. `skip-permissions` mode exists and
 still refuses credential paths, but it removes the prompts.

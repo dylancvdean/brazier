@@ -4732,6 +4732,67 @@ label.span-2 {
   cursor: help;
 }
 
+.agent-runtime-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--soft);
+  background: var(--panel-raised);
+  font-size: 11px;
+  cursor: help;
+}
+
+.agent-runtime-badge.omp {
+  border-color: #6a5430;
+  color: #e4c58a;
+  background: #241c12;
+}
+
+.agent-runtime-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-runtime-choice label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 12px;
+  align-items: start;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  cursor: pointer;
+}
+
+.agent-runtime-choice label.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.agent-runtime-choice label.active {
+  border-color: var(--accent, #7aa2c8);
+}
+
+.agent-runtime-choice strong {
+  display: block;
+}
+
+.agent-runtime-choice small {
+  display: block;
+  color: var(--muted);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+.agent-runtime-choice input {
+  margin-top: 3px;
+}
+
 .agent-sandbox-badge.unsandboxed {
   border-color: #67393c;
   color: #e8adb1;

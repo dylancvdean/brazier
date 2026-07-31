@@ -1801,7 +1801,7 @@ mod tests {
                     title: Some("test".to_owned()),
                     workspace_path: Some(workspace.path().display().to_string()),
                     model: "gguf:test".to_owned(),
-                    runtime_id: "pi".to_owned(),
+                    runtime_id: Some("pi".to_owned()),
                     permission_mode: Some(mode),
                     permission_settings: Some(AgentPermissionSettings {
                         auto_approve_sandboxed_actions: true,

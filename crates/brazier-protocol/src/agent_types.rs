@@ -345,8 +345,10 @@ pub struct CreateAgentSession {
     #[serde(default)]
     pub workspace_path: Option<String>,
     pub model: String,
-    #[serde(default = "default_runtime_id")]
-    pub runtime_id: String,
+    /// Agent framework adapter id (`pi`, `omp`, …). When omitted, the daemon
+    /// resolves the saved default preference, then falls back to `pi`.
+    #[serde(default)]
+    pub runtime_id: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<AgentPermissionMode>,
     #[serde(default)]
@@ -359,9 +361,10 @@ pub struct CreateAgentSession {
     pub confine_to_worktree: bool,
 }
 
-fn default_runtime_id() -> String {
-    "pi".to_owned()
-}
+/// Stock agent framework adapters the daemon advertises.
+pub const AGENT_RUNTIME_PI: &str = "pi";
+pub const AGENT_RUNTIME_OMP: &str = "omp";
+pub const DEFAULT_AGENT_RUNTIME_ID: &str = AGENT_RUNTIME_PI;
 
 /// Partial session update. Absent fields keep their stored value.
 #[derive(Debug, Clone, Default, Deserialize)]

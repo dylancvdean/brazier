@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import type { AgentMessage, AgentSession, AgentSessionState } from './core/types'
+import type { AgentMessage, AgentRuntime, AgentSession, AgentSessionState } from './core/types'
 import { AgentWorkerCore } from './workerCore'
 
 function mockSession(id: string, disposed = false): AgentSession {
@@ -40,6 +40,18 @@ function mockSession(id: string, disposed = false): AgentSession {
   }
 }
 
+function installBrokerAndRuntime(
+  core: AgentWorkerCore,
+  broker: Record<string, unknown>,
+  runtime: AgentRuntime
+): void {
+  ;(core as unknown as { broker: typeof broker }).broker = broker
+  ;(core as unknown as { runtimes: Map<string, AgentRuntime> }).runtimes = new Map([
+    ['pi', runtime]
+  ])
+  ;(core as unknown as { tools: [] }).tools = []
+}
+
 describe('AgentWorkerCore.openSession', () => {
   it('does not rehydrate while a run is in flight', async () => {
     const posts: unknown[] = []
@@ -52,6 +64,7 @@ describe('AgentWorkerCore.openSession', () => {
           id: 'sess-1',
           title: 'Task',
           model: 'model-a',
+          runtime_id: 'pi',
           permission_mode: 'ask',
           permission_settings: {
             auto_approve_host_actions: false,
@@ -87,16 +100,14 @@ describe('AgentWorkerCore.openSession', () => {
       createSession: vi.fn(),
       restoreSession: vi.fn(),
       dispose: vi.fn()
-    }
+    } as unknown as AgentRuntime
 
     await core.handle({
       type: 'init',
       requestId: 'init',
       connection: { address: 'http://127.0.0.1:1', apiKey: null }
     })
-    ;(core as unknown as { broker: typeof broker }).broker = broker
-    ;(core as unknown as { runtime: typeof runtime }).runtime = runtime
-    ;(core as unknown as { tools: [] }).tools = []
+    installBrokerAndRuntime(core, broker, runtime)
 
     const session = mockSession('sess-1')
     const rehydrate = vi.spyOn(session, 'rehydrate')
@@ -117,6 +128,7 @@ describe('AgentWorkerCore.openSession', () => {
           id: 'sess-2',
           title: 'Task',
           model: 'model-a',
+          runtime_id: 'pi',
           permission_mode: 'ask',
           permission_settings: {
             auto_approve_host_actions: false,
@@ -154,16 +166,14 @@ describe('AgentWorkerCore.openSession', () => {
       createSession,
       restoreSession: vi.fn(),
       dispose: vi.fn()
-    }
+    } as unknown as AgentRuntime
 
     await core.handle({
       type: 'init',
       requestId: 'init',
       connection: { address: 'http://127.0.0.1:1', apiKey: null }
     })
-    ;(core as unknown as { broker: typeof broker }).broker = broker
-    ;(core as unknown as { runtime: typeof runtime }).runtime = runtime
-    ;(core as unknown as { tools: [] }).tools = []
+    installBrokerAndRuntime(core, broker, runtime)
     ;(core as unknown as { sessions: Map<string, AgentSession> }).sessions.set(
       'sess-2',
       mockSession('sess-2', true)
@@ -172,5 +182,76 @@ describe('AgentWorkerCore.openSession', () => {
     await core.handle({ type: 'open-session', requestId: 'open', sessionId: 'sess-2' })
 
     expect(createSession).toHaveBeenCalled()
+  })
+
+  it('selects the runtime from session.runtime_id', async () => {
+    const ompCreate = vi.fn(async () => mockSession('sess-omp'))
+    const piCreate = vi.fn(async () => mockSession('sess-pi'))
+    const core = new AgentWorkerCore((_message) => undefined, (_broker, id) => {
+      if (id === 'omp') {
+        return {
+          descriptor: { id: 'omp', name: 'Oh My Pi', version: '0', capabilities: {} },
+          createSession: ompCreate,
+          restoreSession: vi.fn(),
+          dispose: vi.fn()
+        } as unknown as AgentRuntime
+      }
+      return {
+        descriptor: { id: 'pi', name: 'Pi', version: '0', capabilities: {} },
+        createSession: piCreate,
+        restoreSession: vi.fn(),
+        dispose: vi.fn()
+      } as unknown as AgentRuntime
+    })
+    const broker = {
+      session: vi.fn(async () => ({
+        session: {
+          id: 'sess-omp',
+          title: 'Task',
+          model: 'model-a',
+          runtime_id: 'omp',
+          permission_mode: 'ask',
+          permission_settings: {
+            auto_approve_host_actions: false,
+            auto_approve_sandboxed_actions: true
+          },
+          enabled_tools: null,
+          workspace_path: '/tmp',
+          created_at: '2026-01-01',
+          updated_at: '2026-01-01'
+        },
+        messages: [],
+        tool_executions: [],
+        pending_approvals: [],
+        grants: [],
+        sandbox: {
+          backend: 'test',
+          isolated: false,
+          sandboxed_execution: false,
+          filesystem_scoping: false,
+          network_isolation: false,
+          process_isolation: false,
+          profiles: [],
+          detail: 'host'
+        }
+      })),
+      systemPrompt: vi.fn(async () => ({ system_prompt: 'prompt' })),
+      tools: vi.fn(async () => []),
+      textProfile: vi.fn(async () => ({ context_size: 4096 })),
+      runtimeInferenceSettings: vi.fn(async () => ({ context_size: 4096 }))
+    }
+
+    await core.handle({
+      type: 'init',
+      requestId: 'init',
+      connection: { address: 'http://127.0.0.1:1', apiKey: null }
+    })
+    ;(core as unknown as { broker: typeof broker }).broker = broker
+    ;(core as unknown as { tools: [] }).tools = []
+
+    await core.handle({ type: 'open-session', requestId: 'open', sessionId: 'sess-omp' })
+
+    expect(ompCreate).toHaveBeenCalled()
+    expect(piCreate).not.toHaveBeenCalled()
   })
 })

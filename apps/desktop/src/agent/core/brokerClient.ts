@@ -72,8 +72,13 @@ export type AgentCapabilitiesResponse = {
     name: string
     /** Version of the adapter contract, not of the runtime package. */
     adapter_api_version: number
+    available?: boolean
+    trust?: string
+    binary_path?: string | null
+    unavailable_reason?: string | null
     capabilities: Record<string, boolean>
   }>
+  default_runtime_id?: string
   tool_output_limit_chars: number
 }
 
@@ -200,6 +205,7 @@ export class BrokerClient {
     title?: string
     workspace_path?: string | null
     model: string
+    runtime_id?: string
     permission_mode?: DaemonSessionRecord['permission_mode']
     permission_settings?: DaemonSessionRecord['permission_settings']
     enabled_tools?: string[]

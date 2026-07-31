@@ -1,4 +1,5 @@
 import {
+  Bot,
   Box,
   Check,
   ChevronDown,
@@ -96,6 +97,12 @@ import {
   type SdcppBundle,
   type SdcppProposal
 } from '../api'
+import {
+  fetchAgentCapabilities,
+  fetchAgentPreference,
+  saveAgentPreference,
+  type AgentRuntimeInfo
+} from '../agentApi'
 import { RecommendedModels } from './RecommendedModels'
 import { CapabilityIcons, capabilityFlags, hubCapabilityFlags } from './CapabilityIcons'
 import {
@@ -353,6 +360,7 @@ export type ManageSection =
   | 'engine'
   | 'server'
   | 'mcp'
+  | 'agent'
   | 'remote'
   | 'support'
 
@@ -385,6 +393,7 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'discover', label: 'Download models', icon: <Download size={15} /> },
   { id: 'runtimes', label: 'Runtimes', icon: <Cpu size={15} /> },
   { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
+  { id: 'agent', label: 'Agent', icon: <Bot size={15} /> },
   { id: 'remote', label: 'Remote servers', icon: <Globe size={15} /> },
   { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> },
   { id: 'server', label: 'OpenAI server', icon: <KeyRound size={15} /> },
@@ -638,6 +647,7 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
             {props.section === 'discover' && <DiscoverSection {...props} onError={setError} />}
             {props.section === 'runtimes' && <RuntimesSection {...props} onError={setError} />}
             {props.section === 'mcp' && <McpSection {...props} onError={setError} />}
+            {props.section === 'agent' && <AgentSection {...props} onError={setError} />}
             {props.section === 'remote' && <RemoteSection {...props} onError={setError} />}
             {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
             {props.section === 'server' && <ServerSection {...props} onError={setError} />}
@@ -4283,6 +4293,153 @@ function ToolchainChecklist({ tools }: { tools: ToolchainTool[] }): React.JSX.El
         </div>
       ))}
     </div>
+  )
+}
+
+function AgentSection(props: SectionProps): React.JSX.Element {
+  const [runtimes, setRuntimes] = useState<AgentRuntimeInfo[]>([])
+  const [selected, setSelected] = useState('pi')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [savedNotice, setSavedNotice] = useState<string | null>(null)
+
+  async function reload(): Promise<void> {
+    setLoading(true)
+    props.onError(null)
+    try {
+      const [capabilities, preference] = await Promise.all([
+        fetchAgentCapabilities(),
+        fetchAgentPreference()
+      ])
+      setRuntimes(capabilities.runtimes)
+      setSelected(preference.default_runtime_id || capabilities.default_runtime_id || 'pi')
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void reload()
+  }, [])
+
+  async function chooseRuntime(runtimeId: string): Promise<void> {
+    const entry = runtimes.find((runtime) => runtime.id === runtimeId)
+    if (!entry || entry.available === false) return
+    setSaving(true)
+    props.onError(null)
+    setSavedNotice(null)
+    try {
+      const saved = await saveAgentPreference({ default_runtime_id: runtimeId })
+      setSelected(saved.default_runtime_id)
+      setSavedNotice(
+        saved.default_runtime_id === 'omp'
+          ? 'New agent tasks will use Oh My Pi.'
+          : 'New agent tasks will use Pi (default).'
+      )
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const omp = runtimes.find((runtime) => runtime.id === 'omp')
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>Agent</h2>
+        <p>
+          Choose which agent framework runs new tasks. Pi is the default and keeps every machine
+          effect behind Brazier&apos;s policy broker. Oh My Pi is a fuller coding harness with a
+          different trust boundary.
+        </p>
+      </header>
+
+      {loading ? (
+        <div className="manage-placeholder">
+          <LoaderCircle className="spin" size={16} />
+          Loading…
+        </div>
+      ) : (
+        <>
+          <div className="settings-group">
+            <div className="section-label">Default framework</div>
+            <div className="agent-runtime-choice">
+              {runtimes.map((runtime) => {
+                const unavailable = runtime.available === false
+                return (
+                  <label
+                    key={runtime.id}
+                    className={[
+                      selected === runtime.id ? 'active' : '',
+                      unavailable ? 'disabled' : ''
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                  >
+                    <input
+                      type="radio"
+                      name="agent-runtime"
+                      value={runtime.id}
+                      checked={selected === runtime.id}
+                      disabled={unavailable || saving}
+                      onChange={() => void chooseRuntime(runtime.id)}
+                    />
+                    <span>
+                      <strong>
+                        {runtime.name}
+                        {runtime.id === 'pi' ? ' (default)' : ''}
+                      </strong>
+                      <small>
+                        {runtime.id === 'pi'
+                          ? 'Orchestration loop only. Tools, sandbox, approvals, and exec stay in brazierd.'
+                          : 'Fuller Oh My Pi surface: hashline edits, LSP/DAP, embedded shell, and task subagents run in the omp process.'}
+                      </small>
+                      {unavailable && runtime.unavailable_reason && (
+                        <small>{runtime.unavailable_reason}</small>
+                      )}
+                      {!unavailable && runtime.binary_path && (
+                        <small>Binary: {runtime.binary_path}</small>
+                      )}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+            {savedNotice && <p className="model-help">{savedNotice}</p>}
+          </div>
+
+          <div className="settings-group">
+            <div className="section-label">Trust difference</div>
+            <p className="model-help">
+              With Pi, the agent worker reaches the machine only through{' '}
+              <code>POST /api/v1/agent/exec</code>. The daemon applies Seatbelt or Bubblewrap when
+              available, binds approvals to tool arguments, and can refuse host escape in
+              sandbox-only mode.
+            </p>
+            <p className="settings-warning">
+              Oh My Pi is a privileged harness. Its built-in tools execute inside the omp sidecar
+              with your user privileges. Approvals are OMP prompt tiers, not Brazier&apos;s OS
+              sandbox. Prefer Pi unless you explicitly want that fuller tool surface and accept the
+              weaker isolation.
+            </p>
+            {omp?.available === false && (
+              <p className="model-help warn">
+                Install Oh My Pi from{' '}
+                <a href="https://omp.sh/" target="_blank" rel="noreferrer">
+                  omp.sh
+                </a>{' '}
+                so <code>omp</code> is on your PATH, or set <code>BRAZIER_OMP_PATH</code> to the
+                binary. Brazier does not ship OMP&apos;s native package closure by default.
+              </p>
+            )}
+          </div>
+        </>
+      )}
+    </section>
   )
 }
 

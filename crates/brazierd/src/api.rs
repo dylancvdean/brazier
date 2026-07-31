@@ -308,6 +308,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/preferences/welcome",
             get(welcome_preference).put(update_welcome_preference),
         )
+        .route(
+            "/api/v1/preferences/agent",
+            get(agent_preference).put(update_agent_preference),
+        )
         .route("/api/v1/hardware", get(hardware))
         .route("/api/v1/toolchain", get(toolchain_status))
         .route("/api/v1/engines/llama.cpp/ensure", post(ensure_llama))
@@ -1286,6 +1290,162 @@ async fn update_welcome_preference(
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(json!({ "completed": preference.completed })))
+}
+
+const AGENT_PREFERENCE_KEY: &str = "agent";
+
+#[derive(Debug, Deserialize)]
+struct UpdateAgentPreference {
+    default_runtime_id: String,
+}
+
+async fn load_default_agent_runtime_id(state: &AppState) -> ApiResult<String> {
+    let stored = state
+        .db
+        .application_preference(AGENT_PREFERENCE_KEY)
+        .await
+        .map_err(ApiError::internal)?
+        .and_then(|value| {
+            value["default_runtime_id"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned());
+    Ok(stored)
+}
+
+async fn agent_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let default_runtime_id = load_default_agent_runtime_id(&state).await?;
+    Ok(Json(json!({ "default_runtime_id": default_runtime_id })))
+}
+
+async fn update_agent_preference(
+    State(state): State<AppState>,
+    Json(preference): Json<UpdateAgentPreference>,
+) -> ApiResult<Json<Value>> {
+    let runtime_id = preference.default_runtime_id.trim();
+    let catalog = agent_runtime_catalog();
+    let entry = catalog
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some(runtime_id))
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "unknown agent runtime `{runtime_id}`. Available: {}",
+                catalog
+                    .iter()
+                    .filter_map(|entry| entry["id"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+    if entry["available"].as_bool() == Some(false) {
+        let reason = entry["unavailable_reason"]
+            .as_str()
+            .unwrap_or("that runtime is not available on this machine");
+        return Err(ApiError::bad_request(format!(
+            "cannot default to agent runtime `{runtime_id}`: {reason}"
+        )));
+    }
+    state
+        .db
+        .set_application_preference(
+            AGENT_PREFERENCE_KEY,
+            &json!({ "default_runtime_id": runtime_id }),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "default_runtime_id": runtime_id })))
+}
+
+/// Locate a system `omp` binary for the fuller Oh My Pi stock runtime.
+fn detect_omp_binary() -> Option<PathBuf> {
+    let override_path = std::env::var_os("BRAZIER_OMP_PATH")
+        .or_else(|| std::env::var_os("OMP_PATH"));
+    if let Some(path) = override_path {
+        let candidate = PathBuf::from(path);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path_var) {
+        for name in ["omp", "omp.exe"] {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn agent_runtime_catalog() -> Vec<Value> {
+    let omp_path = detect_omp_binary();
+    let omp_available = omp_path.is_some();
+    vec![
+        json!({
+            "id": crate::agent_types::AGENT_RUNTIME_PI,
+            "name": "Pi",
+            "adapter_api_version": 1,
+            "available": true,
+            "trust": "broker",
+            "capabilities": {
+                "streaming": true,
+                "tool_calls": true,
+                "compaction": true,
+                "cancellation": true,
+                "session_restore": true,
+            }
+        }),
+        json!({
+            "id": crate::agent_types::AGENT_RUNTIME_OMP,
+            "name": "Oh My Pi",
+            "adapter_api_version": 1,
+            "available": omp_available,
+            "trust": "privileged_harness",
+            "binary_path": omp_path.map(|path| path.display().to_string()),
+            "unavailable_reason": if omp_available {
+                Value::Null
+            } else {
+                json!("Install Oh My Pi (`omp`) on PATH, or set BRAZIER_OMP_PATH. See https://omp.sh/")
+            },
+            "capabilities": {
+                "streaming": true,
+                "tool_calls": true,
+                "compaction": true,
+                "cancellation": true,
+                "session_restore": true,
+            }
+        }),
+    ]
+}
+
+fn resolve_agent_runtime_id(requested: Option<String>, default_id: &str) -> String {
+    requested
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default_id.to_owned())
+}
+
+fn validate_agent_runtime_id(runtime_id: &str) -> ApiResult<Value> {
+    let catalog = agent_runtime_catalog();
+    let entry = catalog
+        .into_iter()
+        .find(|entry| entry["id"].as_str() == Some(runtime_id))
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "unknown agent runtime `{runtime_id}`. Available: pi, omp"
+            ))
+        })?;
+    if entry["available"].as_bool() == Some(false) {
+        let reason = entry["unavailable_reason"]
+            .as_str()
+            .unwrap_or("that runtime is not available on this machine");
+        return Err(ApiError::bad_request(format!(
+            "agent runtime `{runtime_id}` is unavailable: {reason}"
+        )));
+    }
+    Ok(entry)
 }
 
 async fn update_runtime_settings(
@@ -5027,25 +5187,15 @@ async fn responses(
 /// Sandbox backend, permission modes, and runtime descriptors for Agent mode.
 async fn agent_capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let sandbox = state.agent_broker.capabilities();
+    let default_runtime_id = load_default_agent_runtime_id(&state).await?;
     Ok(Json(json!({
         "schema_version": 1,
         "sandbox": sandbox,
         "permission_modes": ["ask", "sandbox-only", "skip-permissions"],
-        "runtimes": [{
-            "id": "pi",
-            "name": "Pi",
-            // The daemon knows which adapter API it speaks, not which package
-            // version the agent worker loaded; the worker reports that itself
-            // when it comes up.
-            "adapter_api_version": 1,
-            "capabilities": {
-                "streaming": true,
-                "tool_calls": true,
-                "compaction": true,
-                "cancellation": true,
-                "session_restore": true,
-            }
-        }],
+        // The daemon advertises stock adapters and whether they can run here.
+        // Package versions are reported by the agent worker when it loads them.
+        "runtimes": agent_runtime_catalog(),
+        "default_runtime_id": default_runtime_id,
         "tool_output_limit_chars": 24_000,
     })))
 }
@@ -5144,6 +5294,20 @@ async fn create_agent_session(
     if let Some(enabled) = request.enabled_tools.as_deref() {
         validate_agent_enabled_tools(&state.data_dir, enabled)?;
     }
+    let default_runtime_id = load_default_agent_runtime_id(&state).await?;
+    let runtime_id = resolve_agent_runtime_id(request.runtime_id.take(), &default_runtime_id);
+    validate_agent_runtime_id(&runtime_id)?;
+    if runtime_id == crate::agent_types::AGENT_RUNTIME_OMP
+        && matches!(
+            request.permission_mode,
+            Some(crate::agent_types::AgentPermissionMode::SandboxOnly)
+        )
+    {
+        return Err(ApiError::bad_request(
+            "Oh My Pi does not use Brazier's OS sandbox. Choose Ask or Skip permissions, or use the Pi runtime.",
+        ));
+    }
+    request.runtime_id = Some(runtime_id);
     let mut session = state
         .db
         .create_agent_session(request)
@@ -6725,6 +6889,56 @@ mod tests {
                 .unwrap()
                 .contains(&json!("skip-permissions"))
         );
+        let runtimes = capabilities["runtimes"].as_array().unwrap();
+        assert!(runtimes.iter().any(|entry| entry["id"] == "pi"));
+        assert!(runtimes.iter().any(|entry| entry["id"] == "omp"));
+        assert_eq!(capabilities["default_runtime_id"], "pi");
+        let pi = runtimes.iter().find(|entry| entry["id"] == "pi").unwrap();
+        assert_eq!(pi["available"], true);
+        assert_eq!(pi["trust"], "broker");
+    }
+
+    #[tokio::test]
+    async fn agent_default_runtime_preference_is_persisted() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (status, initial) = get_request(&app, "/api/v1/preferences/agent").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(initial["default_runtime_id"], "pi");
+
+        // OMP may be unavailable in CI; selecting an unavailable runtime must fail.
+        let (status, body) = json_request(
+            &app,
+            "PUT",
+            "/api/v1/preferences/agent",
+            json!({ "default_runtime_id": "omp" }),
+        )
+        .await;
+        let omp_available = get_request(&app, "/api/v1/agent/capabilities")
+            .await
+            .1["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "omp")
+            .unwrap()["available"]
+            .as_bool()
+            .unwrap();
+        if omp_available {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["default_runtime_id"], "omp");
+        } else {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        }
+
+        let (status, rejected) = json_request(
+            &app,
+            "PUT",
+            "/api/v1/preferences/agent",
+            json!({ "default_runtime_id": "nope" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
     }
 
     #[tokio::test]
