@@ -596,6 +596,9 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [promptLoading, setPromptLoading] = useState(false)
   const [promptSaving, setPromptSaving] = useState(false)
   const [pendingEnabledTools, setPendingEnabledTools] = useState<string[] | null>(null)
+  /** Permission mode for the next task, until a session exists to own it. */
+  const [pendingPermissionMode, setPendingPermissionMode] =
+    useState<AgentPermissionMode>('ask')
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false)
   const [toolDraft, setToolDraft] = useState<string[]>([])
   const [toolsSaving, setToolsSaving] = useState(false)
@@ -617,7 +620,8 @@ export function AgentMode(props: Props): React.JSX.Element {
   const worktree = sessionWorktree(session)
   const workspaceSettingsPath = worktree?.source_path ?? workspace
   const confinedToWorktree = Boolean(worktree) || (!session && pendingConfineToWorktree)
-  const permissionMode: AgentPermissionMode = session?.permission_mode ?? 'ask'
+  const permissionMode: AgentPermissionMode =
+    session?.permission_mode ?? pendingPermissionMode
   const availableToolNames = useMemo(() => tools.map((tool) => tool.name), [tools])
   const enabledToolNames = useMemo(() => {
     const selected = session?.enabled_tools ?? pendingEnabledTools ?? availableToolNames
@@ -1023,14 +1027,18 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   async function changePermissionMode(mode: AgentPermissionMode): Promise<void> {
     setModeMenuOpen(false)
-    if (!session) return
     if (mode === 'sandbox-only' && !capabilities?.sandbox.sandboxed_execution) {
       onError('Sandbox-only mode is unavailable because this host has no OS sandbox for agent commands.')
+      return
+    }
+    if (!session) {
+      setPendingPermissionMode(mode)
       return
     }
     try {
       const updated = await updateAgentSession(session.id, { permission_mode: mode })
       setSession(updated)
+      setPendingPermissionMode(mode)
       setSessions((current) =>
         current.map((entry) => (entry.id === updated.id ? updated : entry))
       )
@@ -1080,6 +1088,7 @@ export function AgentMode(props: Props): React.JSX.Element {
           title: text.slice(0, 60),
           workspace_path: workspace,
           model: props.modelId,
+          permission_mode: pendingPermissionMode,
           ...(pendingEnabledTools ? { enabled_tools: pendingEnabledTools } : {}),
           confine_to_worktree: requestedWorktree
         })
@@ -1260,6 +1269,7 @@ export function AgentMode(props: Props): React.JSX.Element {
       previousWorktree?.source_path ?? session?.workspace_path ?? pendingWorkspace
     const nextWorkspaceIsGit = Boolean(nextWorkspace && (previousWorktree || workspaceIsGit))
     const nextEnabledTools = session?.enabled_tools ?? pendingEnabledTools
+    const nextPermissionMode = session?.permission_mode ?? pendingPermissionMode
     if (session) {
       await window.brazier.agent.closeSession(session.id).catch(() => undefined)
     }
@@ -1286,6 +1296,7 @@ export function AgentMode(props: Props): React.JSX.Element {
     setPendingWorkspace(nextWorkspace ?? null)
     setWorkspaceIsGit(nextWorkspaceIsGit)
     setPendingEnabledTools(nextEnabledTools ? [...nextEnabledTools] : null)
+    setPendingPermissionMode(nextPermissionMode)
     setPendingConfineToWorktree(nextWorkspaceIsGit)
   }
 
@@ -1499,7 +1510,15 @@ export function AgentMode(props: Props): React.JSX.Element {
         </div>
         {sandbox && <SandboxBadge sandbox={sandbox} />}
         <div className="agent-mode-select">
-          <button type="button" onClick={() => setModeMenuOpen((open) => !open)} disabled={!session}>
+          <button
+            type="button"
+            onClick={() => setModeMenuOpen((open) => !open)}
+            title={
+              session
+                ? 'Permission mode for this task'
+                : 'Permission mode for the next task'
+            }
+          >
             <ShieldCheck size={14} />
             {PERMISSION_LABELS[permissionMode].title}
             <ChevronDown size={13} />
