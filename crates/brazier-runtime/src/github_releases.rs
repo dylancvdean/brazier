@@ -5,8 +5,9 @@
 //! a few hundred milliseconds. Releases land every few days at most, so they
 //! are cached on disk (surviving daemon restarts) and served stale while a
 //! refresh runs in the background — status views never wait on the network.
-//! Installs still resolve their asset from the same cache, refreshing it first
-//! when the entry has aged out.
+//! Installs and updates always re-fetch: a release can appear on `/latest`
+//! before every asset has finished uploading, so a within-TTL cache may be
+//! missing the binary the user just asked to install.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -18,8 +19,8 @@ use std::{
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-/// How long a cached release is considered current. Upstream tags a new
-/// release every few days, and installs re-check before downloading.
+/// How long a cached release is considered current for status views.
+/// Install/update paths always re-fetch regardless of this TTL.
 const CACHE_TTL: Duration = Duration::from_secs(2 * 24 * 60 * 60);
 const CACHE_FILE: &str = "github-releases.json";
 
@@ -173,25 +174,31 @@ async fn fetch(client: &reqwest::Client, url: &str, user_agent: &str) -> anyhow:
     Ok(release)
 }
 
-/// Latest release for a repository, waiting on the network only when nothing
-/// current is cached. Use this on paths that need a trustworthy answer, such
-/// as resolving the asset for an install.
+/// Latest release for a repository, always contacting GitHub.
+///
+/// Use this on install/update paths that need the current asset list. Status
+/// views should keep using [`cached_or_refresh`] so opening Manage stays
+/// instant. Falls back to a cached copy only when the network request fails.
 pub async fn latest_release(
     client: &reqwest::Client,
     url: &str,
     user_agent: &str,
 ) -> anyhow::Result<Release> {
-    if let Some(entry) = entry(url) {
-        if !entry.is_stale() {
-            return Ok(entry.release);
+    match fetch(client, url, user_agent).await {
+        Ok(release) => Ok(release),
+        Err(error) => {
+            if let Some(entry) = entry(url) {
+                tracing::warn!(
+                    %url,
+                    %error,
+                    "using cached GitHub release after fetch failure"
+                );
+                Ok(entry.release)
+            } else {
+                Err(error)
+            }
         }
-        // Prefer a stale answer over an error when the network is unavailable.
-        return match fetch(client, url, user_agent).await {
-            Ok(release) => Ok(release),
-            Err(_) => Ok(entry.release),
-        };
     }
-    fetch(client, url, user_agent).await
 }
 
 /// Whatever is cached right now, kicking off a background refresh when the
