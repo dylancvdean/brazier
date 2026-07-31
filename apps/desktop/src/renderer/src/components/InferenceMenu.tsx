@@ -354,8 +354,9 @@ export function InferenceMenu({
               <span>
                 Drop reasoning between turns
                 <small>
-                  Omit prior-turn thinking from the next request to save context. Leave off to keep
-                  reasoning in model context (default).
+                  Applies to chat and agent on the next turn. Omits prior-turn thinking from the
+                  model request to save context; leave off to keep it (default). Reasoning still
+                  shows in the UI either way.
                 </small>
               </span>
             </label>

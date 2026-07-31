@@ -400,6 +400,8 @@ export interface AgentSession {
    * the history shown in the UI.
    */
   rehydrate(messages: AgentMessage[], systemPrompt?: string): void
+  /** Reload live inference prefs (e.g. drop_reasoning_between_turns) from the daemon. */
+  refreshInferencePrefs(): Promise<void>
   dispose(): Promise<void>
 }
 

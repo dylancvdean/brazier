@@ -90,6 +90,45 @@ describe('messagesForCompletion', () => {
     })
     expect(payload[1]).toMatchObject({ role: 'tool', tool_call_id: 'call_1' })
   })
+
+  it('drops prior-turn reasoning when asked, but keeps current-turn tool reasoning', () => {
+    const payload = messagesForCompletion(
+      [
+        message({
+          id: 'a1',
+          content: 'first answer',
+          metadata: { reasoning_content: 'old thought' }
+        }),
+        message({ id: 'u2', role: 'user', content: 'next' }),
+        message({
+          id: 'a2',
+          content: '',
+          tool_calls: [
+            {
+              id: 'call_1',
+              type: 'function',
+              function: { name: 'run_javascript', arguments: '{}' }
+            }
+          ],
+          metadata: { reasoning_content: 'current thought' }
+        }),
+        message({
+          id: 'tool-1',
+          role: 'tool',
+          tool_call_id: 'call_1',
+          content: '1'
+        })
+      ],
+      { dropReasoningBetweenTurns: true }
+    )
+
+    expect(payload[0]).toEqual({ role: 'assistant', content: 'first answer' })
+    expect(payload[1]).toEqual({ role: 'user', content: 'next' })
+    expect(payload[2]).toMatchObject({
+      role: 'assistant',
+      reasoning_content: 'current thought'
+    })
+  })
 })
 
 describe('reasoningAfterTranscriptBoundary', () => {

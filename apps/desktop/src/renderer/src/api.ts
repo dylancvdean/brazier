@@ -675,6 +675,8 @@ export async function streamCompletion(
     onReasoning?: (token: string) => void
     onLoad?: (event: { phase: string; message: string }) => void
     onPrefill?: (event: PrefillProgress) => void
+    /** When set, overrides a live settings fetch for drop_reasoning_between_turns. */
+    dropReasoningBetweenTurns?: boolean
   }
 ): Promise<StreamCompletionResult> {
   const daemon = await connection()
@@ -684,6 +686,11 @@ export async function streamCompletion(
       : options?.toolChoice
         ? options.toolChoice
         : undefined
+  const dropReasoningBetweenTurns =
+    options?.dropReasoningBetweenTurns ??
+    (await runtimeSettings()
+      .then((settings) => settings.drop_reasoning_between_turns ?? false)
+      .catch(() => false))
   const response = await fetch(`${daemon.address}/v1/chat/completions`, {
     method: 'POST',
     signal,
@@ -700,7 +707,7 @@ export async function streamCompletion(
         ? { builtin_tool_names: options.builtinToolNames }
         : {}),
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
-      messages: messagesForCompletion(messages)
+      messages: messagesForCompletion(messages, { dropReasoningBetweenTurns })
     })
   })
   if (!response.ok || !response.body) {
@@ -2115,7 +2122,18 @@ function reasoningFromMessage(message: Message): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
 }
 
-export function messagesForCompletion(messages: Message[]): OpenAiChatMessage[] {
+export type MessagesForCompletionOptions = {
+  /**
+   * When true, omit reasoning_content from assistant messages before the latest
+   * user turn. Current-turn tool-round reasoning is kept for Jinja.
+   */
+  dropReasoningBetweenTurns?: boolean
+}
+
+export function messagesForCompletion(
+  messages: Message[],
+  options?: MessagesForCompletionOptions
+): OpenAiChatMessage[] {
   const payload: OpenAiChatMessage[] = []
   for (const message of messages) {
     // This assistant-role message exists only to place generated media in the
@@ -2182,6 +2200,20 @@ export function messagesForCompletion(messages: Message[]): OpenAiChatMessage[] 
       content: messageContentForApi(message.content),
       ...(reasoning ? { reasoning_content: reasoning } : {})
     })
+  }
+  if (options?.dropReasoningBetweenTurns) {
+    let lastUser = -1
+    for (let index = 0; index < payload.length; index += 1) {
+      if (payload[index]?.role === 'user') lastUser = index
+    }
+    if (lastUser >= 0) {
+      for (let index = 0; index <= lastUser; index += 1) {
+        const entry = payload[index]
+        if (entry && 'reasoning_content' in entry) {
+          delete entry.reasoning_content
+        }
+      }
+    }
   }
   return payload
 }

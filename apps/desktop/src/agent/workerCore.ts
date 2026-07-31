@@ -173,6 +173,7 @@ export class AgentWorkerCore {
     const messages = remote.messages.map((record) => record.payload)
     if (existing) {
       existing.rehydrate(messages, prompt.system_prompt)
+      await existing.refreshInferencePrefs()
       return existing
     }
     const session = await this.runtime.createSession({
@@ -188,6 +189,7 @@ export class AgentWorkerCore {
       messages,
       capabilities: inferModelCapabilities(remote.session.model)
     })
+    await session.refreshInferencePrefs()
     this.sessions.set(sessionId, session)
     return session
   }

@@ -98,11 +98,7 @@ function thinkingLevelFor(reasoningEnabled: boolean): ThinkingLevel {
 }
 
 /** Convert an application message into the shape Pi hands to a model. */
-function toPiMessage(
-  message: AgentMessage,
-  options?: { includeReasoning?: boolean }
-): PiMessage | undefined {
-  const includeReasoning = options?.includeReasoning ?? true
+function toPiMessage(message: AgentMessage, modelId: string): PiMessage | undefined {
   switch (message.role) {
     case 'user':
       return {
@@ -120,10 +116,16 @@ function toPiMessage(
       }
     case 'assistant': {
       const content: AssistantMessage['content'] = []
-      // Restore prior-turn thinking so resumed sessions keep model context,
-      // unless the user opted to drop reasoning between turns.
-      if (includeReasoning && message.reasoning?.trim()) {
-        content.push({ type: 'thinking', thinking: message.reasoning })
+      // Always keep thinking in the transcript. Whether it is sent on the next
+      // turn is decided at request time from the live drop_reasoning setting.
+      // thinkingSignature must be reasoning_content so openai-completions emits
+      // it as that field (rather than dropping or inlining it as plain text).
+      if (message.reasoning?.trim()) {
+        content.push({
+          type: 'thinking',
+          thinking: message.reasoning,
+          thinkingSignature: 'reasoning_content'
+        })
       }
       if (message.text) content.push({ type: 'text', text: message.text })
       for (const call of message.toolCalls ?? []) {
@@ -139,7 +141,9 @@ function toPiMessage(
         content,
         api: 'openai-completions',
         provider: 'brazier',
-        model: 'restored',
+        // Must match the active model id so Pi keeps thinking blocks (same-model
+        // path) instead of converting them to plain text.
+        model: modelId,
         usage: {
           input: 0,
           output: 0,
@@ -169,11 +173,26 @@ function toPiMessage(
   }
 }
 
-/** Drop thinking parts when prior-turn reasoning should not re-enter context. */
+/** Drop thinking parts from one message. */
 function stripThinkingParts(message: PiMessage): PiMessage {
   if (message.role !== 'assistant' || !Array.isArray(message.content)) return message
   const content = message.content.filter((part) => part.type !== 'thinking')
   return { ...message, content }
+}
+
+/**
+ * Omit thinking from turns before the latest user message. Matches the daemon's
+ * drop_reasoning_between_turns rule so in-turn tool rounds still keep thinking.
+ */
+function stripPriorTurnThinking(messages: PiMessage[]): PiMessage[] {
+  let lastUser = -1
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]?.role === 'user') lastUser = index
+  }
+  if (lastUser < 0) return messages
+  return messages.map((message, index) =>
+    index <= lastUser ? stripThinkingParts(message) : message
+  )
 }
 
 /** Text of an assistant message, ignoring thinking and tool calls. */
@@ -329,8 +348,9 @@ class PiAgentSession implements AgentSession {
   ) => Promise<ToolExecutionOutcome>
   private readonly cancelChildren: () => Promise<void>
   private readonly onDisposed: () => void
-  private readonly reasoningEnabled: boolean
-  private readonly dropReasoningBetweenTurns: boolean
+  private reasoningEnabled: boolean
+  /** Live flag: refreshed from runtime settings at the start of every run. */
+  private dropReasoningBetweenTurns: boolean
   private toolsThisTurn = 0
   private queue?: EventQueue
   private currentRunId?: string
@@ -382,7 +402,7 @@ class PiAgentSession implements AgentSession {
       this.spawnSubagent(this, request)
     )
 
-    const includeReasoning = !options.dropReasoningBetweenTurns
+    const modelId = options.state.model.id
     this.agent = new Agent({
       // Every model request goes to the daemon's OpenAI-compatible endpoint,
       // so local and remote models both work with no provider configuration.
@@ -409,10 +429,11 @@ class PiAgentSession implements AgentSession {
       // The transcript only ever holds LLM messages, because the application
       // converts its own shapes before they reach the agent. Anything else a
       // runtime version adds for its own bookkeeping is dropped here rather
-      // than sent to a model.
+      // than sent to a model. Drop-reasoning is applied here from the live flag
+      // so toggling the setting takes effect on the next model call.
       convertToLlm: (messages) => {
         const llm = messages.filter(isLlmMessage)
-        return options.dropReasoningBetweenTurns ? llm.map(stripThinkingParts) : llm
+        return this.dropReasoningBetweenTurns ? stripPriorTurnThinking(llm) : llm
       },
       getApiKey: () => options.broker.apiKey(),
       sessionId: options.state.id,
@@ -427,7 +448,7 @@ class PiAgentSession implements AgentSession {
         thinkingLevel: thinkingLevelFor(options.reasoningEnabled),
         tools: this.buildTools(),
         messages: options.state.messages
-          .map((message) => toPiMessage(message, { includeReasoning }))
+          .map((message) => toPiMessage(message, modelId))
           .filter((message): message is PiMessage => Boolean(message))
       }
     })
@@ -438,18 +459,39 @@ class PiAgentSession implements AgentSession {
   /**
    * Replace the in-memory transcript with what the daemon stored. Used when
    * reopening a session so the UI history and the model's context stay aligned.
+   * Reasoning stays in the transcript; send-time filtering uses the live setting.
    */
   rehydrate(messages: AgentMessage[], systemPrompt?: string): void {
     if (this.disposed) {
       throw new Error('Cannot rehydrate a disposed agent session.')
     }
-    const includeReasoning = !this.dropReasoningBetweenTurns
     this.state = { ...this.state, messages }
+    const modelId = this.state.model.id
     this.agent.state.messages = messages
-      .map((message) => toPiMessage(message, { includeReasoning }))
+      .map((message) => toPiMessage(message, modelId))
       .filter((message): message is PiMessage => Boolean(message))
     if (systemPrompt !== undefined) {
       this.agent.state.systemPrompt = systemPrompt
+    }
+  }
+
+  /** Pull the current drop-reasoning / thinking prefs (next model call uses them). */
+  async refreshInferencePrefs(): Promise<void> {
+    try {
+      const settings = await this.broker.runtimeInferenceSettings()
+      this.dropReasoningBetweenTurns = settings.drop_reasoning_between_turns ?? false
+      const reasoningEnabled = settings.enable_reasoning ?? this.reasoningEnabled
+      if (reasoningEnabled !== this.reasoningEnabled) {
+        this.reasoningEnabled = reasoningEnabled
+        this.agent.state.model = piModel(
+          this.state.model,
+          this.broker.openAiBaseUrl(),
+          reasoningEnabled
+        )
+        this.agent.state.thinkingLevel = thinkingLevelFor(reasoningEnabled)
+      }
+    } catch {
+      // Keep the last known prefs if the daemon is briefly unreachable.
     }
   }
 
@@ -631,8 +673,10 @@ class PiAgentSession implements AgentSession {
     this.emit({ ...this.base('run-started') } as AgentEvent)
     void this.setRunStatus('running')
 
-    const promise = this.agent
-      .prompt(input.text)
+    // Refresh drop-reasoning (and thinking enablement) so Inference menu changes
+    // apply on the next turn without reopening the session.
+    const promise = this.refreshInferencePrefs()
+      .then(() => this.agent.prompt(input.text))
       .then(async () => {
         const error = this.agent.state.errorMessage
         if (error) {
@@ -719,9 +763,9 @@ class PiAgentSession implements AgentSession {
     }
     const next = dropped.length > 0 ? [summaryMessage, ...keep] : messages
     this.state = { ...this.state, messages: next }
-    const includeReasoning = !this.dropReasoningBetweenTurns
+    const modelId = this.state.model.id
     this.agent.state.messages = next
-      .map((message) => toPiMessage(message, { includeReasoning }))
+      .map((message) => toPiMessage(message, modelId))
       .filter((message): message is PiMessage => Boolean(message))
     await this.enqueuePersistence(() => this.broker.appendMessages(this.id, next, true))
 
