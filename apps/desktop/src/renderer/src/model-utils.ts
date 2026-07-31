@@ -78,6 +78,27 @@ export function isVoiceModel(model: LocalModel | undefined): boolean {
 }
 
 /**
+ * Chat-class models that can drive Computer Use (screenshot → action).
+ *
+ * True when the daemon advertises `capabilities.computer_use`, or when the
+ * model accepts image input and its id/name looks like Fara / computer-use.
+ */
+export function isComputerUseModel(model: LocalModel | undefined): boolean {
+  if (!model || !isChatModel(model)) return false
+  if (model.capabilities?.computer_use) return true
+  const hasImage = Boolean(model.capabilities?.input_modalities?.includes('image'))
+  if (!hasImage) return false
+  const needle = `${model.id} ${model.library_label ?? ''}`.toLowerCase()
+  return (
+    needle.includes('fara') ||
+    needle.includes('computer-use') ||
+    needle.includes('computer_use') ||
+    needle.includes('cua-') ||
+    needle.includes('-cua')
+  )
+}
+
+/**
  * Which family of advanced settings a model takes.
  *
  * Mirrors the daemon's own classification, which is the one that decides what

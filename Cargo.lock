@@ -232,6 +232,7 @@ name = "brazier-agent"
 version = "0.2.9-beta.32"
 dependencies = [
  "anyhow",
+ "base64",
  "brazier-protocol",
  "brazier-runtime",
  "brazier-storage",

@@ -308,6 +308,36 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/preferences/welcome",
             get(welcome_preference).put(update_welcome_preference),
         )
+        .route(
+            "/api/v1/preferences/workspace",
+            get(workspace_preference).put(update_workspace_preference),
+        )
+        .route(
+            "/api/v1/computer/permissions",
+            get(computer_os_permissions),
+        )
+        .route(
+            "/api/v1/computer/sessions",
+            get(list_computer_sessions).post(create_computer_session),
+        )
+        .route(
+            "/api/v1/computer/sessions/{id}",
+            get(get_computer_session).delete(delete_computer_session),
+        )
+        .route(
+            "/api/v1/computer/sessions/{id}/steps",
+            get(list_computer_steps).post(append_computer_step),
+        )
+        .route(
+            "/api/v1/computer/sessions/{id}/screenshot",
+            post(computer_screenshot),
+        )
+        .route("/api/v1/computer/exec", post(computer_exec_action))
+        .route(
+            "/api/v1/computer/approvals/{id}",
+            post(decide_computer_approval),
+        )
+        .route("/api/v1/computer/parse-fara", post(parse_fara_output))
         .route("/api/v1/hardware", get(hardware))
         .route("/api/v1/toolchain", get(toolchain_status))
         .route("/api/v1/engines/llama.cpp/ensure", post(ensure_llama))
@@ -1286,6 +1316,213 @@ async fn update_welcome_preference(
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(json!({ "completed": preference.completed })))
+}
+
+const WORKSPACE_PREFERENCE_KEY: &str = "workspace";
+
+async fn workspace_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let modes = state
+        .db
+        .application_preference(WORKSPACE_PREFERENCE_KEY)
+        .await
+        .map_err(ApiError::internal)?
+        .and_then(|value| {
+            serde_json::from_value::<crate::computer_types::WorkspaceModesPreference>(
+                value
+                    .get("modes")
+                    .cloned()
+                    .unwrap_or(value),
+            )
+            .ok()
+        })
+        .unwrap_or_default()
+        .normalize();
+    Ok(Json(json!({ "modes": modes })))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateWorkspacePreference {
+    modes: crate::computer_types::WorkspaceModesPreference,
+}
+
+async fn update_workspace_preference(
+    State(state): State<AppState>,
+    Json(preference): Json<UpdateWorkspacePreference>,
+) -> ApiResult<Json<Value>> {
+    let modes = preference.modes.normalize();
+    state
+        .db
+        .set_application_preference(WORKSPACE_PREFERENCE_KEY, &json!({ "modes": modes }))
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "modes": modes })))
+}
+
+async fn computer_os_permissions(State(state): State<AppState>) -> Json<Value> {
+    Json(json!(state.computer_broker.os_permissions()))
+}
+
+async fn list_computer_sessions(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "sessions": state.computer_broker.list_sessions().await }))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateComputerSession {
+    title: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    model_id: Option<String>,
+    permission_mode: Option<String>,
+    viewport: Option<crate::computer_types::ComputerViewport>,
+}
+
+async fn create_computer_session(
+    State(state): State<AppState>,
+    Json(body): Json<CreateComputerSession>,
+) -> ApiResult<Json<Value>> {
+    let target = match body.target.as_deref().unwrap_or("browser") {
+        "desktop" => crate::computer_types::ComputerTarget::Desktop,
+        _ => crate::computer_types::ComputerTarget::Browser,
+    };
+    let permission_mode = match body.permission_mode.as_deref().unwrap_or("ask") {
+        "browser-only" => crate::computer_types::ComputerPermissionMode::BrowserOnly,
+        "skip-permissions" => crate::computer_types::ComputerPermissionMode::SkipPermissions,
+        _ => crate::computer_types::ComputerPermissionMode::Ask,
+    };
+    let session = state
+        .computer_broker
+        .create_session(
+            body.title,
+            target,
+            body.model_id,
+            permission_mode,
+            body.viewport,
+        )
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(session)))
+}
+
+async fn get_computer_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let session = state
+        .computer_broker
+        .get_session(&id)
+        .await
+        .map_err(ApiError::not_found)?;
+    Ok(Json(json!(session)))
+}
+
+async fn delete_computer_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state
+        .computer_broker
+        .delete_session(&id)
+        .await
+        .map_err(ApiError::not_found)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_computer_steps(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let steps = state
+        .computer_broker
+        .list_steps(&id)
+        .await
+        .map_err(ApiError::not_found)?;
+    Ok(Json(json!({ "steps": steps })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AppendComputerStep {
+    role: String,
+    content: String,
+    thought: Option<String>,
+    action: Option<crate::computer_types::ComputerAction>,
+    result: Option<crate::computer_types::ComputerActionResult>,
+}
+
+async fn append_computer_step(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AppendComputerStep>,
+) -> ApiResult<Json<Value>> {
+    let step = state
+        .computer_broker
+        .append_step(
+            &id,
+            &body.role,
+            &body.content,
+            body.thought,
+            body.action,
+            body.result,
+        )
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(step)))
+}
+
+async fn computer_screenshot(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let result = state
+        .computer_broker
+        .screenshot(&id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(result)))
+}
+
+async fn computer_exec_action(
+    State(state): State<AppState>,
+    Json(body): Json<crate::computer_exec::ComputerExecRequest>,
+) -> ApiResult<Json<Value>> {
+    let result = state
+        .computer_broker
+        .execute(body)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(result)))
+}
+
+#[derive(Debug, Deserialize)]
+struct DecideComputerApproval {
+    approve: bool,
+}
+
+async fn decide_computer_approval(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<DecideComputerApproval>,
+) -> ApiResult<Json<Value>> {
+    let result = state
+        .computer_broker
+        .decide_approval(&id, body.approve)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "result": result })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ParseFaraRequest {
+    text: String,
+}
+
+async fn parse_fara_output(Json(body): Json<ParseFaraRequest>) -> ApiResult<Json<Value>> {
+    let parsed = crate::computer_fara::parse_fara_output(&body.text)
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "thought": parsed.thought,
+        "actions": parsed.actions,
+        "raw_tool_calls": parsed.raw_tool_calls,
+    })))
 }
 
 async fn update_runtime_settings(
@@ -4143,6 +4380,7 @@ async fn audio_transcriptions(
         reasoning_modes: Vec::new(),
         harmony: false,
         audio_input: None,
+        computer_use: false,
     };
     let ctx = media::MediaContext {
         data_dir: &state.data_dir,
@@ -6162,6 +6400,7 @@ mod tests {
             download_queue,
             runtimes_cache: Arc::new(Mutex::new(None)),
             agent_broker: Arc::new(crate::agent_exec::AgentBroker::new()),
+            computer_broker: Arc::new(crate::computer_exec::ComputerBroker::new()),
         }
     }
 
@@ -6484,6 +6723,81 @@ mod tests {
 
         let (_, reloaded) = get_request(&app, "/api/v1/preferences/welcome").await;
         assert_eq!(reloaded["completed"], true);
+    }
+
+    #[tokio::test]
+    async fn workspace_modes_preference_round_trips() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+
+        let (status, initial) = get_request(&app, "/api/v1/preferences/workspace").await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["modes"]["chat"], true);
+        assert_eq!(initial["modes"]["computer"], false);
+
+        let (status, saved) = json_request(
+            &app,
+            "PUT",
+            "/api/v1/preferences/workspace",
+            json!({
+                "modes": {
+                    "chat": true,
+                    "agent": false,
+                    "generate": true,
+                    "voice": false,
+                    "computer": true
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["modes"]["computer"], true);
+        assert_eq!(saved["modes"]["agent"], false);
+
+        let (_, reloaded) = get_request(&app, "/api/v1/preferences/workspace").await;
+        assert_eq!(reloaded["modes"]["computer"], true);
+    }
+
+    #[tokio::test]
+    async fn computer_session_executes_browser_screenshot() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+
+        let (status, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/computer/sessions",
+            json!({ "title": "Browse", "target": "browser" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        let session_id = session["id"].as_str().unwrap();
+
+        let (status, result) = json_request(
+            &app,
+            "POST",
+            "/api/v1/computer/exec",
+            json!({
+                "session_id": session_id,
+                "action": { "type": "screenshot" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["status"], "ok");
+        assert!(result["screenshot_base64"].as_str().unwrap().len() > 10);
+
+        let (status, parsed) = json_request(
+            &app,
+            "POST",
+            "/api/v1/computer/parse-fara",
+            json!({
+                "text": "<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"visit_url\",\"url\":\"https://example.com\"}}</tool_call>"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["actions"][0]["type"], "visit_url");
     }
 
     async fn get_request(app: &Router, uri: &str) -> (StatusCode, Value) {

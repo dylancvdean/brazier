@@ -367,6 +367,7 @@ impl Runtime {
                 reasoning_modes: Vec::new(),
                 harmony: false,
                 audio_input: None,
+                computer_use: false,
             })
     }
 
@@ -416,6 +417,7 @@ impl Runtime {
                     reasoning_modes: Vec::new(),
                     harmony: false,
                     audio_input: None,
+                    computer_use: false,
                 },
                 size_bytes: None,
                 read_only: false,
@@ -1934,6 +1936,7 @@ impl Runtime {
                 reasoning_modes: Vec::new(),
                 harmony: false,
                 audio_input: None,
+                computer_use: false,
             });
         let whisper_binary = self.whisper.lock().await.binary.clone().or_else(|| {
             whisper::resolve_binary(&self.data_dir, settings.whisper_binary.as_deref())
@@ -2079,6 +2082,7 @@ impl Runtime {
                 reasoning_modes: Vec::new(),
                 harmony: false,
                 audio_input: None,
+                computer_use: false,
             });
         let whisper_binary = self.whisper.lock().await.binary.clone().or_else(|| {
             whisper::resolve_binary(&self.data_dir, settings.whisper_binary.as_deref())
@@ -2984,6 +2988,7 @@ mod tests {
             reasoning_modes: Vec::new(),
             harmony: false,
             audio_input: None,
+            computer_use: false,
         };
         let invocation = tools::ToolInvocation {
             call_id: "call-image".into(),
@@ -3037,6 +3042,7 @@ mod tests {
             reasoning_modes: Vec::new(),
             harmony: false,
             audio_input: None,
+            computer_use: false,
         };
         let invocation = tools::ToolInvocation {
             call_id: "call-image".into(),

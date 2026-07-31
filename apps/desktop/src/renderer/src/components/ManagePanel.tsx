@@ -10,6 +10,7 @@ import {
   Hammer,
   HardDrive,
   KeyRound,
+  LayoutDashboard,
   LoaderCircle,
   Plug,
   RefreshCw,
@@ -87,14 +88,19 @@ import {
   type VllmModelSettings,
   saveRuntimeSettings,
   saveSupportBundle,
+  saveWorkspacePreference,
   searchHub,
   setHuggingFaceToken,
   updateRecommendationState,
   queueModelDownload,
   refreshMcpServer,
   updateMcpServer,
+  fetchComputerPermissions,
+  fetchWorkspacePreference,
+  type OsPermissionStatus,
   type SdcppBundle,
-  type SdcppProposal
+  type SdcppProposal,
+  type WorkspaceModesPreference
 } from '../api'
 import { RecommendedModels } from './RecommendedModels'
 import { CapabilityIcons, capabilityFlags, hubCapabilityFlags } from './CapabilityIcons'
@@ -354,6 +360,7 @@ export type ManageSection =
   | 'server'
   | 'mcp'
   | 'remote'
+  | 'customization'
   | 'support'
 
 type ManagePanelProps = {
@@ -377,6 +384,8 @@ type ManagePanelProps = {
   profileCounts?: Record<string, number>
   pendingBuild?: { engine: BuildEngine; repository: string } | null
   onPendingBuildConsumed?: () => void
+  /** Fired after workspace mode toggles are saved. */
+  onWorkspaceModesChange?: (modes: WorkspaceModesPreference) => void
 }
 
 const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Element }> = [
@@ -388,6 +397,7 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'remote', label: 'Remote servers', icon: <Globe size={15} /> },
   { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> },
   { id: 'server', label: 'OpenAI server', icon: <KeyRound size={15} /> },
+  { id: 'customization', label: 'Customization', icon: <LayoutDashboard size={15} /> },
   { id: 'support', label: 'Support', icon: <ShieldAlert size={15} /> }
 ]
 
@@ -641,6 +651,9 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
             {props.section === 'remote' && <RemoteSection {...props} onError={setError} />}
             {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
             {props.section === 'server' && <ServerSection {...props} onError={setError} />}
+            {props.section === 'customization' && (
+              <CustomizationSection {...props} onError={setError} />
+            )}
             {props.section === 'support' && <SupportSection {...props} onError={setError} />}
           </div>
         </div>
@@ -650,6 +663,296 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
 }
 
 type SectionProps = ManagePanelProps & { onError: (message: string | null) => void }
+
+const DEFAULT_WORKSPACE_MODES: WorkspaceModesPreference = {
+  chat: true,
+  agent: true,
+  generate: true,
+  voice: true,
+  computer: false
+}
+
+const MODE_DESCRIPTIONS: Record<
+  keyof WorkspaceModesPreference,
+  { label: string; detail: string }
+> = {
+  chat: { label: 'Chat', detail: 'Private conversations with local chat models.' },
+  agent: { label: 'Agent', detail: 'Workspace tasks that edit files and run commands.' },
+  generate: { label: 'Generate', detail: 'Image and video generation with sd.cpp models.' },
+  voice: { label: 'Voice', detail: 'Realtime speech with PersonaPlex voice models.' },
+  computer: {
+    label: 'Computer',
+    detail: 'Screenshot-driven computer use with Fara-style action models.'
+  }
+}
+
+function permissionStateLabel(state: OsPermissionStatus['screen_capture']): string {
+  switch (state) {
+    case 'granted':
+      return 'Granted'
+    case 'missing':
+      return 'Missing'
+    case 'unsupported':
+      return 'Unsupported'
+    default:
+      return 'Unknown'
+  }
+}
+
+function CustomizationSection(props: SectionProps): React.JSX.Element {
+  const [modes, setModes] = useState<WorkspaceModesPreference>(DEFAULT_WORKSPACE_MODES)
+  const [modesLoading, setModesLoading] = useState(true)
+  const [savingModes, setSavingModes] = useState(false)
+  const [updateSettings, setUpdateSettings] = useState<{
+    supported: boolean
+    checkOnStartup: boolean
+    autoDownload: boolean
+  } | null>(null)
+  const [checkingUpdates, setCheckingUpdates] = useState(false)
+  const [permissions, setPermissions] = useState<OsPermissionStatus | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setModesLoading(true)
+    void fetchWorkspacePreference()
+      .then((result) => {
+        if (!cancelled) setModes(result.modes)
+      })
+      .catch((cause) => {
+        if (!cancelled) props.onError(errorText(cause))
+      })
+      .finally(() => {
+        if (!cancelled) setModesLoading(false)
+      })
+
+    const brazier = window.brazier as Window['brazier'] & {
+      getUpdateSettings?: () => Promise<{
+        supported: boolean
+        checkOnStartup: boolean
+        autoDownload: boolean
+      }>
+    }
+    void brazier.getUpdateSettings?.()
+      .then((settings) => {
+        if (!cancelled) setUpdateSettings(settings)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setUpdateSettings({ supported: false, checkOnStartup: true, autoDownload: false })
+        }
+      })
+
+    void fetchComputerPermissions()
+      .then((status) => {
+        if (!cancelled) setPermissions(status)
+      })
+      .catch(() => {
+        if (!cancelled) setPermissions(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+    // Load once when the section mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function toggleMode(key: keyof WorkspaceModesPreference, on: boolean): Promise<void> {
+    const next = { ...modes, [key]: on }
+    const enabled = (Object.keys(next) as Array<keyof WorkspaceModesPreference>).filter(
+      (mode) => next[mode]
+    )
+    if (enabled.length === 0) {
+      props.onError('Keep at least one workspace mode enabled.')
+      return
+    }
+    props.onError(null)
+    setModes(next)
+    setSavingModes(true)
+    try {
+      const saved = await saveWorkspacePreference(next)
+      setModes(saved.modes)
+      props.onWorkspaceModesChange?.(saved.modes)
+    } catch (cause) {
+      setModes(modes)
+      props.onError(errorText(cause))
+    } finally {
+      setSavingModes(false)
+    }
+  }
+
+  async function saveUpdates(patch: {
+    checkOnStartup?: boolean
+    autoDownload?: boolean
+  }): Promise<void> {
+    props.onError(null)
+    try {
+      const brazier = window.brazier as Window['brazier'] & {
+        saveUpdateSettings?: (settings: {
+          checkOnStartup?: boolean
+          autoDownload?: boolean
+        }) => Promise<{
+          supported: boolean
+          checkOnStartup: boolean
+          autoDownload: boolean
+        }>
+      }
+      if (!brazier.saveUpdateSettings) {
+        props.onError('Update settings are not available in this build.')
+        return
+      }
+      const saved = await brazier.saveUpdateSettings(patch)
+      setUpdateSettings(saved)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  async function checkUpdates(): Promise<void> {
+    setCheckingUpdates(true)
+    props.onError(null)
+    try {
+      const result = await window.brazier.checkForUpdates()
+      if (!result.supported) {
+        props.onError('App updates are not available for this installation.')
+      }
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setCheckingUpdates(false)
+    }
+  }
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>Customization</h2>
+        <p>Choose which workspace modes appear, how updates behave, and review OS permissions.</p>
+      </header>
+
+      <div className="settings-group">
+        <div className="section-label">Workspace modes</div>
+        <p className="model-help">
+          Hide modes you do not use. At least one mode must stay on.
+        </p>
+        {modesLoading ? (
+          <p className="model-help">Loading preferences…</p>
+        ) : (
+          <div className="toggle-list">
+            {(Object.keys(MODE_DESCRIPTIONS) as Array<keyof WorkspaceModesPreference>).map(
+              (key) => (
+                <label key={key}>
+                  <div>
+                    <strong>{MODE_DESCRIPTIONS[key].label}</strong>
+                    <span>{MODE_DESCRIPTIONS[key].detail}</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={modes[key]}
+                    disabled={savingModes}
+                    onChange={(event) => void toggleMode(key, event.target.checked)}
+                  />
+                </label>
+              )
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="settings-group">
+        <div className="section-label">App updates</div>
+        <p className="model-help">
+          Checks use the signed GitHub release feed. Downloads still ask before installing unless
+          you enable auto-download.
+        </p>
+        <div className="toggle-list">
+          <label>
+            <div>
+              <strong>Check on startup</strong>
+              <span>Look for a newer Brazier build when the app launches.</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={updateSettings?.checkOnStartup ?? true}
+              disabled={!updateSettings}
+              onChange={(event) => void saveUpdates({ checkOnStartup: event.target.checked })}
+            />
+          </label>
+          <label>
+            <div>
+              <strong>Auto-download updates</strong>
+              <span>Download signed updates without an extra confirmation prompt.</span>
+            </div>
+            <input
+              type="checkbox"
+              checked={updateSettings?.autoDownload ?? false}
+              disabled={!updateSettings}
+              onChange={(event) => void saveUpdates({ autoDownload: event.target.checked })}
+            />
+          </label>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
+          <button
+            type="button"
+            disabled={checkingUpdates || updateSettings?.supported === false}
+            onClick={() => void checkUpdates()}
+          >
+            {checkingUpdates ? (
+              <LoaderCircle className="spin" size={14} />
+            ) : (
+              <RefreshCw size={14} />
+            )}
+            {checkingUpdates ? 'Checking…' : 'Check for updates'}
+          </button>
+          {updateSettings && !updateSettings.supported ? (
+            <span className="model-help">Updates are disabled for this installation.</span>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="settings-group">
+        <div className="section-label">Computer Use permissions</div>
+        <p className="model-help">
+          Desktop capture and input injection status for Computer Use. Browser target does not need
+          these OS grants.
+        </p>
+        {permissions ? (
+          <dl className="customization-permissions">
+            <div>
+              <dt>Platform</dt>
+              <dd>
+                {permissions.platform}
+                {permissions.display_server ? ` · ${permissions.display_server}` : ''}
+              </dd>
+            </div>
+            <div>
+              <dt>Screen capture</dt>
+              <dd>{permissionStateLabel(permissions.screen_capture)}</dd>
+            </div>
+            <div>
+              <dt>Input injection</dt>
+              <dd>{permissionStateLabel(permissions.input_injection)}</dd>
+            </div>
+            {permissions.detail ? (
+              <div>
+                <dt>Detail</dt>
+                <dd>{permissions.detail}</dd>
+              </div>
+            ) : null}
+            {permissions.settings_hint ? (
+              <div>
+                <dt>Hint</dt>
+                <dd>{permissions.settings_hint}</dd>
+              </div>
+            ) : null}
+          </dl>
+        ) : (
+          <p className="model-help">Could not read OS permission status from the daemon.</p>
+        )}
+      </div>
+    </section>
+  )
+}
 
 function SupportSection(props: SectionProps): React.JSX.Element {
   const [saving, setSaving] = useState(false)

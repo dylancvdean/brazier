@@ -893,6 +893,7 @@ mod tests {
             reasoning_modes: Vec::new(),
             harmony: false,
             audio_input: None,
+            computer_use: false,
         };
         let ctx = MediaContext {
             data_dir: dir.path(),
@@ -943,6 +944,7 @@ mod tests {
             reasoning_modes: Vec::new(),
             harmony: false,
             audio_input: None,
+            computer_use: false,
         };
         let ctx = MediaContext {
             data_dir: dir.path(),
@@ -1002,6 +1004,7 @@ mod tests {
             reasoning_modes: Vec::new(),
             harmony: false,
             audio_input: None,
+            computer_use: false,
         };
         let ctx = MediaContext {
             data_dir: dir.path(),
@@ -1051,6 +1054,7 @@ mod tests {
             reasoning_modes: Vec::new(),
             harmony: false,
             audio_input: None,
+            computer_use: false,
         };
         let ctx = MediaContext {
             data_dir: dir.path(),

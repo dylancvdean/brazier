@@ -19,7 +19,8 @@ models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and
 | Feature | Status |
 | --- | --- |
 | Platforms | 🟨 Beta on macOS and Linux; |
-| Desktop app | ✅ Electron workspaces for chat, generation, voice, agents, and model management |
+| Desktop app | ✅ Electron workspaces for chat, generation, voice, agents, computer use, and model management |
+| Customization | ✅ Manage → Customization toggles workspace modes and app update preferences |
 | Engines | ✅ llama.cpp, MLX-LM/VLM, stable-diffusion.cpp, whisper.cpp, WhisperKit, Nemotron ASR, PersonaPlex, and remote OpenAI-compatible servers |
 | Custom engine builds | ✅ Build llama.cpp, MLX, whisper.cpp, stable-diffusion.cpp, and PersonaPlex forks from a repository URL on supported platforms |
 | Runtime management | ✅ Managed installs, source builds, system runtime discovery, activation, logs, and removal |
@@ -29,6 +30,7 @@ models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and
 | Tools and MCP | ✅ Built-in utilities, media generation, multi-round tool use, and custom stdio MCP servers |
 | Multimodal input | ✅ Image, audio, and sampled video input with capability-aware fallback |
 | Agent | 🟨 Sandboxed Pi core on macOS and Linux with brokered MCP tools; Windows has no agent sandbox |
+| Computer Use | 🟨 Browser-first observe–act mode with Fara1.5 adapters; desktop OS control probes X11/Wayland/macOS and fails closed |
 | Media generation | 🟨 Curated image/video models and managed runtimes; backend reliability varies and AMD APU Vulkan support is experimental |
 | Speech recognition | ✅ whisper.cpp, WhisperKit, and Nemotron streaming ASR |
 | Multi-GPU | 🟨 Manual llama.cpp GPU splits are supported; automatic and cross-engine placement are not |

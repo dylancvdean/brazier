@@ -7,7 +7,12 @@ import { join, resolve } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 
 import { AgentSupervisor, registerAgentIpc } from './agent'
-import { startUpdates, type UpdateCheckResult } from './updates'
+import {
+  getUpdateSettings,
+  saveUpdateSettings,
+  startUpdates,
+  type UpdateCheckResult
+} from './updates'
 
 /**
  * Where Electron kept per-app state before the rename below.
@@ -563,6 +568,14 @@ app.whenReady().then(async () => {
     if (!checkForUpdates) return { supported: false }
     return checkForUpdates()
   })
+  ipcMain.handle('brazier:get-update-settings', () => getUpdateSettings())
+  ipcMain.handle(
+    'brazier:save-update-settings',
+    (
+      _event,
+      settings: { checkOnStartup?: boolean; autoDownload?: boolean }
+    ) => saveUpdateSettings(settings ?? {})
+  )
   ipcMain.handle('brazier:select-directory', async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender)
     const options = {

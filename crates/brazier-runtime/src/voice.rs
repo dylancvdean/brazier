@@ -174,6 +174,7 @@ pub fn list_models(data_dir: &Path) -> anyhow::Result<Vec<ModelDescriptor>> {
                     reasoning_modes: Vec::new(),
                     harmony: false,
                     audio_input: Some("native".into()),
+                    computer_use: false,
                 },
                 size_bytes: Some(size),
                 read_only: false,

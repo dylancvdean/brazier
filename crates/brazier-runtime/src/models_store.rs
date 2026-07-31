@@ -536,6 +536,8 @@ fn gguf_capabilities(has_projector: bool, model_key: &str, model_path: &Path) ->
         input_modalities.push("audio".into());
     }
     let (reasoning, reasoning_modes) = infer_reasoning_profile(model_key, None);
+    let computer_use = looks_like_computer_use_model(model_key)
+        && input_modalities.iter().any(|m| m == "image");
     ModelCapabilities {
         input_modalities,
         output_modalities: vec!["text".into()],
@@ -546,6 +548,7 @@ fn gguf_capabilities(has_projector: bool, model_key: &str, model_path: &Path) ->
         reasoning_modes,
         harmony: crate::harmony::is_harmony_model(model_key),
         audio_input: native_audio.then(|| "native".to_owned()),
+        computer_use,
     }
 }
 
@@ -577,6 +580,16 @@ fn gguf_context_length(model_path: &Path) -> Option<u32> {
 
 /// True when the checkpoint is likely a chat model that consumes audio tokens
 /// directly (not a Whisper-class ASR weight and not vision-only mmproj).
+/// Fara1.5 and other screenshot→action specialists.
+pub fn looks_like_computer_use_model(model_key: &str) -> bool {
+    let lower = model_key.to_ascii_lowercase();
+    lower.contains("fara")
+        || lower.contains("computer-use")
+        || lower.contains("computer_use")
+        || lower.contains("cua-")
+        || lower.contains("-cua")
+}
+
 pub fn looks_like_native_audio_model(model_key: &str, config_text: Option<&str>) -> bool {
     let lower = model_key.to_ascii_lowercase();
     // Exclude dedicated ASR / Whisper weights — those are batch ASR engines.
@@ -834,6 +847,8 @@ fn mlx_capabilities(kind: MlxKind, dir: &Path, model_key: &str) -> ModelCapabili
         input_modalities.push("audio".into());
     }
     let (reasoning, reasoning_modes) = infer_reasoning_profile(model_key, config_value.as_ref());
+    let computer_use = looks_like_computer_use_model(model_key)
+        && input_modalities.iter().any(|m| m == "image");
     ModelCapabilities {
         input_modalities,
         output_modalities: vec!["text".into()],
@@ -845,6 +860,7 @@ fn mlx_capabilities(kind: MlxKind, dir: &Path, model_key: &str) -> ModelCapabili
         reasoning_modes,
         harmony: crate::harmony::is_harmony_model(model_key),
         audio_input: native_audio.then(|| "native".to_owned()),
+        computer_use,
     }
 }
 

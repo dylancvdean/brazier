@@ -34,6 +34,225 @@ export async function saveWelcomePreference(completed: boolean): Promise<{ compl
   })
 }
 
+/** Which workspace modes appear in the top-bar mode switch. */
+export type WorkspaceModesPreference = {
+  chat: boolean
+  agent: boolean
+  generate: boolean
+  voice: boolean
+  computer: boolean
+}
+
+export async function fetchWorkspacePreference(): Promise<{ modes: WorkspaceModesPreference }> {
+  return request('/api/v1/preferences/workspace')
+}
+
+export async function saveWorkspacePreference(
+  modes: WorkspaceModesPreference
+): Promise<{ modes: WorkspaceModesPreference }> {
+  return request('/api/v1/preferences/workspace', {
+    method: 'PUT',
+    body: JSON.stringify({ modes })
+  })
+}
+
+export type ComputerTarget = 'browser' | 'desktop'
+
+export type ComputerPermissionMode = 'ask' | 'browser-only' | 'skip-permissions'
+
+export type OsPermissionState = 'granted' | 'missing' | 'unsupported' | 'unknown'
+
+export type OsPermissionStatus = {
+  platform: string
+  display_server: string
+  screen_capture: OsPermissionState
+  input_injection: OsPermissionState
+  detail?: string | null
+  settings_hint?: string | null
+}
+
+export type ComputerViewport = {
+  width: number
+  height: number
+  device_pixel_ratio?: number | null
+}
+
+/** Normalized computer-use action (tagged by `type`, snake_case). */
+export type ComputerAction =
+  | { type: 'screenshot' }
+  | { type: 'left_click'; x: number; y: number }
+  | { type: 'right_click'; x: number; y: number }
+  | { type: 'double_click'; x: number; y: number }
+  | { type: 'triple_click'; x: number; y: number }
+  | { type: 'mouse_move'; x: number; y: number }
+  | {
+      type: 'left_click_drag'
+      start_x: number
+      start_y: number
+      end_x: number
+      end_y: number
+    }
+  | { type: 'type'; text: string }
+  | { type: 'keypress'; keys: string[] }
+  | { type: 'scroll'; x: number; y: number; delta_x: number; delta_y: number }
+  | { type: 'wait'; milliseconds?: number }
+  | { type: 'visit_url'; url: string }
+  | { type: 'web_search'; query: string }
+  | { type: 'memorize'; fact: string }
+  | { type: 'ask_user'; question: string }
+  | { type: 'terminate'; response?: string | null }
+
+export type ComputerActionStatus =
+  | 'ok'
+  | 'needs_approval'
+  | 'refused'
+  | 'error'
+  | 'finished'
+  | 'waiting_for_user'
+
+export type ComputerActionResult = {
+  status: ComputerActionStatus
+  message?: string | null
+  screenshot_base64?: string | null
+  mime_type?: string | null
+  viewport?: ComputerViewport | null
+  url?: string | null
+  title?: string | null
+  needs_approval?: boolean
+  approval_id?: string | null
+}
+
+export type ComputerSession = {
+  id: string
+  title: string
+  target: ComputerTarget
+  model_id?: string | null
+  permission_mode: ComputerPermissionMode
+  viewport: ComputerViewport
+  created_at: string
+  updated_at: string
+  url?: string | null
+  title_page?: string | null
+  running?: boolean
+  memories?: string[]
+}
+
+export type ComputerStep = {
+  id: string
+  session_id: string
+  role: string
+  content: string
+  thought?: string | null
+  action?: ComputerAction | null
+  result?: ComputerActionResult | null
+  created_at: string
+}
+
+export type FaraParseResult = {
+  thought?: string | null
+  actions: ComputerAction[]
+  raw_tool_calls?: string[]
+}
+
+export async function fetchComputerPermissions(): Promise<OsPermissionStatus> {
+  return request('/api/v1/computer/permissions')
+}
+
+export async function listComputerSessions(): Promise<ComputerSession[]> {
+  const payload = await request<{ sessions: ComputerSession[] }>('/api/v1/computer/sessions')
+  return payload.sessions ?? []
+}
+
+export async function createComputerSession(body: {
+  title?: string
+  target?: ComputerTarget
+  model_id?: string | null
+  permission_mode?: ComputerPermissionMode
+  viewport?: ComputerViewport
+}): Promise<ComputerSession> {
+  return request('/api/v1/computer/sessions', {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+}
+
+export async function fetchComputerSession(id: string): Promise<ComputerSession> {
+  return request(`/api/v1/computer/sessions/${encodeURIComponent(id)}`)
+}
+
+export async function deleteComputerSession(id: string): Promise<void> {
+  const daemon = await connection()
+  const headers = new Headers({ 'content-type': 'application/json' })
+  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
+  const response = await fetch(
+    `${daemon.address}/api/v1/computer/sessions/${encodeURIComponent(id)}`,
+    { method: 'DELETE', headers }
+  )
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as {
+      error?: { message?: string }
+    } | null
+    throw new Error(payload?.error?.message ?? `Request failed with status ${response.status}.`)
+  }
+}
+
+export async function listComputerSteps(sessionId: string): Promise<ComputerStep[]> {
+  const payload = await request<{ steps: ComputerStep[] }>(
+    `/api/v1/computer/sessions/${encodeURIComponent(sessionId)}/steps`
+  )
+  return payload.steps ?? []
+}
+
+export async function appendComputerStep(
+  sessionId: string,
+  body: {
+    role: string
+    content: string
+    thought?: string | null
+    action?: ComputerAction | null
+    result?: ComputerActionResult | null
+  }
+): Promise<ComputerStep> {
+  return request(`/api/v1/computer/sessions/${encodeURIComponent(sessionId)}/steps`, {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+}
+
+export async function computerScreenshot(sessionId: string): Promise<ComputerActionResult> {
+  return request(`/api/v1/computer/sessions/${encodeURIComponent(sessionId)}/screenshot`, {
+    method: 'POST'
+  })
+}
+
+export async function computerExec(body: {
+  session_id: string
+  action: ComputerAction
+  approval_id?: string | null
+}): Promise<ComputerActionResult> {
+  return request('/api/v1/computer/exec', {
+    method: 'POST',
+    body: JSON.stringify(body)
+  })
+}
+
+export async function decideComputerApproval(
+  approvalId: string,
+  approve: boolean
+): Promise<{ result: ComputerActionResult | null }> {
+  return request(`/api/v1/computer/approvals/${encodeURIComponent(approvalId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ approve })
+  })
+}
+
+export async function parseFaraOutput(text: string): Promise<FaraParseResult> {
+  return request('/api/v1/computer/parse-fara', {
+    method: 'POST',
+    body: JSON.stringify({ text })
+  })
+}
+
 export type LocalModel = {
   id: string
   object: string
@@ -53,6 +272,8 @@ export type LocalModel = {
     harmony?: boolean
     /** `native` when the chat model consumes audio tokens directly. */
     audio_input?: string | null
+    /** Screenshot→action specialists (Fara1.5 and similar). */
+    computer_use?: boolean
   }
 }
 

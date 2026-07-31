@@ -198,6 +198,7 @@ pub fn capabilities() -> ModelCapabilities {
         reasoning_modes: Vec::new(),
         harmony: false,
         audio_input: None,
+        computer_use: false,
     }
 }
 
@@ -250,11 +251,20 @@ pub async fn list_models(http: &reqwest::Client, data_dir: &Path) -> Vec<ModelDe
         match fetch_model_names(http, &connection).await {
             Ok(names) => {
                 for name in names {
+                    let mut caps = capabilities();
+                    if crate::models_store::looks_like_computer_use_model(&name) {
+                        // Fara-class remotes need vision + CU even though generic
+                        // remotes stay text-only by default.
+                        if !caps.input_modalities.iter().any(|m| m == "image") {
+                            caps.input_modalities.push("image".into());
+                        }
+                        caps.computer_use = true;
+                    }
                     models.push(ModelDescriptor {
                         id: model_id(&connection.id, &name),
                         name: format!("{} · {name}", connection.label),
                         engine: ENGINE.to_owned(),
-                        capabilities: capabilities(),
+                        capabilities: caps,
                         size_bytes: None,
                         read_only: true,
                         library_label: Some(connection.label.clone()),

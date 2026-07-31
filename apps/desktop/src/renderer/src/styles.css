@@ -6626,6 +6626,344 @@ label.span-2 {
   animation: drop-in 160ms ease;
 }
 
+/* —— Computer Use mode —— */
+.computer-mode {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.computer-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 12px max(20px, calc((100% - 1100px) / 2));
+  border-bottom: 1px solid var(--line);
+}
+
+.computer-session-bar {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.computer-new-session {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--soft);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.computer-new-session:hover {
+  border-color: #2c2c30;
+}
+
+.computer-session-list {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.computer-session-list > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.computer-session-list > button.active {
+  border-color: var(--line);
+  color: var(--text);
+  background: var(--panel-raised);
+}
+
+.computer-session-list > button i {
+  display: inline-flex;
+  opacity: 0.45;
+}
+
+.computer-session-list > button i:hover {
+  opacity: 1;
+  color: #e8adb1;
+}
+
+.computer-session-empty {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.computer-controls {
+  display: flex;
+  gap: 10px;
+}
+
+.computer-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.computer-controls select {
+  min-width: 120px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.computer-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+}
+
+.computer-viewport {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 16px;
+  border-right: 1px solid var(--line);
+  background:
+    radial-gradient(ellipse at 30% 20%, rgba(246, 123, 42, 0.06), transparent 55%),
+    linear-gradient(180deg, #101012 0%, #0a0a0b 100%);
+}
+
+.computer-viewport img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border: 1px solid #222;
+  border-radius: 4px;
+  background: #000;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.computer-viewport-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.computer-viewport-empty p {
+  max-width: 260px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.computer-viewport-busy {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(10, 10, 11, 0.88);
+  color: var(--soft);
+  font-size: 11px;
+}
+
+.computer-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 14px 16px 20px;
+  overflow: auto;
+}
+
+.computer-steps-empty {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.computer-step {
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.computer-step header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.computer-step header strong {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.computer-step header span {
+  color: var(--soft);
+  font-size: 12px;
+}
+
+.computer-step p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.computer-step-status {
+  display: inline-block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.computer-thought {
+  margin: 6px 0;
+  padding: 8px 9px;
+  border-left: 2px solid #3a3a3a;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.computer-thought.live {
+  border-left-color: #f67b2a;
+}
+
+.computer-thought strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.computer-thought pre {
+  margin: 0;
+  color: var(--soft);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.computer-approval {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #67393c;
+  border-radius: 10px;
+  background: #241819;
+}
+
+.computer-approval strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.computer-approval p {
+  margin: 0;
+  color: #e8adb1;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.computer-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.computer-approval-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.computer-approval-actions button.primary {
+  border-color: #f67b29;
+  color: #fff;
+  background: #c45a16;
+}
+
+.customization-permissions {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.customization-permissions > div {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.customization-permissions dt {
+  color: var(--muted);
+}
+
+.customization-permissions dd {
+  margin: 0;
+  color: var(--soft);
+}
+
+@media (max-width: 900px) {
+  .computer-body {
+    grid-template-columns: 1fr;
+  }
+
+  .computer-viewport {
+    min-height: 220px;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

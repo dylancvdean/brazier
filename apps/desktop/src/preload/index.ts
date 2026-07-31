@@ -60,6 +60,19 @@ contextBridge.exposeInMainWorld('brazier', {
   generateServerApiKey: (): Promise<string> => ipcRenderer.invoke('brazier:generate-server-api-key'),
   getFlags: (): Promise<BrazierFlags> => ipcRenderer.invoke('brazier:flags'),
   checkForUpdates: (): Promise<{ supported: boolean }> => ipcRenderer.invoke('brazier:check-for-updates'),
+  getUpdateSettings: (): Promise<{
+    supported: boolean
+    checkOnStartup: boolean
+    autoDownload: boolean
+  }> => ipcRenderer.invoke('brazier:get-update-settings'),
+  saveUpdateSettings: (settings: {
+    checkOnStartup?: boolean
+    autoDownload?: boolean
+  }): Promise<{
+    supported: boolean
+    checkOnStartup: boolean
+    autoDownload: boolean
+  }> => ipcRenderer.invoke('brazier:save-update-settings', settings),
   platform: process.platform,
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-directory'),
   selectWorkspace: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-workspace'),
