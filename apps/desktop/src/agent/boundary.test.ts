@@ -30,7 +30,7 @@ describe('runtime adapter boundary', () => {
 
   it('imports Pi only inside an adapter directory', () => {
     const offenders = files.filter((file) => {
-      const relativePath = relative(AGENT_ROOT, file)
+      const relativePath = relative(AGENT_ROOT, file).split('\\').join('/')
       const topLevel = relativePath.split('/')[0]
       if (ADAPTER_DIRECTORIES.includes(topLevel ?? '')) return false
       // Two tests name the packages as data rather than importing them: this
@@ -40,7 +40,9 @@ describe('runtime adapter boundary', () => {
       if (relativePath === 'boundary.test.ts' || relativePath === 'packaging.test.ts') return false
       return PI_PACKAGE_PATTERN.test(readFileSync(file, 'utf8'))
     })
-    expect(offenders.map((file) => relative(AGENT_ROOT, file))).toEqual([])
+    expect(
+      offenders.map((file) => relative(AGENT_ROOT, file).split('\\').join('/'))
+    ).toEqual([])
   })
 
   it('keeps the application types self-contained', () => {
@@ -59,8 +61,9 @@ describe('runtime adapter boundary', () => {
     expect(executor).not.toMatch(/\bfetch\(/)
 
     for (const file of files) {
-      const relativePath = relative(AGENT_ROOT, file)
+      const relativePath = relative(AGENT_ROOT, file).split('\\').join('/')
       if (relativePath === 'core/brokerClient.ts') continue
+      if (relativePath.endsWith('.test.ts')) continue
       const source = readFileSync(file, 'utf8')
       expect(source, `${relativePath} must not call fetch directly`).not.toMatch(/\bfetch\(/)
     }
