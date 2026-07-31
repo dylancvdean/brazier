@@ -671,6 +671,11 @@ pub fn diagnose_failure(
             hints.push(hint);
         }
     }
+    if toolchain_hints::missing_hipsparselt(&log_lower, target)
+        && let Some(hint) = toolchain_hints::hipsparselt_install_hint()
+    {
+        hints.push(hint);
+    }
     if log_lower.contains("ninja: error")
         || log_lower.contains("make: ***")
         || log_lower.contains("msbuild : error")
@@ -1336,6 +1341,27 @@ mod tests {
                 .hints
                 .iter()
                 .any(|hint| hint.to_ascii_lowercase().contains("pacman") || hint.contains("ROCm"))
+        );
+    }
+
+    #[test]
+    fn diagnostics_surface_missing_hipsparselt() {
+        let report = diagnose_failure(
+            "Configure failed with 1",
+            Some("Build and install selected vLLM ROCm source"),
+            r#"
+                Optional package hipsparselt not found
+                CMake Error: The link interface of target "torch_hip_library" contains:
+                  roc::hipsparselt
+                but the target was not found.
+            "#,
+            RuntimeTarget::Rocm,
+        );
+        assert!(
+            report
+                .hints
+                .iter()
+                .any(|hint| hint.to_ascii_lowercase().contains("hipsparselt"))
         );
     }
 

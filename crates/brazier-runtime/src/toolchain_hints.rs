@@ -160,7 +160,7 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
             Some("sudo pacman -S base-devel".into())
         }
         (PackageManager::Pacman, ToolchainPackage::RocmHip) => Some(
-            "sudo pacman -S rocm-hip-sdk rocm-opencl-sdk base-devel cmake git".into(),
+            "sudo pacman -S rocm-hip-sdk rocm-opencl-sdk hipsparselt base-devel cmake git".into(),
         ),
         (PackageManager::Pacman, ToolchainPackage::Cuda) => Some(
             "Enable the `extra` repo if needed, then: sudo pacman -S cuda".into(),
@@ -543,6 +543,38 @@ pub fn rocm_preflight_message() -> Option<String> {
     ))
 }
 
+pub fn missing_hipsparselt(log_lower: &str, target: RuntimeTarget) -> bool {
+    if !matches!(target, RuntimeTarget::Rocm) {
+        return false;
+    }
+    if !log_lower.contains("hipsparselt") {
+        return false;
+    }
+    [
+        "not found",
+        "could not find",
+        "target was not found",
+        "optional package hipsparselt not found",
+    ]
+    .iter()
+    .any(|marker| log_lower.contains(marker))
+}
+
+pub fn hipsparselt_install_hint() -> Option<String> {
+    if !matches!(detect_os().family, OsFamily::Linux) {
+        return None;
+    }
+    match detect_os().package_manager {
+        PackageManager::Pacman => Some("sudo pacman -S hipsparselt".into()),
+        PackageManager::Apt | PackageManager::Dnf | PackageManager::Zypper => Some(
+            "Install the ROCm hipSPARSELt development package for your distro (often named hipsparselt or rocm-sparselt).".into(),
+        ),
+        _ => Some(
+            "Install the ROCm hipSPARSELt library that matches your installed ROCm version.".into(),
+        ),
+    }
+}
+
 pub fn missing_rocm_hip(log_lower: &str, message_lower: &str, target: RuntimeTarget) -> bool {
     if !matches!(target, RuntimeTarget::Rocm) {
         return false;
@@ -872,6 +904,24 @@ mod tests {
             "cmake error: could not find hip (missing: hip_library hip_include_dir)",
             "configure failed with 1",
             RuntimeTarget::Rocm,
+        ));
+    }
+
+    #[test]
+    fn detects_missing_hipsparselt_from_cmake_log() {
+        let log = r#"
+            optional package hipsparselt not found
+            cmake error: the link interface of target "torch_hip_library" contains:
+              roc::hipsparselt
+            but the target was not found.
+        "#;
+        assert!(missing_hipsparselt(
+            &log.to_ascii_lowercase(),
+            RuntimeTarget::Rocm,
+        ));
+        assert!(!missing_hipsparselt(
+            &log.to_ascii_lowercase(),
+            RuntimeTarget::Cuda,
         ));
     }
 
