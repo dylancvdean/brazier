@@ -5275,6 +5275,21 @@ async fn delete_agent_session(
         .agent_session(&id)
         .await
         .map_err(|error| ApiError::not_found(error.to_string()))?;
+    // Refuse discardable worktrees before tearing down the agent, so a missing
+    // discard flag cannot kill the run and then leave the session behind.
+    if let Some(info) =
+        crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
+    {
+        let status = crate::agent_worktree::inspect_worktree(&info)
+            .await
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        if status.has_discardable_changes && !query.discard_unapplied {
+            return Err(ApiError::bad_request(format!(
+                "worktree {} has unapplied changes; apply, commit, or discard them before cleanup",
+                info.path
+            )));
+        }
+    }
     state.agent_broker.terminate_session_processes(&id).await;
     if let Some(info) =
         crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())

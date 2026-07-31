@@ -158,7 +158,25 @@ fn git_stderr(output: &std::process::Output) -> String {
     }
 }
 
+/// True when `branch` already exists in `source` (local ref).
+async fn local_branch_exists(source: &Path, branch: &str) -> anyhow::Result<bool> {
+    let output = git_output(
+        source,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .await?;
+    Ok(output.status.success())
+}
+
 /// Create a new, task-named branch worktree for `session_id` rooted at `source`.
+///
+/// If this session previously had a worktree cleaned up, the task branch is kept
+/// on purpose — re-confine reuses that branch instead of failing on `-b`.
 pub async fn create_worktree(
     source: &Path,
     session_id: &str,
@@ -176,18 +194,17 @@ pub async fn create_worktree(
             .with_context(|| format!("could not create {}", parent.display()))?;
     }
     let branch = branch_name(session_id, title);
-    let output = git_output(
-        source,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &branch,
-            &path.display().to_string(),
-            "HEAD",
-        ],
-    )
-    .await?;
+    let path_arg = path.display().to_string();
+    let output = if local_branch_exists(source, &branch).await? {
+        // Re-attach after unconfine/delete cleanup that preserved the branch.
+        git_output(source, &["worktree", "add", &path_arg, &branch]).await?
+    } else {
+        git_output(
+            source,
+            &["worktree", "add", "-b", &branch, &path_arg, "HEAD"],
+        )
+        .await?
+    };
     if !output.status.success() {
         bail!("could not create worktree: {}", git_stderr(&output));
     }
@@ -562,6 +579,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!branch.stdout.is_empty(), "task branch should be preserved");
+
+        // Re-confine must reuse the preserved branch instead of failing on `-b`.
+        let recreated = create_worktree(&repo, "abcdef01-task", "Fix the frobnicator")
+            .await
+            .expect("recreate");
+        assert_eq!(recreated.branch, info.branch);
+        assert!(PathBuf::from(&recreated.path).join("README.md").is_file());
+        remove_worktree(&recreated, false)
+            .await
+            .expect("remove again");
     }
 
     #[tokio::test]

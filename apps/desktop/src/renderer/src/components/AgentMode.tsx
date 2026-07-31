@@ -375,13 +375,16 @@ async function confirmWorktreeCleanup(
     status = null
   }
   if (!status) {
-    if (action === 'delete') {
-      return {
-        proceed: window.confirm(`Delete task “${title}”? This cannot be undone.`),
-        discardUnapplied: false
-      }
+    // Inspect failed or the worktree metadata disappeared. Still ask — never
+    // silently unconfine — and do not claim discard consent we cannot verify.
+    const fallback =
+      action === 'delete'
+        ? `Delete task “${title}”? This cannot be undone.`
+        : `Stop isolating task “${title}” and remove its worktree? The worktree could not be inspected; uncommitted unapplied changes will not be discarded automatically.`
+    return {
+      proceed: window.confirm(fallback),
+      discardUnapplied: false
     }
-    return { proceed: true, discardUnapplied: false }
   }
   const verb =
     action === 'delete'

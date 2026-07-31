@@ -1906,11 +1906,7 @@ mod tests {
         );
         assert!(response.output.contains("Alpha"), "{}", response.output);
         assert!(response.output.contains("Beta"), "{}", response.output);
-        assert!(
-            response.output.contains("lines 1–2"),
-            "{}",
-            response.output
-        );
+        assert!(response.output.contains("lines 1–2"), "{}", response.output);
         assert!(!response.output.contains("Gamma"), "{}", response.output);
     }
 
