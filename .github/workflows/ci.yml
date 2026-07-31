@@ -18,14 +18,9 @@ jobs:
           toolchain: 1.93.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # Agent sandbox tests need Bubblewrap. Ubuntu 24 runners also block
-      # unprivileged user namespaces, which breaks `--unshare-net` loopback setup.
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
-          if [ -w /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
-          fi
+      # Agent sandbox tests need Bubblewrap. Detection probes `--unshare-net`
+      # and omits it when the host denies loopback setup (common on GHA).
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
