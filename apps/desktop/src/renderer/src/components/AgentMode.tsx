@@ -35,6 +35,7 @@ import {
   fetchAgentCapabilities,
   fetchAgentSession,
   fetchAgentTools,
+  fetchAgentWorktreeStatus,
   fetchAgentWorkspacePrompt,
   listAgentSessions,
   sandboxBadge,
@@ -44,7 +45,8 @@ import {
   type AgentCapabilities,
   type AgentPromptComponent,
   type AgentSessionSummary,
-  type AgentToolCatalogEntry
+  type AgentToolCatalogEntry,
+  type AgentWorktreeStatus
 } from '../agentApi'
 import { prefillProgressLabel, type LocalModel, type PrefillProgress } from '../api'
 import { modelDisplayName } from '../model-utils'
@@ -329,6 +331,70 @@ function sessionWorktree(
   session: AgentSessionSummary | null
 ): { source_path: string; path: string; branch: string } | null {
   return session?.runtime_metadata?.worktree ?? null
+}
+
+function describeWorktreeStatus(status: AgentWorktreeStatus): string {
+  const lines = [
+    `Worktree: ${status.path}`,
+    `Branch: ${status.branch} (kept after cleanup)`,
+    `Source: ${status.source_path}`
+  ]
+  if (!status.exists) {
+    lines.push('The worktree directory is already gone.')
+  } else if (status.has_discardable_changes) {
+    lines.push(
+      'It has uncommitted changes that have not been applied to the source checkout. Removing it discards those changes.'
+    )
+  } else if (status.dirty) {
+    lines.push(
+      'It has local changes that already match the last apply to the source checkout.'
+    )
+  } else if (status.ahead_of_source) {
+    lines.push(
+      'It has commits not yet applied to the source checkout. Those commits stay on the branch.'
+    )
+  } else {
+    lines.push('It is clean and already applied to the source checkout.')
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Ask before deleting a task or turning confinement off. Returns whether to
+ * proceed, and whether the user accepted discarding unapplied work.
+ */
+async function confirmWorktreeCleanup(
+  sessionId: string,
+  action: 'delete' | 'unconfine',
+  title: string
+): Promise<{ proceed: boolean; discardUnapplied: boolean }> {
+  let status: AgentWorktreeStatus | null = null
+  try {
+    status = await fetchAgentWorktreeStatus(sessionId)
+  } catch {
+    status = null
+  }
+  if (!status) {
+    if (action === 'delete') {
+      return {
+        proceed: window.confirm(`Delete task “${title}”? This cannot be undone.`),
+        discardUnapplied: false
+      }
+    }
+    return { proceed: true, discardUnapplied: false }
+  }
+  const verb =
+    action === 'delete'
+      ? `Delete task “${title}” and remove its worktree?`
+      : `Stop isolating this task and remove its worktree?`
+  const message = `${verb}\n\n${describeWorktreeStatus(status)}`
+  if (!window.confirm(message)) {
+    return { proceed: false, discardUnapplied: false }
+  }
+  return {
+    proceed: true,
+    discardUnapplied: status.has_discardable_changes
+  }
 }
 
 /**
@@ -1022,7 +1088,40 @@ export function AgentMode(props: Props): React.JSX.Element {
       setPendingConfineToWorktree((current) => !current)
       return
     }
-    onError('Worktree isolation is fixed for this task. Start a new task to change it.')
+    if (running) {
+      onError('Stop the agent before changing worktree confinement.')
+      return
+    }
+    if (worktree) {
+      const confirmation = await confirmWorktreeCleanup(session.id, 'unconfine', session.title)
+      if (!confirmation.proceed) return
+      try {
+        const updated = await updateAgentSession(session.id, {
+          confine_to_worktree: false,
+          discard_unapplied: confirmation.discardUnapplied
+        })
+        setSession(updated)
+        setPendingConfineToWorktree(false)
+        setSessions((current) =>
+          current.map((entry) => (entry.id === updated.id ? updated : entry))
+        )
+        setWorktreeNotice('Switched back to the source checkout. Task branch was kept.')
+      } catch (cause) {
+        onError(errorText(cause))
+      }
+      return
+    }
+    try {
+      const updated = await updateAgentSession(session.id, { confine_to_worktree: true })
+      setSession(updated)
+      setPendingConfineToWorktree(true)
+      setSessions((current) =>
+        current.map((entry) => (entry.id === updated.id ? updated : entry))
+      )
+      setWorktreeNotice('Isolated this task in a fresh worktree.')
+    } catch (cause) {
+      onError(errorText(cause))
+    }
   }
 
   async function changePermissionMode(mode: AgentPermissionMode): Promise<void> {
@@ -1301,9 +1400,24 @@ export function AgentMode(props: Props): React.JSX.Element {
   }
 
   async function removeSession(id: string): Promise<void> {
+    onError(null)
+    const entry =
+      sessions.find((sessionEntry) => sessionEntry.id === id) ??
+      (session?.id === id ? session : null)
+    const title = entry?.title ?? 'this task'
+    const hasWorktree = Boolean(entry?.runtime_metadata?.worktree)
+    const confirmation = hasWorktree
+      ? await confirmWorktreeCleanup(id, 'delete', title)
+      : {
+          proceed: window.confirm(`Delete task “${title}”? This cannot be undone.`),
+          discardUnapplied: false
+        }
+    if (!confirmation.proceed) return
     try {
-      await deleteAgentSession(id)
-      setSessions((current) => current.filter((entry) => entry.id !== id))
+      await deleteAgentSession(id, {
+        discard_unapplied: confirmation.discardUnapplied
+      })
+      setSessions((current) => current.filter((sessionEntry) => sessionEntry.id !== id))
       if (session?.id === id) await startNewTask()
     } catch (cause) {
       onError(errorText(cause))
@@ -1423,12 +1537,12 @@ export function AgentMode(props: Props): React.JSX.Element {
           <button
             className={`chip-button subtle${confinedToWorktree ? ' active' : ''}`}
             type="button"
-            disabled={Boolean(session) || running}
+            disabled={running}
             title={
               worktree
-                ? `Isolated in ${worktree.path} on ${worktree.branch}. The source checkout is ${worktree.source_path}.`
+                ? `Isolated in ${worktree.path} on ${worktree.branch}. Click to return to ${worktree.source_path} and remove the worktree.`
                 : session
-                  ? 'This task uses the source checkout. Isolation is fixed once a task starts.'
+                  ? 'This task uses the source checkout. Click to isolate it in a fresh worktree.'
                   : confinedToWorktree
                     ? 'This task will start in a fresh git worktree.'
                     : 'Run this task in the source checkout.'

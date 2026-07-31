@@ -71,6 +71,9 @@ pub fn path_for_model_id(
     if model_id.starts_with("sdcpp-image:") || model_id.starts_with("sdcpp-video:") {
         return crate::sdcpp::path_for_model_id(data_dir, model_id);
     }
+    if model_id.starts_with("whisper:") {
+        return crate::whisper::path_for_model_id(data_dir, model_id);
+    }
     if model_id.starts_with("personaplex:") {
         return crate::voice::path_for_model_id(data_dir, model_id);
     }
@@ -1127,6 +1130,11 @@ pub fn delete_model(
             std::fs::remove_file(sibling)
                 .map_err(|error| anyhow::anyhow!("delete {}: {error}", sibling.display()))?;
         }
+        // Drop a companion mmproj only when no other weight GGUFs remain in the
+        // repo directory (other quants may still need the projector).
+        if let Some(directory) = path.parent() {
+            remove_orphan_projector(directory)?;
+        }
         prune_empty_parents(path.parent(), &gguf_root(data_dir));
         return Ok(path);
     }
@@ -1162,7 +1170,54 @@ pub fn delete_model(
         prune_empty_parents(path.parent(), &root);
         return Ok(path);
     }
+    if model_id.starts_with("whisper:") {
+        let path = crate::whisper::path_for_model_id(data_dir, model_id)?;
+        anyhow::ensure!(path.is_file(), "model file not found for {model_id}");
+        std::fs::remove_file(&path)
+            .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
+        prune_empty_parents(path.parent(), &crate::whisper::whisper_root(data_dir));
+        return Ok(path);
+    }
+    if model_id.starts_with("personaplex:") {
+        let path = crate::voice::path_for_model_id(data_dir, model_id)?;
+        anyhow::ensure!(path.is_dir(), "model directory not found for {model_id}");
+        std::fs::remove_dir_all(&path)
+            .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
+        prune_empty_parents(path.parent(), &crate::voice::models_root(data_dir));
+        return Ok(path);
+    }
     anyhow::bail!("unknown local model id: {model_id}");
+}
+
+/// Remove a sibling mmproj when the directory has no remaining weight GGUFs.
+fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Ok(());
+    };
+    let mut projector: Option<PathBuf> = None;
+    let mut has_weight = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        {
+            continue;
+        }
+        if is_projector(&path) {
+            projector = Some(path);
+        } else {
+            has_weight = true;
+        }
+    }
+    if has_weight {
+        return Ok(());
+    }
+    if let Some(path) = projector {
+        std::fs::remove_file(&path)
+            .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn prune_empty_parents(mut directory: Option<&Path>, root: &Path) {
@@ -1342,6 +1397,67 @@ mod tests {
         .unwrap();
         assert!(!first.exists());
         assert!(!second.exists());
+    }
+
+    #[test]
+    fn deleting_last_gguf_in_repo_removes_orphan_mmproj() {
+        let dir = tempdir().unwrap();
+        let model = download_destination(dir.path(), "acme/vision", "model-Q4_K_M.gguf").unwrap();
+        let projector =
+            download_destination(dir.path(), "acme/vision", "mmproj-f16.gguf").unwrap();
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"weights").unwrap();
+        std::fs::write(&projector, b"proj").unwrap();
+        delete_model(dir.path(), "gguf:acme/vision/model-Q4_K_M.gguf", &[]).unwrap();
+        assert!(!model.exists());
+        assert!(!projector.exists());
+    }
+
+    #[test]
+    fn deleting_one_quant_keeps_shared_mmproj() {
+        let dir = tempdir().unwrap();
+        let q4 = download_destination(dir.path(), "acme/vision", "model-Q4_K_M.gguf").unwrap();
+        let q8 = download_destination(dir.path(), "acme/vision", "model-Q8_0.gguf").unwrap();
+        let projector =
+            download_destination(dir.path(), "acme/vision", "mmproj-f16.gguf").unwrap();
+        std::fs::create_dir_all(q4.parent().unwrap()).unwrap();
+        std::fs::write(&q4, b"q4").unwrap();
+        std::fs::write(&q8, b"q8").unwrap();
+        std::fs::write(&projector, b"proj").unwrap();
+        delete_model(dir.path(), "gguf:acme/vision/model-Q4_K_M.gguf", &[]).unwrap();
+        assert!(!q4.exists());
+        assert!(q8.exists());
+        assert!(projector.exists());
+    }
+
+    #[test]
+    fn deletes_whisper_weight_file() {
+        let dir = tempdir().unwrap();
+        let path = crate::whisper::whisper_root(dir.path())
+            .join("ggerganov/whisper.cpp")
+            .join("ggml-tiny.bin");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"whisper").unwrap();
+        let removed = delete_model(
+            dir.path(),
+            "whisper:ggerganov/whisper.cpp/ggml-tiny.bin",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(removed, path);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn deletes_personaplex_snapshot_directory() {
+        let dir = tempdir().unwrap();
+        let path = crate::voice::models_root(dir.path()).join("nvidia/personaplex-7b-v1");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("config.json"), b"{}").unwrap();
+        std::fs::write(path.join("model.safetensors"), b"weights").unwrap();
+        let removed = delete_model(dir.path(), "personaplex:nvidia/personaplex-7b-v1", &[]).unwrap();
+        assert_eq!(removed, path);
+        assert!(!path.exists());
     }
 
     #[test]

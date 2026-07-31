@@ -1128,7 +1128,17 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                   ) : (
                     <button
                       className="chip-button subtle"
-                      title="Delete this model from disk"
+                      title={
+                        model.id.startsWith('gguf:')
+                          ? 'Delete this model from disk (all shards and an orphaned mmproj)'
+                          : model.id.startsWith('mlx:') ||
+                              model.id.startsWith('mlx-vlm:') ||
+                              model.id.startsWith('streaming-asr:') ||
+                              model.id.startsWith('sdcpp-') ||
+                              model.id.startsWith('personaplex:')
+                            ? 'Delete this model directory from disk'
+                            : 'Delete this model from disk'
+                      }
                       onClick={() => setConfirming(model.id)}
                     >
                       <Trash2 size={13} />

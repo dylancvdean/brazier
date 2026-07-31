@@ -346,13 +346,44 @@ pub async fn apply_to_source(info: &WorktreeInfo) -> anyhow::Result<ApplyWorktre
     })
 }
 
+/// Live inspection of a managed worktree for UI confirmation before cleanup.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeStatus {
+    pub source_path: String,
+    pub path: String,
+    pub branch: String,
+    /// False when the checkout directory is already gone.
+    pub exists: bool,
+    /// Staged, unstaged, or untracked files present in the worktree.
+    pub dirty: bool,
+    /// Tree differs from the last snapshot applied into the source checkout.
+    /// Committed work stays recoverable on the branch after cleanup.
+    pub ahead_of_source: bool,
+    /// Dirty work that is not reflected in the source checkout. Removing the
+    /// worktree would discard this unless the user confirms.
+    pub has_discardable_changes: bool,
+}
+
 /// True when the managed worktree contains staged, unstaged, or untracked work.
 pub async fn worktree_is_dirty(info: &WorktreeInfo) -> anyhow::Result<bool> {
+    Ok(inspect_worktree(info).await?.dirty)
+}
+
+/// Inspect whether a worktree is safe to remove without discarding user work.
+pub async fn inspect_worktree(info: &WorktreeInfo) -> anyhow::Result<WorktreeStatus> {
     let source = PathBuf::from(&info.source_path);
     let path = PathBuf::from(&info.path);
     validate_worktree_info(&source, &path, &info.branch)?;
     if !path.exists() {
-        return Ok(false);
+        return Ok(WorktreeStatus {
+            source_path: info.source_path.clone(),
+            path: info.path.clone(),
+            branch: info.branch.clone(),
+            exists: false,
+            dirty: false,
+            ahead_of_source: false,
+            has_discardable_changes: false,
+        });
     }
     let output = git_output(
         &path,
@@ -362,34 +393,44 @@ pub async fn worktree_is_dirty(info: &WorktreeInfo) -> anyhow::Result<bool> {
     if !output.status.success() {
         bail!("could not inspect worktree: {}", git_stderr(&output));
     }
-    Ok(!output.stdout.is_empty())
+    let dirty = !output.stdout.is_empty();
+    let current_tree = snapshot_tree(&path).await?;
+    let ahead_of_source = match &info.last_applied_tree {
+        Some(applied) => current_tree != *applied,
+        None => true,
+    };
+    // Only uncommitted drift is discarded by `git worktree remove --force`.
+    // Clean commits remain on the task branch after the checkout is removed.
+    let has_discardable_changes = dirty && ahead_of_source;
+    Ok(WorktreeStatus {
+        source_path: info.source_path.clone(),
+        path: info.path.clone(),
+        branch: info.branch.clone(),
+        exists: true,
+        dirty,
+        ahead_of_source,
+        has_discardable_changes,
+    })
 }
 
-/// Remove a clean session worktree while preserving its branch.
+/// Remove a session worktree while preserving its branch.
 ///
-/// Committed work remains recoverable on the task branch. Uncommitted work is
-/// never discarded implicitly; callers must ask the user to resolve it first.
-pub async fn remove_worktree(info: &WorktreeInfo) -> anyhow::Result<()> {
+/// Committed work remains recoverable on the task branch. Uncommitted unapplied
+/// work is never discarded unless `discard_unapplied` is true — callers must
+/// confirm with the user first.
+pub async fn remove_worktree(info: &WorktreeInfo, discard_unapplied: bool) -> anyhow::Result<()> {
     let source = PathBuf::from(&info.source_path);
     let path = PathBuf::from(&info.path);
     validate_worktree_info(&source, &path, &info.branch)?;
-    let dirty = worktree_is_dirty(info).await?;
-    let fully_applied = if dirty {
-        match &info.last_applied_tree {
-            Some(applied) => snapshot_tree(&path).await? == *applied,
-            None => false,
-        }
-    } else {
-        true
-    };
-    if !fully_applied {
+    let status = inspect_worktree(info).await?;
+    if status.has_discardable_changes && !discard_unapplied {
         bail!(
             "worktree {} has unapplied changes; apply, commit, or discard them before cleanup",
             path.display()
         );
     }
     if source.is_dir() {
-        let output = if dirty {
+        let output = if status.dirty || discard_unapplied {
             git_output(&source, &["worktree", "remove", "--force", &info.path]).await?
         } else {
             git_output(&source, &["worktree", "remove", &info.path]).await?
@@ -515,7 +556,7 @@ mod tests {
         .unwrap();
         assert_eq!(PathBuf::from(&info.path), expected);
 
-        remove_worktree(&info).await.expect("remove");
+        remove_worktree(&info, false).await.expect("remove");
         assert!(!PathBuf::from(&info.path).exists());
         let branch = git_output(&repo, &["branch", "--list", &info.branch])
             .await
@@ -561,8 +602,12 @@ mod tests {
         std::fs::write(PathBuf::from(&info.path).join("README.md"), "changed\n").unwrap();
 
         assert!(worktree_is_dirty(&info).await.unwrap());
-        assert!(remove_worktree(&info).await.is_err());
+        let status = inspect_worktree(&info).await.unwrap();
+        assert!(status.has_discardable_changes);
+        assert!(remove_worktree(&info, false).await.is_err());
         assert!(PathBuf::from(&info.path).exists());
+        remove_worktree(&info, true).await.expect("discard");
+        assert!(!PathBuf::from(&info.path).exists());
     }
 
     #[tokio::test]
@@ -677,7 +722,7 @@ mod tests {
         // Returning the worktree to its last-applied snapshot makes cleanup
         // safe even though that snapshot contains uncommitted files.
         std::fs::write(worktree.join("tracked.txt"), "second\n").unwrap();
-        remove_worktree(&second.worktree).await.unwrap();
+        remove_worktree(&second.worktree, false).await.unwrap();
         assert!(!worktree.exists());
     }
 

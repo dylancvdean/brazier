@@ -97,6 +97,17 @@ export type AgentWorktreeInfo = {
   branch: string
 }
 
+/** Live inspection used before delete/unconfine confirmation. */
+export type AgentWorktreeStatus = {
+  source_path: string
+  path: string
+  branch: string
+  exists: boolean
+  dirty: boolean
+  ahead_of_source: boolean
+  has_discardable_changes: boolean
+}
+
 export type AgentSessionDetail = {
   session: AgentSessionSummary
   messages: Array<{
@@ -165,6 +176,8 @@ export async function updateAgentSession(
     permission_settings?: AgentPermissionSettings
     enabled_tools?: string[]
     confine_to_worktree?: boolean
+    /** Only valid when confine_to_worktree is false. */
+    discard_unapplied?: boolean
   }
 ): Promise<AgentSessionSummary> {
   return request(`/api/v1/agent/sessions/${id}`, {
@@ -173,8 +186,25 @@ export async function updateAgentSession(
   })
 }
 
-export async function deleteAgentSession(id: string): Promise<void> {
-  await request(`/api/v1/agent/sessions/${id}`, { method: 'DELETE' })
+export async function deleteAgentSession(
+  id: string,
+  options?: { discard_unapplied?: boolean }
+): Promise<void> {
+  const params = new URLSearchParams()
+  if (options?.discard_unapplied) params.set('discard_unapplied', 'true')
+  const query = params.toString()
+  await request(`/api/v1/agent/sessions/${id}${query ? `?${query}` : ''}`, {
+    method: 'DELETE'
+  })
+}
+
+export async function fetchAgentWorktreeStatus(
+  id: string
+): Promise<AgentWorktreeStatus | null> {
+  const payload = await request<{ worktree: AgentWorktreeStatus | null }>(
+    `/api/v1/agent/sessions/${id}/worktree`
+  )
+  return payload.worktree
 }
 
 export async function applyAgentWorktree(id: string): Promise<{

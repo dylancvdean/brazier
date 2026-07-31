@@ -381,6 +381,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             post(apply_agent_worktree),
         )
         .route(
+            "/api/v1/agent/sessions/{id}/worktree",
+            get(agent_worktree_status),
+        )
+        .route(
             "/api/v1/agent/sessions/{id}/prompt",
             get(agent_system_prompt),
         )
@@ -5146,7 +5150,7 @@ async fn create_agent_session(
         .await
         .map_err(ApiError::internal)?;
     if confine {
-        match set_worktree_confinement(&state, session.clone(), true).await {
+        match set_worktree_confinement(&state, session.clone(), true, false).await {
             Ok(confined) => session = confined,
             Err(error) => {
                 if let Err(cleanup) = state.db.delete_agent_session(&session.id).await {
@@ -5208,6 +5212,7 @@ async fn patch_agent_session(
     Json(mut update): Json<crate::agent_types::UpdateAgentSession>,
 ) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
     let confine = update.confine_to_worktree.take();
+    let discard_unapplied = update.discard_unapplied.take().unwrap_or(false);
     let has_other_updates = update.title.is_some()
         || update.workspace_path.is_some()
         || update.model.is_some()
@@ -5220,6 +5225,11 @@ async fn patch_agent_session(
     if confine.is_some() && has_other_updates {
         return Err(ApiError::bad_request(
             "worktree confinement must be changed in a separate request",
+        ));
+    }
+    if discard_unapplied && confine != Some(false) {
+        return Err(ApiError::bad_request(
+            "discard_unapplied is only valid when turning worktree confinement off",
         ));
     }
     if let Some(Some(workspace)) = update.workspace_path.as_ref() {
@@ -5238,7 +5248,7 @@ async fn patch_agent_session(
             .await
             .map_err(|error| ApiError::not_found(error.to_string()))?;
         return Ok(Json(
-            set_worktree_confinement(&state, session, enabled).await?,
+            set_worktree_confinement(&state, session, enabled, discard_unapplied).await?,
         ));
     }
     let session = state
@@ -5249,9 +5259,16 @@ async fn patch_agent_session(
     Ok(Json(session))
 }
 
+#[derive(Debug, Deserialize)]
+struct DeleteAgentSessionQuery {
+    #[serde(default)]
+    discard_unapplied: bool,
+}
+
 async fn delete_agent_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<DeleteAgentSessionQuery>,
 ) -> ApiResult<Json<Value>> {
     let session = state
         .db
@@ -5262,7 +5279,7 @@ async fn delete_agent_session(
     if let Some(info) =
         crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
     {
-        crate::agent_worktree::remove_worktree(&info)
+        crate::agent_worktree::remove_worktree(&info, query.discard_unapplied)
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
@@ -5272,6 +5289,27 @@ async fn delete_agent_session(
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(json!({ "deleted": true })))
+}
+
+/// Inspect a session's managed worktree before delete/unconfine confirmation.
+async fn agent_worktree_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let session = state
+        .db
+        .agent_session(&id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let Some(info) =
+        crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
+    else {
+        return Ok(Json(json!({ "worktree": null })));
+    };
+    let status = crate::agent_worktree::inspect_worktree(&info)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "worktree": status })))
 }
 
 /// Copy the task's worktree delta into the source checkout for local testing.
@@ -5877,6 +5915,7 @@ async fn set_worktree_confinement(
     state: &AppState,
     session: crate::agent_types::AgentSessionRecord,
     enabled: bool,
+    discard_unapplied: bool,
 ) -> ApiResult<crate::agent_types::AgentSessionRecord> {
     let existing = crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref());
     if session.last_run_status == "running" {
@@ -5920,7 +5959,7 @@ async fn set_worktree_confinement(
         {
             Ok(session) => Ok(session),
             Err(error) => {
-                if let Err(cleanup) = crate::agent_worktree::remove_worktree(&info).await {
+                if let Err(cleanup) = crate::agent_worktree::remove_worktree(&info, true).await {
                     tracing::error!(
                         session_id = %session.id,
                         error = %cleanup,
@@ -5949,7 +5988,7 @@ async fn set_worktree_confinement(
             )
             .await
             .map_err(ApiError::internal)?;
-        if let Err(error) = crate::agent_worktree::remove_worktree(&info).await {
+        if let Err(error) = crate::agent_worktree::remove_worktree(&info, discard_unapplied).await {
             let rollback = state
                 .db
                 .update_agent_session(

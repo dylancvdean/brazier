@@ -390,6 +390,11 @@ pub struct UpdateAgentSession {
     /// Set to enable or disable worktree confinement for this session.
     #[serde(default)]
     pub confine_to_worktree: Option<bool>,
+    /// When turning confinement off, discard uncommitted worktree changes that
+    /// have not been applied to the source checkout. Requires an explicit UI
+    /// confirmation; ignored when enabling confinement.
+    #[serde(default)]
+    pub discard_unapplied: Option<bool>,
 }
 
 /// One persisted transcript entry. The payload is the runtime-neutral message
