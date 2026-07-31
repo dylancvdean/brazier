@@ -1375,6 +1375,15 @@ export function AgentMode(props: Props): React.JSX.Element {
     return () => onSidebarChange?.(null)
   }, [onSidebarChange, sessions, session?.id, loadSession])
 
+  // Leaving Agent mode must not leave a run going in the worker: PR #6 rehydrates
+  // on every explicit open, and clobbering Pi state mid-run can exit the process.
+  useEffect(() => {
+    return () => {
+      const id = sessionIdRef.current
+      if (id) void window.brazier.agent.cancel(id).catch(() => undefined)
+    }
+  }, [])
+
   return (
     <div className="agent-mode">
       <header className="agent-header">

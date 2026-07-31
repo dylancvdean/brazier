@@ -808,6 +808,10 @@ class PiAgentSession implements AgentSession {
     return this.state
   }
 
+  isDisposed(): boolean {
+    return this.disposed
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
@@ -1158,15 +1162,19 @@ export class PiAgentRuntime implements AgentRuntime {
     const messages = options.messages
     const existing = this.sessions.get(options.sessionId)
     if (existing) {
-      // A cached session may be stale after mode switches or a close that only
-      // cleared the worker map. Always re-apply daemon history so the model
-      // sees the same transcript the UI just loaded.
-      if (messages) {
-        existing.rehydrate(messages, options.systemPrompt)
-      } else if (options.systemPrompt !== undefined) {
-        existing.rehydrate(existing.getState().messages, options.systemPrompt)
+      if (existing.isDisposed()) {
+        this.sessions.delete(options.sessionId)
+      } else {
+        // A cached session may be stale after mode switches or a close that only
+        // cleared the worker map. Always re-apply daemon history so the model
+        // sees the same transcript the UI just loaded.
+        if (messages) {
+          existing.rehydrate(messages, options.systemPrompt)
+        } else if (options.systemPrompt !== undefined) {
+          existing.rehydrate(existing.getState().messages, options.systemPrompt)
+        }
+        return existing
       }
-      return existing
     }
     const remote = await this.broker.session(options.sessionId)
     const sandbox = await this.sandboxDescription()

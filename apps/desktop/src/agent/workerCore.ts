@@ -151,8 +151,16 @@ export class AgentWorkerCore {
     sessionId: string,
     options: { rehydrate: boolean }
   ): Promise<AgentSession> {
-    const existing = this.sessions.get(sessionId)
+    let existing = this.sessions.get(sessionId)
+    if (existing?.isDisposed()) {
+      this.sessions.delete(sessionId)
+      existing = undefined
+    }
     if (existing && !options.rehydrate) return existing
+    // Rehydrating mid-run replaces Pi's live transcript and can crash the worker.
+    if (existing && options.rehydrate && this.running.has(sessionId)) {
+      return existing
+    }
 
     const broker = this.requireBroker()
     if (!this.runtime) throw new Error('The agent worker has no runtime.')

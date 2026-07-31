@@ -7,7 +7,8 @@
  * the renderer, and streams events back.
  */
 
-import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { join, sep } from 'node:path'
 import { app, BrowserWindow, ipcMain, utilityProcess, type UtilityProcess } from 'electron'
 
 import {
@@ -41,9 +42,28 @@ export class AgentSupervisor {
   /**
    * Where the built worker bundle lives. `scripts/build-agent-worker.mjs` emits
    * it beside `out/main`, since electron-vite empties its own output directory.
+   *
+   * Packaged builds keep the worker in `asarUnpack`; fork must target the
+   * unpacked path or Node exits before `parentPort` comes up (code 1).
    */
   private workerPath(): string {
-    return join(__dirname, '..', 'agent', 'agent-worker.mjs')
+    const relative = join('out', 'agent', 'agent-worker.mjs')
+    const candidates = [
+      join(__dirname, '..', 'agent', 'agent-worker.mjs'),
+      join(app.getAppPath(), relative)
+    ]
+    if (app.isPackaged) {
+      candidates.unshift(
+        join(app.getAppPath(), relative).replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`)
+      )
+    }
+    const resolved = candidates.find((candidate) => existsSync(candidate))
+    if (!resolved) {
+      throw new Error(
+        'The agent worker bundle is missing. Rebuild the desktop app (`pnpm run build:agent` in apps/desktop).'
+      )
+    }
+    return resolved
   }
 
   setConnection(connection: WorkerConnection): void {

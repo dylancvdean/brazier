@@ -46,9 +46,11 @@ package() {
 
   install -dm755 "${pkgdir}/usr/lib/${pkgname}"
   cp -a apps/desktop/out "${pkgdir}/usr/lib/${pkgname}/"
-  # The agent worker intentionally keeps its JavaScript dependencies external.
-  # Dereference pnpm's workspace links so they resolve inside /usr/lib/brazier.
-  cp -aL apps/desktop/node_modules "${pkgdir}/usr/lib/${pkgname}/"
+  # The agent worker keeps Pi packages external. Copy the full runtime closure,
+  # not just top-level symlinks — otherwise transitive deps like `openai` are
+  # missing and the utilityProcess worker exits on import (code 1).
+  node apps/desktop/scripts/stage-packaged-node-modules.mjs \
+    "${pkgdir}/usr/lib/${pkgname}/node_modules"
   install -Dm644 apps/desktop/package.json "${pkgdir}/usr/lib/${pkgname}/package.json"
   install -Dm755 target/release/brazierd "${pkgdir}/usr/lib/${pkgname}/brazierd"
   install -Dm644 apps/desktop/build/icon.png "${pkgdir}/usr/share/pixmaps/${pkgname}.png"
