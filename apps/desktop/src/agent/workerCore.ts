@@ -60,12 +60,14 @@ export class AgentWorkerCore {
         return { runtime: this.runtime.descriptor, tools: this.tools }
       }
       case 'open-session': {
-        const session = await this.openSession(command.sessionId)
+        // Explicit open always rehydrates from the daemon so a mode switch or
+        // sidebar reselection prefills model context with stored history.
+        const session = await this.openSession(command.sessionId, { rehydrate: true })
         this.post({ type: 'session-state', sessionId: session.id, state: session.getState() })
         return session.getState()
       }
       case 'run': {
-        const session = await this.openSession(command.sessionId)
+        const session = await this.openSession(command.sessionId, { rehydrate: false })
         if (this.running.has(session.id)) {
           throw new Error('That session is already running. Cancel it first.')
         }
@@ -91,18 +93,18 @@ export class AgentWorkerCore {
         return { cancelled: true }
       }
       case 'compact': {
-        const session = await this.openSession(command.sessionId)
+        const session = await this.openSession(command.sessionId, { rehydrate: false })
         const state = await session.compact()
         this.post({ type: 'session-state', sessionId: session.id, state: session.getState() })
         return state
       }
       case 'set-model': {
-        const session = await this.openSession(command.sessionId)
+        const session = await this.openSession(command.sessionId, { rehydrate: false })
         await session.setModel(command.model)
         return session.getState()
       }
       case 'set-tools': {
-        const session = await this.openSession(command.sessionId)
+        const session = await this.openSession(command.sessionId, { rehydrate: false })
         await session.setEnabledTools(command.tools)
         return session.getState()
       }
@@ -138,10 +140,20 @@ export class AgentWorkerCore {
    * Load a session, building its runtime state from what the daemon stored. The
    * system prompt and tool catalog come from the daemon so the model always
    * sees the live sandbox and permission state.
+   *
+   * When `rehydrate` is true (explicit open/resume), refresh transcript + prompt
+   * from the daemon even if the session is cached — otherwise switching modes
+   * can leave the UI showing history while the model has an empty or stale
+   * context. Run/compact paths keep the live in-memory transcript so a prompt
+   * that has not finished persisting is not wiped.
    */
-  private async openSession(sessionId: string): Promise<AgentSession> {
+  private async openSession(
+    sessionId: string,
+    options: { rehydrate: boolean }
+  ): Promise<AgentSession> {
     const existing = this.sessions.get(sessionId)
-    if (existing) return existing
+    if (existing && !options.rehydrate) return existing
+
     const broker = this.requireBroker()
     if (!this.runtime) throw new Error('The agent worker has no runtime.')
     const remote = await broker.session(sessionId)
@@ -158,6 +170,11 @@ export class AgentWorkerCore {
       broker.textProfile(remote.session.model),
       broker.runtimeInferenceSettings()
     ])
+    const messages = remote.messages.map((record) => record.payload)
+    if (existing) {
+      existing.rehydrate(messages, prompt.system_prompt)
+      return existing
+    }
     const session = await this.runtime.createSession({
       sessionId,
       model: {
@@ -168,7 +185,7 @@ export class AgentWorkerCore {
       },
       systemPrompt: prompt.system_prompt,
       tools,
-      messages: remote.messages.map((record) => record.payload),
+      messages,
       capabilities: inferModelCapabilities(remote.session.model)
     })
     this.sessions.set(sessionId, session)

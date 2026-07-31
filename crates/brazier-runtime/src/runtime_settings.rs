@@ -66,6 +66,10 @@ pub struct RuntimeSettings {
     /// Token cap for thinking models when reasoning mode is `budget`.
     #[serde(default)]
     pub reasoning_budget_tokens: Option<u32>,
+    /// When true, prior-turn reasoning/thinking is omitted from the next model
+    /// request (it still appears in the UI). Default keeps reasoning in context.
+    #[serde(default)]
+    pub drop_reasoning_between_turns: bool,
     /// Absolute path of an explicitly activated llama-server binary. When set,
     /// it takes precedence over discovery and managed installs.
     pub binary_override: Option<String>,
@@ -208,6 +212,7 @@ impl Default for RuntimeSettings {
             enable_reasoning: true,
             jit_loading: true,
             reasoning_budget_tokens: None,
+            drop_reasoning_between_turns: false,
             binary_override: None,
             mlx_lm_python: None,
             mlx_vlm_python: None,

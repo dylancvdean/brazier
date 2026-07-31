@@ -394,6 +394,12 @@ export interface AgentSession {
   setModel(model: AgentModelReference): Promise<void>
   setEnabledTools(toolNames: string[]): Promise<void>
   getState(): AgentSessionState
+  /**
+   * Replace the in-memory transcript (and optional system prompt) with what the
+   * daemon stored. Required when reopening a session so model context matches
+   * the history shown in the UI.
+   */
+  rehydrate(messages: AgentMessage[], systemPrompt?: string): void
   dispose(): Promise<void>
 }
 

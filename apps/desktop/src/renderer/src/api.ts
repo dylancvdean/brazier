@@ -79,6 +79,8 @@ export type RuntimeSettings = {
   max_tokens: number | null
   enable_reasoning: boolean
   reasoning_budget_tokens?: number | null
+  /** When true, omit prior-turn reasoning from the next model request. Default keeps it. */
+  drop_reasoning_between_turns?: boolean
   binary_override: string | null
   mlx_lm_python?: string | null
   mlx_vlm_python?: string | null

@@ -232,6 +232,8 @@ export class BrokerClient {
   async runtimeInferenceSettings(): Promise<{
     context_size: number
     max_tokens?: number | null
+    enable_reasoning?: boolean
+    drop_reasoning_between_turns?: boolean
   }> {
     return this.request('/api/v1/runtime/settings')
   }

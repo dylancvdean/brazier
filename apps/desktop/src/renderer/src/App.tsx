@@ -679,8 +679,14 @@ export function App(): React.JSX.Element {
       if ((next === 'chat' || next === 'agent') && selectedModel) {
         selectModel(selectedModel, next)
       }
+      // Chat stays mounted while other modes are active; re-read the open
+      // conversation when returning so the next completion uses the same
+      // history shown on screen (mirrors agent session rehydrate).
+      if (next === 'chat' && conversationId) {
+        void refreshMessages(conversationId).catch(() => undefined)
+      }
     },
-    [appMode, selectedModel, selectModel]
+    [appMode, selectedModel, selectModel, conversationId]
   )
 
   const unloadSelectedModel = useCallback(async (): Promise<void> => {

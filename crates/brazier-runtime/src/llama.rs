@@ -416,10 +416,23 @@ pub fn translate_chat_request(
         model_alias,
         stream,
     } = context;
+    let drop_prior_reasoning = settings.drop_reasoning_between_turns;
+    let last_user_index = request
+        .messages
+        .iter()
+        .rposition(|message| message.role == "user");
     let mut messages: Vec<serde_json::Value> = request
         .messages
         .iter()
-        .map(message_to_openai_json)
+        .enumerate()
+        .map(|(index, message)| {
+            // Prior-turn reasoning can be dropped to save context; keep anything
+            // after the latest user message so in-turn tool rounds still round-trip
+            // thinking for Jinja / chat templates.
+            let include_reasoning = !drop_prior_reasoning
+                || last_user_index.is_none_or(|user_index| index > user_index);
+            message_to_openai_json_with_reasoning(message, include_reasoning)
+        })
         .collect();
     // A model's own system prompt leads the conversation rather than replacing
     // whatever the caller sent, which may be a tool preamble it still needs.
@@ -965,6 +978,13 @@ pub fn tool_call_fragment_to_delta(fragment: &ToolCallFragment) -> serde_json::V
 }
 
 fn message_to_openai_json(message: &OpenAiMessage) -> serde_json::Value {
+    message_to_openai_json_with_reasoning(message, true)
+}
+
+fn message_to_openai_json_with_reasoning(
+    message: &OpenAiMessage,
+    include_reasoning: bool,
+) -> serde_json::Value {
     let content = match &message.content {
         serde_json::Value::String(text) => serde_json::Value::String(text.clone()),
         serde_json::Value::Array(parts) => serde_json::Value::Array(
@@ -1002,7 +1022,8 @@ fn message_to_openai_json(message: &OpenAiMessage) -> serde_json::Value {
     if let Some(tool_call_id) = &message.tool_call_id {
         json["tool_call_id"] = serde_json::json!(tool_call_id);
     }
-    if let Some(reasoning) = &message.reasoning_content
+    if include_reasoning
+        && let Some(reasoning) = &message.reasoning_content
         && !reasoning.is_empty()
     {
         json["reasoning_content"] = serde_json::Value::String(reasoning.clone());
@@ -2984,5 +3005,73 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
             }]
         });
         assert_eq!(extract_reasoning(&body).as_deref(), Some("step by step"));
+    }
+
+    #[test]
+    fn drop_reasoning_between_turns_keeps_current_turn_only() {
+        let request = ChatCompletionRequest {
+            model: "gguf:demo.gguf".into(),
+            messages: vec![
+                OpenAiMessage {
+                    role: "user".into(),
+                    content: json!("first"),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                OpenAiMessage {
+                    role: "assistant".into(),
+                    content: json!("answer one"),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: Some("old thought".into()),
+                },
+                OpenAiMessage {
+                    role: "user".into(),
+                    content: json!("second"),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                OpenAiMessage {
+                    role: "assistant".into(),
+                    content: json!(""),
+                    tool_calls: Some(json!([{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "run_javascript", "arguments": "{}" }
+                    }])),
+                    tool_call_id: None,
+                    reasoning_content: Some("current thought".into()),
+                },
+                OpenAiMessage {
+                    role: "tool".into(),
+                    content: json!("1"),
+                    tool_calls: None,
+                    tool_call_id: Some("call_1".into()),
+                    reasoning_content: None,
+                },
+            ],
+            stream: false,
+            tools: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            seed: None,
+            enable_reasoning: None,
+            reasoning_budget_tokens: None,
+            tool_choice: None,
+            builtin_tools: None,
+            builtin_tool_names: None,
+            brazier_mode: None,
+        };
+        let settings = RuntimeSettings {
+            drop_reasoning_between_turns: true,
+            ..RuntimeSettings::default()
+        };
+        let body = translate_chat_request(&request, ChatContext::local(&settings, "local", false));
+        let messages = body["messages"].as_array().expect("messages");
+        assert!(messages[1].get("reasoning_content").is_none());
+        assert_eq!(messages[3]["reasoning_content"], "current thought");
     }
 }

@@ -3794,6 +3794,17 @@ a.inline-link {
   line-height: 1.45;
 }
 
+.inference-menu .inference-toggle {
+  margin: 4px 0 12px;
+  align-items: flex-start;
+}
+
+.inference-menu .inference-toggle span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .model-load-status {
   display: flex;
   align-items: center;

@@ -70,15 +70,21 @@ const DESCRIPTOR: AgentRuntimeDescriptor = {
   }
 }
 
+type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
 /** Build a Pi model that points at the daemon's OpenAI-compatible endpoint. */
-function piModel(model: AgentModelReference, baseUrl: string): Model<'openai-completions'> {
+function piModel(
+  model: AgentModelReference,
+  baseUrl: string,
+  reasoningEnabled: boolean
+): Model<'openai-completions'> {
   return {
     id: model.id,
     name: model.name ?? model.id,
     api: 'openai-completions',
     provider: 'brazier',
     baseUrl,
-    reasoning: false,
+    reasoning: reasoningEnabled,
     input: ['text'],
     // Local inference has no per-token price; the daemon reports no usage cost.
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -87,8 +93,16 @@ function piModel(model: AgentModelReference, baseUrl: string): Model<'openai-com
   }
 }
 
+function thinkingLevelFor(reasoningEnabled: boolean): ThinkingLevel {
+  return reasoningEnabled ? 'medium' : 'off'
+}
+
 /** Convert an application message into the shape Pi hands to a model. */
-function toPiMessage(message: AgentMessage): PiMessage | undefined {
+function toPiMessage(
+  message: AgentMessage,
+  options?: { includeReasoning?: boolean }
+): PiMessage | undefined {
+  const includeReasoning = options?.includeReasoning ?? true
   switch (message.role) {
     case 'user':
       return {
@@ -106,6 +120,11 @@ function toPiMessage(message: AgentMessage): PiMessage | undefined {
       }
     case 'assistant': {
       const content: AssistantMessage['content'] = []
+      // Restore prior-turn thinking so resumed sessions keep model context,
+      // unless the user opted to drop reasoning between turns.
+      if (includeReasoning && message.reasoning?.trim()) {
+        content.push({ type: 'thinking', thinking: message.reasoning })
+      }
       if (message.text) content.push({ type: 'text', text: message.text })
       for (const call of message.toolCalls ?? []) {
         content.push({
@@ -148,6 +167,13 @@ function toPiMessage(message: AgentMessage): PiMessage | undefined {
     default:
       return undefined
   }
+}
+
+/** Drop thinking parts when prior-turn reasoning should not re-enter context. */
+function stripThinkingParts(message: PiMessage): PiMessage {
+  if (message.role !== 'assistant' || !Array.isArray(message.content)) return message
+  const content = message.content.filter((part) => part.type !== 'thinking')
+  return { ...message, content }
 }
 
 /** Text of an assistant message, ignoring thinking and tool calls. */
@@ -302,9 +328,13 @@ class PiAgentSession implements AgentSession {
     request: ExecuteToolRequest
   ) => Promise<ToolExecutionOutcome>
   private readonly cancelChildren: () => Promise<void>
+  private readonly onDisposed: () => void
+  private readonly reasoningEnabled: boolean
+  private readonly dropReasoningBetweenTurns: boolean
   private toolsThisTurn = 0
   private queue?: EventQueue
   private currentRunId?: string
+  private disposed = false
   /**
    * Pi can emit several message_end events back-to-back. SQLite append uses a
    * read-then-write transaction to allocate sequence numbers, so overlapping
@@ -319,11 +349,14 @@ class PiAgentSession implements AgentSession {
     systemPrompt: string
     sandbox: SandboxDescription
     capabilities: CreateAgentSessionOptions['capabilities']
+    reasoningEnabled: boolean
+    dropReasoningBetweenTurns: boolean
     spawnSubagent: (
       parent: PiAgentSession,
       request: ExecuteToolRequest
     ) => Promise<ToolExecutionOutcome>
     cancelChildren: () => Promise<void>
+    onDisposed: () => void
   }) {
     this.id = options.state.id
     this.broker = options.broker
@@ -332,8 +365,11 @@ class PiAgentSession implements AgentSession {
     this.enabledTools = options.state.enabledTools ?? options.definitions.map((tool) => tool.name)
     this.sandbox = options.sandbox
     this.maxToolsPerTurn = options.capabilities.maxToolsPerTurn
+    this.reasoningEnabled = options.reasoningEnabled
+    this.dropReasoningBetweenTurns = options.dropReasoningBetweenTurns
     this.spawnSubagent = options.spawnSubagent
     this.cancelChildren = options.cancelChildren
+    this.onDisposed = options.onDisposed
     this.executor = new AgentToolExecutor({
       broker: options.broker,
       sessionId: options.state.id,
@@ -346,6 +382,7 @@ class PiAgentSession implements AgentSession {
       this.spawnSubagent(this, request)
     )
 
+    const includeReasoning = !options.dropReasoningBetweenTurns
     this.agent = new Agent({
       // Every model request goes to the daemon's OpenAI-compatible endpoint,
       // so local and remote models both work with no provider configuration.
@@ -373,22 +410,47 @@ class PiAgentSession implements AgentSession {
       // converts its own shapes before they reach the agent. Anything else a
       // runtime version adds for its own bookkeeping is dropped here rather
       // than sent to a model.
-      convertToLlm: (messages) => messages.filter(isLlmMessage),
+      convertToLlm: (messages) => {
+        const llm = messages.filter(isLlmMessage)
+        return options.dropReasoningBetweenTurns ? llm.map(stripThinkingParts) : llm
+      },
       getApiKey: () => options.broker.apiKey(),
       sessionId: options.state.id,
       toolExecution: options.capabilities.parallelToolCalling ? 'parallel' : 'sequential',
       initialState: {
         systemPrompt: options.systemPrompt,
-        model: piModel(options.state.model, options.broker.openAiBaseUrl()),
-        thinkingLevel: 'off',
+        model: piModel(
+          options.state.model,
+          options.broker.openAiBaseUrl(),
+          options.reasoningEnabled
+        ),
+        thinkingLevel: thinkingLevelFor(options.reasoningEnabled),
         tools: this.buildTools(),
-        messages: options.state.messages.map(toPiMessage).filter((message): message is PiMessage =>
-          Boolean(message)
-        )
+        messages: options.state.messages
+          .map((message) => toPiMessage(message, { includeReasoning }))
+          .filter((message): message is PiMessage => Boolean(message))
       }
     })
 
     this.agent.subscribe((event) => this.onPiEvent(event))
+  }
+
+  /**
+   * Replace the in-memory transcript with what the daemon stored. Used when
+   * reopening a session so the UI history and the model's context stay aligned.
+   */
+  rehydrate(messages: AgentMessage[], systemPrompt?: string): void {
+    if (this.disposed) {
+      throw new Error('Cannot rehydrate a disposed agent session.')
+    }
+    const includeReasoning = !this.dropReasoningBetweenTurns
+    this.state = { ...this.state, messages }
+    this.agent.state.messages = messages
+      .map((message) => toPiMessage(message, { includeReasoning }))
+      .filter((message): message is PiMessage => Boolean(message))
+    if (systemPrompt !== undefined) {
+      this.agent.state.systemPrompt = systemPrompt
+    }
   }
 
   /** Forward a child-session event onto this parent's stream (approvals, etc.). */
@@ -657,8 +719,9 @@ class PiAgentSession implements AgentSession {
     }
     const next = dropped.length > 0 ? [summaryMessage, ...keep] : messages
     this.state = { ...this.state, messages: next }
+    const includeReasoning = !this.dropReasoningBetweenTurns
     this.agent.state.messages = next
-      .map(toPiMessage)
+      .map((message) => toPiMessage(message, { includeReasoning }))
       .filter((message): message is PiMessage => Boolean(message))
     await this.enqueuePersistence(() => this.broker.appendMessages(this.id, next, true))
 
@@ -684,7 +747,8 @@ class PiAgentSession implements AgentSession {
       throw new Error('The model can only be changed between runs.')
     }
     this.state = { ...this.state, model }
-    this.agent.state.model = piModel(model, this.broker.openAiBaseUrl())
+    this.agent.state.model = piModel(model, this.broker.openAiBaseUrl(), this.reasoningEnabled)
+    this.agent.state.thinkingLevel = thinkingLevelFor(this.reasoningEnabled)
     await this.broker.updateSession(this.id, { model: model.id })
   }
 
@@ -701,9 +765,12 @@ class PiAgentSession implements AgentSession {
   }
 
   async dispose(): Promise<void> {
+    if (this.disposed) return
+    this.disposed = true
     this.agent.abort()
     this.queue?.close()
     this.queue = undefined
+    this.onDisposed()
   }
 }
 
@@ -1044,17 +1111,29 @@ export class PiAgentRuntime implements AgentRuntime {
   }
 
   async createSession(options: CreateAgentSessionOptions): Promise<AgentSession> {
+    const messages = options.messages
     const existing = this.sessions.get(options.sessionId)
-    if (existing) return existing
+    if (existing) {
+      // A cached session may be stale after mode switches or a close that only
+      // cleared the worker map. Always re-apply daemon history so the model
+      // sees the same transcript the UI just loaded.
+      if (messages) {
+        existing.rehydrate(messages, options.systemPrompt)
+      } else if (options.systemPrompt !== undefined) {
+        existing.rehydrate(existing.getState().messages, options.systemPrompt)
+      }
+      return existing
+    }
     const remote = await this.broker.session(options.sessionId)
     const sandbox = await this.sandboxDescription()
+    const defaults = await this.broker.runtimeInferenceSettings()
     const state: AgentSessionState = {
       id: remote.session.id,
       title: remote.session.title,
       workspacePath: remote.session.workspace_path ?? null,
       model: options.model,
       runtimeId: DESCRIPTOR.id,
-      messages: options.messages ?? remote.messages.map((record) => record.payload),
+      messages: messages ?? remote.messages.map((record) => record.payload),
       toolExecutions: remote.tool_executions,
       permissionMode: remote.session.permission_mode,
       permissionSettings: remote.session.permission_settings,
@@ -1071,8 +1150,13 @@ export class PiAgentRuntime implements AgentRuntime {
       systemPrompt: options.systemPrompt,
       sandbox,
       capabilities: options.capabilities,
+      reasoningEnabled: defaults.enable_reasoning ?? true,
+      dropReasoningBetweenTurns: defaults.drop_reasoning_between_turns ?? false,
       spawnSubagent: (parent, request) => this.spawnSubagent(parent, request),
-      cancelChildren: () => this.cancelChildren(options.sessionId)
+      cancelChildren: () => this.cancelChildren(options.sessionId),
+      onDisposed: () => {
+        this.sessions.delete(options.sessionId)
+      }
     })
     this.sessions.set(session.id, session)
     return session

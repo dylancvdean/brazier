@@ -133,6 +133,9 @@ type TimelineEntry = {
   }
 }
 
+/** Remembers which agent task was open across Agent ↔ Chat mode switches. */
+const LAST_AGENT_SESSION_KEY = 'brazier.agent.lastSessionId'
+
 const PERMISSION_LABELS: Record<AgentPermissionMode, { title: string; detail: string }> = {
   ask: {
     title: 'Ask first',
@@ -923,6 +926,11 @@ export function AgentMode(props: Props): React.JSX.Element {
         setSession(detail.session)
         sessionIdRef.current = detail.session.id
         onSessionBound?.(detail.session.id)
+        try {
+          window.sessionStorage.setItem(LAST_AGENT_SESSION_KEY, detail.session.id)
+        } catch {
+          // Ignore quota / privacy mode failures.
+        }
         // Prefer the daemon's created_at for sorting so messages and tool
         // executions share one clock format after restore.
         setMessages(
@@ -945,7 +953,8 @@ export function AgentMode(props: Props): React.JSX.Element {
         } else {
           setWorkspaceIsGit(false)
         }
-        // Restoring never re-runs anything: the worker only rebuilds context.
+        // Restoring never re-runs anything: the worker rebuilds model context
+        // from the daemon transcript so history is prefilled for the next turn.
         await window.brazier.agent.openSession(id)
       } catch (cause) {
         onError(errorText(cause))
@@ -953,6 +962,31 @@ export function AgentMode(props: Props): React.JSX.Element {
     },
     [onError, onSessionBound]
   )
+
+  // After remount (chat → agent), reselect the last task so its history is on
+  // screen and rehydrated into the worker before the next prompt.
+  useEffect(() => {
+    if (sessionIdRef.current) return
+    let cancelled = false
+    void listAgentSessions()
+      .then((entries) => {
+        if (cancelled) return
+        const tasks = entries.filter((entry) => entry.runtime_metadata?.kind !== 'subagent')
+        let lastId: string | null = null
+        try {
+          lastId = window.sessionStorage.getItem(LAST_AGENT_SESSION_KEY)
+        } catch {
+          lastId = null
+        }
+        if (lastId && tasks.some((entry) => entry.id === lastId)) {
+          void loadSession(lastId)
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [loadSession])
 
   async function chooseWorkspace(): Promise<void> {
     onError(null)
@@ -1051,6 +1085,11 @@ export function AgentMode(props: Props): React.JSX.Element {
         })
         setSession(active)
         sessionIdRef.current = active.id
+        try {
+          window.sessionStorage.setItem(LAST_AGENT_SESSION_KEY, active.id)
+        } catch {
+          // Ignore.
+        }
         setSessions((current) => [active as AgentSessionSummary, ...current])
         setPendingWorkspace(null)
         setPendingConfineToWorktree(false)
@@ -1226,6 +1265,11 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
     setSession(null)
     sessionIdRef.current = null
+    try {
+      window.sessionStorage.removeItem(LAST_AGENT_SESSION_KEY)
+    } catch {
+      // Ignore.
+    }
     // Nothing is bound until the next task exists, so a voice turn falls back
     // to an ordinary chat answer rather than reaching a closed session.
     onSessionBound?.(null)

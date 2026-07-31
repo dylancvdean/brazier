@@ -167,13 +167,13 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "doc_read",
-                "description": "Read a PDF, RTF, DOC, or DOCX the user attached. Pass the document id from the attachment notice. For PDFs, choose a page range (default: first 3 pages) or set render_pages to true to receive page images — use that for scanned PDFs with no text layer, or when layout matters. For RTF/DOC/DOCX, choose a line range instead. Output is truncated when too long; narrow the range and call again.",
+                "description": "Read a PDF, RTF, DOC, or DOCX the user attached. Pass the short document id from the attachment notice (about 12 hex characters). For PDFs, choose a page range (default: first 3 pages) or set render_pages to true to receive page images — use that for scanned PDFs with no text layer, or when layout matters. For RTF/DOC/DOCX, choose a line range instead. Output is truncated when too long; narrow the range and call again.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "document": {
                             "type": "string",
-                            "description": "Document blob id (sha256) from the attachment notice."
+                            "description": "Short document id from the attachment notice (unique prefix of the blob sha256)."
                         },
                         "start_page": {
                             "type": "integer",
@@ -519,6 +519,46 @@ fn describe_generation_failure(error: anyhow::Error) -> anyhow::Error {
     error
 }
 
+/// Resolve a `doc_read` document argument against conversation attachments.
+///
+/// Accepts a full sha256, an optional `brazier_blob:` prefix, or the short
+/// unique prefix shown in attachment notices.
+fn resolve_conversation_document<'a>(
+    requested: &str,
+    documents: &'a [crate::tool_registry::ConversationDocument],
+) -> anyhow::Result<&'a crate::tool_registry::ConversationDocument> {
+    let sha256 = requested
+        .strip_prefix("brazier_blob:")
+        .unwrap_or(requested)
+        .trim();
+    anyhow::ensure!(
+        !sha256.is_empty(),
+        "doc_read requires a `document` string (the id from the attachment notice)"
+    );
+    if let Some(document) = documents
+        .iter()
+        .find(|doc| doc.sha256.eq_ignore_ascii_case(sha256))
+    {
+        return Ok(document);
+    }
+    let matches: Vec<_> = documents
+        .iter()
+        .filter(|doc| {
+            doc.sha256.len() >= sha256.len()
+                && doc.sha256[..sha256.len()].eq_ignore_ascii_case(sha256)
+        })
+        .collect();
+    match matches.as_slice() {
+        [document] => Ok(document),
+        [] => anyhow::bail!(
+            "that document is not in this conversation — use the document id from an attachment notice"
+        ),
+        _ => anyhow::bail!(
+            "that document id is ambiguous — pass more characters from the attachment notice"
+        ),
+    }
+}
+
 async fn doc_read_tool(
     data_dir: &std::path::Path,
     args: &Value,
@@ -527,17 +567,9 @@ async fn doc_read_tool(
     let requested = args
         .get("document")
         .and_then(Value::as_str)
-        .context("doc_read requires a `document` string (the attachment blob id)")?
+        .context("doc_read requires a `document` string (the id from the attachment notice)")?
         .trim();
-    let sha256 = requested
-        .strip_prefix("brazier_blob:")
-        .unwrap_or(requested);
-    let document = documents
-        .iter()
-        .find(|doc| doc.sha256.eq_ignore_ascii_case(sha256))
-        .context(
-            "that document is not in this conversation — use the blob id from an attachment notice",
-        )?;
+    let document = resolve_conversation_document(requested, documents)?;
     let kind = crate::documents::kind_for_mime(&document.mime_type, &document.name).context(
         "that attachment is not a PDF, RTF, DOC, or DOCX document",
     )?;
@@ -1488,5 +1520,39 @@ exit 0
         let dir = tempfile::tempdir().unwrap();
         let described = video_tool_description(&definitions_for(dir.path()));
         assert!(described.contains("No default video model"), "{described}");
+    }
+
+    #[test]
+    fn doc_read_resolves_short_document_ids() {
+        let documents = vec![
+            crate::tool_registry::ConversationDocument {
+                sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    .into(),
+                mime_type: "application/pdf".into(),
+                name: "a.pdf".into(),
+            },
+            crate::tool_registry::ConversationDocument {
+                sha256: "ffffff0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    .into(),
+                mime_type: "application/pdf".into(),
+                name: "b.pdf".into(),
+            },
+        ];
+        assert_eq!(
+            resolve_conversation_document("abcdef012345", &documents)
+                .unwrap()
+                .name,
+            "a.pdf"
+        );
+        assert_eq!(
+            resolve_conversation_document(
+                "brazier_blob:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                &documents
+            )
+            .unwrap()
+            .name,
+            "a.pdf"
+        );
+        assert!(resolve_conversation_document("deadbeef", &documents).is_err());
     }
 }

@@ -340,6 +340,25 @@ export function InferenceMenu({
                 </p>
               </>
             )}
+            <label className="settings-toggle inference-toggle">
+              <input
+                type="checkbox"
+                checked={draft.drop_reasoning_between_turns ?? false}
+                onChange={(event) =>
+                  setDraft({
+                    ...draft,
+                    drop_reasoning_between_turns: event.target.checked
+                  })
+                }
+              />
+              <span>
+                Drop reasoning between turns
+                <small>
+                  Omit prior-turn thinking from the next request to save context. Leave off to keep
+                  reasoning in model context (default).
+                </small>
+              </span>
+            </label>
             <button
               className="popover-apply"
               disabled={!dirty || saving}
