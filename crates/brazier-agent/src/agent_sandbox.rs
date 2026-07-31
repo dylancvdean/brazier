@@ -211,6 +211,12 @@ impl SandboxBackend {
         }
         if cfg!(target_os = "linux") {
             if let Some(program) = which("bwrap") {
+                if !bubblewrap_is_usable(&program) {
+                    return Self::unavailable(
+                        "Bubblewrap is installed but cannot create a user namespace on this host \
+                         (uid map denied). Agent shell commands will not be sandboxed.",
+                    );
+                }
                 let unshare_net = bubblewrap_supports_unshare_net(&program);
                 let detail = if unshare_net {
                     "Bubblewrap mounts the host read-only, hides the home directory, and \
@@ -521,25 +527,28 @@ pub fn seatbelt_profile(request: &SandboxRequest<'_>) -> String {
     profile
 }
 
-/// Probe whether Bubblewrap can create a network namespace on this host.
-fn bubblewrap_supports_unshare_net(bwrap: &Path) -> bool {
-    std::process::Command::new(bwrap)
-        .args([
-            "--die-with-parent",
-            "--unshare-net",
-            "--ro-bind",
-            "/",
-            "/",
-            "--dev",
-            "/dev",
-            "--",
-            "true",
-        ])
+fn bubblewrap_probe(bwrap: &Path, extra: &[&str]) -> bool {
+    let mut command = std::process::Command::new(bwrap);
+    command
+        .arg("--die-with-parent")
+        .args(extra)
+        .args(["--ro-bind", "/", "/", "--dev", "/dev", "--", "true"])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// Probe whether Bubblewrap can enter a user namespace on this host at all.
+fn bubblewrap_is_usable(bwrap: &Path) -> bool {
+    bubblewrap_probe(bwrap, &[])
+}
+
+/// Probe whether Bubblewrap can create a network namespace on this host.
+fn bubblewrap_supports_unshare_net(bwrap: &Path) -> bool {
+    bubblewrap_probe(bwrap, &["--unshare-net"])
 }
 
 /// Generate Bubblewrap arguments. Later binds override earlier ones, so the
