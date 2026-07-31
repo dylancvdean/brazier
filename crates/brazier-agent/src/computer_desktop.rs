@@ -13,24 +13,22 @@ use brazier_protocol::computer_types::{
 pub fn probe_os_permissions() -> OsPermissionStatus {
     #[cfg(target_os = "macos")]
     {
-        return probe_macos();
+        probe_macos()
     }
     #[cfg(target_os = "linux")]
     {
-        return probe_linux();
+        probe_linux()
     }
     #[cfg(target_os = "windows")]
     {
-        return OsPermissionStatus {
+        OsPermissionStatus {
             platform: "windows".into(),
             display_server: "win32".into(),
             screen_capture: OsPermissionState::Unsupported,
             input_injection: OsPermissionState::Unsupported,
-            detail: Some(
-                "Windows desktop computer use is not implemented yet.".into(),
-            ),
+            detail: Some("Windows desktop computer use is not implemented yet.".into()),
             settings_hint: None,
-        };
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -70,10 +68,14 @@ fn probe_linux() -> OsPermissionStatus {
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
     let x11 = std::env::var_os("DISPLAY").is_some();
     if wayland {
-        let portal = std::path::Path::new("/usr/share/dbus-1/services/org.freedesktop.portal.Desktop.service")
-            .exists()
-            || std::path::Path::new("/usr/local/share/dbus-1/services/org.freedesktop.portal.Desktop.service")
-                .exists();
+        let portal = std::path::Path::new(
+            "/usr/share/dbus-1/services/org.freedesktop.portal.Desktop.service",
+        )
+        .exists()
+            || std::path::Path::new(
+                "/usr/local/share/dbus-1/services/org.freedesktop.portal.Desktop.service",
+            )
+            .exists();
         OsPermissionStatus {
             platform: "linux".into(),
             display_server: "wayland".into(),

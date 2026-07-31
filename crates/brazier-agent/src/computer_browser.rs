@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use brazier_protocol::computer_types::{
     ComputerAction, ComputerActionResult, ComputerActionStatus, ComputerViewport,
 };
@@ -129,7 +129,9 @@ impl BrowserDriver for SyntheticBrowserSession {
             } => Ok(self.ok_frame(format!(
                 "Drag ({start_x:.0},{start_y:.0}) → ({end_x:.0},{end_y:.0})"
             ))),
-            ComputerAction::Type { text } => Ok(self.ok_frame(format!("Typed {} chars", text.len()))),
+            ComputerAction::Type { text } => {
+                Ok(self.ok_frame(format!("Typed {} chars", text.len())))
+            }
             ComputerAction::Keypress { keys } => {
                 Ok(self.ok_frame(format!("Pressed {}", keys.join("+"))))
             }
@@ -142,8 +144,10 @@ impl BrowserDriver for SyntheticBrowserSession {
                 "Scroll at ({x:.0},{y:.0}) Δ({delta_x:.0},{delta_y:.0})"
             ))),
             ComputerAction::Wait { milliseconds } => {
-                tokio::time::sleep(std::time::Duration::from_millis((*milliseconds).min(10_000)))
-                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    (*milliseconds).min(10_000),
+                ))
+                .await;
                 Ok(self.ok_frame(format!("Waited {milliseconds}ms")))
             }
             ComputerAction::Memorize { fact } => {
@@ -223,11 +227,7 @@ impl BrowserSessionRegistry {
         Ok((session.viewport(), session.url(), session.title()))
     }
 
-    pub async fn execute(
-        &self,
-        id: &str,
-        action: &ComputerAction,
-    ) -> Result<ComputerActionResult> {
+    pub async fn execute(&self, id: &str, action: &ComputerAction) -> Result<ComputerActionResult> {
         let mut sessions = self.sessions.lock().await;
         let session = sessions
             .get_mut(id)

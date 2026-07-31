@@ -1,6 +1,6 @@
 //! Fara1.5 action dialect: XML `<tool_call>` blocks calling `computer_use`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use brazier_protocol::computer_types::ComputerAction;
 use serde_json::Value;
 
@@ -25,11 +25,11 @@ pub fn parse_fara_output(text: &str) -> Result<FaraParseResult> {
     // Some servers wrap a single JSON object without XML.
     if actions.is_empty() {
         let trimmed = text.trim();
-        if trimmed.starts_with('{') {
-            if let Ok(action) = parse_tool_call_json(trimmed) {
-                actions.push(action);
-                raw_tool_calls.push(trimmed.to_owned());
-            }
+        if trimmed.starts_with('{')
+            && let Ok(action) = parse_tool_call_json(trimmed)
+        {
+            actions.push(action);
+            raw_tool_calls.push(trimmed.to_owned());
         }
     }
 
@@ -92,10 +92,7 @@ fn parse_tool_call_json(block: &str) -> Result<ComputerAction> {
     } else if value.get("action").is_some() || value.get("type").is_some() {
         value.clone()
     } else if let Some(function) = value.get("function") {
-        function
-            .get("arguments")
-            .cloned()
-            .unwrap_or(Value::Null)
+        function.get("arguments").cloned().unwrap_or(Value::Null)
     } else {
         value.clone()
     };
@@ -117,13 +114,13 @@ fn action_from_args(args: &Value) -> Result<ComputerAction> {
         .unwrap_or("screenshot");
 
     let coord = |key_x: &str, key_y: &str| -> Result<(f64, f64)> {
-        if let Some(arr) = args.get("coordinate").and_then(|v| v.as_array()) {
-            if arr.len() >= 2 {
-                return Ok((
-                    arr[0].as_f64().unwrap_or(0.0),
-                    arr[1].as_f64().unwrap_or(0.0),
-                ));
-            }
+        if let Some(arr) = args.get("coordinate").and_then(|v| v.as_array())
+            && arr.len() >= 2
+        {
+            return Ok((
+                arr[0].as_f64().unwrap_or(0.0),
+                arr[1].as_f64().unwrap_or(0.0),
+            ));
         }
         let x = args
             .get(key_x)
@@ -161,23 +158,24 @@ fn action_from_args(args: &Value) -> Result<ComputerAction> {
             ComputerAction::MouseMove { x, y }
         }
         "left_click_drag" | "drag" => {
-            let (start_x, start_y) = if let Some(arr) = args.get("start_coordinate").and_then(|v| v.as_array())
-            {
-                (
-                    arr.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
-                    arr.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
-                )
-            } else {
-                coord("start_x", "start_y")?
-            };
-            let (end_x, end_y) = if let Some(arr) = args.get("coordinate").and_then(|v| v.as_array()) {
-                (
-                    arr.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
-                    arr.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
-                )
-            } else {
-                coord("end_x", "end_y")?
-            };
+            let (start_x, start_y) =
+                if let Some(arr) = args.get("start_coordinate").and_then(|v| v.as_array()) {
+                    (
+                        arr.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        arr.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    )
+                } else {
+                    coord("start_x", "start_y")?
+                };
+            let (end_x, end_y) =
+                if let Some(arr) = args.get("coordinate").and_then(|v| v.as_array()) {
+                    (
+                        arr.first().and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        arr.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    )
+                } else {
+                    coord("end_x", "end_y")?
+                };
             ComputerAction::LeftClickDrag {
                 start_x,
                 start_y,

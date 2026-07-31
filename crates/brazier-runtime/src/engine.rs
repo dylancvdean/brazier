@@ -1903,7 +1903,7 @@ impl Runtime {
                 emit(&load_tx, "load", "Loading vLLM model weights…").await;
                 if let Err(error) = self
                     .ensure_vllm_server_for_model(
-                        &model_id.strip_prefix("vllm:").unwrap_or(&model_id),
+                        model_id.strip_prefix("vllm:").unwrap_or(&model_id),
                         effective_profile.as_ref(),
                     )
                     .await
@@ -2664,6 +2664,7 @@ async fn generated_media_context_messages(
 }
 
 /// Streaming generation loop with server-side tool execution.
+#[allow(clippy::too_many_arguments)]
 async fn stream_tool_rounds(
     runtime: &Runtime,
     endpoint: &Endpoint,
@@ -2677,12 +2678,12 @@ async fn stream_tool_rounds(
     tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
 ) -> anyhow::Result<()> {
     let model_caps = runtime.model_capabilities(&request.model).await;
-        let ctx = ToolContext {
-            data_dir: &runtime.data_dir,
-            http: &runtime.http,
-            images,
-            documents,
-        };
+    let ctx = ToolContext {
+        data_dir: &runtime.data_dir,
+        http: &runtime.http,
+        images,
+        documents,
+    };
     let mut audio_fallback_attempted = false;
     let mut completion_tokens = 0u64;
     let mut prompt_tokens = None;

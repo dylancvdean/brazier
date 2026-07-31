@@ -299,7 +299,10 @@ fn window_lines(raw: &str, lines: Option<(usize, usize)>, max_chars: usize) -> E
     let all: Vec<&str> = raw.lines().collect();
     let total = all.len();
     let start = lines.map(|(start, _)| start.max(1)).unwrap_or(1);
-    let end = lines.map(|(_, end)| end.max(start)).unwrap_or(total).min(total);
+    let end = lines
+        .map(|(_, end)| end.max(start))
+        .unwrap_or(total)
+        .min(total);
     let window = if start > total || start > end {
         String::new()
     } else {
@@ -517,9 +520,7 @@ pub fn rtf_to_text(bytes: &[u8]) -> anyhow::Result<String> {
                             }
                         }
                         b'~' if !stack.last().expect("group").ignorable => output.push(' '),
-                        b'_' if !stack.last().expect("group").ignorable => {
-                            output.push('\u{2011}')
-                        }
+                        b'_' if !stack.last().expect("group").ignorable => output.push('\u{2011}'),
                         _ => {}
                     }
                     index += 1;
@@ -646,7 +647,9 @@ pub fn docx_to_text(bytes: &[u8]) -> anyhow::Result<String> {
         if tag.starts_with("<w:t>") || tag.starts_with("<w:t ") {
             let content_start = tag.find('>').map(|at| at + 1).unwrap_or(1);
             let close = tag.find("</w:t>").unwrap_or(tag.len());
-            output.push_str(&xml_unescape(&tag[content_start..close.max(content_start).min(tag.len())]));
+            output.push_str(&xml_unescape(
+                &tag[content_start..close.max(content_start).min(tag.len())],
+            ));
             rest = &tag[close + 1..];
             continue;
         }
@@ -900,7 +903,10 @@ mod tests {
         assert!(text.contains("scan.pdf"), "{text}");
         assert!(text.contains("12 pages"), "{text}");
         assert!(text.contains(short_document_id(digest)), "{text}");
-        assert!(!text.contains(digest), "full digest should not be shown: {text}");
+        assert!(
+            !text.contains(digest),
+            "full digest should not be shown: {text}"
+        );
         assert!(text.contains("PDF"), "{text}");
 
         let docx = attachment_notice(

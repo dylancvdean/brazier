@@ -1,8 +1,6 @@
 //! Policy decisions for Computer Use actions.
 
-use brazier_protocol::computer_types::{
-    ComputerAction, ComputerPermissionMode, ComputerTarget,
-};
+use brazier_protocol::computer_types::{ComputerAction, ComputerPermissionMode, ComputerTarget};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputerPolicyDecision {

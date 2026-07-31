@@ -999,6 +999,7 @@ pub fn tool_call_fragment_to_delta(fragment: &ToolCallFragment) -> serde_json::V
     entry
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn message_to_openai_json(message: &OpenAiMessage) -> serde_json::Value {
     message_to_openai_json_with_reasoning(message, true, false)
 }
@@ -1836,8 +1837,8 @@ fn skip_gguf_value(file: &mut std::fs::File, value_type: u32) -> Option<()> {
     match value_type {
         0 | 1 | 7 => skip_gguf_bytes(file, 1),
         2 | 3 => skip_gguf_bytes(file, 2),
-        4 | 5 | 6 => skip_gguf_bytes(file, 4),
-        10 | 11 | 12 => skip_gguf_bytes(file, 8),
+        4..=6 => skip_gguf_bytes(file, 4),
+        10..=12 => skip_gguf_bytes(file, 8),
         8 => {
             let length = read_u64(file)?;
             skip_gguf_bytes(file, length)

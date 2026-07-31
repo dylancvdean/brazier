@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use brazier_protocol::computer_types::{
     ComputerAction, ComputerActionResult, ComputerActionStatus, ComputerPermissionMode,
     ComputerSession, ComputerStep, ComputerTarget, ComputerViewport, OsPermissionStatus,
@@ -221,10 +221,7 @@ impl ComputerBroker {
                     session.pending.insert(approval_id.clone(), pending);
                     return Ok(ComputerActionResult {
                         status: ComputerActionStatus::NeedsApproval,
-                        message: Some(format!(
-                            "Approval required for {}",
-                            request.action.kind()
-                        )),
+                        message: Some(format!("Approval required for {}", request.action.kind())),
                         screenshot_base64: None,
                         mime_type: None,
                         viewport: Some(session.record.viewport.clone()),
@@ -238,7 +235,9 @@ impl ComputerBroker {
                 let session = sessions
                     .get_mut(&request.session_id)
                     .context("session disappeared")?;
-                let Some(pending) = session.pending.remove(request.approval_id.as_deref().unwrap_or(""))
+                let Some(pending) = session
+                    .pending
+                    .remove(request.approval_id.as_deref().unwrap_or(""))
                 else {
                     bail!("approval not found or already spent");
                 };

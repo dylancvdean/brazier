@@ -24,10 +24,11 @@ impl ComputerTarget {
 }
 
 /// Permission mode for a computer-use session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ComputerPermissionMode {
     /// Ask before navigate, type, click, and credentialed-site work.
+    #[default]
     Ask,
     /// Only browser/sandbox targets; host desktop refused.
     BrowserOnly,
@@ -42,12 +43,6 @@ impl ComputerPermissionMode {
             Self::BrowserOnly => "browser-only",
             Self::SkipPermissions => "skip-permissions",
         }
-    }
-}
-
-impl Default for ComputerPermissionMode {
-    fn default() -> Self {
-        Self::Ask
     }
 }
 
@@ -172,20 +167,23 @@ impl ComputerAction {
             ),
             ComputerPermissionMode::BrowserOnly | ComputerPermissionMode::Ask => !matches!(
                 self,
-                Self::Screenshot | Self::Wait { .. } | Self::Memorize { .. } | Self::Terminate { .. }
+                Self::Screenshot
+                    | Self::Wait { .. }
+                    | Self::Memorize { .. }
+                    | Self::Terminate { .. }
             ),
         }
     }
 
     /// Desktop target never accepts browser-only actions.
     pub fn allowed_on(&self, target: ComputerTarget) -> bool {
-        match (target, self) {
+        !matches!(
+            (target, self),
             (
                 ComputerTarget::Desktop,
-                Self::VisitUrl { .. } | Self::WebSearch { .. },
-            ) => false,
-            _ => true,
-        }
+                Self::VisitUrl { .. } | Self::WebSearch { .. }
+            )
+        )
     }
 }
 

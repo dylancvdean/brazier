@@ -536,8 +536,8 @@ fn gguf_capabilities(has_projector: bool, model_key: &str, model_path: &Path) ->
         input_modalities.push("audio".into());
     }
     let (reasoning, reasoning_modes) = infer_reasoning_profile(model_key, None);
-    let computer_use = looks_like_computer_use_model(model_key)
-        && input_modalities.iter().any(|m| m == "image");
+    let computer_use =
+        looks_like_computer_use_model(model_key) && input_modalities.iter().any(|m| m == "image");
     ModelCapabilities {
         input_modalities,
         output_modalities: vec!["text".into()],
@@ -847,8 +847,8 @@ fn mlx_capabilities(kind: MlxKind, dir: &Path, model_key: &str) -> ModelCapabili
         input_modalities.push("audio".into());
     }
     let (reasoning, reasoning_modes) = infer_reasoning_profile(model_key, config_value.as_ref());
-    let computer_use = looks_like_computer_use_model(model_key)
-        && input_modalities.iter().any(|m| m == "image");
+    let computer_use =
+        looks_like_computer_use_model(model_key) && input_modalities.iter().any(|m| m == "image");
     ModelCapabilities {
         input_modalities,
         output_modalities: vec!["text".into()],
@@ -1419,8 +1419,7 @@ mod tests {
     fn deleting_last_gguf_in_repo_removes_orphan_mmproj() {
         let dir = tempdir().unwrap();
         let model = download_destination(dir.path(), "acme/vision", "model-Q4_K_M.gguf").unwrap();
-        let projector =
-            download_destination(dir.path(), "acme/vision", "mmproj-f16.gguf").unwrap();
+        let projector = download_destination(dir.path(), "acme/vision", "mmproj-f16.gguf").unwrap();
         std::fs::create_dir_all(model.parent().unwrap()).unwrap();
         std::fs::write(&model, b"weights").unwrap();
         std::fs::write(&projector, b"proj").unwrap();
@@ -1434,8 +1433,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let q4 = download_destination(dir.path(), "acme/vision", "model-Q4_K_M.gguf").unwrap();
         let q8 = download_destination(dir.path(), "acme/vision", "model-Q8_0.gguf").unwrap();
-        let projector =
-            download_destination(dir.path(), "acme/vision", "mmproj-f16.gguf").unwrap();
+        let projector = download_destination(dir.path(), "acme/vision", "mmproj-f16.gguf").unwrap();
         std::fs::create_dir_all(q4.parent().unwrap()).unwrap();
         std::fs::write(&q4, b"q4").unwrap();
         std::fs::write(&q8, b"q8").unwrap();
@@ -1471,7 +1469,8 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("config.json"), b"{}").unwrap();
         std::fs::write(path.join("model.safetensors"), b"weights").unwrap();
-        let removed = delete_model(dir.path(), "personaplex:nvidia/personaplex-7b-v1", &[]).unwrap();
+        let removed =
+            delete_model(dir.path(), "personaplex:nvidia/personaplex-7b-v1", &[]).unwrap();
         assert_eq!(removed, path);
         assert!(!path.exists());
     }

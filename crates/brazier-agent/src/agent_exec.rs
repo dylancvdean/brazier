@@ -968,7 +968,7 @@ async fn doc_read(
             .unwrap_or(start + brazier_runtime::documents::DEFAULT_PAGE_COUNT - 1)
             .max(start);
         anyhow::ensure!(
-            end - start + 1 <= brazier_runtime::documents::MAX_TEXT_PAGES,
+            end - start < brazier_runtime::documents::MAX_TEXT_PAGES,
             "PDF text window is limited to {} pages; narrow start_page/end_page",
             brazier_runtime::documents::MAX_TEXT_PAGES
         );

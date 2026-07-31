@@ -312,10 +312,7 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/preferences/workspace",
             get(workspace_preference).put(update_workspace_preference),
         )
-        .route(
-            "/api/v1/computer/permissions",
-            get(computer_os_permissions),
-        )
+        .route("/api/v1/computer/permissions", get(computer_os_permissions))
         .route(
             "/api/v1/computer/sessions",
             get(list_computer_sessions).post(create_computer_session),
@@ -1328,10 +1325,7 @@ async fn workspace_preference(State(state): State<AppState>) -> ApiResult<Json<V
         .map_err(ApiError::internal)?
         .and_then(|value| {
             serde_json::from_value::<crate::computer_types::WorkspaceModesPreference>(
-                value
-                    .get("modes")
-                    .cloned()
-                    .unwrap_or(value),
+                value.get("modes").cloned().unwrap_or(value),
             )
             .ok()
         })
@@ -1516,8 +1510,8 @@ struct ParseFaraRequest {
 }
 
 async fn parse_fara_output(Json(body): Json<ParseFaraRequest>) -> ApiResult<Json<Value>> {
-    let parsed = crate::computer_fara::parse_fara_output(&body.text)
-        .map_err(ApiError::bad_request)?;
+    let parsed =
+        crate::computer_fara::parse_fara_output(&body.text).map_err(ApiError::bad_request)?;
     Ok(Json(json!({
         "thought": parsed.thought,
         "actions": parsed.actions,
@@ -2148,7 +2142,7 @@ fn available_disk_bytes(path: &std::path::Path) -> anyhow::Result<u64> {
             .context("disk-space check returned an unreadable filesystem")?
             .parse()
             .context("parse available disk space")?;
-        return Ok(available_kib.saturating_mul(1024));
+        Ok(available_kib.saturating_mul(1024))
     }
     #[cfg(not(unix))]
     anyhow::bail!("Brazier cannot verify free disk space on this platform")
@@ -2294,7 +2288,7 @@ async fn list_recommendation_setups(State(state): State<AppState>) -> ApiResult<
                     complete = false;
                 }
                 "failed" | "cancelled" => {
-                    failed = Some(job.error.unwrap_or_else(|| job.status));
+                    failed = Some(job.error.unwrap_or(job.status));
                     complete = false;
                 }
                 _ => complete = false,
@@ -2327,12 +2321,12 @@ async fn list_recommendation_setups(State(state): State<AppState>) -> ApiResult<
                 .all(|step| step.status == "completed")
         {
             for (step_index, step) in setup.steps.iter().enumerate() {
-                if step.kind == "runtime-build" && step.job_id.is_none() {
-                    if let Ok(request) =
+                if step.kind == "runtime-build"
+                    && step.job_id.is_none()
+                    && let Ok(request) =
                         serde_json::from_value::<builds::BuildRequest>(step.payload.clone())
-                    {
-                        builds_to_start.push((setup.id.clone(), step_index, request));
-                    }
+                {
+                    builds_to_start.push((setup.id.clone(), step_index, request));
                 }
             }
         }
@@ -5868,12 +5862,12 @@ async fn put_agent_workspace_prompt(
     let workspace_path = validate_workspace_path(&state, &request.workspace_path)?
         .display()
         .to_string();
-    if let Some(prompt) = request.system_prompt.as_deref() {
-        if prompt.len() > MAX_AGENT_SYSTEM_PROMPT_BYTES {
-            return Err(ApiError::bad_request(
-                "agent system prompt cannot exceed 64 KiB",
-            ));
-        }
+    if let Some(prompt) = request.system_prompt.as_deref()
+        && prompt.len() > MAX_AGENT_SYSTEM_PROMPT_BYTES
+    {
+        return Err(ApiError::bad_request(
+            "agent system prompt cannot exceed 64 KiB",
+        ));
     }
     state
         .db
