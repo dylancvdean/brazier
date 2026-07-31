@@ -14,6 +14,23 @@ license=('MIT')
 options=(!debug !lto)
 depends=('electron')
 makedepends=('cargo' 'git' 'nodejs' 'pnpm' 'rust')
+# Host packages Brazier uses when building or preparing engine runtimes from
+# the app. None are required just to launch the UI against a prebuilt runtime.
+optdepends=(
+  'git: clone engine sources for llama.cpp, whisper.cpp, stable-diffusion.cpp, vLLM, and PersonaPlex builds'
+  'cmake: configure CMake-based engine builds (llama.cpp, whisper.cpp, stable-diffusion.cpp)'
+  'base-devel: C/C++ toolchain (gcc, make, pkgconf, …) for compiling engine sources'
+  'cuda: NVIDIA CUDA toolkit for CUDA builds of llama.cpp, whisper.cpp, stable-diffusion.cpp, and vLLM'
+  'rocm-hip-sdk: AMD ROCm/HIP SDK for ROCm builds of llama.cpp and related engines'
+  'rocm-opencl-sdk: OpenCL SDK used alongside ROCm engine builds'
+  'hipsparselt: hipSPARSELt library required for vLLM on AMD GPUs (ROCm)'
+  'vulkan-headers: Vulkan headers for Vulkan builds of llama.cpp and related engines'
+  'vulkan-icd-loader: Vulkan loader for Vulkan engine builds'
+  'spirv-headers: SPIR-V headers for Vulkan engine builds'
+  'glslang: SPIR-V shader tooling for Vulkan engine builds'
+  'uv: create Python environments for vLLM, streaming ASR, and PersonaPlex'
+  'ffmpeg: sample video frames for vision models and convert audio for transcription'
+)
 # source=("${pkgname}::git+${url}.git#branch=master")
 # Package the checkout that contains this PKGBUILD. `makepkg` clones it into
 # $srcdir, so commit the changes you want included before building.

@@ -1,0 +1,83 @@
+# Maintainer: Dylan C. V. Dean <dylan@dylancvdean.com>
+
+pkgname=brazier-bin
+# Pacman reserves `-` as the separator before pkgrel, so encode upstream
+# prerelease separators with `_` in pkgver.
+pkgver=0.2.9_beta.32
+pkgrel=1
+pkgdesc='Desktop client and local API for open-weight AI models (AppImage)'
+arch=('x86_64')
+url='https://github.com/dylancvdean/brazier'
+license=('MIT')
+provides=('brazier')
+conflicts=('brazier')
+depends=('fuse2')
+# Host packages Brazier uses when building or preparing engine runtimes from
+# the app. None are required just to launch the UI against a prebuilt runtime.
+optdepends=(
+  'git: clone engine sources for llama.cpp, whisper.cpp, stable-diffusion.cpp, vLLM, and PersonaPlex builds'
+  'cmake: configure CMake-based engine builds (llama.cpp, whisper.cpp, stable-diffusion.cpp)'
+  'base-devel: C/C++ toolchain (gcc, make, pkgconf, …) for compiling engine sources'
+  'cuda: NVIDIA CUDA toolkit for CUDA builds of llama.cpp, whisper.cpp, stable-diffusion.cpp, and vLLM'
+  'rocm-hip-sdk: AMD ROCm/HIP SDK for ROCm builds of llama.cpp and related engines'
+  'rocm-opencl-sdk: OpenCL SDK used alongside ROCm engine builds'
+  'hipsparselt: hipSPARSELt library required for vLLM on AMD GPUs (ROCm)'
+  'vulkan-headers: Vulkan headers for Vulkan builds of llama.cpp and related engines'
+  'vulkan-icd-loader: Vulkan loader for Vulkan engine builds'
+  'spirv-headers: SPIR-V headers for Vulkan engine builds'
+  'glslang: SPIR-V shader tooling for Vulkan engine builds'
+  'uv: create Python environments for vLLM, streaming ASR, and PersonaPlex'
+  'ffmpeg: sample video frames for vision models and convert audio for transcription'
+)
+# Stripping an AppImage corrupts its embedded runtime and payload.
+options=(!strip !debug)
+_pkgver="${pkgver//_/-}"
+source=(
+  "Brazier.AppImage::https://github.com/dylancvdean/brazier/releases/download/v${_pkgver}/Brazier.AppImage"
+  "brazier.png::https://raw.githubusercontent.com/dylancvdean/brazier/v${_pkgver}/apps/desktop/build/icon.png"
+  "LICENSE::https://raw.githubusercontent.com/dylancvdean/brazier/v${_pkgver}/LICENSE"
+  "THIRD_PARTY_NOTICES.md::https://raw.githubusercontent.com/dylancvdean/brazier/v${_pkgver}/THIRD_PARTY_NOTICES.md"
+)
+noextract=('Brazier.AppImage')
+sha256sums=(
+  '85e8d75db62cda9976718708d690a23dd189668095f2584eb722ccc80dbc7338'
+  '67281f70a7d8c90757519d812d13b391abb02ffc125f921fd34f598b303509b4'
+  '821a8169603e993693146b1f169c6027caa81489b5b193fceeabb89f78bb75f7'
+  '6d384b6723d0f6068be94568d78bac7759177c6ef440a4986512d48ba2dae700'
+)
+
+package() {
+  install -Dm755 "${srcdir}/Brazier.AppImage" "${pkgdir}/opt/${pkgname}/Brazier.AppImage"
+  install -Dm644 "${srcdir}/brazier.png" "${pkgdir}/usr/share/pixmaps/brazier.png"
+  install -Dm644 "${srcdir}/brazier.png" "${pkgdir}/usr/share/icons/hicolor/1024x1024/apps/brazier.png"
+  install -Dm644 "${srcdir}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 "${srcdir}/THIRD_PARTY_NOTICES.md" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/THIRD_PARTY_NOTICES.md"
+
+  install -dm755 "${pkgdir}/usr/bin"
+  cat > "${pkgdir}/usr/bin/brazier" <<'EOF'
+#!/bin/sh
+# Pacman owns this AppImage; do not let electron-updater replace it in place.
+export BRAZIER_DISABLE_UPDATES=1
+# Brazier currently uses XWayland on Linux for a reliable Chromium render path.
+# Setting this before Electron starts makes `--class` apply to the actual
+# window, allowing Plasma to associate it with brazier.desktop.
+export ELECTRON_OZONE_PLATFORM_HINT=x11
+unset WAYLAND_DISPLAY
+exec /opt/brazier-bin/Brazier.AppImage "$@"
+EOF
+  chmod 755 "${pkgdir}/usr/bin/brazier"
+
+  install -Dm644 /dev/stdin "${pkgdir}/usr/share/applications/brazier.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Brazier
+Comment=${pkgdesc}
+Exec=brazier %U
+Icon=brazier
+Terminal=false
+Categories=Utility;Development;
+StartupWMClass=brazier
+StartupNotify=true
+EOF
+}
