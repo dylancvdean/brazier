@@ -27,12 +27,14 @@ const post = (message: WorkerMessage): void => {
 
 const core = new AgentWorkerCore(post)
 
+/** Handle one command at a time so open/rehydrate cannot race a run. */
+let commandChain = Promise.resolve()
 parentPort.on('message', (event) => {
   const command = event.data as WorkerCommand
   if (!command || typeof command !== 'object' || typeof command.type !== 'string') {
     return
   }
-  void core.handle(command)
+  commandChain = commandChain.then(() => core.handle(command))
 })
 
 process.on('uncaughtException', (error: Error) => {

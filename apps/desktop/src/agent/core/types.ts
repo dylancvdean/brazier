@@ -402,6 +402,8 @@ export interface AgentSession {
   rehydrate(messages: AgentMessage[], systemPrompt?: string): void
   /** Reload live inference prefs (e.g. drop_reasoning_between_turns) from the daemon. */
   refreshInferencePrefs(): Promise<void>
+  /** True after {@link dispose}; the worker must not rehydrate disposed sessions. */
+  isDisposed(): boolean
   dispose(): Promise<void>
 }
 
