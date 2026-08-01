@@ -45,6 +45,16 @@ export function observationError(result: ComputerActionResult | null | undefined
   return result?.message || 'Could not capture the current computer screenshot.'
 }
 
+/**
+ * Fara actions must be parsed from normal completion content. Older local
+ * sessions may have been run with thinking enabled, which caused llama.cpp to
+ * classify the whole XML response as reasoning content; retain that text as a
+ * compatibility fallback instead of silently ending the task.
+ */
+export function computerModelOutput(responseText: string, reasoningText: string): string {
+  return responseText.trim() ? responseText : reasoningText
+}
+
 function historyMessage(role: Message['role'], content: string | ContentPart[], id: string): Message {
   return {
     id: `computer-history-${id}`,
@@ -61,7 +71,8 @@ export function computerSystemPrompt(session: Pick<ComputerSession, 'target' | '
   return [
     'You are Fara, a computer-use agent specialized in completing web-browser tasks from screenshots.',
     'Use visual evidence from the latest screenshot and the recorded trajectory; do not assume page state.',
-    'Return exactly one next action as <tool_call>{"name":"computer_use","arguments":{...}}</tool_call>.',
+    'Return exactly one next action, for example:',
+    '<tool_call>{"name":"computer_use","arguments":{"action":"visit_url","url":"https://example.com"}}</tool_call>.',
     'Supported actions are left_click, right_click, double_click, triple_click, mouse_move,',
     'left_click_drag, type, key, scroll, visit_url, web_search, wait,',
     'pause_and_memorize_fact, ask_user_question, and terminate.',

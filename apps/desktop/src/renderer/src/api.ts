@@ -903,6 +903,8 @@ export async function streamCompletion(
     onReasoning?: (token: string) => void
     onLoad?: (event: { phase: string; message: string }) => void
     onPrefill?: (event: PrefillProgress) => void
+    /** Override the runtime's default thinking mode for this completion. */
+    enableReasoning?: boolean
     /** When set, overrides a live settings fetch for drop_reasoning_between_turns. */
     dropReasoningBetweenTurns?: boolean
   }
@@ -935,6 +937,9 @@ export async function streamCompletion(
         ? { builtin_tool_names: options.builtinToolNames }
         : {}),
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
+      ...(typeof options?.enableReasoning === 'boolean'
+        ? { enable_reasoning: options.enableReasoning }
+        : {}),
       messages: messagesForCompletion(messages, {
         dropReasoningBetweenTurns,
         harmony: isHarmonyModel(model)

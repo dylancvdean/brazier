@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { ComputerActionResult, ComputerSession, ComputerStep } from '../api'
 import {
   buildComputerHistory,
+  computerModelOutput,
   computerSystemPrompt,
   continuationForResult,
   MAX_COMPUTER_HISTORY_IMAGES,
@@ -50,10 +51,21 @@ function imagePayloads(history: ReturnType<typeof buildComputerHistory>): string
 }
 
 describe('computer history', () => {
+  it('uses reasoning output only as a compatibility fallback for old Fara sessions', () => {
+    expect(computerModelOutput('<tool_call>content</tool_call>', '<tool_call>reasoning</tool_call>')).toBe(
+      '<tool_call>content</tool_call>'
+    )
+    expect(computerModelOutput('', '<tool_call>reasoning</tool_call>')).toBe(
+      '<tool_call>reasoning</tool_call>'
+    )
+  })
+
   it('uses Fara grounding dimensions and critical-point safety instructions', () => {
     const prompt = computerSystemPrompt(session)
     expect(prompt).toContain('1440x900')
     expect(prompt).toContain('exactly one next action')
+    expect(prompt).toContain('"action":"visit_url"')
+    expect(prompt).not.toContain('{...}')
     expect(prompt).toContain('irreversible action')
     expect(prompt).toContain('Never invent personal or payment information')
   })

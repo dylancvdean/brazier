@@ -33,6 +33,7 @@ import type { AgentComposerControls } from './AgentMode'
 import {
   buildComputerHistory,
   computerActionLabel,
+  computerModelOutput,
   computerScreenshotDataUrl,
   continuationForResult,
   observationError,
@@ -234,10 +235,14 @@ export function ComputerMode(props: Props): React.JSX.Element {
         },
         {
           onReasoning: (token) => setLiveThought((current) => current + token),
-          toolChoice: 'none'
+          toolChoice: 'none',
+          // Fara emits its XML action after a think block. With thinking
+          // enabled llama.cpp can classify the entire response as reasoning,
+          // leaving the action parser an empty completion.
+          enableReasoning: false
         }
       )
-      responseText = completion.responseText || responseText
+      responseText = computerModelOutput(completion.responseText || responseText, completion.reasoningText)
       if (controller.signal.aborted) return
 
       const parsed = await parseModelOutput(responseText)
@@ -250,7 +255,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
         thought: parsed.thought
       })
 
-      if (parsed.actions.length === 0) return
+      if (parsed.actions.length === 0) {
+        onError('The computer-use model returned no executable action. Try again or choose another model.')
+        return
+      }
       for (const action of parsed.actions) {
         if (controller.signal.aborted) return
         const result = await computerExec({ session_id: active.id, action })
