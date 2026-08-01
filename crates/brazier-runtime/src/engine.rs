@@ -2589,18 +2589,19 @@ async fn generated_media_context_messages(
     if invocation.media.is_empty() || invocation.is_error {
         return None;
     }
-    if !model_caps
-        .input_modalities
-        .iter()
-        .any(|modality| modality == "image")
+    let vision = model_caps.input_modalities.iter().any(|modality| modality == "image");
+    let from_document = invocation.name == "doc_read" || invocation.name == "fetch_url";
+    if !vision
+        && !from_document
     {
         return None;
     }
-    let from_doc_read = invocation.name == "doc_read";
     let mut persisted_parts = Vec::new();
     let mut live_parts = Vec::new();
     for media in &invocation.media {
-        let allowed = if from_doc_read {
+        let allowed = if from_document && media.mime_type == "application/pdf" {
+            true
+        } else if from_document {
             true
         } else if media.mime_type.starts_with("video/") {
             settings.show_generated_video_to_model
@@ -2610,13 +2611,13 @@ async fn generated_media_context_messages(
         if !allowed {
             continue;
         }
-        let name = if from_doc_read {
+        let name = media.name.as_deref().unwrap_or(if from_document {
             "document-page"
         } else if media.mime_type.starts_with("video/") {
             "generated-video"
         } else {
             "generated-image"
-        };
+        });
         persisted_parts.push(serde_json::json!({
             "type": "brazier_blob",
             "brazier_blob": {
@@ -2625,7 +2626,11 @@ async fn generated_media_context_messages(
                 "name": name
             }
         }));
-        if let Ok(parts) =
+        if media.mime_type == "application/pdf" {
+            live_parts.push(crate::documents::attachment_notice(
+                name, &media.mime_type, &media.sha256, None,
+            ));
+        } else if vision && let Ok(parts) =
             media::generated_media_parts(data_dir, &media.sha256, &media.mime_type).await
         {
             live_parts.extend(parts);
@@ -2634,7 +2639,7 @@ async fn generated_media_context_messages(
     if persisted_parts.is_empty() {
         return None;
     }
-    let status_text = if from_doc_read {
+    let status_text = if from_document {
         "The requested document pages were rendered as images and are included below. Read them, then call doc_read again with another range if you need more."
     } else {
         "The requested media was generated successfully and has already been displayed to the user. It is included here so you can see the completed result. Do not call a media-generation tool again unless the user explicitly asks for another version or requests a change. Briefly confirm completion."
@@ -3000,6 +3005,7 @@ mod tests {
             media: vec![tools::ToolMedia {
                 sha256: blob.sha256.clone(),
                 mime_type: "image/png".into(),
+                name: None,
             }],
         };
 
@@ -3054,6 +3060,7 @@ mod tests {
             media: vec![tools::ToolMedia {
                 sha256: "abc123".into(),
                 mime_type: "image/png".into(),
+                name: None,
             }],
         };
 

@@ -68,6 +68,8 @@ export type AgentComposerControls = {
   /** Empty when a run can start; otherwise why it cannot. */
   blockedReason: string
   placeholder: string
+  /** Runtime-specific prompt words that the shared shell can complete. */
+  suggestions?: Array<{ value: string; description: string }>
 }
 
 /**
@@ -1514,10 +1516,18 @@ export function AgentMode(props: Props): React.JSX.Element {
         ? blockedReason
         : running
           ? 'The agent is working. Stop it to send something else…'
-          : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`
+          : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`,
+      suggestions:
+        activeRuntimeId === 'omp'
+          ? [
+              { value: 'ultrathink', description: 'Use the highest supported reasoning effort for this turn.' },
+              { value: 'orchestrate', description: 'Plan, delegate independent work, and verify the result.' },
+              { value: 'workflowz', description: 'Build a deterministic multi-subagent workflow when task tools are available.' }
+            ]
+          : undefined
     })
     return () => onComposerChange?.(null)
-  }, [onComposerChange, running, blockedReason, modelLabel, workspace])
+  }, [onComposerChange, running, blockedReason, modelLabel, workspace, activeRuntimeId])
 
   // Same pattern for the app sidebar: Agent mode replaces conversations with
   // directory-grouped tasks, so the list and its actions live up there.

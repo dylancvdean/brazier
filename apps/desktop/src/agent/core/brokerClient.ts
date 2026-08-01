@@ -82,6 +82,11 @@ export type AgentCapabilitiesResponse = {
   tool_output_limit_chars: number
 }
 
+export type AgentPreferenceResponse = {
+  default_runtime_id: string
+  omp_profile?: { binary_path?: string; config_yaml?: string } | null
+}
+
 export type DaemonSessionRecord = {
   id: string
   title: string
@@ -162,6 +167,10 @@ export class BrokerClient {
 
   async capabilities(): Promise<AgentCapabilitiesResponse> {
     return this.request('/api/v1/agent/capabilities')
+  }
+
+  async agentPreference(): Promise<AgentPreferenceResponse> {
+    return this.request('/api/v1/preferences/agent')
   }
 
   /** Tool catalog, translated into the application's own tool shape. */

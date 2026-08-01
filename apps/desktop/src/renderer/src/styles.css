@@ -1818,6 +1818,35 @@ code {
   color: #707070;
 }
 
+.composer-suggestions {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% + 7px);
+  display: grid;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid #343434;
+  border-radius: 10px;
+  background: #151515;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .35);
+}
+
+.composer-suggestions button {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  color: #ddd;
+  text-align: left;
+  background: transparent;
+}
+
+.composer-suggestions button:hover { background: #252525; }
+.composer-suggestions span { color: #989898; font-size: 12px; }
+
 .composer-actions {
   display: flex;
   align-items: center;

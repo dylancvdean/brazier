@@ -4837,6 +4837,8 @@ function AgentSection(props: SectionProps): React.JSX.Element {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [savedNotice, setSavedNotice] = useState<string | null>(null)
+  const [ompBinaryPath, setOmpBinaryPath] = useState('')
+  const [ompConfigYaml, setOmpConfigYaml] = useState('')
 
   async function reload(): Promise<void> {
     setLoading(true)
@@ -4848,6 +4850,8 @@ function AgentSection(props: SectionProps): React.JSX.Element {
       ])
       setRuntimes(capabilities.runtimes)
       setSelected(preference.default_runtime_id || capabilities.default_runtime_id || 'pi')
+      setOmpBinaryPath(preference.omp_profile?.binary_path ?? '')
+      setOmpConfigYaml(preference.omp_profile?.config_yaml ?? '')
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -4866,7 +4870,7 @@ function AgentSection(props: SectionProps): React.JSX.Element {
     props.onError(null)
     setSavedNotice(null)
     try {
-      const saved = await saveAgentPreference({ default_runtime_id: runtimeId })
+      const saved = await saveAgentPreference({ default_runtime_id: runtimeId, omp_profile: { binary_path: ompBinaryPath, config_yaml: ompConfigYaml } })
       setSelected(saved.default_runtime_id)
       setSavedNotice(
         saved.default_runtime_id === 'omp'
@@ -4881,6 +4885,22 @@ function AgentSection(props: SectionProps): React.JSX.Element {
   }
 
   const omp = runtimes.find((runtime) => runtime.id === 'omp')
+
+  async function saveOmpProfile(): Promise<void> {
+    setSaving(true)
+    props.onError(null)
+    try {
+      const saved = await saveAgentPreference({
+        default_runtime_id: selected,
+        omp_profile: { binary_path: ompBinaryPath.trim(), config_yaml: ompConfigYaml }
+      })
+      setSavedNotice(saved.default_runtime_id === 'omp' ? 'OMP profile saved. New OMP tasks will use it.' : 'OMP profile saved.')
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <section>
@@ -4945,6 +4965,21 @@ function AgentSection(props: SectionProps): React.JSX.Element {
               })}
             </div>
             {savedNotice && <p className="model-help">{savedNotice}</p>}
+          </div>
+
+          <div className="settings-group">
+            <div className="section-label">Oh My Pi runtime profile</div>
+            <p className="model-help">This isolated profile is written only into Brazier&apos;s temporary OMP sidecar directory. It never edits your normal <code>~/.omp</code> settings or stores credentials.</p>
+            <label className="settings-field">
+              <span>OMP executable (optional)</span>
+              <input value={ompBinaryPath} onChange={(event) => setOmpBinaryPath(event.target.value)} placeholder="Discover omp from PATH" disabled={saving} />
+            </label>
+            <label className="settings-field">
+              <span>Advanced OMP YAML</span>
+              <textarea value={ompConfigYaml} onChange={(event) => setOmpConfigYaml(event.target.value)} placeholder={'defaultThinkingLevel: high\ncompaction:\n  enabled: true\nlsp:\n  enabled: true'} rows={10} disabled={saving} />
+            </label>
+            <p className="model-help">Use this for thinking, sampling, compaction, retry, edit, LSP, browser/web-search, and tool-timeout settings. Brazier still chooses the model and session approval mode.</p>
+            <button className="secondary-action" onClick={() => void saveOmpProfile()} disabled={saving}>Save OMP profile</button>
           </div>
 
           <div className="settings-group">

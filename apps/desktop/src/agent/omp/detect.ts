@@ -25,8 +25,8 @@ function isExecutable(path: string): boolean {
 }
 
 /** Resolve the omp CLI, or null when the fuller runtime cannot start. */
-export function detectOmpBinary(): OmpBinary | null {
-  const override = process.env.BRAZIER_OMP_PATH || process.env.OMP_PATH
+export function detectOmpBinary(configuredPath?: string): OmpBinary | null {
+  const override = configuredPath?.trim() || process.env.BRAZIER_OMP_PATH || process.env.OMP_PATH
   if (override && isExecutable(override)) {
     return { path: override, source: 'env' }
   }

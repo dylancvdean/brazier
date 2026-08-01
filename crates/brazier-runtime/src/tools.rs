@@ -33,6 +33,9 @@ pub struct ToolInvocation {
 pub struct ToolMedia {
     pub sha256: String,
     pub mime_type: String,
+    /// Original display name when the media is a document fetched from the web.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Tool definitions with the generation tools described for this machine.
@@ -136,11 +139,14 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fetch_url",
-                "description": "Fetch a public http(s) URL and return its text content. Responses are truncated; HTML is reduced to text. Private and local addresses are blocked.",
+                "description": "Fetch a public http(s) URL and return text content. Public PDFs are saved as conversation attachments and read by page; set render_pages for scans/layout when using a vision model. Private and local addresses are blocked.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "url": { "type": "string", "description": "Absolute http:// or https:// URL." }
+                        "url": { "type": "string", "description": "Absolute http:// or https:// URL." },
+                        "start_page": { "type": "integer", "minimum": 1, "description": "First PDF page, 1-based; default 1." },
+                        "end_page": { "type": "integer", "minimum": 1, "description": "Last PDF page, inclusive; default first three pages." },
+                        "render_pages": { "type": "boolean", "description": "Render PDF pages as images for scans or layout-sensitive reading." }
                     },
                     "required": ["url"]
                 }
@@ -403,6 +409,11 @@ pub async fn execute_with_context(
                 "generate_video requires daemon data directory context"
             )),
         },
+        "fetch_url" => match (data_dir, parsed.get("url").and_then(Value::as_str)) {
+            (Some(dir), Some(url)) => fetch_url(client, dir, url, &parsed).await,
+            (None, _) => Err(anyhow::anyhow!("fetch_url requires daemon data directory context")),
+            (_, None) => Err(anyhow::anyhow!("fetch_url requires a `url` string argument")),
+        },
         other => simple_tool(client, data_dir, other, &parsed)
             .await
             .map(ToolOutput::from),
@@ -429,7 +440,7 @@ pub async fn execute_with_context(
 
 /// Built-in tools that return plain text.
 async fn simple_tool(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     data_dir: Option<&std::path::Path>,
     name: &str,
     parsed: &Value,
@@ -449,12 +460,6 @@ async fn simple_tool(
                     }
                 })
             }),
-        "fetch_url" => match parsed.get("url").and_then(Value::as_str) {
-            Some(url) => fetch_url(client, url).await,
-            None => Err(anyhow::anyhow!(
-                "fetch_url requires a `url` string argument"
-            )),
-        },
         "run_javascript" => match parsed.get("code").and_then(Value::as_str) {
             Some(code) => {
                 let code = code.to_owned();
@@ -615,6 +620,7 @@ async fn doc_read_tool(
                 .map(|page| ToolMedia {
                     sha256: page.sha256,
                     mime_type: page.mime_type,
+                    name: None,
                 })
                 .collect(),
         });
@@ -777,6 +783,7 @@ async fn generate_image_tool(
         media: vec![ToolMedia {
             sha256: blob.sha256.clone(),
             mime_type: "image/png".to_owned(),
+            name: None,
         }],
     })
 }
@@ -877,6 +884,7 @@ async fn generate_video_tool(
         media: vec![ToolMedia {
             sha256: blob.sha256.clone(),
             mime_type: mime.to_owned(),
+            name: None,
         }],
     })
 }
@@ -1155,22 +1163,47 @@ pub fn html_to_text(html: &str) -> String {
     collapsed.trim().to_owned()
 }
 
-async fn fetch_url(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
-    let parsed = reqwest::Url::parse(url).context("invalid URL")?;
+async fn fetch_url(
+    _client: &reqwest::Client,
+    data_dir: &std::path::Path,
+    url: &str,
+    args: &Value,
+) -> anyhow::Result<ToolOutput> {
+    let mut parsed = reqwest::Url::parse(url).context("invalid URL")?;
     anyhow::ensure!(
         matches!(parsed.scheme(), "http" | "https"),
         "only http and https URLs are supported"
     );
-    let host = parsed.host_str().context("URL has no host")?;
-    guard_host(host).await?;
-
-    let response = client
-        .get(parsed)
-        .header("user-agent", "brazier-tools/0.1 (+bounded-fetch)")
-        .timeout(FETCH_TIMEOUT)
-        .send()
-        .await
-        .context("request failed")?;
+    // Do redirects ourselves: reqwest's default policy would follow a public
+    // URL to a private address after we checked only the first host.
+    let redirecting = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("build bounded fetch client")?;
+    let mut redirects = 0_u8;
+    let response = loop {
+        let host = parsed.host_str().context("URL has no host")?;
+        guard_host(host).await?;
+        let response = redirecting
+            .get(parsed.clone())
+            .header("user-agent", "brazier-tools/0.1 (+bounded-fetch)")
+            .timeout(FETCH_TIMEOUT)
+            .send()
+            .await
+            .context("request failed")?;
+        if !response.status().is_redirection() {
+            break response;
+        }
+        redirects += 1;
+        anyhow::ensure!(redirects <= 10, "too many redirects");
+        let next = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .context("redirect response has no valid Location header")?;
+        parsed = parsed.join(next).context("invalid redirect URL")?;
+        anyhow::ensure!(matches!(parsed.scheme(), "http" | "https"), "redirected to unsupported URL scheme");
+    };
     let status = response.status();
     anyhow::ensure!(status.is_success(), "server returned {status}");
     let content_type = response
@@ -1179,6 +1212,46 @@ async fn fetch_url(client: &reqwest::Client, url: &str) -> anyhow::Result<String
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
+    use futures::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut bytes: Vec<u8> = Vec::new();
+    let pdf_content = content_type.contains("application/pdf");
+    let byte_limit = if pdf_content || content_type.contains("octet-stream") {
+        crate::blob_store::MAX_DOCUMENT_BYTES as usize
+    } else {
+        FETCH_MAX_BYTES
+    };
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read response body")?;
+        bytes.extend_from_slice(&chunk);
+        anyhow::ensure!(bytes.len() <= byte_limit, "response exceeds the {} limit", if pdf_content { "document" } else { "web fetch" });
+    }
+    let is_pdf = pdf_content || bytes.starts_with(b"%PDF-");
+    if is_pdf {
+        let name = parsed
+            .path_segments()
+            .and_then(|mut parts| parts.next_back())
+            .filter(|part| !part.is_empty())
+            .unwrap_or("download.pdf");
+        let blob = crate::blob_store::store_bytes(data_dir, &bytes, "application/pdf", Some(name)).await?;
+        let document = crate::tool_registry::ConversationDocument {
+            sha256: blob.sha256.clone(),
+            mime_type: "application/pdf".to_owned(),
+            name: name.to_owned(),
+        };
+        let mut read_args = args.clone();
+        read_args["document"] = Value::String(blob.sha256.clone());
+        let mut read = doc_read_tool(data_dir, &read_args, &[document]).await?;
+        read.media.push(ToolMedia {
+            sha256: blob.sha256,
+            mime_type: "application/pdf".into(),
+            name: Some(name.to_owned()),
+        });
+        return Ok(ToolOutput {
+            text: format!("Fetched and attached PDF {name}.\n\n{}", read.text),
+            media: read.media,
+        });
+    }
     anyhow::ensure!(
         content_type.is_empty()
             || content_type.contains("text/")
@@ -1186,18 +1259,6 @@ async fn fetch_url(client: &reqwest::Client, url: &str) -> anyhow::Result<String
             || content_type.contains("xml"),
         "unsupported content type `{content_type}`"
     );
-
-    use futures::StreamExt;
-    let mut stream = response.bytes_stream();
-    let mut bytes: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("read response body")?;
-        bytes.extend_from_slice(&chunk);
-        if bytes.len() >= FETCH_MAX_BYTES {
-            bytes.truncate(FETCH_MAX_BYTES);
-            break;
-        }
-    }
     let body = String::from_utf8_lossy(&bytes);
     let mut text = if content_type.contains("html") {
         html_to_text(&body)
@@ -1213,7 +1274,7 @@ async fn fetch_url(client: &reqwest::Client, url: &str) -> anyhow::Result<String
         text.push_str("… [truncated]");
     }
     anyhow::ensure!(!text.is_empty(), "response contained no text");
-    Ok(text)
+    Ok(ToolOutput::from(text))
 }
 
 #[cfg(test)]

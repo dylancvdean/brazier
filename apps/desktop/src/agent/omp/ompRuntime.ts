@@ -219,7 +219,8 @@ export function ompBrazierModelsConfig(
 async function createOmpAgentDir(
   baseUrl: string,
   model: AgentModelReference,
-  capabilities: AgentModelCapabilities
+  capabilities: AgentModelCapabilities,
+  configYaml?: string
 ): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'brazier-omp-'))
   try {
@@ -228,6 +229,9 @@ async function createOmpAgentDir(
       `${JSON.stringify(ompBrazierModelsConfig(baseUrl, model, capabilities), null, 2)}\n`,
       { mode: 0o600 }
     )
+    if (configYaml?.trim()) {
+      await writeFile(join(directory, 'config.yml'), configYaml, { mode: 0o600 })
+    }
     return directory
   } catch (cause) {
     await rm(directory, { recursive: true, force: true })
@@ -370,7 +374,9 @@ class OmpAgentSession implements AgentSession {
     broker: BrokerClient,
     options: CreateAgentSessionOptions
   ): Promise<OmpAgentSession> {
-    const binary = detectOmpBinary()
+    const preference = await broker.agentPreference().catch(() => null)
+    const profile = preference?.omp_profile ?? undefined
+    const binary = detectOmpBinary(profile?.binary_path)
     if (!binary) {
       throw new Error(
         'Oh My Pi (`omp`) was not found. Install it from https://omp.sh/ or set BRAZIER_OMP_PATH.'
@@ -382,7 +388,8 @@ class OmpAgentSession implements AgentSession {
     const agentDir = await createOmpAgentDir(
       broker.openAiBaseUrl(),
       options.model,
-      options.capabilities
+      options.capabilities,
+      profile?.config_yaml
     )
     const sidecar: OmpSidecarOptions = {
       binary: binary.path,

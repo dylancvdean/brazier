@@ -76,6 +76,10 @@ export type AgentCapabilities = {
 
 export type AgentPreference = {
   default_runtime_id: string
+  omp_profile?: {
+    binary_path?: string
+    config_yaml?: string
+  } | null
 }
 
 export type AgentSessionSummary = {

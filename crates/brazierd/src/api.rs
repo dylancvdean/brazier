@@ -1324,6 +1324,8 @@ const AGENT_PREFERENCE_KEY: &str = "agent";
 #[derive(Debug, Deserialize)]
 struct UpdateAgentPreference {
     default_runtime_id: String,
+    #[serde(default)]
+    omp_profile: Option<Value>,
 }
 
 async fn load_default_agent_runtime_id(state: &AppState) -> ApiResult<String> {
@@ -1338,8 +1340,12 @@ async fn load_default_agent_runtime_id(state: &AppState) -> ApiResult<String> {
 }
 
 async fn agent_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let default_runtime_id = load_default_agent_runtime_id(&state).await?;
-    Ok(Json(json!({ "default_runtime_id": default_runtime_id })))
+    let stored = state.db.application_preference(AGENT_PREFERENCE_KEY).await.map_err(ApiError::internal)?;
+    let default_runtime_id = stored.as_ref().and_then(|value| value["default_runtime_id"].as_str()).unwrap_or(crate::agent_types::DEFAULT_AGENT_RUNTIME_ID);
+    Ok(Json(json!({
+        "default_runtime_id": default_runtime_id,
+        "omp_profile": stored.and_then(|value| value.get("omp_profile").cloned()).unwrap_or(Value::Null),
+    })))
 }
 
 async fn update_agent_preference(
@@ -1371,13 +1377,13 @@ async fn update_agent_preference(
     }
     state
         .db
-        .set_application_preference(
-            AGENT_PREFERENCE_KEY,
-            &json!({ "default_runtime_id": runtime_id }),
-        )
+        .set_application_preference(AGENT_PREFERENCE_KEY, &json!({
+            "default_runtime_id": runtime_id,
+            "omp_profile": preference.omp_profile,
+        }))
         .await
         .map_err(ApiError::internal)?;
-    Ok(Json(json!({ "default_runtime_id": runtime_id })))
+    Ok(Json(json!({ "default_runtime_id": runtime_id, "omp_profile": preference.omp_profile })))
 }
 
 /// Locate a system `omp` binary for the fuller Oh My Pi stock runtime.
