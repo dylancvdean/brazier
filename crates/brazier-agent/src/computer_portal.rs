@@ -17,6 +17,28 @@ struct PortalSession { connection: Connection, path: OwnedObjectPath, stream: u3
 static SESSION: OnceLock<Mutex<Option<PortalSession>>> = OnceLock::new();
 fn session_slot() -> &'static Mutex<Option<PortalSession>> { SESSION.get_or_init(|| Mutex::new(None)) }
 
+fn restore_token_path() -> Option<std::path::PathBuf> {
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state")))?;
+    Some(state_home.join("brazier").join("wayland-remote-desktop-token"))
+}
+
+fn load_restore_token() -> Option<String> {
+    restore_token_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty())
+}
+
+fn save_restore_token(token: &str) {
+    let Some(path) = restore_token_path() else { return };
+    let Some(parent) = path.parent() else { return };
+    if std::fs::create_dir_all(parent).is_ok() {
+        let _ = std::fs::write(path, token);
+    }
+}
+
 async fn proxy<'a>(connection: &'a Connection, path: &'a str, interface: &'a str) -> Result<Proxy<'a>, String> {
     Proxy::new(connection, DESKTOP, path, interface).await.map_err(|e| e.to_string())
 }
@@ -122,6 +144,9 @@ async fn create_session() -> Result<PortalSession, String> {
     let (mut device_options, device_token) = request_options();
     device_options.insert("types".into(), OwnedValue::from(3_u32));
     device_options.insert("persist_mode".into(), OwnedValue::from(2_u32));
+    if let Some(restore_token) = load_restore_token() {
+        device_options.insert("restore_token".into(), string_value(&restore_token));
+    }
     let device_response = response_listener(&connection, &device_token).await?;
     let request: OwnedObjectPath = remote.call("SelectDevices", &(path.clone(), device_options)).await.map_err(|e| e.to_string())?;
     if request.as_str() != expected_request_path(&connection, &device_token)? { return Err("desktop portal returned an unexpected SelectDevices handle".into()); }
@@ -131,6 +156,9 @@ async fn create_session() -> Result<PortalSession, String> {
     let request: OwnedObjectPath = remote.call("Start", &(path.clone(), "", start_options)).await.map_err(|e| e.to_string())?;
     if request.as_str() != expected_request_path(&connection, &start_token)? { return Err("desktop portal returned an unexpected Start handle".into()); }
     let mut results = response_from(start_response).await?;
+    if let Ok(restore_token) = value::<String>(&mut results, "restore_token") {
+        save_restore_token(&restore_token);
+    }
     let streams: Vec<(u32, HashMap<String, OwnedValue>)> = value(&mut results, "streams")?;
     let stream = streams.first().ok_or("no monitor was selected in the desktop portal")?.0;
     Ok(PortalSession { connection, path, stream })
@@ -162,6 +190,7 @@ pub async fn pointer_motion(x: f64, y: f64) -> Result<(), String> {
 pub async fn pointer_button(x: f64, y: f64, button: u32, clicks: usize) -> Result<(), String> {
     pointer_motion(x, y).await?;
     let path = with_session(|s| s.path.clone()).await?;
+    let button = i32::try_from(button).map_err(|_| "invalid pointer button")?;
     for _ in 0..clicks {
         remote_call("NotifyPointerButton", &(path.clone(), options(), button, 1_u32)).await?;
         remote_call("NotifyPointerButton", &(path.clone(), options(), button, 0_u32)).await?;
@@ -171,9 +200,9 @@ pub async fn pointer_button(x: f64, y: f64, button: u32, clicks: usize) -> Resul
 pub async fn pointer_drag(start_x: f64, start_y: f64, end_x: f64, end_y: f64) -> Result<(), String> {
     pointer_motion(start_x, start_y).await?;
     let path = with_session(|s| s.path.clone()).await?;
-    remote_call("NotifyPointerButton", &(path.clone(), options(), 272_u32, 1_u32)).await?;
+    remote_call("NotifyPointerButton", &(path.clone(), options(), 272_i32, 1_u32)).await?;
     pointer_motion(end_x, end_y).await?;
-    remote_call("NotifyPointerButton", &(path, options(), 272_u32, 0_u32)).await
+    remote_call("NotifyPointerButton", &(path, options(), 272_i32, 0_u32)).await
 }
 pub async fn scroll(delta_x: f64, delta_y: f64) -> Result<(), String> {
     let path = with_session(|s| s.path.clone()).await?;
