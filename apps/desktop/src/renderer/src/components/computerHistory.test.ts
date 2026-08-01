@@ -12,9 +12,10 @@ import {
   recoverComputerPause
 } from './computerHistory'
 
-const session: Pick<ComputerSession, 'target' | 'permission_mode'> = {
+const session: Pick<ComputerSession, 'target' | 'permission_mode' | 'viewport'> = {
   target: 'browser',
-  permission_mode: 'ask'
+  permission_mode: 'ask',
+  viewport: { width: 1920, height: 1080, device_pixel_ratio: 1 }
 }
 
 function result(status: ComputerActionResult['status'], index?: number): ComputerActionResult {
@@ -62,7 +63,8 @@ describe('computer history', () => {
 
   it('uses Fara grounding dimensions and critical-point safety instructions', () => {
     const prompt = computerSystemPrompt(session)
-    expect(prompt).toContain('1440x900')
+    expect(prompt).toContain('1920x1080')
+    expect(prompt).toContain('normalized 0..1000 model-display space')
     expect(prompt).toContain('exactly one next action')
     expect(prompt).toContain('"action":"visit_url"')
     expect(prompt).not.toContain('{...}')

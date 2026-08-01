@@ -316,7 +316,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/preferences/workspace",
             get(workspace_preference).put(update_workspace_preference),
         )
-        .route("/api/v1/computer/permissions", get(computer_os_permissions))
+        .route(
+            "/api/v1/computer/permissions",
+            get(computer_os_permissions).post(request_computer_os_permissions),
+        )
         .route(
             "/api/v1/computer/sessions",
             get(list_computer_sessions).post(create_computer_session),
@@ -332,6 +335,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         .route(
             "/api/v1/computer/sessions/{id}/screenshot",
             post(computer_screenshot),
+        )
+        .route(
+            "/api/v1/computer/sessions/{id}/stop",
+            post(stop_computer_session),
         )
         .route("/api/v1/computer/exec", post(computer_exec_action))
         .route(
@@ -531,7 +538,13 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         .route("/api/v1/models/prepare", post(prepare_model))
         .route("/api/v1/models/loaded", delete(unload_model))
         .route("/v1/models", get(list_models))
-        .route("/v1/chat/completions", post(chat_completions))
+        // Computer Use can include several full desktop screenshots in one
+        // trajectory. Axum's 2 MiB default rejects those before the runtime
+        // ever sees them, despite the image-history limit being valid.
+        .route(
+            "/v1/chat/completions",
+            post(chat_completions).layer(DefaultBodyLimit::max(70 * 1024 * 1024)),
+        )
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
         .route("/v1/responses", post(responses))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -1530,6 +1543,17 @@ async fn computer_os_permissions(State(state): State<AppState>) -> Json<Value> {
     Json(json!(state.computer_broker.os_permissions()))
 }
 
+async fn request_computer_os_permissions(
+    State(state): State<AppState>,
+) -> ApiResult<Json<Value>> {
+    let status = state
+        .computer_broker
+        .request_os_permissions()
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(status)))
+}
+
 async fn list_computer_sessions(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "sessions": state.computer_broker.list_sessions().await }))
 }
@@ -1593,6 +1617,14 @@ async fn delete_computer_session(
         .delete_session(&id)
         .await
         .map_err(ApiError::not_found)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn stop_computer_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state.computer_broker.stop(&id).await.map_err(ApiError::not_found)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

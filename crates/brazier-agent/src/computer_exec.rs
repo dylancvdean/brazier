@@ -135,6 +135,12 @@ impl ComputerBroker {
         computer_desktop::probe_os_permissions()
     }
 
+    pub async fn request_os_permissions(&self) -> Result<OsPermissionStatus> {
+        computer_desktop::request_os_permissions()
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
     async fn persist(&self) -> Result<()> {
         let Some(path) = &self.persist_path else {
             return Ok(());
@@ -393,12 +399,16 @@ impl ComputerBroker {
     pub async fn execute(&self, request: ComputerExecRequest) -> Result<ComputerActionResult> {
         let gate = self.action_gate(&request.session_id).await?;
         let _gate = gate.lock().await;
-        let (target, mode) = {
+        let (target, mode, viewport) = {
             let sessions = self.sessions.lock().await;
             let session = sessions
                 .get(&request.session_id)
                 .with_context(|| format!("unknown computer session {}", request.session_id))?;
-            (session.record.target, session.record.permission_mode)
+            (
+                session.record.target,
+                session.record.permission_mode,
+                session.record.viewport.clone(),
+            )
         };
         let decision = computer_policy::decide(&ComputerPolicyRequest {
             target,
@@ -482,6 +492,11 @@ impl ComputerBroker {
                 .running = true;
         }
         self.persist().await?;
+        // The durable trajectory retains Fara's model-space coordinates. The
+        // final conversion is intentionally here, after a screenshot has
+        // updated the session viewport and immediately before an OS/browser
+        // driver receives the action.
+        let driver_action = request.action.scaled_for_viewport(&viewport);
         let executed = match &request.action {
             ComputerAction::Memorize { fact } => Ok(ComputerActionResult {
                 status: ComputerActionStatus::Ok,
@@ -518,11 +533,11 @@ impl ComputerBroker {
             }),
             _ => match target {
                 ComputerTarget::Browser => match self.ensure_browser(&request.session_id).await {
-                    Ok(id) => self.browsers.execute(&id, &request.action).await,
+                    Ok(id) => self.browsers.execute(&id, &driver_action).await,
                     Err(error) => Err(error),
                 },
                 ComputerTarget::Desktop => {
-                    Ok(computer_desktop::execute_desktop_action(&request.action).await)
+                    Ok(computer_desktop::execute_desktop_action(&driver_action).await)
                 }
             },
         };
@@ -600,6 +615,24 @@ impl ComputerBroker {
             approval_id: None,
         })
         .await
+    }
+
+    /// Revoke host-desktop authority immediately. The renderer calls this for
+    /// its global Escape hatch in addition to aborting the model request.
+    pub async fn stop(&self, session_id: &str) -> Result<()> {
+        let target = {
+            let mut sessions = self.sessions.lock().await;
+            let session = sessions
+                .get_mut(session_id)
+                .with_context(|| format!("unknown computer session {session_id}"))?;
+            session.record.running = false;
+            session.record.target
+        };
+        #[cfg(target_os = "linux")]
+        if target == ComputerTarget::Desktop && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            crate::computer_portal::close_session().await;
+        }
+        self.persist().await
     }
 }
 impl Default for ComputerBroker {

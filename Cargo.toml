@@ -42,3 +42,6 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
+zbus = { version = "5.18", default-features = false, features = ["tokio"] }
+x11rb = { version = "0.13", features = ["xtest"] }
+png = "0.17"

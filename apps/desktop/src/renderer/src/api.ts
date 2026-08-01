@@ -71,6 +71,10 @@ export type OsPermissionStatus = {
   settings_hint?: string | null
 }
 
+export async function requestComputerPermissions(): Promise<OsPermissionStatus> {
+  return request('/api/v1/computer/permissions', { method: 'POST' })
+}
+
 export type ComputerViewport = {
   width: number
   height: number
@@ -221,6 +225,12 @@ export async function appendComputerStep(
 
 export async function computerScreenshot(sessionId: string): Promise<ComputerActionResult> {
   return request(`/api/v1/computer/sessions/${encodeURIComponent(sessionId)}/screenshot`, {
+    method: 'POST'
+  })
+}
+
+export async function stopComputerSession(sessionId: string): Promise<void> {
+  await request(`/api/v1/computer/sessions/${encodeURIComponent(sessionId)}/stop`, {
     method: 'POST'
   })
 }

@@ -6,6 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Fara predicts pointer positions in this square model-display space rather
+/// than in framebuffer pixels.
+pub const FARA_DISPLAY_SIZE: f64 = 1000.0;
+
 /// Where computer-use actions run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,13 +76,26 @@ impl Default for ComputerViewport {
 
 #[cfg(test)]
 mod viewport_tests {
-    use super::ComputerViewport;
+    use super::{ComputerAction, ComputerViewport};
 
     #[test]
     fn default_matches_fara_grounding_viewport() {
         let viewport = ComputerViewport::default();
         assert_eq!((viewport.width, viewport.height), (1440, 900));
         assert_eq!(viewport.device_pixel_ratio, Some(1.0));
+    }
+
+    #[test]
+    fn scales_fara_coordinates_to_the_captured_viewport() {
+        let viewport = ComputerViewport {
+            width: 1920,
+            height: 1080,
+            device_pixel_ratio: Some(1.0),
+        };
+        assert_eq!(
+            ComputerAction::LeftClick { x: 500.0, y: 250.0 }.scaled_for_viewport(&viewport),
+            ComputerAction::LeftClick { x: 960.0, y: 270.0 },
+        );
     }
 }
 
@@ -152,6 +169,52 @@ fn default_wait_ms() -> u64 {
 }
 
 impl ComputerAction {
+    /// Convert Fara's 0..1000 model-display coordinates into pixels in the
+    /// captured viewport. Scroll deltas are wheel/pixel movement, so only the
+    /// scroll anchor is rescaled.
+    pub fn scaled_for_viewport(&self, viewport: &ComputerViewport) -> Self {
+        let scale_x = viewport.width as f64 / FARA_DISPLAY_SIZE;
+        let scale_y = viewport.height as f64 / FARA_DISPLAY_SIZE;
+        let point = |x: f64, y: f64| {
+            (
+                x.clamp(0.0, FARA_DISPLAY_SIZE) * scale_x,
+                y.clamp(0.0, FARA_DISPLAY_SIZE) * scale_y,
+            )
+        };
+        match self {
+            Self::LeftClick { x, y } => {
+                let (x, y) = point(*x, *y);
+                Self::LeftClick { x, y }
+            }
+            Self::RightClick { x, y } => {
+                let (x, y) = point(*x, *y);
+                Self::RightClick { x, y }
+            }
+            Self::DoubleClick { x, y } => {
+                let (x, y) = point(*x, *y);
+                Self::DoubleClick { x, y }
+            }
+            Self::TripleClick { x, y } => {
+                let (x, y) = point(*x, *y);
+                Self::TripleClick { x, y }
+            }
+            Self::MouseMove { x, y } => {
+                let (x, y) = point(*x, *y);
+                Self::MouseMove { x, y }
+            }
+            Self::LeftClickDrag { start_x, start_y, end_x, end_y } => {
+                let (start_x, start_y) = point(*start_x, *start_y);
+                let (end_x, end_y) = point(*end_x, *end_y);
+                Self::LeftClickDrag { start_x, start_y, end_x, end_y }
+            }
+            Self::Scroll { x, y, delta_x, delta_y } => {
+                let (x, y) = point(*x, *y);
+                Self::Scroll { x, y, delta_x: *delta_x, delta_y: *delta_y }
+            }
+            _ => self.clone(),
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Screenshot => "screenshot",

@@ -91,7 +91,6 @@ contextBridge.exposeInMainWorld('brazier', {
   revealFile: (path: string): Promise<void> => ipcRenderer.invoke('brazier:reveal-file', path),
   computer: {
     setActive: (active: boolean): Promise<void> => ipcRenderer.invoke('brazier:computer:set-active', active),
-    installWaylandInput: (): Promise<void> => ipcRenderer.invoke('brazier:computer:install-wayland-input'),
     onEscape: (listener: () => void): (() => void) => {
       const handler = (): void => listener()
       ipcRenderer.on('brazier:computer:escape', handler)

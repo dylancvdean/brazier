@@ -67,7 +67,9 @@ function historyMessage(role: Message['role'], content: string | ContentPart[], 
   }
 }
 
-export function computerSystemPrompt(session: Pick<ComputerSession, 'target' | 'permission_mode'>): string {
+export function computerSystemPrompt(
+  session: Pick<ComputerSession, 'target' | 'permission_mode'> & { viewport?: ComputerSession['viewport'] }
+): string {
   // Microsoft publishes this as the required system prompt for Fara inference.
   // Keep its Critical Point policy intact; only the action signature changes to
   // match the target that Brazier actually exposes.
@@ -80,6 +82,9 @@ export function computerSystemPrompt(session: Pick<ComputerSession, 'target' | '
     'Some tasks, like answering questions, may not encounter a Critical Point at all.'
   ]
   const desktop = session.target === 'desktop'
+  const viewport = session.viewport
+    ? `${session.viewport.width}x${session.viewport.height}`
+    : 'the latest screenshot dimensions'
   if (desktop) {
     return [
       'You are a computer-use agent that performs actions in a visible desktop GUI to fulfill user requests by calling various tools.',
@@ -93,7 +98,7 @@ export function computerSystemPrompt(session: Pick<ComputerSession, 'target' | '
       'Pause with ask_user_question when required personal information is missing or the task is ambiguous.',
       'Before an irreversible action, ask for confirmation unless the user explicitly authorized that exact action.',
       'Never invent personal or payment information.',
-      `The viewport is 1440x900. Target: ${session.target}. Permission mode: ${session.permission_mode}.`
+      `The visible desktop is ${viewport}. Coordinates in computer_use actions are in Fara's normalized 0..1000 model-display space, not screen pixels. Target: ${session.target}. Permission mode: ${session.permission_mode}.`
     ].join(' ')
   }
   const actions = desktop
@@ -110,7 +115,7 @@ export function computerSystemPrompt(session: Pick<ComputerSession, 'target' | '
     'Pause with ask_user_question when required personal information is missing or the task is ambiguous.',
     'Before an irreversible action, ask for confirmation unless the user explicitly authorized that exact action.',
     'Never invent personal or payment information.',
-    `The viewport is 1440x900. Target: ${session.target}. Permission mode: ${session.permission_mode}.`
+    `The browser viewport is ${viewport}. Coordinates in computer_use actions are in Fara's normalized 0..1000 model-display space, not screen pixels. Target: ${session.target}. Permission mode: ${session.permission_mode}.`
   ].filter(Boolean).join(' ')
 }
 

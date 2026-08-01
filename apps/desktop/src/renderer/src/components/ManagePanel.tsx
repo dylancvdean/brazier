@@ -97,6 +97,7 @@ import {
   refreshMcpServer,
   updateMcpServer,
   fetchComputerPermissions,
+  requestComputerPermissions,
   fetchWorkspacePreference,
   type OsPermissionStatus,
   type SdcppBundle,
@@ -730,7 +731,7 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
   } | null>(null)
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [permissions, setPermissions] = useState<OsPermissionStatus | null>(null)
-  const [installingWaylandInput, setInstallingWaylandInput] = useState(false)
+  const [requestingComputerPermissions, setRequestingComputerPermissions] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -802,18 +803,6 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
     }
   }
 
-  async function installWaylandInput(): Promise<void> {
-    setInstallingWaylandInput(true)
-    props.onError(null)
-    try {
-      await window.brazier.computer.installWaylandInput()
-      setPermissions(await fetchComputerPermissions())
-    } catch (cause) {
-      props.onError(errorText(cause))
-    } finally {
-      setInstallingWaylandInput(false)
-    }
-  }
 
   async function saveUpdates(patch: {
     checkOnStartup?: boolean
@@ -854,6 +843,23 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
       props.onError(errorText(cause))
     } finally {
       setCheckingUpdates(false)
+    }
+  }
+
+  async function requestComputerAccess(): Promise<void> {
+    setRequestingComputerPermissions(true)
+    props.onError(null)
+    try {
+      setPermissions(await requestComputerPermissions())
+    } catch (cause) {
+      props.onError(errorText(cause))
+      try {
+        setPermissions(await fetchComputerPermissions())
+      } catch {
+        // Keep the last known status when the portal itself could not reply.
+      }
+    } finally {
+      setRequestingComputerPermissions(false)
     }
   }
 
@@ -983,11 +989,19 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
         ) : (
           <p className="model-help">Could not read OS permission status from the daemon.</p>
         )}
-        {permissions?.display_server === 'wayland' && permissions.input_injection !== 'granted' ? (
-          <button type="button" className="secondary-action" disabled={installingWaylandInput} onClick={() => void installWaylandInput()}>
-            {installingWaylandInput ? 'Setting up input…' : 'Set up Wayland input'}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
+          <button
+            type="button"
+            disabled={requestingComputerPermissions || permissions?.platform === 'windows'}
+            onClick={() => void requestComputerAccess()}
+          >
+            {requestingComputerPermissions ? <LoaderCircle className="spin" size={14} /> : null}
+            {requestingComputerPermissions ? 'Waiting for OS approval…' : 'Request desktop access'}
           </button>
-        ) : null}
+          <span className="model-help">
+            On Wayland this opens the compositor’s Screen Share and Remote Desktop approval prompt.
+          </span>
+        </div>
       </div>
     </section>
   )

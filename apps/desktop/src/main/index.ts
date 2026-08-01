@@ -122,28 +122,6 @@ function setComputerUseActive(active: boolean): void {
   computerSafetyOverlay.showInactive()
 }
 
-/** Install the injector as a root-owned system service. ydotoold needs access
- * to /dev/uinput, which a user service normally does not have. The socket is
- * deliberately owned by the current desktop user, not world-readable. */
-async function installWaylandInput(): Promise<void> {
-  if (process.platform !== 'linux') throw new Error('Wayland input setup is only available on Linux.')
-  const uid = process.getuid?.()
-  const gid = process.getgid?.()
-  if (uid === undefined || gid === undefined) throw new Error('Could not identify the desktop user.')
-  const unit = `[Unit]\nDescription=Brazier Wayland input injector\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/ydotoold -p /run/brazier-ydotoold.sock -P 0600 -o ${uid}:${gid}\nRestart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n`
-  const script = `install -m 0644 /dev/stdin /etc/systemd/system/brazier-ydotoold.service <<'UNIT'\n${unit}UNIT\nsystemctl daemon-reload\nsystemctl enable --now brazier-ydotoold.service`
-  await new Promise<void>((resolveInstall, rejectInstall) => {
-    const child = spawn('pkexec', ['sh', '-c', script], { stdio: ['ignore', 'pipe', 'pipe'] })
-    let stderr = ''
-    child.stderr.on('data', (chunk) => { stderr += String(chunk) })
-    child.once('error', rejectInstall)
-    child.once('exit', (code) => {
-      if (code === 0) resolveInstall()
-      else rejectInstall(new Error(stderr.trim() || 'Administrator authorization was cancelled or the ydotool service could not start.'))
-    })
-  })
-}
-
 export type ServerSettings = {
   enabled: boolean
   port: number
@@ -360,7 +338,6 @@ function startDaemon(): Promise<Connection> {
     env: {
       ...process.env,
       ...(COMPUTER_WAYLAND_DISPLAY ? { WAYLAND_DISPLAY: COMPUTER_WAYLAND_DISPLAY } : {}),
-      ...(existsSync('/run/brazier-ydotoold.sock') ? { YDOTOOL_SOCKET: '/run/brazier-ydotoold.sock' } : {}),
       RUST_LOG: process.env.RUST_LOG ?? 'brazierd=info',
       RUSTUP_TOOLCHAIN: process.env.RUSTUP_TOOLCHAIN ?? 'stable'
     },
@@ -621,7 +598,6 @@ app.whenReady().then(async () => {
   ipcMain.handle('brazier:computer:set-active', (_event, active: boolean) => {
     setComputerUseActive(active === true)
   })
-  ipcMain.handle('brazier:computer:install-wayland-input', () => installWaylandInput())
   ipcMain.handle('brazier:server-settings', (): ServerSettings => publicServerSettings(loadServerSettings()))
   ipcMain.handle(
     'brazier:save-server-settings',

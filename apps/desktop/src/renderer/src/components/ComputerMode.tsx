@@ -13,6 +13,7 @@ import {
   appendComputerStep,
   computerExec,
   computerScreenshot,
+  stopComputerSession,
   createComputerSession,
   decideComputerApproval,
   deleteComputerSession,
@@ -208,6 +209,14 @@ export function ComputerMode(props: Props): React.JSX.Element {
   const stop = useCallback(async (): Promise<void> => {
     abortRef.current?.abort()
     abortRef.current = null
+    const active = sessionRef.current
+    if (active?.target === 'desktop') {
+      try {
+        await stopComputerSession(active.id)
+      } catch {
+        // Escape remains a local emergency stop even if the daemon vanished.
+      }
+    }
     setRunning(false)
   }, [])
 
