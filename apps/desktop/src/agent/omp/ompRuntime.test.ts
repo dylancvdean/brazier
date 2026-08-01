@@ -4,8 +4,9 @@ import {
   contextSeedAfterPermissionModeAttempt,
   hostToolResultFrame,
   isCurrentOmpRun,
+  ompBrazierModelsConfig,
   ompApprovalModeArg,
-  promptWithBrazierContext
+  promptWithBrazierHistory
 } from './ompRuntime'
 
 describe('OMP adapter protocol helpers', () => {
@@ -28,10 +29,42 @@ describe('OMP adapter protocol helpers', () => {
     })
   })
 
-  it('seeds a fresh sidecar with the Brazier instructions and prior transcript', () => {
+  it('registers the daemon as an OMP provider without rewriting its model ids', () => {
     expect(
-      promptWithBrazierContext(
-        'Never deploy without confirmation.',
+      ompBrazierModelsConfig(
+        'http://127.0.0.1:7777/v1',
+        { id: 'gguf-ext:0:owner/model.gguf', name: 'Local model', contextWindow: 32768 },
+        {
+          nativeToolCalling: true,
+          parallelToolCalling: false,
+          supportsReasoningStream: true,
+          harmony: true,
+          reliableJson: true
+        }
+      )
+    ).toMatchObject({
+      providers: {
+        brazier: {
+          baseUrl: 'http://127.0.0.1:7777/v1',
+          apiKey: 'BRAZIER_OPENAI_API_KEY',
+          authHeader: true,
+          api: 'openai-completions',
+          discovery: { type: 'openai-models-list' },
+          models: [
+            {
+              id: 'gguf-ext:0:owner/model.gguf',
+              input: ['text'],
+              contextWindow: 32768
+            }
+          ]
+        }
+      }
+    })
+  })
+
+  it('seeds prior transcript without overriding OMP system instructions', () => {
+    expect(
+      promptWithBrazierHistory(
         [
           { role: 'user', text: 'Inspect the release.', timestamp: '2026-01-01T00:00:00Z' },
           { role: 'tool', tool: 'mcp_ci', toolCallId: '1', output: 'green', isError: false, timestamp: '2026-01-01T00:00:01Z' }
@@ -39,7 +72,7 @@ describe('OMP adapter protocol helpers', () => {
         'What should I do next?'
       )
     ).toContain(
-      '## Brazier system instructions\nNever deploy without confirmation.\n\n## Prior Brazier transcript\n[user]\nInspect the release.\n\n[tool mcp_ci]\ngreen\n\n## Current user request\nWhat should I do next?'
+      '## Prior Brazier transcript\n[user]\nInspect the release.\n\n[tool mcp_ci]\ngreen\n\n## Current user request\nWhat should I do next?'
     )
   })
 

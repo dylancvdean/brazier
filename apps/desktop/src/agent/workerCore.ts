@@ -190,7 +190,10 @@ export class AgentWorkerCore {
     const broker = this.requireBroker()
     const remote = await broker.session(sessionId)
     const runtime = this.runtimeFor(remote.session.runtime_id || DEFAULT_RUNTIME_ID)
-    const prompt = await broker.systemPrompt(sessionId)
+    // OMP owns its native harness prompt and project-instruction discovery.
+    // Brazier's editable workspace template is a Pi-runtime concern only.
+    const prompt =
+      runtime.descriptor.id === 'omp' ? { system_prompt: '' } : await broker.systemPrompt(sessionId)
     // MCP configuration can change while the utility process remains alive.
     // Refresh when opening a session so newly enabled server tools do not
     // require restarting the desktop application.

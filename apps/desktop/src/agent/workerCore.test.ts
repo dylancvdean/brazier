@@ -254,5 +254,7 @@ describe('AgentWorkerCore.openSession', () => {
 
     expect(ompCreate).toHaveBeenCalled()
     expect(piCreate).not.toHaveBeenCalled()
+    expect(broker.systemPrompt).not.toHaveBeenCalled()
+    expect(ompCreate).toHaveBeenCalledWith(expect.objectContaining({ systemPrompt: '' }))
   })
 })

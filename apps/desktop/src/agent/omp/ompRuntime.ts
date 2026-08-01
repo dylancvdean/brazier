@@ -11,6 +11,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import type { BrokerClient } from '../core/brokerClient'
 import { inferModelCapabilities } from '../core/modelCompat'
@@ -20,6 +23,7 @@ import type {
   AgentCompactionState,
   AgentEvent,
   AgentMessage,
+  AgentModelCapabilities,
   AgentModelReference,
   AgentPermissionMode,
   AgentPermissionSettings,
@@ -83,6 +87,7 @@ type OmpSidecarOptions = {
   binary: string
   cwd: string
   env: NodeJS.ProcessEnv
+  agentDir: string
 }
 
 function textFromContent(content: unknown): {
@@ -137,20 +142,15 @@ export function hostToolResultFrame(
 }
 
 /**
- * RPC mode has no command for setting a system prompt or importing an external
- * transcript.  Seed both explicitly in the first prompt of each new sidecar
- * so the context OMP receives matches the transcript Brazier displays.
+ * RPC mode has no transcript-import command. Seed only Brazier's prior turns
+ * into a fresh sidecar; OMP remains the sole owner of its system prompt.
  */
-export function promptWithBrazierContext(
-  systemPrompt: string,
+export function promptWithBrazierHistory(
   history: AgentMessage[],
   userText: string,
   maxChars = 240_000
 ): string {
   const sections: string[] = []
-  if (systemPrompt.trim()) {
-    sections.push(`## Brazier system instructions\n${systemPrompt.trim()}`)
-  }
   if (history.length > 0) {
     const transcript = history
       .map((message) => {
@@ -169,6 +169,57 @@ export function promptWithBrazierContext(
   }
   if (sections.length === 0) return userText
   return `${sections.join('\n\n')}\n\n## Current user request\n${userText}`
+}
+
+/** OMP-supported custom provider definition for Brazier's authenticated API. */
+export function ompBrazierModelsConfig(
+  baseUrl: string,
+  model: AgentModelReference,
+  capabilities: AgentModelCapabilities
+): Record<string, unknown> {
+  return {
+    providers: {
+      brazier: {
+        baseUrl,
+        apiKey: 'BRAZIER_OPENAI_API_KEY',
+        authHeader: true,
+        api: 'openai-completions',
+        discovery: { type: 'openai-models-list' },
+        models: [
+          {
+            id: model.id,
+            name: model.name || model.id,
+            reasoning: capabilities.supportsReasoningStream,
+            // Brazier's current capability contract does not report vision support.
+            // Declaring image input makes OMP send images to text-only local models.
+            input: ['text'],
+            supportsTools: capabilities.nativeToolCalling,
+            ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
+            ...(model.maxTokens ? { maxTokens: model.maxTokens } : {})
+          }
+        ]
+      }
+    }
+  }
+}
+
+async function createOmpAgentDir(
+  baseUrl: string,
+  model: AgentModelReference,
+  capabilities: AgentModelCapabilities
+): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), 'brazier-omp-'))
+  try {
+    await writeFile(
+      join(directory, 'models.yml'),
+      `${JSON.stringify(ompBrazierModelsConfig(baseUrl, model, capabilities), null, 2)}\n`,
+      { mode: 0o600 }
+    )
+    return directory
+  } catch (cause) {
+    await rm(directory, { recursive: true, force: true })
+    throw cause
+  }
 }
 
 /** A failed sidecar reconfiguration must leave the existing sidecar's context intact. */
@@ -207,12 +258,11 @@ export class OmpAgentRuntime implements AgentRuntime {
     const existing = this.sessions.get(sessionId)
     if (existing && !existing.isDisposed()) return existing
     const remote = await this.broker.session(sessionId)
-    const prompt = await this.broker.systemPrompt(sessionId)
     const tools = await this.broker.tools()
     return this.createSession({
       sessionId,
       model: { id: remote.session.model, name: remote.session.model },
-      systemPrompt: prompt.system_prompt,
+      systemPrompt: '',
       tools,
       messages: remote.messages.map((record) => record.payload),
       capabilities: inferModelCapabilities(remote.session.model),
@@ -250,7 +300,6 @@ class OmpAgentSession implements AgentSession {
   private readonly sidecar: OmpSidecarOptions
   private disposed = false
   private model: AgentModelReference
-  private systemPrompt: string
   private messages: AgentMessage[]
   private toolCatalog: AgentToolDefinition[]
   private toolExecutions: ToolExecutionRecord[]
@@ -281,10 +330,9 @@ class OmpAgentSession implements AgentSession {
     this.client = client
     this.sidecar = sidecar
     this.model = options.model
-    this.systemPrompt = options.systemPrompt
     this.messages = [...(options.messages ?? [])]
     this.toolCatalog = [...options.tools]
-    this.needsContextSeed = Boolean(this.systemPrompt.trim() || this.messages.length > 0)
+    this.needsContextSeed = this.messages.length > 0
     const preloaded = options.preloaded
     this.toolExecutions = [...(preloaded?.tool_executions ?? [])]
     this.permissionMode = preloaded?.session.permission_mode ?? 'ask'
@@ -318,11 +366,18 @@ class OmpAgentSession implements AgentSession {
     const permissionMode = options.preloaded?.session.permission_mode ?? 'ask'
     const approvalMode = approvalModeFor(permissionMode)
     const cwd = options.preloaded?.session.workspace_path || process.cwd()
+    const agentDir = await createOmpAgentDir(
+      broker.openAiBaseUrl(),
+      options.model,
+      options.capabilities
+    )
     const sidecar: OmpSidecarOptions = {
       binary: binary.path,
       cwd,
+      agentDir,
       env: {
         ...process.env,
+        PI_CODING_AGENT_DIR: agentDir,
         OPENAI_BASE_URL: broker.openAiBaseUrl(),
         OPENAI_API_KEY: broker.apiKey(),
         OPENAI_API_BASE: broker.openAiBaseUrl(),
@@ -330,11 +385,18 @@ class OmpAgentSession implements AgentSession {
         BRAZIER_OPENAI_API_KEY: broker.apiKey()
       }
     }
-    const client = await OmpAgentSession.startSidecar(sidecar, approvalMode)
-    const session = new OmpAgentSession(broker, options, client, sidecar)
-    await session.configureModel(options.model)
-    await session.configureHostTools()
-    return session
+    let client: OmpRpcClient | null = null
+    try {
+      client = await OmpAgentSession.startSidecar(sidecar, approvalMode)
+      const session = new OmpAgentSession(broker, options, client, sidecar)
+      await session.configureModel(options.model)
+      await session.configureHostTools()
+      return session
+    } catch (cause) {
+      await client?.dispose()
+      await rm(agentDir, { recursive: true, force: true })
+      throw cause
+    }
   }
 
   isDisposed(): boolean {
@@ -361,10 +423,9 @@ class OmpAgentSession implements AgentSession {
     }
   }
 
-  rehydrate(messages: AgentMessage[], systemPrompt?: string): void {
+  rehydrate(messages: AgentMessage[], _systemPrompt?: string): void {
     if (this.disposed) throw new Error('Cannot rehydrate a disposed agent session.')
     this.messages = [...messages]
-    if (systemPrompt != null) this.systemPrompt = systemPrompt
   }
 
   async refreshInferencePrefs(): Promise<void> {
@@ -640,8 +701,7 @@ class OmpAgentSession implements AgentSession {
         source: { type: 'data_url', dataUrl: url }
       }))
       const message = this.needsContextSeed
-        ? promptWithBrazierContext(
-            this.systemPrompt,
+        ? promptWithBrazierHistory(
             this.messages.slice(0, -1),
             input.text,
             Math.max(24_000, Math.min((this.model.contextWindow ?? 80_000) * 3, 240_000))
@@ -713,30 +773,16 @@ class OmpAgentSession implements AgentSession {
     this.disposed = true
     await this.client?.dispose()
     this.client = null
+    await rm(this.sidecar.agentDir, { recursive: true, force: true })
   }
 
   private async configureModel(model: AgentModelReference): Promise<void> {
     const client = this.requireClient()
     try {
-      await client.request({
-        type: 'set_model',
-        provider: 'openai',
-        modelId: model.id
-      })
-    } catch (openAiError) {
-      try {
-        await client.request({
-          type: 'set_model',
-          provider: 'openai-compatible',
-          modelId: model.id
-        })
-      } catch (compatibleError) {
-        const first = openAiError instanceof Error ? openAiError.message : String(openAiError)
-        const second = compatibleError instanceof Error ? compatibleError.message : String(compatibleError)
-        throw new Error(
-          `OMP could not select Brazier model \`${model.id}\` (openai: ${first}; openai-compatible: ${second}).`
-        )
-      }
+      await client.request({ type: 'set_model', provider: 'brazier', modelId: model.id })
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      throw new Error(`OMP could not select Brazier model \`${model.id}\`: ${detail}`)
     }
   }
 
@@ -745,7 +791,9 @@ class OmpAgentSession implements AgentSession {
     permissionMode: ReturnType<typeof approvalModeFor>
   ): Promise<OmpRpcClient> {
     const client = new OmpRpcClient({
-      ...options,
+      binary: options.binary,
+      cwd: options.cwd,
+      env: options.env,
       // Public OMP CLI flag (v17+). Dotted config keys are not CLI options and
       // make oclif terminate with a usage error before RPC becomes ready.
       args: [ompApprovalModeArg(permissionMode)]

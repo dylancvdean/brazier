@@ -1300,6 +1300,11 @@ export function AgentMode(props: Props): React.JSX.Element {
   }
 
   async function openPromptEditor(): Promise<void> {
+    if (ompRuntime) {
+      setPromptLoading(false)
+      setPromptEditorOpen(true)
+      return
+    }
     if (!workspaceSettingsPath) return
     setPromptEditorOpen(true)
     setPromptLoading(true)
@@ -1603,12 +1608,16 @@ export function AgentMode(props: Props): React.JSX.Element {
         <button
           className="chip-button subtle"
           type="button"
-          disabled={!workspaceSettingsPath || running}
-          title="Edit the system prompt shared by agent tasks in this workspace."
+          disabled={(!ompRuntime && !workspaceSettingsPath) || running}
+          title={
+            ompRuntime
+              ? 'Inspect how Oh My Pi owns its native system prompt and project instructions.'
+              : 'Edit the system prompt shared by Pi agent tasks in this workspace.'
+          }
           onClick={() => void openPromptEditor()}
         >
           <Layers size={13} />
-          System prompt
+          {ompRuntime ? 'OMP prompt' : 'System prompt'}
         </button>
         <div className="tool-menu-anchor agent-tool-menu-anchor">
           <button
@@ -1899,8 +1908,8 @@ export function AgentMode(props: Props): React.JSX.Element {
           <div className="agent-artifact agent-prompt-editor">
             <header>
               <div>
-                <strong>Workspace system prompt</strong>
-                <small>{workspaceSettingsPath}</small>
+                <strong>{ompRuntime ? 'Oh My Pi system prompt' : 'Workspace system prompt'}</strong>
+                <small>{ompRuntime ? 'Managed by the OMP runtime' : workspaceSettingsPath}</small>
               </div>
               <button
                 type="button"
@@ -1910,7 +1919,19 @@ export function AgentMode(props: Props): React.JSX.Element {
                 <X size={15} />
               </button>
             </header>
-            {promptLoading ? (
+            {ompRuntime ? (
+              <div className="agent-prompt-loading">
+                <p>
+                  Oh My Pi owns this task&apos;s native coding-harness system prompt. Brazier does
+                  not prepend the Pi workspace template or rewrite OMP&apos;s instructions.
+                </p>
+                <p>
+                  OMP also discovers project instruction sources such as <code>AGENTS.md</code> and
+                  <code>.omp</code> configuration from the selected workspace. Edit those files to
+                  customize OMP behavior; the editable Brazier workspace prompt applies only to Pi.
+                </p>
+              </div>
+            ) : promptLoading ? (
               <div className="agent-prompt-loading">
                 <LoaderCircle className="spin" size={16} />
                 Loading prompt…
