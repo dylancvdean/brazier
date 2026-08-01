@@ -65,6 +65,10 @@ const PERMISSION_LABELS: Record<
   'skip-permissions': {
     title: 'Skip low-risk',
     detail: 'Low-risk browser actions run without prompts. Sensitive ones still ask.'
+  },
+  'allow-all': {
+    title: 'Allow all',
+    detail: 'Run all supported actions without approval. The always-visible Esc emergency stop remains active.'
   }
 }
 
@@ -265,6 +269,18 @@ export function ComputerMode(props: Props): React.JSX.Element {
         const shotUrl = computerScreenshotDataUrl(result)
         if (shotUrl) setViewportUrl(shotUrl)
         await syncSteps(active.id)
+
+        // Fara is browser-trained and can occasionally emit a navigation
+        // action even after the desktop-only signature. Preserve that failed
+        // action in history, then give it a fresh turn to use the visible GUI
+        // rather than treating the whole task as irrecoverably blocked.
+        if (active.target === 'desktop' && (action.type === 'visit_url' || action.type === 'web_search')) {
+          await appendComputerStep(active.id, {
+            role: 'user',
+            content: 'That action is unavailable on this desktop. Continue by interacting with the visible desktop GUI using mouse and keyboard only.'
+          })
+          break
+        }
 
         const continuation: ComputerContinuation = continuationForResult(result)
         if (result.needs_approval || result.status === 'needs_approval') {

@@ -730,6 +730,7 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
   } | null>(null)
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [permissions, setPermissions] = useState<OsPermissionStatus | null>(null)
+  const [installingWaylandInput, setInstallingWaylandInput] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -798,6 +799,19 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
       props.onError(errorText(cause))
     } finally {
       setSavingModes(false)
+    }
+  }
+
+  async function installWaylandInput(): Promise<void> {
+    setInstallingWaylandInput(true)
+    props.onError(null)
+    try {
+      await window.brazier.computer.installWaylandInput()
+      setPermissions(await fetchComputerPermissions())
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setInstallingWaylandInput(false)
     }
   }
 
@@ -969,6 +983,11 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
         ) : (
           <p className="model-help">Could not read OS permission status from the daemon.</p>
         )}
+        {permissions?.display_server === 'wayland' && permissions.input_injection !== 'granted' ? (
+          <button type="button" className="secondary-action" disabled={installingWaylandInput} onClick={() => void installWaylandInput()}>
+            {installingWaylandInput ? 'Setting up input…' : 'Set up Wayland input'}
+          </button>
+        ) : null}
       </div>
     </section>
   )

@@ -105,4 +105,18 @@ mod tests {
             assert_eq!(decision, ComputerPolicyDecision::Ask, "{}", action.kind());
         }
     }
+
+    #[test]
+    fn allow_all_does_not_pause_an_os_permitted_desktop_click() {
+        let action = ComputerAction::LeftClick { x: 10.0, y: 10.0 };
+        assert_eq!(
+            decide(&ComputerPolicyRequest {
+                target: ComputerTarget::Desktop,
+                mode: ComputerPermissionMode::AllowAll,
+                action: &action,
+                desktop_permitted: true,
+            }),
+            ComputerPolicyDecision::Allow
+        );
+    }
 }

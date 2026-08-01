@@ -409,7 +409,16 @@ impl ComputerBroker {
         let mut consumed_approval_id = None;
         match decision {
             ComputerPolicyDecision::Refuse(reason) => {
-                let result = Self::refusal(reason);
+                let detail = if target == ComputerTarget::Desktop
+                    && reason == "Desktop capture or input permission is missing."
+                {
+                    self.os_permissions()
+                        .detail
+                        .unwrap_or_else(|| reason.into())
+                } else {
+                    reason.into()
+                };
+                let result = Self::refusal(detail);
                 self.record(&request.session_id, request.action, result.clone())
                     .await?;
                 return Ok(result);

@@ -20,6 +20,37 @@ fn binary(name: &str) -> bool {
         .is_some_and(|paths| std::env::split_paths(&paths).any(|path| path.join(name).is_file()))
 }
 
+#[cfg(target_os = "linux")]
+fn ydotool_socket() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("YDOTOOL_SOCKET").map(std::path::PathBuf::from) {
+        return Some(path);
+    }
+    let user_socket = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .map(|dir| dir.join(".ydotool_socket"));
+    if user_socket.as_ref().is_some_and(|path| path.exists()) {
+        return user_socket;
+    }
+    let brazier_socket = std::path::PathBuf::from("/run/brazier-ydotoold.sock");
+    if brazier_socket.exists() {
+        return Some(brazier_socket);
+    }
+    user_socket.or(Some(brazier_socket))
+}
+
+#[cfg(target_os = "linux")]
+fn ydotool_ready() -> bool {
+    binary("ydotool") && ydotool_socket().is_some_and(|path| path.exists())
+}
+
+#[cfg(target_os = "linux")]
+fn uinput_writable() -> bool {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/uinput")
+        .is_ok()
+}
+
 fn result(status: ComputerActionStatus, message: Option<String>) -> ComputerActionResult {
     ComputerActionResult {
         status,
@@ -84,11 +115,26 @@ fn probe_linux() -> OsPermissionStatus {
     let x11 = std::env::var_os("DISPLAY").is_some();
     if wayland {
         let portal = binary("gdbus") || binary("busctl");
+        let capture_ready = binary("grim") || binary("spectacle") || binary("gnome-screenshot");
+        let input_ready = ydotool_ready() && portal;
+        let input_detail = if !binary("ydotool") {
+            "ydotool is not installed."
+        } else if !ydotool_socket().is_some_and(|path| path.exists()) {
+            if !uinput_writable() {
+                "ydotoold cannot start because Brazier's user cannot open /dev/uinput. Configure a privileged ydotoold system service or grant this user write access to /dev/uinput."
+            } else {
+                "ydotoold is not running or its socket is unavailable. Run: systemctl --user enable --now ydotool.service."
+            }
+        } else if !portal {
+            "A session D-Bus portal client (gdbus or busctl) is unavailable."
+        } else {
+            "ydotool input is ready."
+        };
         OsPermissionStatus { platform: "linux".into(), display_server: "wayland".into(),
-            screen_capture: if binary("grim") || binary("spectacle") || binary("gnome-screenshot") { OsPermissionState::Granted } else { OsPermissionState::Missing },
-            input_injection: if binary("ydotool") && portal { OsPermissionState::Granted } else { OsPermissionState::Missing },
-            detail: Some("Wayland uses grim when the compositor exposes screencopy, or portal-aware Spectacle/GNOME Screenshot otherwise; ydotool performs input.".into()),
-            settings_hint: Some("Install grim or Spectacle/GNOME Screenshot plus ydotool, start ydotoold, and approve any ScreenCast/RemoteDesktop portal prompt.".into()) }
+            screen_capture: if capture_ready { OsPermissionState::Granted } else { OsPermissionState::Missing },
+            input_injection: if input_ready { OsPermissionState::Granted } else { OsPermissionState::Missing },
+            detail: Some(format!("Wayland capture uses grim or portal-aware Spectacle/GNOME Screenshot. {input_detail}")),
+            settings_hint: Some("Install grim or Spectacle/GNOME Screenshot plus ydotool, start ydotoold (its socket must be available to Brazier), and approve any ScreenCast/RemoteDesktop portal prompt.".into()) }
     } else if x11 {
         OsPermissionStatus { platform: "linux".into(), display_server: "x11".into(),
             screen_capture: if binary("magick") || binary("import") || binary("gnome-screenshot") { OsPermissionState::Granted } else { OsPermissionState::Missing },
@@ -113,15 +159,32 @@ pub fn desktop_permitted(status: &OsPermissionStatus) -> bool {
 }
 
 async fn command(program: &str, args: &[String]) -> Result<Vec<u8>, String> {
-    let output = Command::new(program)
-        .args(args)
+    let mut command = Command::new(program);
+    command.args(args);
+    #[cfg(target_os = "linux")]
+    if program == "ydotool" {
+        if let Some(socket) = ydotool_socket() {
+            command.env("YDOTOOL_SOCKET", socket);
+        }
+    }
+    let output = command
         .output()
         .await
         .map_err(|e| format!("start {program}: {e}"))?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let detail = if detail.is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        } else {
+            detail
+        };
+        Err(if detail.is_empty() {
+            format!("{program} exited with status {}", output.status)
+        } else {
+            detail
+        })
     }
 }
 
@@ -292,13 +355,11 @@ fn mac_key(keys: &[String]) -> Result<u16, String> {
 
 #[cfg(target_os = "linux")]
 async fn linux_action(action: &ComputerAction) -> Result<(), String> {
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let (program, args): (&str, Vec<String>) = if wayland {
-        ("ydotool", wayland_args(action)?)
-    } else {
-        ("xdotool", x11_args(action)?)
-    };
-    command(program, &args).await.map(|_| ())
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return wayland_action(action).await;
+    }
+    let args = x11_args(action)?;
+    command("xdotool", &args).await.map(|_| ())
 }
 #[cfg(target_os = "linux")]
 fn x11_args(a: &ComputerAction) -> Result<Vec<String>, String> {
@@ -372,39 +433,46 @@ fn x11_args(a: &ComputerAction) -> Result<Vec<String>, String> {
     })
 }
 #[cfg(target_os = "linux")]
-fn wayland_args(a: &ComputerAction) -> Result<Vec<String>, String> {
-    let out = match a {
-        ComputerAction::MouseMove { x, y } => vec![
+async fn wayland_action(action: &ComputerAction) -> Result<(), String> {
+    if let ComputerAction::Wait { milliseconds } = action {
+        tokio::time::sleep(std::time::Duration::from_millis(*milliseconds)).await;
+        return Ok(());
+    }
+    // ydotool accepts exactly one subcommand per invocation. In particular,
+    // `ydotool mousemove … click …` can corrupt older ydotool clients.
+    let commands: Vec<Vec<String>> = match action {
+        ComputerAction::MouseMove { x, y } => vec![vec![
             "mousemove".into(),
             x.round().to_string(),
             y.round().to_string(),
-        ],
-        ComputerAction::LeftClick { x, y } => vec![
-            "mousemove".into(),
-            x.round().to_string(),
-            y.round().to_string(),
-            "click".into(),
-            "0xC0".into(),
-        ],
-        ComputerAction::RightClick { x, y } => vec![
-            "mousemove".into(),
-            x.round().to_string(),
-            y.round().to_string(),
-            "click".into(),
-            "0xC1".into(),
-        ],
-        ComputerAction::Type { text } => vec!["type".into(), text.clone()],
+        ]],
+        ComputerAction::LeftClick { x, y } => pointer_clicks(*x, *y, "0xC0", 1),
+        ComputerAction::RightClick { x, y } => pointer_clicks(*x, *y, "0xC1", 1),
+        ComputerAction::DoubleClick { x, y } => pointer_clicks(*x, *y, "0xC0", 2),
+        ComputerAction::TripleClick { x, y } => pointer_clicks(*x, *y, "0xC0", 3),
+        ComputerAction::Type { text } => vec![vec!["type".into(), text.clone()]],
         ComputerAction::Keypress { keys }
             if keys.len() == 1 && matches!(keys[0].as_str(), "Escape" | "Esc") =>
         {
-            vec!["key".into(), "1:1".into(), "1:0".into()]
-        }
-        ComputerAction::Wait { milliseconds } => {
-            vec!["sleep".into(), (*milliseconds as f64 / 1000.0).to_string()]
+            vec![vec!["key".into(), "1:1".into(), "1:0".into()]]
         }
         _ => return Err("This Wayland action is not supported by ydotool yet.".into()),
     };
-    Ok(out)
+    for args in commands {
+        command("ydotool", &args).await?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn pointer_clicks(x: f64, y: f64, button: &str, count: usize) -> Vec<Vec<String>> {
+    let mut commands = vec![vec![
+        "mousemove".into(),
+        x.round().to_string(),
+        y.round().to_string(),
+    ]];
+    commands.extend((0..count).map(|_| vec!["click".into(), button.into()]));
+    commands
 }
 
 pub async fn execute_desktop_action(action: &ComputerAction) -> ComputerActionResult {
@@ -460,6 +528,19 @@ mod tests {
         assert_eq!(
             png_viewport(&png).map(|size| (size.width, size.height)),
             Some((1920, 1080))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_clicks_use_individual_ydotool_subcommands() {
+        assert_eq!(
+            pointer_clicks(478.4, 16.2, "0xC0", 2),
+            vec![
+                vec!["mousemove", "478", "16"],
+                vec!["click", "0xC0"],
+                vec!["click", "0xC0"],
+            ]
         );
     }
 }

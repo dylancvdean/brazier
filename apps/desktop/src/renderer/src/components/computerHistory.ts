@@ -80,22 +80,33 @@ export function computerSystemPrompt(session: Pick<ComputerSession, 'target' | '
     'Some tasks, like answering questions, may not encounter a Critical Point at all.'
   ]
   const desktop = session.target === 'desktop'
+  if (desktop) {
+    return [
+      'You are a computer-use agent that performs actions in a visible desktop GUI to fulfill user requests by calling various tools.',
+      ...microsoftFaraPrompt.slice(1),
+      'You do not have a terminal, application menu, browser address bar, or any browser-navigation tools. Use only what is visible in the screenshot.',
+      'To open an application, use the visible desktop launcher, dock, panel, or icon with mouse and keyboard actions.',
+      'Use visual evidence from the latest screenshot and the recorded trajectory; do not assume screen state.',
+      'Return exactly one next action, for example:',
+      '<tool_call>{"name":"computer_use","arguments":{"action":"left_click","coordinate":[720,450]}}</tool_call>.',
+      'Supported actions are key, type, mouse_move, left_click, right_click, double_click, triple_click, left_click_drag, scroll, pause_and_memorize_fact, ask_user_question, wait, and terminate.',
+      'Pause with ask_user_question when required personal information is missing or the task is ambiguous.',
+      'Before an irreversible action, ask for confirmation unless the user explicitly authorized that exact action.',
+      'Never invent personal or payment information.',
+      `The viewport is 1440x900. Target: ${session.target}. Permission mode: ${session.permission_mode}.`
+    ].join(' ')
+  }
   const actions = desktop
     ? 'key, type, mouse_move, left_click, right_click, double_click, triple_click, left_click_drag, scroll, pause_and_memorize_fact, ask_user_question, wait, and terminate'
     : 'key, type, mouse_move, left_click, right_click, double_click, triple_click, left_click_drag, scroll, visit_url, web_search, pause_and_memorize_fact, ask_user_question, wait, and terminate'
-  const example = desktop
-    ? '<tool_call>{"name":"computer_use","arguments":{"action":"left_click","coordinate":[720,450]}}</tool_call>.'
-    : '<tool_call>{"name":"computer_use","arguments":{"action":"visit_url","url":"https://example.com"}}</tool_call>.'
+  const example = '<tool_call>{"name":"computer_use","arguments":{"action":"visit_url","url":"https://example.com"}}</tool_call>.'
   return [
     ...microsoftFaraPrompt,
-    desktop
-      ? 'This is an interface to a desktop GUI. You do not have access to a terminal or applications menu; use only the visible desktop and mouse/keyboard actions below.'
-      : 'This is an isolated browser interface.',
+    'This is an isolated browser interface.',
     'Use visual evidence from the latest screenshot and the recorded trajectory; do not assume page state.',
     'Return exactly one next action, for example:',
     example,
     `Supported actions are ${actions}.`,
-    desktop ? 'Never emit visit_url or web_search: those actions are unavailable for the desktop target.' : '',
     'Pause with ask_user_question when required personal information is missing or the task is ambiguous.',
     'Before an irreversible action, ask for confirmation unless the user explicitly authorized that exact action.',
     'Never invent personal or payment information.',

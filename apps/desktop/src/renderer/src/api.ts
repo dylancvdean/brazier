@@ -58,7 +58,7 @@ export async function saveWorkspacePreference(
 
 export type ComputerTarget = 'browser' | 'desktop'
 
-export type ComputerPermissionMode = 'ask' | 'browser-only' | 'skip-permissions'
+export type ComputerPermissionMode = 'ask' | 'browser-only' | 'skip-permissions' | 'allow-all'
 
 export type OsPermissionState = 'granted' | 'missing' | 'unsupported' | 'unknown'
 

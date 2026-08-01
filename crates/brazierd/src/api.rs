@@ -1340,8 +1340,15 @@ async fn load_default_agent_runtime_id(state: &AppState) -> ApiResult<String> {
 }
 
 async fn agent_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let stored = state.db.application_preference(AGENT_PREFERENCE_KEY).await.map_err(ApiError::internal)?;
-    let default_runtime_id = stored.as_ref().and_then(|value| value["default_runtime_id"].as_str()).unwrap_or(crate::agent_types::DEFAULT_AGENT_RUNTIME_ID);
+    let stored = state
+        .db
+        .application_preference(AGENT_PREFERENCE_KEY)
+        .await
+        .map_err(ApiError::internal)?;
+    let default_runtime_id = stored
+        .as_ref()
+        .and_then(|value| value["default_runtime_id"].as_str())
+        .unwrap_or(crate::agent_types::DEFAULT_AGENT_RUNTIME_ID);
     Ok(Json(json!({
         "default_runtime_id": default_runtime_id,
         "omp_profile": stored.and_then(|value| value.get("omp_profile").cloned()).unwrap_or(Value::Null),
@@ -1377,13 +1384,18 @@ async fn update_agent_preference(
     }
     state
         .db
-        .set_application_preference(AGENT_PREFERENCE_KEY, &json!({
-            "default_runtime_id": runtime_id,
-            "omp_profile": preference.omp_profile,
-        }))
+        .set_application_preference(
+            AGENT_PREFERENCE_KEY,
+            &json!({
+                "default_runtime_id": runtime_id,
+                "omp_profile": preference.omp_profile,
+            }),
+        )
         .await
         .map_err(ApiError::internal)?;
-    Ok(Json(json!({ "default_runtime_id": runtime_id, "omp_profile": preference.omp_profile })))
+    Ok(Json(
+        json!({ "default_runtime_id": runtime_id, "omp_profile": preference.omp_profile }),
+    ))
 }
 
 /// Locate a system `omp` binary for the fuller Oh My Pi stock runtime.
@@ -1543,6 +1555,7 @@ async fn create_computer_session(
     let permission_mode = match body.permission_mode.as_deref().unwrap_or("ask") {
         "browser-only" => crate::computer_types::ComputerPermissionMode::BrowserOnly,
         "skip-permissions" => crate::computer_types::ComputerPermissionMode::SkipPermissions,
+        "allow-all" => crate::computer_types::ComputerPermissionMode::AllowAll,
         _ => crate::computer_types::ComputerPermissionMode::Ask,
     };
     let session = state

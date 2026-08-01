@@ -66,6 +66,7 @@ declare global {
       revealFile(path: string): Promise<void>
       computer: {
         setActive(active: boolean): Promise<void>
+        installWaylandInput(): Promise<void>
         onEscape(listener: () => void): () => void
       }
       /**

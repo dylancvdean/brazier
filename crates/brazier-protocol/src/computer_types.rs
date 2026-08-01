@@ -34,6 +34,9 @@ pub enum ComputerPermissionMode {
     BrowserOnly,
     /// Explicit opt-out of prompting for low-risk browser actions.
     SkipPermissions,
+    /// Explicitly allow every supported action in this Computer Use session.
+    /// The UI keeps the global Escape emergency stop visible while this mode is active.
+    AllowAll,
 }
 
 impl ComputerPermissionMode {
@@ -42,6 +45,7 @@ impl ComputerPermissionMode {
             Self::Ask => "ask",
             Self::BrowserOnly => "browser-only",
             Self::SkipPermissions => "skip-permissions",
+            Self::AllowAll => "allow-all",
         }
     }
 }
@@ -171,6 +175,7 @@ impl ComputerAction {
 
     pub fn requires_approval(&self, mode: ComputerPermissionMode) -> bool {
         match mode {
+            ComputerPermissionMode::AllowAll => false,
             ComputerPermissionMode::SkipPermissions => matches!(
                 self,
                 Self::AskUser { .. }

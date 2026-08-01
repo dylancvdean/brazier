@@ -72,10 +72,11 @@ describe('computer history', () => {
 
   it('uses Microsoft Fara guidance but never offers browser-only actions to desktop sessions', () => {
     const prompt = computerSystemPrompt({ ...session, target: 'desktop' })
-    expect(prompt).toContain('You are a web automation agent')
+    expect(prompt).toContain('You are a computer-use agent')
     expect(prompt).toContain('Critical Point')
     expect(prompt).toContain('desktop GUI')
-    expect(prompt).toContain('Never emit visit_url or web_search')
+    expect(prompt).toContain('visible desktop GUI')
+    expect(prompt).toContain('browser address bar')
     expect(prompt).not.toContain('"action":"visit_url"')
   })
 
