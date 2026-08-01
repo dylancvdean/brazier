@@ -137,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
         data_dir.clone(),
         db.clone(),
         Arc::clone(&active_downloads),
+        Arc::clone(&runtime),
     );
     let state = AppState {
         db,

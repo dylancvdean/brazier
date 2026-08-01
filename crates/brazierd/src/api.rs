@@ -6541,6 +6541,7 @@ mod tests {
             data_dir.to_path_buf(),
             db.clone(),
             Arc::clone(&active_downloads),
+            Arc::clone(&runtime),
         );
         AppState {
             db,

@@ -2187,6 +2187,18 @@ a.inline-link {
   cursor: default;
 }
 
+.computer-model-offer > .secondary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 108px;
+}
+
+.computer-model-offer .progress-track {
+  margin-top: 6px;
+}
+
 .library-card,
 .runtime-card {
   display: grid;

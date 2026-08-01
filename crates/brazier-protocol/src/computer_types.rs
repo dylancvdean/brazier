@@ -58,10 +58,23 @@ pub struct ComputerViewport {
 impl Default for ComputerViewport {
     fn default() -> Self {
         Self {
-            width: 1280,
-            height: 720,
+            // Fara1.5 is most commonly trained and evaluated at this viewport.
+            width: 1440,
+            height: 900,
             device_pixel_ratio: Some(1.0),
         }
+    }
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::ComputerViewport;
+
+    #[test]
+    fn default_matches_fara_grounding_viewport() {
+        let viewport = ComputerViewport::default();
+        assert_eq!((viewport.width, viewport.height), (1440, 900));
+        assert_eq!(viewport.device_pixel_ratio, Some(1.0));
     }
 }
 

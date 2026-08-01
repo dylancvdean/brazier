@@ -2504,7 +2504,15 @@ export function App(): React.JSX.Element {
           onSelect={modeModel.select}
           onConfigure={setConfiguringModel}
           configuredCounts={profileCounts}
-          onManage={() => openManage(modelsLoadFailed || localModels.length === 0 ? 'discover' : 'library')}
+          onManage={() =>
+            openManage(
+              appMode === 'computer'
+                ? 'computer'
+                : modelsLoadFailed || localModels.length === 0
+                  ? 'discover'
+                  : 'library'
+            )
+          }
           onClose={() => setModelMenuOpen(false)}
         />
       )}

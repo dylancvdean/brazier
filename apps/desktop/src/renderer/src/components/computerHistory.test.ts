@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { ComputerActionResult, ComputerSession, ComputerStep } from '../api'
 import {
   buildComputerHistory,
+  computerSystemPrompt,
   continuationForResult,
   MAX_COMPUTER_HISTORY_IMAGES,
   MAX_COMPUTER_HISTORY_MESSAGES,
@@ -49,6 +50,14 @@ function imagePayloads(history: ReturnType<typeof buildComputerHistory>): string
 }
 
 describe('computer history', () => {
+  it('uses Fara grounding dimensions and critical-point safety instructions', () => {
+    const prompt = computerSystemPrompt(session)
+    expect(prompt).toContain('1440x900')
+    expect(prompt).toContain('exactly one next action')
+    expect(prompt).toContain('irreversible action')
+    expect(prompt).toContain('Never invent personal or payment information')
+  })
+
   it('rebuilds durable conversation and keeps the newest ten screenshots', () => {
     const steps = [
       step(0, { role: 'user', content: 'Book a table for two tomorrow.' }),

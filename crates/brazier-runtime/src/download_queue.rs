@@ -17,6 +17,7 @@ use crate::{
     active_downloads::{ActiveDownloads, StopReason},
     db::Database,
     download::{self, DownloadRequest, MlxDownloadRequest},
+    engine::Runtime,
 };
 
 /// What a queued job should download. Serialized onto the job row.
@@ -120,6 +121,7 @@ impl DownloadQueue {
         data_dir: std::path::PathBuf,
         db: Database,
         active: Arc<ActiveDownloads>,
+        runtime: Arc<Runtime>,
     ) -> Self {
         let (tx, mut rx) = mpsc::channel::<QueuedDownload>(256);
         tokio::spawn(async move {
@@ -134,8 +136,14 @@ impl DownloadQueue {
                 let data_dir = data_dir.clone();
                 let db = db.clone();
                 let active = Arc::clone(&active);
+                let runtime = Arc::clone(&runtime);
                 tokio::spawn(async move {
-                    run_one(&http, &data_dir, &db, &active, work).await;
+                    if run_one(&http, &data_dir, &db, &active, work).await {
+                        // Model discovery is cached because it includes remote
+                        // probes. A queued install must invalidate that cache
+                        // just like the streaming download endpoints do.
+                        runtime.invalidate_models_cache().await;
+                    }
                     drop(slot);
                 });
             }
@@ -154,7 +162,7 @@ async fn run_one(
     db: &Database,
     active: &ActiveDownloads,
     work: QueuedDownload,
-) {
+) -> bool {
     // Register before checking durable state so cancellation cannot slip
     // between "still pending" and registration. Once the flag is visible,
     // every later cancel reaches this worker directly.
@@ -164,7 +172,7 @@ async fn run_one(
         Ok(job) if matches!(job.status.as_str(), "pending" | "downloading") => {}
         Ok(_) => {
             active.finish(&work.job_id);
-            return;
+            return false;
         }
         Err(error) => {
             tracing::error!(
@@ -173,7 +181,7 @@ async fn run_one(
                 "refusing to start download without durable job state"
             );
             active.finish(&work.job_id);
-            return;
+            return false;
         }
     }
 
@@ -249,7 +257,9 @@ async fn run_one(
                 let _ = db.fail_download_job(&work.job_id, &error.to_string()).await;
             }
         }
+        return false;
     }
+    true
 }
 
 #[cfg(test)]

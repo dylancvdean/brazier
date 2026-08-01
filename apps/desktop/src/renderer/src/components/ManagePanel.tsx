@@ -121,6 +121,11 @@ import {
   runtimesForModel
 } from '../model-utils'
 import type { HubModel } from '../types'
+import {
+  MANAGED_FARA_BUNDLES,
+  modelIdForManagedFara,
+  type ManagedFaraBundle
+} from '../../../computer/recipes'
 
 type DiscoverEngine =
   | 'llama.cpp'
@@ -367,6 +372,7 @@ export type ManageSection =
   | 'server'
   | 'mcp'
   | 'agent'
+  | 'computer'
   | 'remote'
   | 'customization'
   | 'support'
@@ -403,6 +409,7 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'runtimes', label: 'Runtimes', icon: <Cpu size={15} /> },
   { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
   { id: 'agent', label: 'Agent', icon: <Bot size={15} /> },
+  { id: 'computer', label: 'Computer use', icon: <LayoutDashboard size={15} /> },
   { id: 'remote', label: 'Remote servers', icon: <Globe size={15} /> },
   { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> },
   { id: 'server', label: 'OpenAI server', icon: <KeyRound size={15} /> },
@@ -658,6 +665,9 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
             {props.section === 'runtimes' && <RuntimesSection {...props} onError={setError} />}
             {props.section === 'mcp' && <McpSection {...props} onError={setError} />}
             {props.section === 'agent' && <AgentSection {...props} onError={setError} />}
+            {props.section === 'computer' && (
+              <ComputerUseSection {...props} onError={setError} />
+            )}
             {props.section === 'remote' && <RemoteSection {...props} onError={setError} />}
             {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
             {props.section === 'server' && <ServerSection {...props} onError={setError} />}
@@ -1105,6 +1115,228 @@ function RecommendedSection(props: SectionProps): React.JSX.Element {
           </div>
         </>
       ) : null}
+    </section>
+  )
+}
+
+function ComputerUseSection(props: SectionProps): React.JSX.Element {
+  const [jobs, setJobs] = useState<DownloadJob[]>([])
+  const [installing, setInstalling] = useState<string | null>(null)
+  const [runtimePhase, setRuntimePhase] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const settledSignature = useRef('')
+
+  useEffect(() => {
+    let cancelled = false
+    async function refresh(): Promise<void> {
+      try {
+        const next = await listDownloadJobs()
+        if (cancelled) return
+        setJobs(next)
+        const managed = next.filter((job) =>
+          MANAGED_FARA_BUNDLES.some((bundle) => bundle.quantRepo === job.repo_id)
+        )
+        const signature = managed
+          .filter((job) => ['completed', 'failed', 'cancelled'].includes(job.status))
+          .map((job) => `${job.id}:${job.status}:${job.updated_at}`)
+          .join('|')
+        if (signature && signature !== settledSignature.current) {
+          settledSignature.current = signature
+          await props.refreshModels()
+        }
+      } catch {
+        if (!cancelled) setJobs([])
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [props.refreshModels])
+
+  async function queueBundleFile(bundle: ManagedFaraBundle, filename: string): Promise<void> {
+    // The daemon returns newest jobs first. Prefer the latest attempt so an
+    // older failed row cannot be resumed alongside a newer active download.
+    const existing = jobs.find(
+      (job) => job.repo_id === bundle.quantRepo && job.filename === filename
+    )
+    if (existing && ['pending', 'downloading'].includes(existing.status)) return
+    if (existing && ['paused', 'failed', 'cancelled'].includes(existing.status)) {
+      await resumeDownloadJob(existing.id)
+      return
+    }
+    await queueModelDownload(bundle.quantRepo, filename)
+  }
+
+  async function enableComputerMode(): Promise<void> {
+    const preference = await fetchWorkspacePreference()
+    if (preference.modes.computer) return
+    const saved = await saveWorkspacePreference({ ...preference.modes, computer: true })
+    props.onWorkspaceModesChange?.(saved.modes)
+  }
+
+  async function installBundle(bundle: ManagedFaraBundle): Promise<void> {
+    setInstalling(bundle.id)
+    setRuntimePhase('Checking the llama.cpp runtime…')
+    setNotice(null)
+    props.onError(null)
+    try {
+      await Promise.all([
+        queueBundleFile(bundle, bundle.modelFile),
+        queueBundleFile(bundle, bundle.projectorFile),
+        ensureLlamaEngine((event) => setRuntimePhase(progressLabel(event))),
+        enableComputerMode()
+      ])
+      setJobs(await listDownloadJobs())
+      setNotice(
+        `${bundle.label} is in the download queue. Brazier has also prepared its vision projector, inference runtime, and Computer Use workspace mode.`
+      )
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setInstalling(null)
+      setRuntimePhase(null)
+    }
+  }
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>Computer use</h2>
+        <p>
+          Install a ready-to-run model stack. Brazier downloads the model and matching vision
+          projector, installs the best managed llama.cpp runtime for this machine, and enables the
+          Computer workspace mode.
+        </p>
+      </header>
+
+      <div className="settings-group">
+        <div className="section-label">Fara1.5 models</div>
+        <p className="model-help">
+          These are balanced Q4_K_M GGUF conversions of Microsoft&apos;s MIT-licensed Fara1.5
+          releases. The 4B model is the recommended starting point; larger variants improve
+          multi-step reliability but need substantially more memory and compute.
+        </p>
+        <div className="runtime-offer-list computer-model-offers">
+          {MANAGED_FARA_BUNDLES.map((bundle) => {
+            const fit = generationFit(bundle.downloadBytes, props.hardware)
+            const model = props.models.find((entry) => entry.id === modelIdForManagedFara(bundle))
+            const ready = Boolean(model?.capabilities?.computer_use)
+            const filenames = new Set([bundle.modelFile, bundle.projectorFile])
+            const bundleJobs = jobs.filter(
+              (job) => job.repo_id === bundle.quantRepo && filenames.has(job.filename)
+            )
+            const activeJobs = bundleJobs.filter((job) =>
+              ['pending', 'downloading'].includes(job.status)
+            )
+            const paused = bundleJobs.some((job) => job.status === 'paused')
+            const failed = bundleJobs.some((job) => job.status === 'failed')
+            const downloaded = activeJobs.reduce(
+              (total, job) => total + (job.bytes_downloaded ?? 0),
+              0
+            )
+            const activeTotal = activeJobs.reduce(
+              (total, job) => total + (job.total_bytes ?? 0),
+              0
+            )
+            const percent = activeTotal > 0 ? Math.min(100, (downloaded / activeTotal) * 100) : 0
+            const busy = installing === bundle.id || activeJobs.length > 0
+            return (
+              <article className="runtime-offer computer-model-offer" key={bundle.id}>
+                <div className="runtime-offer-info">
+                  <strong>
+                    {bundle.label}
+                    {bundle.recommended && <span className="installed-badge">Recommended</span>}
+                    {ready && <span className="installed-badge">Ready</span>}
+                  </strong>
+                  <span>{bundle.summary}</span>
+                  <span>
+                    {formatBytes(bundle.downloadBytes)} download ·{' '}
+                    <span className={`generation-fit ${fit}`}>{generationFitLabel(fit)}</span>
+                  </span>
+                  <span>
+                    Base:{' '}
+                    <a
+                      href={`https://huggingface.co/${bundle.sourceRepo}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {bundle.sourceRepo}
+                    </a>{' '}
+                    · Quantization:{' '}
+                    <a
+                      href={`https://huggingface.co/${bundle.quantRepo}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {bundle.quantRepo}
+                    </a>
+                  </span>
+                  {activeJobs.length > 0 && (
+                    <>
+                      <span>
+                        Downloading {formatBytes(downloaded)}
+                        {activeTotal > 0 ? ` / ${formatBytes(activeTotal)}` : ''}
+                      </span>
+                      <div className="progress-track compact">
+                        <div className="progress-fill" style={{ width: `${percent}%` }} />
+                      </div>
+                    </>
+                  )}
+                  {!ready && model && activeJobs.length === 0 && (
+                    <span>The model is present, but its vision projector still needs setup.</span>
+                  )}
+                  {!ready && failed && activeJobs.length === 0 && (
+                    <span className="run-error-text">A download failed; setup will resume it.</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="secondary-action"
+                  disabled={ready || busy}
+                  onClick={() => void installBundle(bundle)}
+                >
+                  {installing === bundle.id ? (
+                    <LoaderCircle className="spin" size={13} />
+                  ) : ready ? (
+                    <Check size={13} />
+                  ) : (
+                    <Download size={13} />
+                  )}
+                  {ready
+                    ? 'Ready'
+                    : installing === bundle.id
+                      ? 'Preparing…'
+                      : activeJobs.length > 0
+                        ? 'Downloading…'
+                        : paused
+                          ? 'Resume setup'
+                          : failed
+                            ? 'Retry setup'
+                            : model
+                              ? 'Finish setup'
+                              : 'Install all'}
+                </button>
+              </article>
+            )
+          })}
+        </div>
+        {runtimePhase && <p className="model-help">{runtimePhase}</p>}
+        {notice && <p className="model-help">{notice}</p>}
+      </div>
+
+      <div className="settings-group">
+        <div className="section-label">What Brazier manages</div>
+        <p className="model-help">
+          Downloads are resumable and remain visible in the global activity tray. The matching
+          projector is loaded automatically when the model starts, and the runtime uses the
+          hardware target selected under Runtimes. Browser tasks use an installed Chromium-family
+          browser in a fresh dedicated profile; desktop control remains opt-in and reports its OS
+          permission requirements under Customization.
+        </p>
+      </div>
     </section>
   )
 }
