@@ -89,5 +89,13 @@ contextBridge.exposeInMainWorld('brazier', {
   saveFile: (suggestedName: string, data: ArrayBuffer): Promise<string | null> =>
     ipcRenderer.invoke('brazier:save-file', suggestedName, data),
   revealFile: (path: string): Promise<void> => ipcRenderer.invoke('brazier:reveal-file', path),
+  computer: {
+    setActive: (active: boolean): Promise<void> => ipcRenderer.invoke('brazier:computer:set-active', active),
+    onEscape: (listener: () => void): (() => void) => {
+      const handler = (): void => listener()
+      ipcRenderer.on('brazier:computer:escape', handler)
+      return () => ipcRenderer.removeListener('brazier:computer:escape', handler)
+    }
+  },
   agent
 })

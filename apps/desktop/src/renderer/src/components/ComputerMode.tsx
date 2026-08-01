@@ -398,8 +398,19 @@ export function ComputerMode(props: Props): React.JSX.Element {
   useEffect(() => {
     return () => {
       abortRef.current?.abort()
+      void window.brazier.computer.setActive(false)
     }
   }, [])
+
+  // The main process owns the global Escape binding, so this fires even when a
+  // controlled native app is focused. Limit the banner to real host control;
+  // browser sessions remain contained in their isolated Chromium process.
+  useEffect(() => {
+    void window.brazier.computer.setActive(running && target === 'desktop')
+    return () => { void window.brazier.computer.setActive(false) }
+  }, [running, target])
+
+  useEffect(() => window.brazier.computer.onEscape(() => { void stop() }), [stop])
 
   return (
     <div className="computer-mode">

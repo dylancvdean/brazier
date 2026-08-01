@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, shell } from 'electron'
 
 import { AgentSupervisor, registerAgentIpc } from './agent'
 import {
@@ -79,6 +79,33 @@ if (process.platform === 'linux') {
 type Connection = {
   address: string
   api_key: string | null
+}
+
+let computerSafetyOverlay: BrowserWindow | null = null
+let computerUseActive = false
+
+/** A system-level indicator, deliberately independent of the renderer UI.
+ * It is click-through so it cannot steal a target click, while Escape remains
+ * a global shortcut even when the controlled application owns focus. */
+function setComputerUseActive(active: boolean): void {
+  computerUseActive = active
+  if (!active) {
+    computerSafetyOverlay?.hide()
+    return
+  }
+  if (!computerSafetyOverlay || computerSafetyOverlay.isDestroyed()) {
+    computerSafetyOverlay = new BrowserWindow({
+      width: 286, height: 48, x: 24, y: 24, frame: false, transparent: true,
+      resizable: false, movable: false, focusable: false, skipTaskbar: true,
+      alwaysOnTop: true,
+      webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true }
+    })
+    computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
+    computerSafetyOverlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    computerSafetyOverlay.setIgnoreMouseEvents(true, { forward: true })
+    computerSafetyOverlay.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html><style>body{margin:0;background:transparent;font:600 14px -apple-system,BlinkMacSystemFont,sans-serif;color:#fff}div{height:48px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:10px;border:1px solid #ff8c69;border-radius:12px;background:#31140eeF;box-shadow:0 8px 30px #0008}b{color:#ffad91}kbd{padding:3px 7px;border:1px solid #ffffff55;border-radius:5px;background:#0008;font:600 12px inherit}</style><div><b>Computer Use active</b><span><kbd>Esc</kbd> to stop</span></div>`))
+  }
+  computerSafetyOverlay.showInactive()
 }
 
 export type ServerSettings = {
@@ -425,6 +452,20 @@ async function createWindow(): Promise<void> {
     }
   })
 
+  // Register once per app lifecycle. Sending a renderer event instead of
+  // merely hiding the banner makes Escape cancel the model loop immediately.
+  globalShortcut.unregister('Escape')
+  globalShortcut.register('Escape', () => {
+    if (!computerUseActive) return
+    computerUseActive = false
+    computerSafetyOverlay?.hide()
+    for (const candidate of BrowserWindow.getAllWindows()) {
+      if (candidate !== computerSafetyOverlay && !candidate.isDestroyed()) {
+        candidate.webContents.send('brazier:computer:escape')
+      }
+    }
+  })
+
   attachContextMenu(window)
 
   window.once('ready-to-show', () => {
@@ -539,6 +580,9 @@ app.whenReady().then(async () => {
   }
   connection = startDaemon()
   ipcMain.handle('brazier:connection', () => connection)
+  ipcMain.handle('brazier:computer:set-active', (_event, active: boolean) => {
+    setComputerUseActive(active === true)
+  })
   ipcMain.handle('brazier:server-settings', (): ServerSettings => publicServerSettings(loadServerSettings()))
   ipcMain.handle(
     'brazier:save-server-settings',
