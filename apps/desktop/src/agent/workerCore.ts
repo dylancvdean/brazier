@@ -112,6 +112,10 @@ export class AgentWorkerCore {
         await session.setEnabledTools(command.tools)
         return session.getState()
       }
+      case 'composer-suggestions': {
+        const session = await this.openSession(command.sessionId, { rehydrate: false })
+        return (await session.composerSuggestions?.()) ?? []
+      }
       case 'set-permission-mode': {
         const session = await this.openSession(command.sessionId, { rehydrate: false })
         await session.setPermissionMode(command.mode)

@@ -78,6 +78,7 @@ declare global {
           model: { id: string; name?: string; contextWindow?: number; maxTokens?: number }
         ): Promise<unknown>
         setTools(sessionId: string, tools: string[]): Promise<unknown>
+        composerSuggestions(sessionId: string): Promise<Array<{ value: string; description: string }>>
         setPermissionMode(
           sessionId: string,
           mode: import('../../agent/core/types').AgentPermissionMode

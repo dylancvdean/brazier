@@ -692,6 +692,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [deciding, setDeciding] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [artifact, setArtifact] = useState<{ id: string; text: string } | null>(null)
+  const [ompSuggestions, setOmpSuggestions] = useState<Array<{ value: string; description: string }>>([])
   const scrollAnchor = useRef<HTMLDivElement>(null)
   const sessionIdRef = useRef<string | null>(null)
 
@@ -703,6 +704,13 @@ export function AgentMode(props: Props): React.JSX.Element {
     session?.permission_mode ?? pendingPermissionMode
   const activeRuntimeId = session?.runtime_id ?? defaultRuntimeId
   const ompRuntime = activeRuntimeId === 'omp'
+  useEffect(() => {
+    if (!session || !ompRuntime) {
+      setOmpSuggestions([])
+      return
+    }
+    void window.brazier.agent.composerSuggestions(session.id).then(setOmpSuggestions).catch(() => setOmpSuggestions([]))
+  }, [session?.id, ompRuntime])
   const availableToolNames = useMemo(() => tools.map((tool) => tool.name), [tools])
   const enabledToolNames = useMemo(() => {
     const selected = session?.enabled_tools ?? pendingEnabledTools ?? availableToolNames
@@ -1522,12 +1530,13 @@ export function AgentMode(props: Props): React.JSX.Element {
           ? [
               { value: 'ultrathink', description: 'Use the highest supported reasoning effort for this turn.' },
               { value: 'orchestrate', description: 'Plan, delegate independent work, and verify the result.' },
-              { value: 'workflowz', description: 'Build a deterministic multi-subagent workflow when task tools are available.' }
+              { value: 'workflowz', description: 'Build a deterministic multi-subagent workflow when task tools are available.' },
+              ...ompSuggestions.filter((entry) => !['ultrathink', 'orchestrate', 'workflowz'].includes(entry.value))
             ]
           : undefined
     })
     return () => onComposerChange?.(null)
-  }, [onComposerChange, running, blockedReason, modelLabel, workspace, activeRuntimeId])
+  }, [onComposerChange, running, blockedReason, modelLabel, workspace, activeRuntimeId, ompSuggestions])
 
   // Same pattern for the app sidebar: Agent mode replaces conversations with
   // directory-grouped tasks, so the list and its actions live up there.

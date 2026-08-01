@@ -36,6 +36,7 @@ export type WorkerCommand =
       model: AgentModelReference
     }
   | { type: 'set-tools'; requestId: string; sessionId: string; tools: string[] }
+  | { type: 'composer-suggestions'; requestId: string; sessionId: string }
   | { type: 'set-permission-mode'; requestId: string; sessionId: string; mode: AgentPermissionMode }
   | { type: 'close-session'; requestId: string; sessionId: string }
   | { type: 'shutdown'; requestId: string }

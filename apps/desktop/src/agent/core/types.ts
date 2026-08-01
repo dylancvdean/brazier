@@ -363,6 +363,8 @@ export type AgentUserInput = {
   images?: string[]
 }
 
+export type AgentComposerSuggestion = { value: string; description: string }
+
 export type AgentRuntimeCapabilities = {
   streaming: boolean
   toolCalls: boolean
@@ -428,6 +430,7 @@ export interface AgentSession {
   /** Apply a permission-mode change to an already-open runtime session. */
   setPermissionMode(mode: AgentPermissionMode): Promise<void>
   getState(): AgentSessionState
+  composerSuggestions?(): Promise<AgentComposerSuggestion[]>
   /**
    * Replace the in-memory transcript (and optional system prompt) with what the
    * daemon stored. Required when reopening a session so model context matches

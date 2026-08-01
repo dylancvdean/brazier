@@ -39,6 +39,8 @@ const agent = {
     invokeAgent({ type: 'set-model', sessionId, model }),
   setTools: (sessionId: string, tools: string[]): Promise<unknown> =>
     invokeAgent({ type: 'set-tools', sessionId, tools }),
+  composerSuggestions: (sessionId: string): Promise<Array<{ value: string; description: string }>> =>
+    invokeAgent({ type: 'composer-suggestions', sessionId }) as Promise<Array<{ value: string; description: string }>>,
   setPermissionMode: (sessionId: string, mode: AgentPermissionMode): Promise<unknown> =>
     invokeAgent({ type: 'set-permission-mode', sessionId, mode }),
   closeSession: (sessionId: string): Promise<unknown> =>

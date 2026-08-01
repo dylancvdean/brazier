@@ -21,6 +21,7 @@ import { accumulate, emptySummary } from '../core/runSummary'
 import { EventSequencer } from '../core/toolExecutor'
 import type {
   AgentCompactionState,
+  AgentComposerSuggestion,
   AgentEvent,
   AgentMessage,
   AgentModelCapabilities,
@@ -323,6 +324,7 @@ class OmpAgentSession implements AgentSession {
   private permissionMode: AgentPermissionMode
   private permissionSettings: AgentPermissionSettings
   private enabledTools?: string[]
+  private commandSuggestions: AgentComposerSuggestion[] = []
   private title: string
   private workspacePath?: string | null
   private createdAt: string
@@ -411,6 +413,7 @@ class OmpAgentSession implements AgentSession {
       const session = new OmpAgentSession(broker, options, client, sidecar)
       await session.configureModel(options.model)
       await session.configureHostTools()
+      await session.refreshCommandSuggestions()
       return session
     } catch (cause) {
       await client?.dispose()
@@ -441,6 +444,16 @@ class OmpAgentSession implements AgentSession {
       compactionState: this.compactionState,
       runtimeMetadata: this.runtimeMetadata
     }
+  }
+
+  async composerSuggestions(): Promise<AgentComposerSuggestion[]> {
+    await this.refreshCommandSuggestions()
+    return [
+      { value: 'ultrathink', description: 'Use the highest supported reasoning effort for this turn.' },
+      { value: 'orchestrate', description: 'Plan, delegate independent work, and verify the result.' },
+      { value: 'workflowz', description: 'Build a deterministic multi-subagent workflow when task tools are available.' },
+      ...this.commandSuggestions
+    ]
   }
 
   rehydrate(messages: AgentMessage[], _systemPrompt?: string): void {
@@ -805,6 +818,24 @@ class OmpAgentSession implements AgentSession {
       const detail = cause instanceof Error ? cause.message : String(cause)
       throw new Error(`OMP could not select Brazier model \`${model.id}\`: ${detail}`)
     }
+  }
+
+  private async refreshCommandSuggestions(): Promise<void> {
+    const frame = await this.requireClient()
+      .request({ type: 'get_available_commands' })
+      .catch(() => null)
+    const commands = (frame?.data as { commands?: unknown[] } | undefined)?.commands
+    if (!Array.isArray(commands)) return
+    this.commandSuggestions = commands.flatMap((command) => {
+      if (!command || typeof command !== 'object') return []
+      const entry = command as Record<string, unknown>
+      const raw = typeof entry.name === 'string' ? entry.name : typeof entry.command === 'string' ? entry.command : ''
+      if (!raw) return []
+      return [{
+        value: raw.startsWith('/') ? raw : `/${raw}`,
+        description: typeof entry.description === 'string' ? entry.description : 'OMP command'
+      }]
+    })
   }
 
   private static async startSidecar(
