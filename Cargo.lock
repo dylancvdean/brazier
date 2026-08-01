@@ -236,10 +236,13 @@ dependencies = [
  "brazier-protocol",
  "brazier-runtime",
  "brazier-storage",
+ "futures",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "uuid",
 ]
 

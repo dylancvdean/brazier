@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 import { AGENT_IPC, type WorkerCommandInput, type WorkerMessage } from '../agent/core/protocol'
-import type { AgentModelReference, AgentUserInput } from '../agent/core/types'
+import type { AgentModelReference, AgentPermissionMode, AgentUserInput } from '../agent/core/types'
 
 export type BrazierConnection = {
   address: string
@@ -39,6 +39,8 @@ const agent = {
     invokeAgent({ type: 'set-model', sessionId, model }),
   setTools: (sessionId: string, tools: string[]): Promise<unknown> =>
     invokeAgent({ type: 'set-tools', sessionId, tools }),
+  setPermissionMode: (sessionId: string, mode: AgentPermissionMode): Promise<unknown> =>
+    invokeAgent({ type: 'set-permission-mode', sessionId, mode }),
   closeSession: (sessionId: string): Promise<unknown> =>
     invokeAgent({ type: 'close-session', sessionId }),
   status: (): Promise<{ running: boolean; crashes: number }> =>

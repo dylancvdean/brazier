@@ -30,7 +30,7 @@ models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and
 | Tools and MCP | ✅ Built-in utilities, media generation, multi-round tool use, and custom stdio MCP servers |
 | Multimodal input | ✅ Image, audio, and sampled video input with capability-aware fallback |
 | Agent | 🟨 Sandboxed Pi core on macOS and Linux with brokered MCP tools; Windows has no agent sandbox |
-| Computer Use | 🟨 Browser-first observe–act mode with Fara1.5 adapters; desktop OS control probes X11/Wayland/macOS and fails closed |
+| Computer Use | 🟨 Browser-first observe–act mode with Fara1.5 adapters, isolated Chromium/CDP sessions, and durable task recovery; desktop OS control probes X11/Wayland/macOS and fails closed |
 | Media generation | 🟨 Curated image/video models and managed runtimes; backend reliability varies and AMD APU Vulkan support is experimental |
 | Speech recognition | ✅ whisper.cpp, WhisperKit, and Nemotron streaming ASR |
 | Multi-GPU | 🟨 Manual llama.cpp GPU splits are supported; automatic and cross-engine placement are not |

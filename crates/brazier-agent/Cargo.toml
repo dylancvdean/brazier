@@ -16,9 +16,12 @@ base64 = "0.22.1"
 brazier-protocol = { path = "../brazier-protocol" }
 brazier-runtime = { path = "../brazier-runtime", optional = true }
 brazier-storage = { path = "../brazier-storage", optional = true }
+futures.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tokio-tungstenite = "0.29"
 uuid.workspace = true
 
 [dev-dependencies]

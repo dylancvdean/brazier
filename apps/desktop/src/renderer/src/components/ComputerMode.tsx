@@ -30,7 +30,15 @@ import {
 } from '../api'
 import { modelDisplayName } from '../model-utils'
 import type { AgentComposerControls } from './AgentMode'
-import type { ContentPart, Message } from '../types'
+import {
+  buildComputerHistory,
+  computerActionLabel,
+  computerScreenshotDataUrl,
+  continuationForResult,
+  observationError,
+  recoverComputerPause,
+  type ComputerContinuation
+} from './computerHistory'
 
 type Props = {
   modelId: string
@@ -63,55 +71,6 @@ function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
 
-function actionLabel(action: ComputerAction | null | undefined): string {
-  if (!action) return '—'
-  switch (action.type) {
-    case 'visit_url':
-      return `Visit ${action.url}`
-    case 'web_search':
-      return `Search “${action.query}”`
-    case 'type':
-      return `Type “${action.text.slice(0, 48)}${action.text.length > 48 ? '…' : ''}”`
-    case 'left_click':
-    case 'right_click':
-    case 'double_click':
-    case 'triple_click':
-    case 'mouse_move':
-      return `${action.type.replaceAll('_', ' ')} (${Math.round(action.x)}, ${Math.round(action.y)})`
-    case 'keypress':
-      return `Keys ${action.keys.join('+')}`
-    case 'ask_user':
-      return `Ask: ${action.question}`
-    case 'terminate':
-      return action.response ? `Done — ${action.response}` : 'Terminate'
-    case 'memorize':
-      return `Remember: ${action.fact}`
-    default:
-      return action.type.replaceAll('_', ' ')
-  }
-}
-
-function screenshotDataUrl(result: ComputerActionResult | null | undefined): string | null {
-  if (!result?.screenshot_base64) return null
-  const mime = result.mime_type || 'image/png'
-  return `data:${mime};base64,${result.screenshot_base64}`
-}
-
-function ephemeralMessage(
-  role: Message['role'],
-  content: string | ContentPart[]
-): Message {
-  return {
-    id: `computer-${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    conversation_id: 'computer',
-    parent_id: null,
-    role,
-    content,
-    model: null,
-    created_at: new Date().toISOString()
-  }
-}
-
 export function ComputerMode(props: Props): React.JSX.Element {
   const { modelId, models, onError, onComposerChange } = props
   const modelLabel = useMemo(() => {
@@ -131,6 +90,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
     action: ComputerAction
     message?: string | null
   } | null>(null)
+  const [pendingUserQuestion, setPendingUserQuestion] = useState<string | null>(null)
   const [liveThought, setLiveThought] = useState('')
   const abortRef = useRef<AbortController | null>(null)
   const sessionRef = useRef<ComputerSession | null>(null)
@@ -149,8 +109,11 @@ export function ComputerMode(props: Props): React.JSX.Element {
         const list = await refreshSessions()
         const found = list.find((entry) => entry.id === id) ?? null
         setSession(found)
+        sessionRef.current = found
         if (!found) {
           setSteps([])
+          setPendingApproval(null)
+          setPendingUserQuestion(null)
           return
         }
         setTarget(found.target)
@@ -159,9 +122,12 @@ export function ComputerMode(props: Props): React.JSX.Element {
         setSteps(nextSteps)
         const lastShot = [...nextSteps]
           .reverse()
-          .map((step) => screenshotDataUrl(step.result))
+          .map((step) => computerScreenshotDataUrl(step.result))
           .find(Boolean)
-        if (lastShot) setViewportUrl(lastShot)
+        setViewportUrl(lastShot ?? null)
+        const recovered = recoverComputerPause(nextSteps)
+        setPendingApproval(recovered.approval)
+        setPendingUserQuestion(recovered.userQuestion)
       } catch (cause) {
         onError(errorText(cause))
       }
@@ -181,8 +147,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
       permission_mode: permissionMode
     })
     setSession(created)
+    sessionRef.current = created
     setSteps([])
     setPendingApproval(null)
+    setPendingUserQuestion(null)
     setViewportUrl(null)
     await refreshSessions()
     return created
@@ -193,9 +161,11 @@ export function ComputerMode(props: Props): React.JSX.Element {
       await deleteComputerSession(id)
       if (sessionRef.current?.id === id) {
         setSession(null)
+        sessionRef.current = null
         setSteps([])
         setViewportUrl(null)
         setPendingApproval(null)
+        setPendingUserQuestion(null)
       }
       await refreshSessions()
     } catch (cause) {
@@ -206,7 +176,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
   async function refreshViewport(sessionId: string): Promise<ComputerActionResult | null> {
     try {
       const shot = await computerScreenshot(sessionId)
-      const url = screenshotDataUrl(shot)
+      const url = computerScreenshotDataUrl(shot)
       if (url) setViewportUrl(url)
       return shot
     } catch {
@@ -236,230 +206,122 @@ export function ComputerMode(props: Props): React.JSX.Element {
     setRunning(false)
   }, [])
 
-  const send = useCallback(
-    async (text: string): Promise<void> => {
-      const goal = text.trim()
-      if (!goal || running) return
-      if (!modelId) {
-        onError('Choose a computer-use model in the top bar.')
-        return
-      }
+  async function syncSteps(sessionId: string): Promise<ComputerStep[]> {
+    const next = await listComputerSteps(sessionId)
+    setSteps(next)
+    return next
+  }
 
-      onError(null)
-      setRunning(true)
-      setPendingApproval(null)
+  async function runModelLoop(active: ComputerSession, controller: AbortController): Promise<void> {
+    // This screenshot is a broker-recorded action, so it survives reload and is
+    // visible to the next model turn through buildComputerHistory().
+    const observation = await refreshViewport(active.id)
+    const observationFailure = observationError(observation)
+    if (observationFailure) throw new Error(observationFailure)
+    await syncSteps(active.id)
+    const activeModelId = active.model_id || modelId
+
+    for (let step = 0; step < MAX_LOOP_STEPS && !controller.signal.aborted; step += 1) {
+      const history = buildComputerHistory(active, await syncSteps(active.id))
+      let responseText = ''
       setLiveThought('')
-      const controller = new AbortController()
-      abortRef.current = controller
-
-      try {
-        let active = sessionRef.current
-        if (!active) {
-          active = await createComputerSession({
-            title: goal.slice(0, 72) || 'Computer task',
-            target,
-            model_id: modelId,
-            permission_mode: permissionMode
-          })
-          setSession(active)
-          await refreshSessions()
+      const completion = await streamCompletion(
+        history,
+        activeModelId,
+        controller.signal,
+        (token) => {
+          responseText += token
+        },
+        {
+          onReasoning: (token) => setLiveThought((current) => current + token),
+          toolChoice: 'none'
         }
+      )
+      responseText = completion.responseText || responseText
+      if (controller.signal.aborted) return
 
-        await appendComputerStep(active.id, { role: 'user', content: goal })
-        let nextSteps = await listComputerSteps(active.id)
-        setSteps(nextSteps)
+      const parsed = await parseModelOutput(responseText)
+      if (parsed.thought) setLiveThought(parsed.thought)
+      // The model's complete raw reply is narrative context.  Only the broker
+      // writes action/result records, preventing duplicate tool timeline rows.
+      await appendComputerStep(active.id, {
+        role: 'assistant',
+        content: responseText,
+        thought: parsed.thought
+      })
 
-        let shot = await refreshViewport(active.id)
-        const history: Message[] = [
-          ephemeralMessage(
-            'system',
-            [
-              'You are a computer-use agent. Observe the screenshot and act via Fara tool calls.',
-              'Emit <tool_call>{"name":"computer_use","arguments":{...}}</tool_call> with one action.',
-              'Available actions include screenshot, left_click, type, keypress, scroll, visit_url,',
-              'web_search, wait, ask_user, memorize, and terminate.',
-              `Target: ${active.target}. Permission mode: ${active.permission_mode}.`
-            ].join(' ')
-          )
-        ]
+      if (parsed.actions.length === 0) return
+      for (const action of parsed.actions) {
+        if (controller.signal.aborted) return
+        const result = await computerExec({ session_id: active.id, action })
+        const shotUrl = computerScreenshotDataUrl(result)
+        if (shotUrl) setViewportUrl(shotUrl)
+        await syncSteps(active.id)
 
-        for (let step = 0; step < MAX_LOOP_STEPS; step += 1) {
-          if (controller.signal.aborted) break
-
-          const imageUrl = screenshotDataUrl(shot)
-          const userParts: ContentPart[] = [{ type: 'text', text: step === 0 ? goal : 'Continue.' }]
-          if (imageUrl) {
-            userParts.push({ type: 'image_url', image_url: { url: imageUrl } })
+        const continuation: ComputerContinuation = continuationForResult(result)
+        if (result.needs_approval || result.status === 'needs_approval') {
+          const approvalId = result.approval_id
+          if (!approvalId) {
+            onError(result.message || 'Action needs approval, but no approval id was returned.')
+            return
           }
-          history.push(ephemeralMessage('user', userParts))
-
-          let responseText = ''
-          setLiveThought('')
-          const result = await streamCompletion(
-            history,
-            modelId,
-            controller.signal,
-            (token) => {
-              responseText += token
-            },
-            {
-              onReasoning: (token) => {
-                setLiveThought((current) => current + token)
-              },
-              toolChoice: 'none'
-            }
-          )
-          responseText = result.responseText || responseText
-          history.push(ephemeralMessage('assistant', responseText))
-
-          const parsed = await parseModelOutput(responseText)
-          if (parsed.thought) setLiveThought(parsed.thought)
-
-          if (parsed.actions.length === 0) {
-            await appendComputerStep(active.id, {
-              role: 'assistant',
-              content: responseText,
-              thought: parsed.thought
-            })
-            nextSteps = await listComputerSteps(active.id)
-            setSteps(nextSteps)
-            break
-          }
-
-          let stopLoop = false
-          for (const action of parsed.actions) {
-            if (controller.signal.aborted) {
-              stopLoop = true
-              break
-            }
-
-            const recorded = await appendComputerStep(active.id, {
-              role: 'assistant',
-              content: actionLabel(action),
-              thought: parsed.thought,
-              action
-            })
-
-            if (action.type === 'ask_user') {
-              await appendComputerStep(active.id, {
-                role: 'assistant',
-                content: action.question,
-                thought: parsed.thought,
-                action,
-                result: {
-                  status: 'waiting_for_user',
-                  message: action.question
-                }
-              })
-              stopLoop = true
-              break
-            }
-
-            if (action.type === 'terminate') {
-              await appendComputerStep(active.id, {
-                role: 'assistant',
-                content: action.response || 'Task finished.',
-                thought: parsed.thought,
-                action,
-                result: {
-                  status: 'finished',
-                  message: action.response || 'finished'
-                }
-              })
-              stopLoop = true
-              break
-            }
-
-            let execResult = await computerExec({
-              session_id: active.id,
-              action
-            })
-
-            if (execResult.needs_approval || execResult.status === 'needs_approval') {
-              const approvalId = execResult.approval_id
-              if (!approvalId) {
-                onError(execResult.message || 'Action needs approval, but no approval id was returned.')
-                stopLoop = true
-                break
-              }
-              setPendingApproval({
-                approvalId,
-                action,
-                message: execResult.message
-              })
-              await appendComputerStep(active.id, {
-                role: 'assistant',
-                content: `Waiting for approval: ${actionLabel(action)}`,
-                action,
-                result: execResult
-              })
-              // Pause the loop; user decides via the approval buttons.
-              setSteps(await listComputerSteps(active.id))
-              setRunning(false)
-              abortRef.current = null
-              return
-            }
-
-            if (execResult.status === 'error' || execResult.status === 'refused') {
-              await appendComputerStep(active.id, {
-                role: 'assistant',
-                content: execResult.message || execResult.status,
-                action,
-                result: execResult
-              })
-              onError(execResult.message || `Action ${action.type} ${execResult.status}.`)
-              stopLoop = true
-              break
-            }
-
-            const shotUrl = screenshotDataUrl(execResult)
-            if (shotUrl) setViewportUrl(shotUrl)
-            else shot = (await refreshViewport(active.id)) ?? shot
-
-            await appendComputerStep(active.id, {
-              role: 'tool',
-              content: execResult.message || actionLabel(action),
-              action,
-              result: execResult
-            }).catch(async () => {
-              // If tool role is rejected, keep the assistant step we already wrote.
-              void recorded
-            })
-
-            if (execResult.screenshot_base64) {
-              shot = execResult
-            } else {
-              shot = (await refreshViewport(active.id)) ?? shot
-            }
-          }
-
-          nextSteps = await listComputerSteps(active.id)
-          setSteps(nextSteps)
-          if (stopLoop) break
+          setPendingApproval({ approvalId, action, message: result.message })
+          return
         }
-      } catch (cause) {
-        if ((cause as Error).name !== 'AbortError') {
-          onError(errorText(cause))
+        if (continuation.kind === 'waiting_for_user') {
+          setPendingUserQuestion(continuation.question)
+          return
         }
-      } finally {
-        setRunning(false)
-        abortRef.current = null
-        setLiveThought('')
-        const id = sessionRef.current?.id
-        if (id) {
-          void listComputerSteps(id).then(setSteps).catch(() => undefined)
+        if (continuation.kind === 'finished') return
+        if (continuation.kind === 'blocked') {
+          onError(result.message || `Action ${action.type} ${result.status}.`)
+          return
         }
       }
-    },
-    [
-      modelId,
-      onError,
-      permissionMode,
-      refreshSessions,
-      running,
-      target
-    ]
-  )
+    }
+  }
+
+  async function send(text: string): Promise<void> {
+    const userText = text.trim()
+    if (!userText || running || pendingApproval) return
+    if (!modelId && !sessionRef.current?.model_id) {
+      onError('Choose a computer-use model in the top bar.')
+      return
+    }
+
+    onError(null)
+    setRunning(true)
+    setPendingUserQuestion(null)
+    setLiveThought('')
+    const controller = new AbortController()
+    abortRef.current = controller
+    try {
+      let active = sessionRef.current
+      if (!active) {
+        active = await createComputerSession({
+          title: userText.slice(0, 72) || 'Computer task',
+          target,
+          model_id: modelId,
+          permission_mode: permissionMode
+        })
+        setSession(active)
+        sessionRef.current = active
+        await refreshSessions()
+      }
+      // User prompts (including answers to ask_user and ordinary follow-ups)
+      // are durable and become part of every resumed/reloaded history.
+      await appendComputerStep(active.id, { role: 'user', content: userText })
+      await runModelLoop(active, controller)
+    } catch (cause) {
+      if ((cause as Error).name !== 'AbortError') onError(errorText(cause))
+    } finally {
+      setRunning(false)
+      if (abortRef.current === controller) abortRef.current = null
+      setLiveThought('')
+      const id = sessionRef.current?.id
+      if (id) void syncSteps(id).catch(() => undefined)
+    }
+  }
 
   async function resolveApproval(approve: boolean): Promise<void> {
     if (!pendingApproval || !session) return
@@ -468,28 +330,40 @@ export function ComputerMode(props: Props): React.JSX.Element {
       const { result } = await decideComputerApproval(pendingApproval.approvalId, approve)
       setPendingApproval(null)
       if (result) {
-        const shotUrl = screenshotDataUrl(result)
+        const shotUrl = computerScreenshotDataUrl(result)
         if (shotUrl) setViewportUrl(shotUrl)
-        await appendComputerStep(session.id, {
-          role: 'assistant',
-          content: approve
-            ? `Approved: ${actionLabel(pendingApproval.action)}`
-            : `Denied: ${actionLabel(pendingApproval.action)}`,
-          action: pendingApproval.action,
-          result
-        })
-        setSteps(await listComputerSteps(session.id))
+        await syncSteps(session.id)
       }
-      if (approve && result && result.status !== 'error' && result.status !== 'refused') {
-        // Continue the loop with a nudge.
-        await send('Continue after the approved action.')
+      if (approve && result && continuationForResult(result).kind === 'model') {
+        setRunning(true)
+        const controller = new AbortController()
+        abortRef.current = controller
+        try {
+          // The broker result is already in persisted history; continue the
+          // same task without inventing a contextless user prompt.
+          await runModelLoop(session, controller)
+        } finally {
+          setRunning(false)
+          if (abortRef.current === controller) abortRef.current = null
+          setLiveThought('')
+          void syncSteps(session.id).catch(() => undefined)
+        }
       }
     } catch (cause) {
       onError(errorText(cause))
     }
   }
 
-  const blockedReason = !modelId ? 'Choose a computer-use model in the top bar…' : ''
+  const blockedReason = !modelId && !session?.model_id ? 'Choose a computer-use model in the top bar…' : ''
+  const composerPlaceholder =
+    blockedReason ||
+    (running
+      ? 'Computer Use is working. Stop it to send something else…'
+      : pendingApproval
+        ? 'Approve or deny the pending action before continuing…'
+        : pendingUserQuestion
+          ? `Answer the agent: ${pendingUserQuestion}`
+          : `Ask ${modelLabel} to use the ${target}…`)
   const composerActionsRef = useRef({ send, stop })
   composerActionsRef.current = { send, stop }
 
@@ -499,22 +373,18 @@ export function ComputerMode(props: Props): React.JSX.Element {
       stop: () => composerActionsRef.current.stop(),
       running,
       blockedReason,
-      placeholder: blockedReason
-        ? blockedReason
-        : running
-          ? 'Computer Use is working. Stop it to send something else…'
-          : pendingApproval
-            ? 'Approve or deny the pending action before continuing…'
-            : `Ask ${modelLabel} to use the ${target}…`
+      placeholder: composerPlaceholder
     })
     return () => onComposerChange?.(null)
   }, [
     onComposerChange,
     running,
     blockedReason,
+    composerPlaceholder,
     modelLabel,
     target,
-    pendingApproval
+    pendingApproval,
+    pendingUserQuestion
   ])
 
   useEffect(() => {
@@ -628,7 +498,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
             <div className="computer-approval">
               <div>
                 <strong>Approval needed</strong>
-                <p>{pendingApproval.message || actionLabel(pendingApproval.action)}</p>
+                <p>{pendingApproval.message || computerActionLabel(pendingApproval.action)}</p>
               </div>
               <div className="computer-approval-actions">
                 <button type="button" onClick={() => void resolveApproval(false)}>
@@ -643,6 +513,15 @@ export function ComputerMode(props: Props): React.JSX.Element {
                   <Check size={14} />
                   Approve
                 </button>
+              </div>
+            </div>
+          )}
+
+          {pendingUserQuestion && !pendingApproval && (
+            <div className="computer-approval">
+              <div>
+                <strong>Information needed</strong>
+                <p>{pendingUserQuestion}</p>
               </div>
             </div>
           )}
@@ -666,14 +545,14 @@ export function ComputerMode(props: Props): React.JSX.Element {
               <article key={step.id} className={`computer-step role-${step.role}`}>
                 <header>
                   <strong>{step.role}</strong>
-                  {step.action ? <span>{actionLabel(step.action)}</span> : null}
+                  {step.action ? <span>{computerActionLabel(step.action)}</span> : null}
                 </header>
                 {step.thought ? (
                   <div className="computer-thought">
                     <pre>{step.thought}</pre>
                   </div>
                 ) : null}
-                {step.content && step.content !== actionLabel(step.action) ? (
+                {step.content && step.content !== computerActionLabel(step.action) ? (
                   <p>{step.content}</p>
                 ) : step.content && !step.action ? (
                   <p>{step.content}</p>

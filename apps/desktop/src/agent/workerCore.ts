@@ -112,6 +112,12 @@ export class AgentWorkerCore {
         await session.setEnabledTools(command.tools)
         return session.getState()
       }
+      case 'set-permission-mode': {
+        const session = await this.openSession(command.sessionId, { rehydrate: false })
+        await session.setPermissionMode(command.mode)
+        this.post({ type: 'session-state', sessionId: session.id, state: session.getState() })
+        return session.getState()
+      }
       case 'close-session': {
         const session = this.sessions.get(command.sessionId)
         if (session) {

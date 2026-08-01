@@ -43,6 +43,7 @@ import type {
   AgentEvent,
   AgentMessage,
   AgentModelReference,
+  AgentPermissionMode,
   AgentRunStatus,
   AgentRuntime,
   AgentRuntimeDescriptor,
@@ -824,6 +825,14 @@ class PiAgentSession implements AgentSession {
     this.executor.setDefinitions(this.definitions)
     this.agent.state.tools = this.buildTools()
     await this.broker.updateSession(this.id, { enabled_tools: toolNames })
+  }
+
+  async setPermissionMode(mode: AgentPermissionMode): Promise<void> {
+    if (this.agent.state.isStreaming) {
+      throw new Error('The permission mode can only be changed between runs.')
+    }
+    this.state = { ...this.state, permissionMode: mode }
+    await this.broker.updateSession(this.id, { permission_mode: mode })
   }
 
   getState(): AgentSessionState {

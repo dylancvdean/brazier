@@ -6,7 +6,13 @@
  * channel or an authenticated call to the daemon.
  */
 
-import type { AgentEvent, AgentModelReference, AgentSessionState, AgentUserInput } from './types'
+import type {
+  AgentEvent,
+  AgentModelReference,
+  AgentPermissionMode,
+  AgentSessionState,
+  AgentUserInput
+} from './types'
 
 export type WorkerConnection = {
   address: string
@@ -30,6 +36,7 @@ export type WorkerCommand =
       model: AgentModelReference
     }
   | { type: 'set-tools'; requestId: string; sessionId: string; tools: string[] }
+  | { type: 'set-permission-mode'; requestId: string; sessionId: string; mode: AgentPermissionMode }
   | { type: 'close-session'; requestId: string; sessionId: string }
   | { type: 'shutdown'; requestId: string }
 

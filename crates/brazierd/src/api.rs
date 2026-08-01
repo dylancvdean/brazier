@@ -6913,6 +6913,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a working Chromium and local TCP loopback"]
     async fn computer_session_executes_browser_screenshot() {
         let dir = tempdir().unwrap();
         let app = router(test_state(dir.path()).await);

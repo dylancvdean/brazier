@@ -78,6 +78,10 @@ declare global {
           model: { id: string; name?: string; contextWindow?: number; maxTokens?: number }
         ): Promise<unknown>
         setTools(sessionId: string, tools: string[]): Promise<unknown>
+        setPermissionMode(
+          sessionId: string,
+          mode: import('../../agent/core/types').AgentPermissionMode
+        ): Promise<unknown>
         closeSession(sessionId: string): Promise<unknown>
         status(): Promise<{ running: boolean; crashes: number }>
         onMessage(listener: (message: import('../../agent/core/protocol').WorkerMessage) => void): () => void

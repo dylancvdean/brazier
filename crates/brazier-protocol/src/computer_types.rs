@@ -164,6 +164,17 @@ impl ComputerAction {
                     | Self::Type { .. }
                     | Self::Keypress { .. }
                     | Self::VisitUrl { .. }
+                    // Coordinates do not convey intent. A click can submit a
+                    // purchase, consent, delete data, or send a message, so it
+                    // is never safe to auto-approve based on its primitive.
+                    | Self::LeftClick { .. }
+                    | Self::RightClick { .. }
+                    | Self::DoubleClick { .. }
+                    | Self::TripleClick { .. }
+                    | Self::LeftClickDrag { .. }
+                    | Self::MouseMove { .. }
+                    | Self::Scroll { .. }
+                    | Self::WebSearch { .. }
             ),
             ComputerPermissionMode::BrowserOnly | ComputerPermissionMode::Ask => !matches!(
                 self,

@@ -1159,7 +1159,8 @@ export function AgentMode(props: Props): React.JSX.Element {
       return
     }
     try {
-      const updated = await updateAgentSession(session.id, { permission_mode: mode })
+      await window.brazier.agent.setPermissionMode(session.id, mode)
+      const updated = (await fetchAgentSession(session.id)).session
       setSession(updated)
       setPendingPermissionMode(mode)
       setSessions((current) =>

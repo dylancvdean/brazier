@@ -75,6 +75,12 @@ function hostSandbox(detail: string): SandboxDescription {
   }
 }
 
+type OmpSidecarOptions = {
+  binary: string
+  cwd: string
+  env: NodeJS.ProcessEnv
+}
+
 function textFromContent(content: unknown): {
   text: string
   reasoning?: string
@@ -110,6 +116,72 @@ function textFromContent(content: unknown): {
 
 function isMcpTool(tool: AgentToolDefinition): boolean {
   return tool.name.includes('__') || tool.name.startsWith('mcp_')
+}
+
+/** OMP's host-tool transport deliberately uses structured content, not a string. */
+export function hostToolResultFrame(
+  id: string,
+  text: string,
+  isError = false
+): OmpRpcFrame {
+  return {
+    type: 'host_tool_result',
+    id,
+    result: { content: [{ type: 'text', text }] },
+    ...(isError ? { isError: true } : {})
+  }
+}
+
+/**
+ * RPC mode has no command for setting a system prompt or importing an external
+ * transcript.  Seed both explicitly in the first prompt of each new sidecar
+ * so the context OMP receives matches the transcript Brazier displays.
+ */
+export function promptWithBrazierContext(
+  systemPrompt: string,
+  history: AgentMessage[],
+  userText: string,
+  maxChars = 240_000
+): string {
+  const sections: string[] = []
+  if (systemPrompt.trim()) {
+    sections.push(`## Brazier system instructions\n${systemPrompt.trim()}`)
+  }
+  if (history.length > 0) {
+    const transcript = history
+      .map((message) => {
+        switch (message.role) {
+          case 'assistant':
+            return `[assistant]\n${message.text}${message.reasoning ? `\n[reasoning]\n${message.reasoning}` : ''}`
+          case 'tool':
+            return `[tool ${message.tool}${message.isError ? ' error' : ''}]\n${message.output}`
+          default:
+            return `[${message.role}]\n${message.text}`
+        }
+      })
+      .join('\n\n')
+    // Keep the newest turns, which are the useful part of a restored context.
+    sections.push(`## Prior Brazier transcript\n${transcript.slice(-maxChars)}`)
+  }
+  if (sections.length === 0) return userText
+  return `${sections.join('\n\n')}\n\n## Current user request\n${userText}`
+}
+
+/** A failed sidecar reconfiguration must leave the existing sidecar's context intact. */
+export function contextSeedAfterPermissionModeAttempt(
+  previousNeedsSeed: boolean,
+  brokerUpdated: boolean
+): boolean {
+  return brokerUpdated ? true : previousNeedsSeed
+}
+
+/** Prevent a late host-tool callback from following a newer run's controller. */
+export function isCurrentOmpRun(
+  activeRunId: string | undefined,
+  requestedRunId: string,
+  aborted: boolean
+): boolean {
+  return activeRunId === requestedRunId && !aborted
 }
 
 export class OmpAgentRuntime implements AgentRuntime {
@@ -171,10 +243,12 @@ class OmpAgentSession implements AgentSession {
   readonly id: string
   private readonly broker: BrokerClient
   private client: OmpRpcClient | null = null
+  private readonly sidecar: OmpSidecarOptions
   private disposed = false
   private model: AgentModelReference
   private systemPrompt: string
   private messages: AgentMessage[]
+  private toolCatalog: AgentToolDefinition[]
   private toolExecutions: ToolExecutionRecord[]
   private permissionMode: AgentPermissionMode
   private permissionSettings: AgentPermissionSettings
@@ -188,20 +262,25 @@ class OmpAgentSession implements AgentSession {
   private runtimeMetadata?: Record<string, unknown>
   private readonly sandbox: SandboxDescription
   private persistence = Promise.resolve()
-  private activeRun: { runId: string; abort: boolean } | null = null
+  private activeRun: { runId: string; abort: boolean; controller: AbortController } | null = null
+  private needsContextSeed: boolean
   private readonly sequencer = new EventSequencer()
 
   private constructor(
     broker: BrokerClient,
     options: CreateAgentSessionOptions,
-    client: OmpRpcClient
+    client: OmpRpcClient,
+    sidecar: OmpSidecarOptions
   ) {
     this.broker = broker
     this.id = options.sessionId
     this.client = client
+    this.sidecar = sidecar
     this.model = options.model
     this.systemPrompt = options.systemPrompt
     this.messages = [...(options.messages ?? [])]
+    this.toolCatalog = [...options.tools]
+    this.needsContextSeed = Boolean(this.systemPrompt.trim() || this.messages.length > 0)
     const preloaded = options.preloaded
     this.toolExecutions = [...(preloaded?.tool_executions ?? [])]
     this.permissionMode = preloaded?.session.permission_mode ?? 'ask'
@@ -235,7 +314,7 @@ class OmpAgentSession implements AgentSession {
     const permissionMode = options.preloaded?.session.permission_mode ?? 'ask'
     const approvalMode = approvalModeFor(permissionMode)
     const cwd = options.preloaded?.session.workspace_path || process.cwd()
-    const client = new OmpRpcClient({
+    const sidecar: OmpSidecarOptions = {
       binary: binary.path,
       cwd,
       env: {
@@ -245,24 +324,12 @@ class OmpAgentSession implements AgentSession {
         OPENAI_API_BASE: broker.openAiBaseUrl(),
         BRAZIER_OPENAI_BASE_URL: broker.openAiBaseUrl(),
         BRAZIER_OPENAI_API_KEY: broker.apiKey()
-      },
-      args: [`--tools.approvalMode=${approvalMode}`]
-    })
-    const session = new OmpAgentSession(broker, options, client)
-    await client.waitUntilReady()
-    await session.configureModel(options.model)
-    const hostTools = options.tools.filter(isMcpTool)
-    if (hostTools.length > 0) {
-      await client.request({
-        type: 'set_host_tools',
-        tools: hostTools.map((tool) => ({
-          name: tool.name,
-          label: tool.label,
-          description: tool.description,
-          parameters: tool.inputSchema
-        }))
-      })
+      }
     }
+    const client = await OmpAgentSession.startSidecar(sidecar, approvalMode)
+    const session = new OmpAgentSession(broker, options, client, sidecar)
+    await session.configureModel(options.model)
+    await session.configureHostTools()
     return session
   }
 
@@ -302,18 +369,50 @@ class OmpAgentSession implements AgentSession {
   }
 
   async setModel(model: AgentModelReference): Promise<void> {
-    this.model = model
     await this.configureModel(model)
+    this.model = model
     await this.broker.updateSession(this.id, { model: model.id })
   }
 
   async setEnabledTools(toolNames: string[]): Promise<void> {
+    const tools = await this.broker.tools()
+    this.toolCatalog = tools
+    await this.configureHostTools(toolNames)
     this.enabledTools = toolNames
     await this.broker.updateSession(this.id, { enabled_tools: toolNames })
   }
 
+  async setPermissionMode(mode: AgentPermissionMode): Promise<void> {
+    if (this.activeRun) {
+      throw new Error('Cancel the active OMP run before changing its permission mode.')
+    }
+    if (mode === this.permissionMode) return
+    const replacement = await OmpAgentSession.startSidecar(this.sidecar, approvalModeFor(mode))
+    const previous = this.requireClient()
+    const previousNeedsContextSeed = this.needsContextSeed
+    this.client = replacement
+    try {
+      await this.configureModel(this.model)
+      await this.configureHostTools()
+      this.permissionMode = mode
+      await this.broker.updateSession(this.id, { permission_mode: mode })
+      // Changing OMP's startup-only approval mode creates a fresh sidecar.
+      // Its model context must be reconstructed before its next prompt.
+      this.needsContextSeed = contextSeedAfterPermissionModeAttempt(previousNeedsContextSeed, true)
+    } catch (cause) {
+      this.client = previous
+      this.needsContextSeed = contextSeedAfterPermissionModeAttempt(previousNeedsContextSeed, false)
+      await replacement.dispose()
+      throw cause
+    }
+    await previous.dispose()
+  }
+
   async cancel(): Promise<void> {
-    if (this.activeRun) this.activeRun.abort = true
+    if (this.activeRun) {
+      this.activeRun.abort = true
+      this.activeRun.controller.abort()
+    }
     await this.client?.request({ type: 'abort' }).catch(() => undefined)
     await this.broker.cancel(this.id).catch(() => undefined)
     this.lastRunStatus = 'cancelled'
@@ -339,7 +438,7 @@ class OmpAgentSession implements AgentSession {
     if (this.disposed) throw new Error('Cannot run a disposed agent session.')
     const client = this.requireClient()
     const runId = randomUUID()
-    this.activeRun = { runId, abort: false }
+    this.activeRun = { runId, abort: false, controller: new AbortController() }
     this.lastRunStatus = 'running'
     await this.broker.updateSession(this.id, { last_run_status: 'running' })
 
@@ -381,6 +480,13 @@ class OmpAgentSession implements AgentSession {
 
     const unsubscribe = client.onFrame((frame) => {
       const type = String(frame.type ?? '')
+      if (type === 'agent_start') {
+        // OMP documents prompt acknowledgement as only acceptance.  The
+        // transcript is now known to have entered the agent loop only once an
+        // agent-start event arrives; do not discard a recovery seed earlier.
+        this.needsContextSeed = false
+        return
+      }
       if (type === 'host_tool_call') {
         void this.handleHostToolCall(frame, runId, push, event)
         return
@@ -529,9 +635,17 @@ class OmpAgentSession implements AgentSession {
         type: 'image',
         source: { type: 'data_url', dataUrl: url }
       }))
+      const message = this.needsContextSeed
+        ? promptWithBrazierContext(
+            this.systemPrompt,
+            this.messages.slice(0, -1),
+            input.text,
+            Math.max(24_000, Math.min((this.model.contextWindow ?? 80_000) * 3, 240_000))
+          )
+        : input.text
       const response = await client.request({
         type: 'prompt',
-        message: input.text,
+        message,
         ...(promptImages.length > 0 ? { images: promptImages } : {})
       })
       const agentInvoked = (response.data as { agentInvoked?: boolean } | undefined)?.agentInvoked
@@ -577,7 +691,13 @@ class OmpAgentSession implements AgentSession {
       yield event({ type: 'run-failed', error })
     } finally {
       unsubscribe()
-      this.activeRun = null
+      if (this.activeRun?.runId === runId) {
+        // A host-tool callback can still be waiting on a daemon approval when
+        // OMP emits agent_end.  Abort it before dropping the run reference so
+        // it cannot continue into a subsequent run.
+        this.activeRun.controller.abort()
+        this.activeRun = null
+      }
       await this.broker
         .updateSession(this.id, { last_run_status: this.lastRunStatus })
         .catch(() => undefined)
@@ -599,17 +719,53 @@ class OmpAgentSession implements AgentSession {
         provider: 'openai',
         modelId: model.id
       })
-    } catch {
+    } catch (openAiError) {
       try {
         await client.request({
           type: 'set_model',
           provider: 'openai-compatible',
           modelId: model.id
         })
-      } catch {
-        // Operator may already have OMP auth/models configured.
+      } catch (compatibleError) {
+        const first = openAiError instanceof Error ? openAiError.message : String(openAiError)
+        const second = compatibleError instanceof Error ? compatibleError.message : String(compatibleError)
+        throw new Error(
+          `OMP could not select Brazier model \`${model.id}\` (openai: ${first}; openai-compatible: ${second}).`
+        )
       }
     }
+  }
+
+  private static async startSidecar(
+    options: OmpSidecarOptions,
+    permissionMode: ReturnType<typeof approvalModeFor>
+  ): Promise<OmpRpcClient> {
+    const client = new OmpRpcClient({
+      ...options,
+      args: [`--tools.approvalMode=${permissionMode}`]
+    })
+    try {
+      await client.waitUntilReady()
+      return client
+    } catch (cause) {
+      await client.dispose()
+      throw cause
+    }
+  }
+
+  private async configureHostTools(enabledTools = this.enabledTools): Promise<void> {
+    const tools = this.toolCatalog
+      .filter(isMcpTool)
+      .filter((tool) => !enabledTools || enabledTools.includes(tool.name))
+    await this.requireClient().request({
+      type: 'set_host_tools',
+      tools: tools.map((tool) => ({
+        name: tool.name,
+        label: tool.label,
+        description: tool.description,
+        parameters: tool.inputSchema
+      }))
+    })
   }
 
   private async handleHostToolCall(
@@ -619,6 +775,15 @@ class OmpAgentSession implements AgentSession {
     event: (partial: Record<string, unknown> & { type: AgentEvent['type'] }) => AgentEvent
   ): Promise<void> {
     const client = this.requireClient()
+    const activeRun = this.activeRun
+    if (
+      !activeRun ||
+      !isCurrentOmpRun(activeRun.runId, runId, activeRun.controller.signal.aborted)
+    ) {
+      client.send(hostToolResultFrame(String(frame.id ?? ''), 'The originating agent run has ended.', true))
+      return
+    }
+    const signal = activeRun.controller.signal
     const requestId = String(frame.id ?? '')
     const toolCallId = String(frame.toolCallId ?? randomUUID())
     const toolName = String(frame.toolName ?? 'tool')
@@ -637,23 +802,51 @@ class OmpAgentSession implements AgentSession {
       })
     )
     try {
-      const result = await this.broker.execTool({
-        sessionId: this.id,
-        runId,
-        toolCallId,
-        tool: toolName,
-        arguments: args,
-        environment: 'host'
-      })
+      let approvalId: string | undefined
+      let result
+      while (true) {
+        result = await this.broker.execTool({
+          sessionId: this.id,
+          runId,
+          toolCallId,
+          tool: toolName,
+          arguments: args,
+          environment: 'host',
+          approvalId
+        }, signal)
+        if (result.status !== 'approval_required' || !result.approval) break
+        this.lastRunStatus = 'awaiting-approval'
+        push(event({ type: 'approval-required', toolCallId, approval: result.approval }))
+        push(
+          event({
+            type: 'elevation-requested',
+            toolCallId,
+            approvalId: result.approval.id,
+            request: result.approval.elevation
+          })
+        )
+        const decision = await this.waitForApproval(result.approval, runId, signal)
+        if (decision.status !== 'approved') {
+          const denied = decision.status === 'denied'
+          const reason = denied
+            ? `The user denied this action.${decision.note ? ` Note: ${decision.note}` : ''}`
+            : 'The approval request expired or the run was cancelled.'
+          client.send(hostToolResultFrame(requestId, reason, true))
+          push(
+            event({
+              type: 'tool-failed', toolCallId, tool: toolName, environment: 'host', sandbox: this.sandbox,
+              error: reason, denied, durationMs: Number(result.duration_ms ?? 0)
+            })
+          )
+          return
+        }
+        approvalId = result.approval.id
+        this.lastRunStatus = 'running'
+      }
       const output = result.output || result.denied_reason || ''
-      client.send({
-        type: 'host_tool_result',
-        id: requestId,
-        toolCallId,
-        content: output,
-        isError: Boolean(result.is_error)
-      })
-      if (result.is_error) {
+      const isError = Boolean(result.is_error || result.status === 'denied')
+      client.send(hostToolResultFrame(requestId, output, isError))
+      if (isError) {
         push(
           event({
             type: 'tool-failed',
@@ -662,7 +855,7 @@ class OmpAgentSession implements AgentSession {
             environment: 'host',
             sandbox: this.sandbox,
             error: output,
-            denied: Boolean(result.denied_reason),
+            denied: result.status === 'denied' || Boolean(result.denied_reason),
             durationMs: Number(result.duration_ms ?? 0)
           })
         )
@@ -685,13 +878,7 @@ class OmpAgentSession implements AgentSession {
       }
     } catch (cause) {
       const error = cause instanceof Error ? cause.message : String(cause)
-      client.send({
-        type: 'host_tool_result',
-        id: requestId,
-        toolCallId,
-        content: error,
-        isError: true
-      })
+      client.send(hostToolResultFrame(requestId, error, true))
       push(
         event({
           type: 'tool-failed',
@@ -705,6 +892,29 @@ class OmpAgentSession implements AgentSession {
         })
       )
     }
+  }
+
+  private async waitForApproval(
+    approval: import('../core/types').AgentApproval,
+    runId: string,
+    signal: AbortSignal
+  ) {
+    while (
+      isCurrentOmpRun(this.activeRun?.runId, runId, signal.aborted) &&
+      !this.activeRun?.abort
+    ) {
+      try {
+        const current = await this.broker.waitForApproval(
+          approval.id,
+          30_000,
+          signal
+        )
+        if (current.status !== 'pending') return current
+      } catch {
+        return { ...approval, status: 'expired' as const }
+      }
+    }
+    return { ...approval, status: 'expired' as const }
   }
 
   private async handleExtensionUi(frame: OmpRpcFrame): Promise<void> {

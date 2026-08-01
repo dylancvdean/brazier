@@ -398,8 +398,11 @@ The web pack uses an SSRF-aware fetcher. Computer Use mode adds a model-agnostic
 observe–act loop: adapters (Fara XML today; generic tool dialects later) emit
 normalized `ComputerAction` values, and a daemon broker executes them against a
 browser target or — when OS permissions allow — a desktop target. Browser
-sessions start as an in-process synthetic driver with the same action contract a
-Chromium/CDP worker will implement. Desktop drivers probe macOS Screen
+sessions run in isolated headless Chromium processes controlled through CDP;
+if no working Chromium installation is available, the broker reports the target
+as unavailable instead of fabricating observations or successful actions. The
+daemon durably stores Computer Use sessions, steps, memories, and pending
+approvals so an interrupted task can be resumed after restart. Desktop drivers probe macOS Screen
 Recording/Accessibility and Linux X11/Wayland portals and fail closed until both
 capture and input are granted.
 

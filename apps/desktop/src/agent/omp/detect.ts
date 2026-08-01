@@ -6,7 +6,7 @@
  * BRAZIER_OMP_PATH at a binary).
  */
 
-import { accessSync, constants } from 'node:fs'
+import { accessSync, constants, statSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 
 export type OmpBinary = {
@@ -16,15 +16,11 @@ export type OmpBinary = {
 
 function isExecutable(path: string): boolean {
   try {
+    if (!statSync(path).isFile()) return false
     accessSync(path, constants.X_OK)
     return true
   } catch {
-    try {
-      accessSync(path, constants.F_OK)
-      return true
-    } catch {
-      return false
-    }
+    return false
   }
 }
 

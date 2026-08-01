@@ -36,6 +36,7 @@ function mockSession(id: string, disposed = false): AgentSession {
     compact: vi.fn(),
     setModel: vi.fn(),
     setEnabledTools: vi.fn(),
+    setPermissionMode: vi.fn(),
     dispose: vi.fn(async () => undefined)
   }
 }

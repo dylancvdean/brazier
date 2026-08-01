@@ -268,8 +268,9 @@ what is left is mostly the difference between working and trustworthy.
 
 - **Computer Use (browser-first) is in:** Manage → Customization toggles a
   Computer workspace mode; the daemon brokers normalized actions against an
-  isolated browser session with Fara1.5 XML parsing, approvals, and OS
-  permission probes for a later desktop target (X11/Wayland/macOS). Desktop
+  isolated Chromium/CDP browser session with Fara1.5 XML parsing, durable task
+  recovery, approvals, and OS permission probes for a desktop target
+  (X11/Wayland/macOS). Desktop
   input injection remains fail-closed until portal/Accessibility grants exist.
 - Add WASI code runtimes and optional OCI execution (safe built-in tools,
   bounded web retrieval, and the agent permission broker are implemented).

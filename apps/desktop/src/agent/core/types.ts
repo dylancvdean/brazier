@@ -425,6 +425,8 @@ export interface AgentSession {
   compact(): Promise<AgentCompactionState>
   setModel(model: AgentModelReference): Promise<void>
   setEnabledTools(toolNames: string[]): Promise<void>
+  /** Apply a permission-mode change to an already-open runtime session. */
+  setPermissionMode(mode: AgentPermissionMode): Promise<void>
   getState(): AgentSessionState
   /**
    * Replace the in-memory transcript (and optional system prompt) with what the

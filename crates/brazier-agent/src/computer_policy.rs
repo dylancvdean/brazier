@@ -23,6 +23,17 @@ pub fn decide(request: &ComputerPolicyRequest<'_>) -> ComputerPolicyDecision {
         );
     }
 
+    // These are broker-local control actions; they do not capture or inject
+    // anything into the desktop and therefore do not depend on OS grants.
+    if matches!(
+        request.action,
+        ComputerAction::Memorize { .. }
+            | ComputerAction::Terminate { .. }
+            | ComputerAction::AskUser { .. }
+    ) {
+        return ComputerPolicyDecision::Allow;
+    }
+
     if request.target == ComputerTarget::Desktop {
         if request.mode == ComputerPermissionMode::BrowserOnly {
             return ComputerPolicyDecision::Refuse(
@@ -34,10 +45,6 @@ pub fn decide(request: &ComputerPolicyRequest<'_>) -> ComputerPolicyDecision {
                 "Desktop capture or input permission is missing.",
             );
         }
-    }
-
-    if matches!(request.action, ComputerAction::AskUser { .. }) {
-        return ComputerPolicyDecision::Ask;
     }
 
     if request.action.requires_approval(request.mode) {
@@ -73,5 +80,29 @@ mod tests {
             desktop_permitted: false,
         });
         assert_eq!(decision, ComputerPolicyDecision::Ask);
+    }
+
+    #[test]
+    fn skip_permissions_still_asks_for_ambiguous_interactive_actions() {
+        for action in [
+            ComputerAction::LeftClick { x: 10.0, y: 10.0 },
+            ComputerAction::Scroll {
+                x: 10.0,
+                y: 10.0,
+                delta_x: 0.0,
+                delta_y: 500.0,
+            },
+            ComputerAction::WebSearch {
+                query: "sensitive account".into(),
+            },
+        ] {
+            let decision = decide(&ComputerPolicyRequest {
+                target: ComputerTarget::Browser,
+                mode: ComputerPermissionMode::SkipPermissions,
+                action: &action,
+                desktop_permitted: false,
+            });
+            assert_eq!(decision, ComputerPolicyDecision::Ask, "{}", action.kind());
+        }
     }
 }
