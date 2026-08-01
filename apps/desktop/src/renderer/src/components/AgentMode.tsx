@@ -49,6 +49,7 @@ import {
   type AgentToolCatalogEntry,
   type AgentWorktreeStatus
 } from '../agentApi'
+import { showsBrazierSandboxStatus } from '../agentRuntimeDisplay'
 import { prefillProgressLabel, type LocalModel, type PrefillProgress } from '../api'
 import { modelDisplayName } from '../model-utils'
 import { Markdown } from './Markdown'
@@ -1668,7 +1669,9 @@ export function AgentMode(props: Props): React.JSX.Element {
           <Bot size={13} />
           {runtimeLabel(activeRuntimeId)}
         </span>
-        {sandbox && <SandboxBadge sandbox={sandbox} />}
+        {sandbox && showsBrazierSandboxStatus(activeRuntimeId) && (
+          <SandboxBadge sandbox={sandbox} />
+        )}
         <div className="agent-mode-select">
           <button
             type="button"
