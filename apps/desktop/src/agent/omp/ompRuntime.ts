@@ -123,6 +123,19 @@ function textFromContent(content: unknown): {
   return { text, reasoning: reasoning || undefined, toolCalls }
 }
 
+/**
+ * OMP emits `message_end` for user, assistant, and tool-result messages.
+ * Only assistant messages belong in Brazier's visible response stream.
+ */
+export function assistantContentFromOmpMessage(
+  message: unknown
+): ReturnType<typeof textFromContent> | null {
+  if (!message || typeof message !== 'object') return null
+  const record = message as Record<string, unknown>
+  if (record.role !== 'assistant') return null
+  return textFromContent(record.content)
+}
+
 function isMcpTool(tool: AgentToolDefinition): boolean {
   return tool.name.includes('__') || tool.name.startsWith('mcp_')
 }
@@ -572,7 +585,8 @@ class OmpAgentSession implements AgentSession {
           assistantReasoning += inner.delta
           push(event({ type: 'text-delta', delta: inner.delta, channel: 'reasoning' }))
         } else if (assistantMessage) {
-          const parsed = textFromContent(assistantMessage.content ?? assistantMessage)
+          const parsed = assistantContentFromOmpMessage(assistantMessage)
+          if (!parsed) return
           if (parsed.text && parsed.text.length > assistantText.length) {
             const delta = parsed.text.slice(assistantText.length)
             assistantText = parsed.text

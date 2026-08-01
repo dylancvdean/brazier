@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  assistantContentFromOmpMessage,
   contextSeedAfterPermissionModeAttempt,
   hostToolResultFrame,
   isCurrentOmpRun,
@@ -10,6 +11,27 @@ import {
 } from './ompRuntime'
 
 describe('OMP adapter protocol helpers', () => {
+  it('keeps user echoes and tool results out of the assistant response stream', () => {
+    expect(
+      assistantContentFromOmpMessage({
+        role: 'user',
+        content: [{ type: 'text', text: 'Repeat-sensitive prompt' }]
+      })
+    ).toBeNull()
+    expect(
+      assistantContentFromOmpMessage({
+        role: 'toolResult',
+        content: [{ type: 'text', text: '#include <whole-header.h>' }]
+      })
+    ).toBeNull()
+    expect(
+      assistantContentFromOmpMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'The header has one issue.' }]
+      })
+    ).toEqual({ text: 'The header has one issue.', toolCalls: [] })
+  })
+
   it('uses OMP public approval-mode CLI syntax', () => {
     expect(ompApprovalModeArg('always-ask')).toBe('--approval-mode=always-ask')
     expect(ompApprovalModeArg('yolo')).toBe('--approval-mode=yolo')
