@@ -70,6 +70,15 @@ describe('computer history', () => {
     expect(prompt).toContain('Never invent personal or payment information')
   })
 
+  it('uses Microsoft Fara guidance but never offers browser-only actions to desktop sessions', () => {
+    const prompt = computerSystemPrompt({ ...session, target: 'desktop' })
+    expect(prompt).toContain('You are a web automation agent')
+    expect(prompt).toContain('Critical Point')
+    expect(prompt).toContain('desktop GUI')
+    expect(prompt).toContain('Never emit visit_url or web_search')
+    expect(prompt).not.toContain('"action":"visit_url"')
+  })
+
   it('rebuilds durable conversation and keeps the newest ten screenshots', () => {
     const steps = [
       step(0, { role: 'user', content: 'Book a table for two tomorrow.' }),

@@ -68,20 +68,39 @@ function historyMessage(role: Message['role'], content: string | ContentPart[], 
 }
 
 export function computerSystemPrompt(session: Pick<ComputerSession, 'target' | 'permission_mode'>): string {
+  // Microsoft publishes this as the required system prompt for Fara inference.
+  // Keep its Critical Point policy intact; only the action signature changes to
+  // match the target that Brazier actually exposes.
+  const microsoftFaraPrompt = [
+    'You are a web automation agent that performs actions on websites to fulfill user requests by calling various tools.',
+    'You should stop execution at Critical Points. A Critical Point occurs in tasks like checkout, booking, purchase, call, email, or order.',
+    'A Critical Point requires the user\'s permission or personal/sensitive information (name, email, credit card, address, payment information, resume, etc.) to complete a transaction or to communicate as a human would.',
+    'Guideline: Solve the task as far as possible up until a Critical Point.',
+    'For example, find the phone number rather than making a call, and add suitable shoes to a cart rather than placing the order.',
+    'Some tasks, like answering questions, may not encounter a Critical Point at all.'
+  ]
+  const desktop = session.target === 'desktop'
+  const actions = desktop
+    ? 'key, type, mouse_move, left_click, right_click, double_click, triple_click, left_click_drag, scroll, pause_and_memorize_fact, ask_user_question, wait, and terminate'
+    : 'key, type, mouse_move, left_click, right_click, double_click, triple_click, left_click_drag, scroll, visit_url, web_search, pause_and_memorize_fact, ask_user_question, wait, and terminate'
+  const example = desktop
+    ? '<tool_call>{"name":"computer_use","arguments":{"action":"left_click","coordinate":[720,450]}}</tool_call>.'
+    : '<tool_call>{"name":"computer_use","arguments":{"action":"visit_url","url":"https://example.com"}}</tool_call>.'
   return [
-    'You are Fara, a computer-use agent specialized in completing web-browser tasks from screenshots.',
+    ...microsoftFaraPrompt,
+    desktop
+      ? 'This is an interface to a desktop GUI. You do not have access to a terminal or applications menu; use only the visible desktop and mouse/keyboard actions below.'
+      : 'This is an isolated browser interface.',
     'Use visual evidence from the latest screenshot and the recorded trajectory; do not assume page state.',
     'Return exactly one next action, for example:',
-    '<tool_call>{"name":"computer_use","arguments":{"action":"visit_url","url":"https://example.com"}}</tool_call>.',
-    'Supported actions are left_click, right_click, double_click, triple_click, mouse_move,',
-    'left_click_drag, type, key, scroll, visit_url, web_search, wait,',
-    'pause_and_memorize_fact, ask_user_question, and terminate.',
+    example,
+    `Supported actions are ${actions}.`,
+    desktop ? 'Never emit visit_url or web_search: those actions are unavailable for the desktop target.' : '',
     'Pause with ask_user_question when required personal information is missing or the task is ambiguous.',
-    'Before an irreversible action such as submitting, purchasing, sending, signing in, or deleting,',
-    'ask for confirmation unless the user explicitly authorized that exact action.',
+    'Before an irreversible action, ask for confirmation unless the user explicitly authorized that exact action.',
     'Never invent personal or payment information.',
     `The viewport is 1440x900. Target: ${session.target}. Permission mode: ${session.permission_mode}.`
-  ].join(' ')
+  ].filter(Boolean).join(' ')
 }
 
 function toolResultText(step: ComputerStep): string {

@@ -85,13 +85,13 @@ fn probe_linux() -> OsPermissionStatus {
     if wayland {
         let portal = binary("gdbus") || binary("busctl");
         OsPermissionStatus { platform: "linux".into(), display_server: "wayland".into(),
-            screen_capture: if binary("grim") { OsPermissionState::Granted } else { OsPermissionState::Missing },
+            screen_capture: if binary("grim") || binary("spectacle") || binary("gnome-screenshot") { OsPermissionState::Granted } else { OsPermissionState::Missing },
             input_injection: if binary("ydotool") && portal { OsPermissionState::Granted } else { OsPermissionState::Missing },
-            detail: Some("Wayland uses grim for capture and ydotool with compositor/portal approval for input.".into()),
-            settings_hint: Some("Install grim and ydotool, start ydotoold, and approve any ScreenCast/RemoteDesktop portal prompt.".into()) }
+            detail: Some("Wayland uses grim when the compositor exposes screencopy, or portal-aware Spectacle/GNOME Screenshot otherwise; ydotool performs input.".into()),
+            settings_hint: Some("Install grim or Spectacle/GNOME Screenshot plus ydotool, start ydotoold, and approve any ScreenCast/RemoteDesktop portal prompt.".into()) }
     } else if x11 {
         OsPermissionStatus { platform: "linux".into(), display_server: "x11".into(),
-            screen_capture: if binary("import") || binary("gnome-screenshot") { OsPermissionState::Granted } else { OsPermissionState::Missing },
+            screen_capture: if binary("magick") || binary("import") || binary("gnome-screenshot") { OsPermissionState::Granted } else { OsPermissionState::Missing },
             input_injection: if binary("xdotool") { OsPermissionState::Granted } else { OsPermissionState::Missing },
             detail: Some("X11 uses ImageMagick/gnome-screenshot for capture and XTest through xdotool for input.".into()),
             settings_hint: Some("Install xdotool plus ImageMagick (or gnome-screenshot).".into()) }
@@ -125,6 +125,22 @@ async fn command(program: &str, args: &[String]) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Portal-aware desktop utilities write to a file rather than stdout. Keep the
+/// image only long enough to return it to the broker, then remove it.
+async fn screenshot_file(program: &str, args: Vec<String>) -> Result<Vec<u8>, String> {
+    let path = std::env::temp_dir().join(format!("brazier-computer-{}.png", uuid::Uuid::new_v4()));
+    let mut args = args;
+    args.push(path.to_string_lossy().into_owned());
+    let captured = command(program, &args).await;
+    let bytes = if captured.is_ok() {
+        tokio::fs::read(&path).await.map_err(|e| e.to_string())
+    } else {
+        Err(captured.unwrap_err())
+    };
+    let _ = tokio::fs::remove_file(&path).await;
+    bytes
+}
+
 fn png_viewport(bytes: &[u8]) -> Option<ComputerViewport> {
     if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
         return None;
@@ -145,7 +161,37 @@ async fn screenshot() -> Result<ComputerActionResult, String> {
     .await?;
     #[cfg(all(target_os = "linux"))]
     let bytes = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        command("grim", &["-".into()]).await?
+        match command("grim", &["-".into()]).await {
+            Ok(bytes) => bytes,
+            Err(grim_error) if binary("spectacle") => {
+                screenshot_file("spectacle", vec!["-b".into(), "-n".into(), "-o".into()])
+                    .await
+                    .map_err(|spectacle_error| {
+                        format!("grim: {grim_error}; Spectacle portal fallback: {spectacle_error}")
+                    })?
+            }
+            Err(grim_error) if binary("gnome-screenshot") => {
+                screenshot_file("gnome-screenshot", vec!["-f".into()])
+                    .await
+                    .map_err(|gnome_error| {
+                        format!(
+                            "grim: {grim_error}; GNOME Screenshot portal fallback: {gnome_error}"
+                        )
+                    })?
+            }
+            Err(error) => return Err(error),
+        }
+    } else if binary("magick") {
+        command(
+            "magick",
+            &[
+                "import".into(),
+                "-window".into(),
+                "root".into(),
+                "png:-".into(),
+            ],
+        )
+        .await?
     } else if binary("import") {
         command("import", &["-window".into(), "root".into(), "png:-".into()]).await?
     } else {

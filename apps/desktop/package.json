@@ -8,8 +8,8 @@
   "description": "Brazier desktop application",
   "main": "./out/main/index.js",
   "scripts": {
-    "dev": "pnpm run build:agent && env -u WAYLAND_DISPLAY ELECTRON_OZONE_PLATFORM_HINT=x11 electron-vite dev",
-    "dev:welcome": "pnpm run build:agent && env -u WAYLAND_DISPLAY ELECTRON_OZONE_PLATFORM_HINT=x11 BRAZIER_FORCE_WELCOME=1 electron-vite dev",
+    "dev": "pnpm run build:agent && ELECTRON_OZONE_PLATFORM_HINT=x11 electron-vite dev",
+    "dev:welcome": "pnpm run build:agent && ELECTRON_OZONE_PLATFORM_HINT=x11 BRAZIER_FORCE_WELCOME=1 electron-vite dev",
     "build": "pnpm run build:agent && electron-vite build",
     "build:agent": "node scripts/build-agent-worker.mjs",
     "watch:agent": "node scripts/build-agent-worker.mjs --watch",

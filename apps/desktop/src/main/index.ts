@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, type WriteStream } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync, type WriteStream } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -22,6 +22,20 @@ import {
  * name, and `migrateLegacyDataDirectory` needs to be able to find them.
  */
 const LEGACY_USER_DATA = app.getPath('userData')
+// Electron may render through XWayland for stability, but the daemon must see
+// the actual login session to choose the correct desktop-control driver. The
+// dev launcher intentionally unsets WAYLAND_DISPLAY, so recover the compositor
+// socket from its per-user runtime directory in that case.
+function computerWaylandDisplay(): string | undefined {
+  if (process.env.WAYLAND_DISPLAY) return process.env.WAYLAND_DISPLAY
+  if (process.platform !== 'linux' || process.env.XDG_SESSION_TYPE !== 'wayland') return undefined
+  try {
+    return readdirSync(process.env.XDG_RUNTIME_DIR ?? '').find((entry) => /^wayland-\d+$/.test(entry))
+  } catch {
+    return undefined
+  }
+}
+const COMPUTER_WAYLAND_DISPLAY = computerWaylandDisplay()
 // A distro package runs `electron /usr/lib/brazier`, which Electron considers
 // an unpackaged app even though its renderer and daemon are installed there.
 const installedApp = app.isPackaged || process.env.BRAZIER_INSTALLED === '1'
@@ -323,6 +337,7 @@ function startDaemon(): Promise<Connection> {
     cwd: installedApp || useInstalledDaemon ? undefined : repositoryRoot(),
     env: {
       ...process.env,
+      ...(COMPUTER_WAYLAND_DISPLAY ? { WAYLAND_DISPLAY: COMPUTER_WAYLAND_DISPLAY } : {}),
       RUST_LOG: process.env.RUST_LOG ?? 'brazierd=info',
       RUSTUP_TOOLCHAIN: process.env.RUSTUP_TOOLCHAIN ?? 'stable'
     },
