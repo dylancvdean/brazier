@@ -141,6 +141,26 @@ pub struct ModelCapabilities {
     ///   style). Prefer this path over ASR when both are available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_input: Option<String>,
+    /// When true, the model is advertised for Computer Use (screenshot → action).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub computer_use: bool,
+}
+
+impl Default for ModelCapabilities {
+    fn default() -> Self {
+        Self {
+            input_modalities: vec!["text".into()],
+            output_modalities: vec!["text".into()],
+            streaming: true,
+            tools: false,
+            reasoning: false,
+            max_context_length: None,
+            reasoning_modes: Vec::new(),
+            harmony: false,
+            audio_input: None,
+            computer_use: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

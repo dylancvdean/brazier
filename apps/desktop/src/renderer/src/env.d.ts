@@ -39,6 +39,19 @@ declare global {
       }>
       /** Check the signed release feed; download still requires confirmation. */
       checkForUpdates(): Promise<{ supported: boolean }>
+      getUpdateSettings(): Promise<{
+        supported: boolean
+        checkOnStartup: boolean
+        autoDownload: boolean
+      }>
+      saveUpdateSettings(settings: {
+        checkOnStartup?: boolean
+        autoDownload?: boolean
+      }): Promise<{
+        supported: boolean
+        checkOnStartup: boolean
+        autoDownload: boolean
+      }>
       platform: NodeJS.Platform
       selectDirectory(): Promise<string | null>
       /** Folder picker for an agent workspace. */

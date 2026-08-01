@@ -212,14 +212,10 @@ pub async fn prepare_messages(
 
 /// Inline a plain-text attachment, naming its length so the model knows how
 /// much it is holding and whether the content was cut to the budget.
-async fn inline_text_document(
-    data_dir: &Path,
-    sha256: &str,
-    name: &str,
-) -> anyhow::Result<Value> {
+async fn inline_text_document(data_dir: &Path, sha256: &str, name: &str) -> anyhow::Result<Value> {
     let (bytes, _) = blob_store::read_blob(data_dir, sha256).await?;
-    let text = String::from_utf8(bytes)
-        .with_context(|| format!("document `{name}` is not UTF-8 text"))?;
+    let text =
+        String::from_utf8(bytes).with_context(|| format!("document `{name}` is not UTF-8 text"))?;
     let total_chars = text.chars().count();
     let total_lines = text.lines().count();
     let (body, truncated) = if text.len() <= crate::documents::MAX_INLINE_CHARS {
@@ -231,9 +227,8 @@ async fn inline_text_document(
         }
         (text[..cut].trim_end().to_owned(), true)
     };
-    let mut header = format!(
-        "[Contents of {name} — {total_lines} lines, {total_chars} characters]"
-    );
+    let mut header =
+        format!("[Contents of {name} — {total_lines} lines, {total_chars} characters]");
     if truncated {
         header.push_str(" [truncated to fit the attachment budget]");
     }
@@ -893,6 +888,7 @@ mod tests {
             reasoning_modes: Vec::new(),
             harmony: false,
             audio_input: None,
+            computer_use: false,
         };
         let ctx = MediaContext {
             data_dir: dir.path(),
@@ -930,9 +926,10 @@ mod tests {
     #[tokio::test]
     async fn pdf_attachments_become_notices_with_length_hint() {
         let dir = tempfile::tempdir().unwrap();
-        let stored = blob_store::store_bytes(dir.path(), b"%PDF-1.7", "application/pdf", Some("a.pdf"))
-            .await
-            .unwrap();
+        let stored =
+            blob_store::store_bytes(dir.path(), b"%PDF-1.7", "application/pdf", Some("a.pdf"))
+                .await
+                .unwrap();
         let caps = ModelCapabilities {
             input_modalities: vec!["text".into()],
             output_modalities: vec!["text".into()],
@@ -943,6 +940,7 @@ mod tests {
             reasoning_modes: Vec::new(),
             harmony: false,
             audio_input: None,
+            computer_use: false,
         };
         let ctx = MediaContext {
             data_dir: dir.path(),
@@ -989,9 +987,10 @@ mod tests {
     async fn plain_text_attachments_are_inlined_with_length() {
         let dir = tempfile::tempdir().unwrap();
         let body = "alpha\nbeta\ngamma\n";
-        let stored = blob_store::store_bytes(dir.path(), body.as_bytes(), "text/plain", Some("n.txt"))
-            .await
-            .unwrap();
+        let stored =
+            blob_store::store_bytes(dir.path(), body.as_bytes(), "text/plain", Some("n.txt"))
+                .await
+                .unwrap();
         let caps = ModelCapabilities {
             input_modalities: vec!["text".into()],
             output_modalities: vec!["text".into()],
@@ -1002,6 +1001,7 @@ mod tests {
             reasoning_modes: Vec::new(),
             harmony: false,
             audio_input: None,
+            computer_use: false,
         };
         let ctx = MediaContext {
             data_dir: dir.path(),
@@ -1051,6 +1051,7 @@ mod tests {
             reasoning_modes: Vec::new(),
             harmony: false,
             audio_input: None,
+            computer_use: false,
         };
         let ctx = MediaContext {
             data_dir: dir.path(),

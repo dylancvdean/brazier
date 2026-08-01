@@ -634,6 +634,7 @@ fn collect_whisper(
                 harmony: false,
                 // Whisper weights are batch ASR engines, not native audio chat models.
                 audio_input: None,
+                computer_use: false,
             },
             size_bytes: Some(size),
             read_only: false,

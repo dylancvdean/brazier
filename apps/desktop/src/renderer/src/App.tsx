@@ -67,16 +67,19 @@ import {
   type RuntimeForkHint,
   type RuntimeSettings,
   type ToolCallRecord,
+  fetchWorkspacePreference,
   recordRun,
   saveRuntimeSettings,
   streamCompletion,
   unloadModel,
   updateConversation,
   updateRecommendationState,
-  uploadAttachmentBlob
+  uploadAttachmentBlob,
+  type WorkspaceModesPreference
 } from './api'
 import { AgentMode, type AgentComposerControls, type AgentSidebarControls } from './components/AgentMode'
 import { AgentSessionSidebar } from './components/AgentSessionSidebar'
+import { ComputerMode } from './components/ComputerMode'
 import { DownloadTray } from './components/DownloadTray'
 import { GenerationActivity } from './components/GenerationActivity'
 import {
@@ -100,6 +103,7 @@ import { voiceStreamSupported } from './audio/voiceStream'
 import { useSessionCoordinator } from './session/useSessionCoordinator'
 import {
   isChatModel,
+  isComputerUseModel,
   isImageGenModel,
   isVideoGenModel,
   isVoiceModel,
@@ -123,6 +127,16 @@ import type { Attachment, ContentPart, Conversation, Message, Role } from './typ
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 const CHAT_TITLE_MODE_KEY = 'brazier.chatTitleMode.v1'
 const GENERATE_HISTORY_KEY = 'brazier.generateHistory.v1'
+
+type AppMode = 'chat' | 'agent' | 'generate' | 'voice' | 'computer'
+
+const DEFAULT_WORKSPACE_MODES: WorkspaceModesPreference = {
+  chat: true,
+  agent: true,
+  generate: true,
+  voice: true,
+  computer: false
+}
 
 type ChatTitleMode = 'never' | 'always' | 'over-20-tokens'
 
@@ -490,12 +504,15 @@ export function App(): React.JSX.Element {
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null)
   const [showWelcome, setShowWelcome] = useState<boolean | null>(null)
   const [recommendationSwaps, setRecommendationSwaps] = useState<PendingSwap[]>([])
-  const [appMode, setAppMode] = useState<'chat' | 'agent' | 'generate' | 'voice'>('chat')
+  const [appMode, setAppMode] = useState<AppMode>('chat')
+  const [workspaceModes, setWorkspaceModes] =
+    useState<WorkspaceModesPreference>(DEFAULT_WORKSPACE_MODES)
   const [realtimeVoiceAvailable, setRealtimeVoiceAvailable] = useState(false)
-  // Generate and Voice pick from their own model families; the top bar shows
-  // whichever belongs to the mode on screen.
+  // Generate, Voice, and Computer pick from their own model families; the top
+  // bar shows whichever belongs to the mode on screen.
   const [voiceModel, setVoiceModel] = useState('')
   const [generateModel, setGenerateModel] = useState('')
+  const [computerModel, setComputerModel] = useState('')
   const [generateModality, setGenerateModality] = useState<'image' | 'video'>('image')
   const [generateHistory, setGenerateHistory] = useState<GenerateHistoryEntry[]>(() =>
     readGenerateHistory()
@@ -503,9 +520,10 @@ export function App(): React.JSX.Element {
   const [activeGenerateHistoryId, setActiveGenerateHistoryId] = useState<string | null>(null)
   const [persona, setPersona] = useState('You are a helpful assistant.')
   const personaEdited = useRef(false)
-  // Agent mode has no composer of its own; it publishes these so the one at the
-  // bottom of the window can drive it.
+  // Agent / Computer modes have no composer of their own; they publish these
+  // so the one at the bottom of the window can drive them.
   const [agentComposer, setAgentComposer] = useState<AgentComposerControls | null>(null)
+  const [computerComposer, setComputerComposer] = useState<AgentComposerControls | null>(null)
   const [agentSidebar, setAgentSidebar] = useState<AgentSidebarControls | null>(null)
 
   useEffect(() => {
@@ -516,6 +534,21 @@ export function App(): React.JSX.Element {
         // Recommendations are optional and may require the Hub; startup is not.
       })
   }, [showWelcome])
+
+  useEffect(() => {
+    void fetchWorkspacePreference()
+      .then((result) => setWorkspaceModes(result.modes))
+      .catch(() => {
+        // Defaults keep the familiar mode strip until preferences load.
+      })
+  }, [])
+
+  useEffect(() => {
+    const order: AppMode[] = ['chat', 'agent', 'generate', 'voice', 'computer']
+    if (workspaceModes[appMode]) return
+    const fallback = order.find((mode) => workspaceModes[mode])
+    if (fallback) setAppMode(fallback)
+  }, [workspaceModes, appMode])
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
@@ -534,6 +567,10 @@ export function App(): React.JSX.Element {
   const selectedCapabilities = localModels.find((model) => model.id === selectedModel)?.capabilities
   const chatModels = useMemo(() => localModels.filter((model) => isChatModel(model)), [localModels])
   const voiceModels = useMemo(() => localModels.filter((model) => isVoiceModel(model)), [localModels])
+  const computerModels = useMemo(
+    () => localModels.filter((model) => isComputerUseModel(model)),
+    [localModels]
+  )
   const generateModels = useMemo(
     () =>
       localModels.filter((model) =>
@@ -673,7 +710,7 @@ export function App(): React.JSX.Element {
   }, [appMode])
 
   const switchAppMode = useCallback(
-    (next: 'chat' | 'agent' | 'generate' | 'voice'): void => {
+    (next: AppMode): void => {
       if (next === appMode) return
       setAppMode(next)
       if ((next === 'chat' || next === 'agent') && selectedModel) {
@@ -732,6 +769,15 @@ export function App(): React.JSX.Element {
         emptySubtitle: 'Download one from the library'
       }
     }
+    if (appMode === 'computer') {
+      return {
+        models: computerModels,
+        selected: computerModel,
+        select: setComputerModel,
+        emptyTitle: 'No computer-use model',
+        emptySubtitle: 'Install a Fara1.5 or similar vision agent model'
+      }
+    }
     return {
       models: chatModels,
       selected: selectedModel,
@@ -746,6 +792,8 @@ export function App(): React.JSX.Element {
     generateModels,
     generateModel,
     generateModality,
+    computerModels,
+    computerModel,
     chatModels,
     selectedModel,
     selectModel
@@ -868,6 +916,9 @@ export function App(): React.JSX.Element {
     parentId: () => chainRef.current.at(-1)?.id ?? null
   })
   const agentMode = appMode === 'agent'
+  const computerMode = appMode === 'computer'
+  const shellComposer = agentMode ? agentComposer : computerMode ? computerComposer : null
+  const shellComposerMode = agentMode || computerMode
   const voiceLive = session.snapshot.voiceStatus === 'live'
   const audioSupported = useMemo(() => voiceStreamSupported(), [])
   /** Whichever answer is streaming: the composer's own, or a coordinated turn. */
@@ -900,6 +951,13 @@ export function App(): React.JSX.Element {
     runtime?.default_image_gen_model,
     runtime?.default_video_gen_model
   ])
+
+  useEffect(() => {
+    setComputerModel((current) => {
+      if (current && computerModels.some((model) => model.id === current)) return current
+      return computerModels[0]?.id ?? ''
+    })
+  }, [computerModels])
 
   async function updateModelBinding(modelId: string, runtimeId: string | null): Promise<void> {
     setError(null)
@@ -1298,11 +1356,12 @@ export function App(): React.JSX.Element {
     const text = draft.trim()
     // Agent mode: the same box, pointed at the agent. Its own transcript and
     // approval cards render above; only the input is shared.
-    if (appMode === 'agent') {
-      if (!text || !agentComposer || agentComposer.running) return
+    if (appMode === 'agent' || appMode === 'computer') {
+      const composer = appMode === 'agent' ? agentComposer : computerComposer
+      if (!text || !composer || composer.running) return
       setDraft('')
       setError(null)
-      await agentComposer.send(text)
+      await composer.send(text)
       return
     }
     if ((!text && attachments.length === 0) || busy) return
@@ -1563,7 +1622,13 @@ export function App(): React.JSX.Element {
         >
           <Menu size={16} />
           <span>
-            {appMode === 'agent' ? 'Tasks' : appMode === 'generate' ? 'History' : 'Conversations'}
+            {appMode === 'agent'
+              ? 'Tasks'
+              : appMode === 'generate'
+                ? 'History'
+                : appMode === 'computer'
+                  ? 'Computer'
+                  : 'Conversations'}
           </span>
           <ChevronUp className="handle-chevron" size={15} />
         </button>
@@ -1709,9 +1774,12 @@ export function App(): React.JSX.Element {
                 ['chat', 'Chat'],
                 ['agent', 'Agent'],
                 ['generate', 'Generate'],
-                ['voice', 'Voice']
+                ['voice', 'Voice'],
+                ['computer', 'Computer']
               ] as const
-            ).map(([id, label]) => (
+            )
+              .filter(([id]) => workspaceModes[id])
+              .map(([id, label]) => (
               <button
                 key={id}
                 type="button"
@@ -1730,9 +1798,9 @@ export function App(): React.JSX.Element {
               <button
                 type="button"
                 className="model-unload-button"
-                disabled={modelUnloading || busy || Boolean(agentComposer?.running)}
+                disabled={modelUnloading || busy || Boolean(shellComposer?.running)}
                 title={
-                  busy || agentComposer?.running
+                  busy || shellComposer?.running
                     ? 'Stop the active response before unloading the model'
                     : 'Unload model from memory'
                 }
@@ -1756,7 +1824,9 @@ export function App(): React.JSX.Element {
                   ? 'Choose which installed model drives the agent'
                   : appMode === 'voice'
                     ? 'Choose which PersonaPlex model to speak with'
-                    : `Choose which ${generateModality} model to generate with`
+                    : appMode === 'computer'
+                      ? 'Choose which computer-use model drives the session'
+                      : `Choose which ${generateModality} model to generate with`
             }
             onClick={() => setModelMenuOpen(true)}
           >
@@ -1876,6 +1946,14 @@ export function App(): React.JSX.Element {
             onSidebarChange={setAgentSidebar}
             onSuggestPrompt={setDraft}
             onSessionBound={session.bindAgentSession}
+            onError={setError}
+          />
+        ) : null}
+        {appMode === 'computer' ? (
+          <ComputerMode
+            modelId={computerModel}
+            models={computerModels}
+            onComposerChange={setComputerComposer}
             onError={setError}
           />
         ) : null}
@@ -2131,10 +2209,13 @@ export function App(): React.JSX.Element {
             onSubmit={(event) => void submit(event)}
           >
             <textarea
-              aria-label={agentMode ? 'Agent task' : 'Message'}
+              aria-label={
+                agentMode ? 'Agent task' : computerMode ? 'Computer Use task' : 'Message'
+              }
               placeholder={
-                agentMode
-                  ? (agentComposer?.placeholder ?? 'Loading agent…')
+                shellComposerMode
+                  ? (shellComposer?.placeholder ??
+                    (agentMode ? 'Loading agent…' : 'Loading computer use…'))
                   : !selectedModel
                     ? 'Select a model to start chatting…'
                     : modelPrepareState === 'loading'
@@ -2145,7 +2226,7 @@ export function App(): React.JSX.Element {
                           ? 'Continue this branch…'
                           : 'Message a local model…'
               }
-              rows={agentMode ? 2 : 1}
+              rows={shellComposerMode ? 2 : 1}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {
@@ -2193,9 +2274,9 @@ export function App(): React.JSX.Element {
                 hidden
                 onChange={(event) => void selectFiles(event)}
               />
-              {/* Chat tools and attachments do not apply to the agent: its tool
-                  set and permissions are its own, and it takes no media. */}
-              <div className="tool-menu-anchor" hidden={agentMode}>
+              {/* Chat tools and attachments do not apply to agent/computer: their
+                  tool sets and permissions are their own, and they take no media. */}
+              <div className="tool-menu-anchor" hidden={shellComposerMode}>
                 <button
                   className={toolsEnabled ? 'attach-button tools-on' : 'attach-button'}
                   type="button"
@@ -2241,7 +2322,7 @@ export function App(): React.JSX.Element {
               <button
                 className="attach-button"
                 type="button"
-                hidden={agentMode}
+                hidden={shellComposerMode}
                 title={
                   canAttach
                     ? [
@@ -2258,17 +2339,19 @@ export function App(): React.JSX.Element {
               >
                 <Paperclip size={18} />
               </button>
-              {(agentMode ? agentComposer?.running : busy) ? (
+              {(shellComposerMode ? shellComposer?.running : busy) ? (
                 <button
                   className="send-button stop"
                   type="button"
                   title={
                     agentMode
                       ? 'Stop the run, terminate its processes, and refuse pending approvals'
-                      : 'Stop generation'
+                      : computerMode
+                        ? 'Stop the computer-use loop'
+                        : 'Stop generation'
                   }
                   onClick={() => {
-                    if (agentMode) void agentComposer?.stop()
+                    if (shellComposerMode) void shellComposer?.stop()
                     else abortRef.current?.abort()
                   }}
                 >
@@ -2278,10 +2361,12 @@ export function App(): React.JSX.Element {
                 <button
                   className="send-button"
                   type="submit"
-                  title={agentMode ? 'Start the task' : 'Send'}
+                  title={
+                    agentMode ? 'Start the task' : computerMode ? 'Start computer use' : 'Send'
+                  }
                   disabled={
-                    agentMode
-                      ? !draft.trim() || !agentComposer || agentComposer.blockedReason !== ''
+                    shellComposerMode
+                      ? !draft.trim() || !shellComposer || shellComposer.blockedReason !== ''
                       : (!draft.trim() && attachments.length === 0) || !canChat
                   }
                 >
@@ -2293,6 +2378,8 @@ export function App(): React.JSX.Element {
           <p className="composer-hint" hidden={appMode === 'voice' || appMode === 'generate'}>
             {agentMode ? (
               'The agent edits files and runs commands in the workspace above. Each action is judged by its permission mode.'
+            ) : computerMode ? (
+              'Computer Use screenshots the target, asks the model, and runs the returned actions under the permission mode above.'
             ) : (
               <>
                 {generationRate != null ? (
@@ -2407,7 +2494,9 @@ export function App(): React.JSX.Element {
                 ? 'Choose a model for the agent'
                 : appMode === 'voice'
                   ? 'Choose a voice model'
-                  : `Choose a ${generateModality} model`
+                  : appMode === 'computer'
+                    ? 'Choose a computer-use model'
+                    : `Choose a ${generateModality} model`
           }
           selectedModel={modeModel.selected}
           loading={modelsLoading}
@@ -2520,6 +2609,7 @@ export function App(): React.JSX.Element {
           hardware={hardware}
           onConfigureModel={setConfiguringModel}
           profileCounts={profileCounts}
+          onWorkspaceModesChange={setWorkspaceModes}
         />
       )}
     </main>

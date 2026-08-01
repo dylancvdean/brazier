@@ -394,7 +394,18 @@ Tool execution uses the same capability model as engines. Every tool declares
 network, filesystem, process, and secret requirements. Grants are scoped to one
 call, conversation, domain, or user-selected directory.
 
-The web pack will use an SSRF-aware fetcher and an optional isolated browser
-worker. The code pack will prefer WASI and can delegate broader workloads to an
+The web pack uses an SSRF-aware fetcher. Computer Use mode adds a model-agnostic
+observe–act loop: adapters (Fara XML today; generic tool dialects later) emit
+normalized `ComputerAction` values, and a daemon broker executes them against a
+browser target or — when OS permissions allow — a desktop target. Browser
+sessions start as an in-process synthetic driver with the same action contract a
+Chromium/CDP worker will implement. Desktop drivers probe macOS Screen
+Recording/Accessibility and Linux X11/Wayland portals and fail closed until both
+capture and input are granted.
+
+Workspace mode visibility (Chat, Agent, Generate, Voice, Computer) and app
+update preferences live under Manage → Customization.
+
+The code pack will prefer WASI and can delegate broader workloads to an
 OCI runtime. Workers receive no network, host filesystem, or secrets unless the
 specific grant provides them.

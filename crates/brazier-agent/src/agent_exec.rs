@@ -968,7 +968,7 @@ async fn doc_read(
             .unwrap_or(start + brazier_runtime::documents::DEFAULT_PAGE_COUNT - 1)
             .max(start);
         anyhow::ensure!(
-            end - start + 1 <= brazier_runtime::documents::MAX_TEXT_PAGES,
+            end - start < brazier_runtime::documents::MAX_TEXT_PAGES,
             "PDF text window is limited to {} pages; narrow start_page/end_page",
             brazier_runtime::documents::MAX_TEXT_PAGES
         );
@@ -2182,9 +2182,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn require_usable_sandbox(broker: &AgentBroker) -> bool {
+        if broker.backend().isolated() {
+            return true;
+        }
+        eprintln!(
+            "skipping sandboxed shell test: {}",
+            broker.backend().capabilities().detail
+        );
+        false
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn shell_run_captures_output_and_exit_code() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        if !require_usable_sandbox(&harness.broker) {
+            return;
+        }
         let response = harness
             .call("shell_run", json!({ "command": "echo agent-mode-ok" }))
             .await;
@@ -2244,6 +2259,10 @@ mod tests {
         // SAFETY: single-threaded test mutating its own environment.
         unsafe { std::env::set_var("AGENT_EXEC_TEST_TOKEN", "leaked-value") };
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        if !require_usable_sandbox(&harness.broker) {
+            unsafe { std::env::remove_var("AGENT_EXEC_TEST_TOKEN") };
+            return;
+        }
         let response = harness
             .call(
                 "shell_run",
@@ -2262,6 +2281,9 @@ mod tests {
     #[tokio::test]
     async fn shell_run_times_out_instead_of_hanging() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        if !require_usable_sandbox(&harness.broker) {
+            return;
+        }
         let response = harness
             .call(
                 "shell_run",
@@ -2280,6 +2302,9 @@ mod tests {
     #[tokio::test]
     async fn background_processes_stream_output_and_stop_on_request() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        if !require_usable_sandbox(&harness.broker) {
+            return;
+        }
         let started = harness
             .call(
                 "shell_start",
@@ -2325,6 +2350,9 @@ mod tests {
     #[tokio::test]
     async fn cancelling_a_session_kills_its_processes() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        if !require_usable_sandbox(&harness.broker) {
+            return;
+        }
         harness
             .call("shell_start", json!({ "command": "sleep 30" }))
             .await;

@@ -541,7 +541,7 @@ mod tests {
             title: "task".to_owned(),
             workspace_path: Some("/ws".to_owned()),
             model: "gguf:test".to_owned(),
-            runtime_id: Some("pi".to_owned()),
+            runtime_id: "pi".to_owned(),
             permission_mode: mode,
             permission_settings: AgentPermissionSettings::default(),
             enabled_tools: None,

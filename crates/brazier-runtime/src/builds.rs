@@ -261,6 +261,7 @@ pub fn llama_cpp_build_preflight(target: RuntimeTarget) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_step(
     label: &str,
     program: &str,

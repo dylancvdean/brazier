@@ -108,6 +108,9 @@ pub struct SandboxBackend {
     kind: SandboxBackendKind,
     program: Option<PathBuf>,
     detail: String,
+    /// Whether `bwrap --unshare-net` can configure loopback on this host.
+    /// Some CI images deny RTM_NEWADDR even when Bubblewrap itself is present.
+    unshare_net: bool,
 }
 
 /// Everything a wrapped command needs to know about its jail.
@@ -199,6 +202,7 @@ impl SandboxBackend {
                     detail: "macOS Seatbelt confines writes to the workspace and blocks reads of \
                              credential paths."
                         .to_owned(),
+                    unshare_net: true,
                 };
             }
             return Self::unavailable(
@@ -207,12 +211,28 @@ impl SandboxBackend {
         }
         if cfg!(target_os = "linux") {
             if let Some(program) = which("bwrap") {
+                if !bubblewrap_is_usable(&program) {
+                    return Self::unavailable(
+                        "Bubblewrap is installed but cannot create a user namespace on this host \
+                         (uid map denied). Agent shell commands will not be sandboxed.",
+                    );
+                }
+                let unshare_net = bubblewrap_supports_unshare_net(&program);
+                let detail = if unshare_net {
+                    "Bubblewrap mounts the host read-only, hides the home directory, and \
+                     binds the workspace read-write."
+                        .to_owned()
+                } else {
+                    "Bubblewrap mounts the host read-only and hides the home directory, but \
+                     network namespace isolation is unavailable on this host (loopback setup \
+                     denied)."
+                        .to_owned()
+                };
                 return Self {
                     kind: SandboxBackendKind::Bubblewrap,
                     program: Some(program),
-                    detail: "Bubblewrap mounts the host read-only, hides the home directory, and \
-                             binds the workspace read-write."
-                        .to_owned(),
+                    detail,
+                    unshare_net,
                 };
             }
             return Self::unavailable(
@@ -227,6 +247,7 @@ impl SandboxBackend {
             kind: SandboxBackendKind::None,
             program: None,
             detail: detail.to_owned(),
+            unshare_net: false,
         }
     }
 
@@ -245,7 +266,11 @@ impl SandboxBackend {
             isolated: self.isolated(),
             sandboxed_execution: self.isolated(),
             filesystem_scoping: self.isolated(),
-            network_isolation: self.isolated(),
+            network_isolation: match self.kind {
+                SandboxBackendKind::Seatbelt => true,
+                SandboxBackendKind::Bubblewrap => self.unshare_net,
+                SandboxBackendKind::None => false,
+            },
             process_isolation: matches!(self.kind, SandboxBackendKind::Bubblewrap),
             profiles: vec![
                 SandboxProfile::Workspace.as_str().to_owned(),
@@ -312,7 +337,7 @@ impl SandboxBackend {
                 }
             }
             (SandboxBackendKind::Bubblewrap, Some(bwrap)) => {
-                let mut wrapped: Vec<OsString> = bubblewrap_args(request)
+                let mut wrapped: Vec<OsString> = bubblewrap_args(request, self.unshare_net)
                     .into_iter()
                     .map(OsString::from)
                     .collect();
@@ -502,9 +527,33 @@ pub fn seatbelt_profile(request: &SandboxRequest<'_>) -> String {
     profile
 }
 
+fn bubblewrap_probe(bwrap: &Path, extra: &[&str]) -> bool {
+    let mut command = std::process::Command::new(bwrap);
+    command
+        .arg("--die-with-parent")
+        .args(extra)
+        .args(["--ro-bind", "/", "/", "--dev", "/dev", "--", "true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Probe whether Bubblewrap can enter a user namespace on this host at all.
+fn bubblewrap_is_usable(bwrap: &Path) -> bool {
+    bubblewrap_probe(bwrap, &[])
+}
+
+/// Probe whether Bubblewrap can create a network namespace on this host.
+fn bubblewrap_supports_unshare_net(bwrap: &Path) -> bool {
+    bubblewrap_probe(bwrap, &["--unshare-net"])
+}
+
 /// Generate Bubblewrap arguments. Later binds override earlier ones, so the
 /// workspace bind comes after the home tmpfs that hides credentials.
-pub fn bubblewrap_args(request: &SandboxRequest<'_>) -> Vec<String> {
+pub fn bubblewrap_args(request: &SandboxRequest<'_>, unshare_net: bool) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "--die-with-parent".into(),
         "--new-session".into(),
@@ -541,7 +590,7 @@ pub fn bubblewrap_args(request: &SandboxRequest<'_>) -> Vec<String> {
     args.push(request.workspace.display().to_string());
     args.push(request.workspace.display().to_string());
 
-    if !request.profile.allows_network() {
+    if !request.profile.allows_network() && unshare_net {
         args.push("--unshare-net".into());
     }
 
@@ -702,7 +751,10 @@ mod tests {
     fn bubblewrap_binds_workspace_after_hiding_home() {
         let workspace = PathBuf::from("/tmp/ws");
         let scratch = PathBuf::from("/tmp/scratch");
-        let args = bubblewrap_args(&request(SandboxProfile::Workspace, &workspace, &scratch));
+        let args = bubblewrap_args(
+            &request(SandboxProfile::Workspace, &workspace, &scratch),
+            true,
+        );
         let joined = args.join(" ");
         assert!(joined.contains("--ro-bind / /"));
         assert!(joined.contains("--unshare-net"));
@@ -716,13 +768,23 @@ mod tests {
                 "workspace must survive the home tmpfs"
             );
         }
+
+        let without_net = bubblewrap_args(
+            &request(SandboxProfile::Workspace, &workspace, &scratch),
+            false,
+        )
+        .join(" ");
+        assert!(!without_net.contains("--unshare-net"));
     }
 
     #[test]
     fn read_only_bubblewrap_binds_workspace_read_only() {
         let workspace = PathBuf::from("/tmp/ws");
         let scratch = PathBuf::from("/tmp/scratch");
-        let args = bubblewrap_args(&request(SandboxProfile::ReadOnly, &workspace, &scratch));
+        let args = bubblewrap_args(
+            &request(SandboxProfile::ReadOnly, &workspace, &scratch),
+            true,
+        );
         let joined = args.join(" ");
         assert!(joined.contains("--ro-bind /tmp/ws /tmp/ws"));
     }

@@ -147,10 +147,7 @@ pub fn adapt_tool_choice(value: &Value, harmony: bool) -> Value {
         .pointer_mut("/function")
         .and_then(Value::as_object_mut)
     {
-        function.insert(
-            "name".into(),
-            Value::String(wire_tool_name(name, true)),
-        );
+        function.insert("name".into(), Value::String(wire_tool_name(name, true)));
     }
     adapted
 }
@@ -185,28 +182,15 @@ mod tests {
             "function": { "name": "calculator", "arguments": "{}" }
         }]);
         let wired = wire_tool_calls(&logical, true);
-        assert_eq!(
-            wired[0]["function"]["name"],
-            "functions.calculator"
-        );
+        assert_eq!(wired[0]["function"]["name"], "functions.calculator");
         assert_eq!(wire_tool_calls(&logical, false), logical);
     }
 
     #[test]
     fn harmony_keeps_reasoning_on_prior_tool_turns_when_dropping() {
-        assert!(include_reasoning_on_message(
-            true,
-            true,
-            false,
-            true,
-            true
-        ));
+        assert!(include_reasoning_on_message(true, true, false, true, true));
         assert!(!include_reasoning_on_message(
-            true,
-            false,
-            false,
-            true,
-            true
+            true, false, false, true, true
         ));
     }
 

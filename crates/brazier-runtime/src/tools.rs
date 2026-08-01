@@ -570,9 +570,8 @@ async fn doc_read_tool(
         .context("doc_read requires a `document` string (the id from the attachment notice)")?
         .trim();
     let document = resolve_conversation_document(requested, documents)?;
-    let kind = crate::documents::kind_for_mime(&document.mime_type, &document.name).context(
-        "that attachment is not a PDF, RTF, DOC, or DOCX document",
-    )?;
+    let kind = crate::documents::kind_for_mime(&document.mime_type, &document.name)
+        .context("that attachment is not a PDF, RTF, DOC, or DOCX document")?;
     let path = crate::blob_store::blob_path(data_dir, &document.sha256)
         .context("document blob is missing")?;
     anyhow::ensure!(path.is_file(), "that document is no longer stored locally");
@@ -599,8 +598,7 @@ async fn doc_read_tool(
             .unwrap_or(start + crate::documents::DEFAULT_PAGE_COUNT - 1)
             .max(start);
         let count = (end - start + 1).min(crate::documents::MAX_RENDER_PAGES);
-        let rendered =
-            crate::documents::render_pages(data_dir, &path, start, count).await?;
+        let rendered = crate::documents::render_pages(data_dir, &path, start, count).await?;
         let pages: Vec<String> = rendered
             .iter()
             .map(|page| format!("page {}", page.page))
@@ -636,7 +634,7 @@ async fn doc_read_tool(
             .unwrap_or(start + crate::documents::DEFAULT_PAGE_COUNT - 1)
             .max(start);
         anyhow::ensure!(
-            end - start + 1 <= crate::documents::MAX_TEXT_PAGES,
+            end - start < crate::documents::MAX_TEXT_PAGES,
             "PDF text window is limited to {} pages; narrow start_page/end_page",
             crate::documents::MAX_TEXT_PAGES
         );
@@ -1526,14 +1524,12 @@ exit 0
     fn doc_read_resolves_short_document_ids() {
         let documents = vec![
             crate::tool_registry::ConversationDocument {
-                sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                    .into(),
+                sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
                 mime_type: "application/pdf".into(),
                 name: "a.pdf".into(),
             },
             crate::tool_registry::ConversationDocument {
-                sha256: "ffffff0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                    .into(),
+                sha256: "ffffff0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
                 mime_type: "application/pdf".into(),
                 name: "b.pdf".into(),
             },

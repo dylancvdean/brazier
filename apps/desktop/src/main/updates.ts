@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { app, dialog } from 'electron'
 import { autoUpdater } from 'electron-updater'
 
@@ -5,6 +8,55 @@ type Report = (line: string, level?: 'log' | 'warn' | 'error') => void
 
 export type UpdateCheckResult = {
   supported: boolean
+}
+
+export type UpdateSettings = {
+  supported: boolean
+  checkOnStartup: boolean
+  autoDownload: boolean
+}
+
+type StoredUpdateSettings = {
+  checkOnStartup: boolean
+  autoDownload: boolean
+}
+
+const DEFAULT_STORED: StoredUpdateSettings = {
+  checkOnStartup: true,
+  autoDownload: false
+}
+
+function updateSettingsPath(): string {
+  return join(app.getPath('userData'), 'update-settings.json')
+}
+
+function loadStoredUpdateSettings(): StoredUpdateSettings {
+  try {
+    const parsed = JSON.parse(readFileSync(updateSettingsPath(), 'utf8')) as Partial<StoredUpdateSettings>
+    return {
+      checkOnStartup: parsed.checkOnStartup !== false,
+      autoDownload: parsed.autoDownload === true
+    }
+  } catch {
+    return { ...DEFAULT_STORED }
+  }
+}
+
+function writeStoredUpdateSettings(settings: StoredUpdateSettings): void {
+  const path = updateSettingsPath()
+  mkdirSync(app.getPath('userData'), { recursive: true })
+  const temporary = `${path}.${randomBytes(6).toString('hex')}.tmp`
+  writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 })
+  renameSync(temporary, path)
+}
+
+function updatesSupported(): boolean {
+  return (
+    app.isPackaged &&
+    process.env.BRAZIER_DISABLE_UPDATES !== '1' &&
+    process.env.BRAZIER_INSTALLED !== '1' &&
+    !(process.platform === 'linux' && !process.env.APPIMAGE)
+  )
 }
 
 /**
@@ -19,19 +71,17 @@ export function startUpdates(report: Report): { checkForUpdates: () => Promise<U
   // Arch launcher sets BRAZIER_INSTALLED, so it must never replace files that
   // pacman owns. On Linux the updater is meaningful only for a running
   // AppImage: electron-updater uses APPIMAGE to replace that exact file.
-  if (
-    !app.isPackaged ||
-    process.env.BRAZIER_DISABLE_UPDATES === '1' ||
-    process.env.BRAZIER_INSTALLED === '1' ||
-    (process.platform === 'linux' && !process.env.APPIMAGE)
-  ) {
+  if (!updatesSupported()) {
     report('[updater] disabled for this installation')
     return { checkForUpdates: async () => ({ supported: false }) }
   }
 
+  const settings = loadStoredUpdateSettings()
+
   // Availability is cheap to check, but an AppImage or macOS bundle can be a
-  // large download. Never transfer it until its owner has said yes.
-  autoUpdater.autoDownload = false
+  // large download. Never transfer it until its owner has said yes — unless
+  // they opted into auto-download in Customization.
+  autoUpdater.autoDownload = settings.autoDownload
   autoUpdater.autoInstallOnAppQuit = false
 
   let checking = false
@@ -68,6 +118,10 @@ export function startUpdates(report: Report): { checkForUpdates: () => Promise<U
   })
   autoUpdater.on('update-available', async (info) => {
     report(`[updater] update available: ${info.version}`)
+    if (autoUpdater.autoDownload) {
+      // Already downloading; skip the confirmation prompt.
+      return
+    }
     if (downloadPromptOpen || downloading) return
     downloadPromptOpen = true
     try {
@@ -136,6 +190,43 @@ export function startUpdates(report: Report): { checkForUpdates: () => Promise<U
     return { supported: true }
   }
 
-  void checkForUpdates()
+  if (settings.checkOnStartup) {
+    void checkForUpdates()
+  } else {
+    report('[updater] startup check skipped (checkOnStartup=false)')
+  }
   return { checkForUpdates: () => checkForUpdates(true) }
+}
+
+export function getUpdateSettings(): UpdateSettings {
+  const stored = existsSync(updateSettingsPath())
+    ? loadStoredUpdateSettings()
+    : { ...DEFAULT_STORED }
+  return {
+    supported: updatesSupported(),
+    checkOnStartup: stored.checkOnStartup,
+    autoDownload: stored.autoDownload
+  }
+}
+
+export function saveUpdateSettings(settings: {
+  checkOnStartup?: boolean
+  autoDownload?: boolean
+}): UpdateSettings {
+  const current = loadStoredUpdateSettings()
+  const next: StoredUpdateSettings = {
+    checkOnStartup:
+      settings.checkOnStartup === undefined ? current.checkOnStartup : settings.checkOnStartup,
+    autoDownload:
+      settings.autoDownload === undefined ? current.autoDownload : settings.autoDownload
+  }
+  writeStoredUpdateSettings(next)
+  if (updatesSupported()) {
+    autoUpdater.autoDownload = next.autoDownload
+  }
+  return {
+    supported: updatesSupported(),
+    checkOnStartup: next.checkOnStartup,
+    autoDownload: next.autoDownload
+  }
 }

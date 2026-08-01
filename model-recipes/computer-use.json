@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "_comment": [
+    "Computer Use model recipes for Brazier's Computer workspace mode.",
+    "",
+    "Fara1.5 is Microsoft Research's native computer-use agent family. Models",
+    "observe browser (or desktop) screenshots and emit Fara XML <tool_call>",
+    "blocks calling computer_use. Brazier parses those into normalized",
+    "ComputerAction values and executes them against the selected target.",
+    "",
+    "Serve with vLLM (or another OpenAI-compatible vision endpoint) and register",
+    "the endpoint as a remote connection, or place the weights where Brazier's",
+    "vLLM runtime can load them. Prefer temperature 0 and at least 15k context",
+    "for multi-screenshot trajectories; Fara1.5 natively supports up to 262k."
+  ],
+  "recipes": [
+    {
+      "id": "fara1.5-4b",
+      "label": "Fara1.5 4B",
+      "family": "fara1.5",
+      "action_dialect": "fara-xml",
+      "hf_id": "microsoft/Fara1.5-4B",
+      "parameters": "4B",
+      "context_tokens": 262144,
+      "min_context_tokens": 15000,
+      "default_target": "browser",
+      "recommended_engine": "vllm",
+      "summary": "Smallest Fara1.5 CUA. Practical on a single consumer GPU; strong for its size on browser tasks.",
+      "vllm_serve": {
+        "command": [
+          "vllm",
+          "serve",
+          "microsoft/Fara1.5-4B",
+          "--dtype",
+          "bfloat16",
+          "--max-model-len",
+          "262144",
+          "--limit-mm-per-prompt",
+          "image=10"
+        ],
+        "notes": [
+          "Lower --max-model-len (e.g. 32768 or 65536) if VRAM is tight.",
+          "Set temperature to 0 for best agent reliability.",
+          "Ensure image multimodal limits allow the screenshot history (image=10)."
+        ]
+      }
+    },
+    {
+      "id": "fara1.5-9b",
+      "label": "Fara1.5 9B",
+      "family": "fara1.5",
+      "action_dialect": "fara-xml",
+      "hf_id": "microsoft/Fara1.5-9B",
+      "parameters": "9B",
+      "context_tokens": 262144,
+      "min_context_tokens": 15000,
+      "default_target": "browser",
+      "recommended_engine": "vllm",
+      "summary": "Mid-size Fara1.5. Best balance of quality and footprint for most desktop hosts with a single A100-class GPU.",
+      "vllm_serve": {
+        "command": [
+          "vllm",
+          "serve",
+          "microsoft/Fara1.5-9B",
+          "--dtype",
+          "bfloat16",
+          "--max-model-len",
+          "262144",
+          "--limit-mm-per-prompt",
+          "image=10"
+        ],
+        "notes": [
+          "Requires vllm >= 0.19.1 and transformers with Qwen3.5 multimodal support.",
+          "262k context needs substantial KV cache; reduce max-model-len on smaller cards.",
+          "Temperature 0; keep at least ~15k tokens for multi-step browser tasks."
+        ]
+      }
+    },
+    {
+      "id": "fara1.5-27b",
+      "label": "Fara1.5 27B",
+      "family": "fara1.5",
+      "action_dialect": "fara-xml",
+      "hf_id": "microsoft/Fara1.5-27B",
+      "parameters": "27B",
+      "context_tokens": 262144,
+      "min_context_tokens": 15000,
+      "default_target": "browser",
+      "recommended_engine": "vllm",
+      "summary": "Largest open Fara1.5 CUA. Highest task success; needs multi-GPU or high-VRAM hosts.",
+      "vllm_serve": {
+        "command": [
+          "vllm",
+          "serve",
+          "microsoft/Fara1.5-27B",
+          "--dtype",
+          "bfloat16",
+          "--max-model-len",
+          "262144",
+          "--limit-mm-per-prompt",
+          "image=10"
+        ],
+        "notes": [
+          "Plan for tensor parallel on multi-GPU hosts when VRAM is insufficient for bf16.",
+          "Cap context if necessary; agent quality still benefits from ≥15k tokens.",
+          "Temperature 0 for deterministic tool-call formatting."
+        ]
+      }
+    }
+  ]
+}

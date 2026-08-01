@@ -2,9 +2,12 @@ pub mod api;
 pub mod service;
 pub mod support;
 
-pub use brazier_agent::{agent_exec, agent_policy, agent_sandbox, agent_tools, agent_worktree};
+pub use brazier_agent::{
+    agent_exec, agent_policy, agent_sandbox, agent_tools, agent_worktree, computer_browser,
+    computer_desktop, computer_exec, computer_fara, computer_policy,
+};
 pub use brazier_formats::{gguf_meta, wav};
-pub use brazier_protocol::{agent_types, message_format, progress, types};
+pub use brazier_protocol::{agent_types, computer_types, message_format, progress, types};
 pub use brazier_runtime::{
     active_downloads, adapters, build_recipe, builds, download, download_queue, engine, fork_hints,
     github_releases, hardware, harmony, hf, hf_auth, js_sandbox, llama, mcp, media, mlx,
@@ -40,6 +43,8 @@ pub struct AppState {
     /// Policy, sandbox, and execution for Agent mode. The agent runtime reaches
     /// the host only through this broker.
     pub agent_broker: Arc<agent_exec::AgentBroker>,
+    /// Computer Use observe–act broker (browser/desktop drivers + approvals).
+    pub computer_broker: Arc<computer_exec::ComputerBroker>,
 }
 
 impl AppState {

@@ -847,6 +847,7 @@ fn capabilities_for(modality: Modality) -> ModelCapabilities {
         reasoning_modes: Vec::new(),
         harmony: false,
         audio_input: None,
+        computer_use: false,
     }
 }
 

@@ -150,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
         download_queue,
         runtimes_cache: Arc::new(Mutex::new(None)),
         agent_broker: Arc::new(brazierd::agent_exec::AgentBroker::new()),
+        computer_broker: Arc::new(brazierd::computer_exec::ComputerBroker::new()),
     };
 
     let port = args.port.unwrap_or(if args.service {

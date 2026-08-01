@@ -18,6 +18,15 @@ jobs:
           toolchain: 1.93.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # Agent sandbox tests need Bubblewrap and unprivileged user namespaces.
+      # Ubuntu 24 GHA images restrict userns via AppArmor.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          bwrap --ro-bind / / --dev /dev --die-with-parent -- true
+          bwrap --unshare-net --ro-bind / / --dev /dev --die-with-parent -- true
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -30,8 +39,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11.17.0
+        # Version comes from package.json packageManager; specifying both here
+        # and there makes action-setup fail with ERR_PNPM_BAD_PM_VERSION.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
