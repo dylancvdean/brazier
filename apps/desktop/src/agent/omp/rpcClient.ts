@@ -148,6 +148,7 @@ export class OmpRpcClient {
   private closed = false
   private exited = false
   private protocolVersion: 1 | 2 = 1
+  private stderrTail = ''
 
   constructor(options: OmpRpcClientOptions) {
     const args = ['--mode', 'rpc', '--no-session', ...(options.args ?? [])]
@@ -163,16 +164,23 @@ export class OmpRpcClient {
     this.child.on('exit', (code, signal) => {
       this.exited = true
       this.closed = true
+      const stderr = this.stderrTail.trim()
       this.failAll(
         new OmpRpcError(
-          `omp exited${code != null ? ` with code ${code}` : ''}${signal ? ` (${signal})` : ''}.`
+          `omp exited${code != null ? ` with code ${code}` : ''}${signal ? ` (${signal})` : ''}.` +
+            (stderr ? `\n${stderr}` : '')
         )
       )
       options.onExit?.(code, signal)
     })
     const stdout = createInterface({ input: this.child.stdout })
     stdout.on('line', (line) => this.handleLine(line))
-    createInterface({ input: this.child.stderr }).on('line', () => undefined)
+    this.child.stderr.setEncoding('utf8')
+    this.child.stderr.on('data', (chunk: string) => {
+      // OMP startup diagnostics are essential when a CLI version rejects an
+      // option. Keep only a bounded tail so a noisy sidecar cannot grow memory.
+      this.stderrTail = (this.stderrTail + chunk).slice(-16_384)
+    })
   }
 
   onFrame(listener: OmpFrameListener): () => void {

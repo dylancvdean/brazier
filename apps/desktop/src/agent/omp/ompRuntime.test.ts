@@ -4,10 +4,16 @@ import {
   contextSeedAfterPermissionModeAttempt,
   hostToolResultFrame,
   isCurrentOmpRun,
+  ompApprovalModeArg,
   promptWithBrazierContext
 } from './ompRuntime'
 
 describe('OMP adapter protocol helpers', () => {
+  it('uses OMP public approval-mode CLI syntax', () => {
+    expect(ompApprovalModeArg('always-ask')).toBe('--approval-mode=always-ask')
+    expect(ompApprovalModeArg('yolo')).toBe('--approval-mode=yolo')
+  })
+
   it('uses OMP structured host-tool results and marks errors at the top level', () => {
     expect(hostToolResultFrame('host_1', 'done')).toEqual({
       type: 'host_tool_result',

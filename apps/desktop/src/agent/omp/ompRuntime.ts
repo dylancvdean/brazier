@@ -65,6 +65,10 @@ function approvalModeFor(permission: AgentPermissionMode): 'always-ask' | 'write
   }
 }
 
+export function ompApprovalModeArg(mode: ReturnType<typeof approvalModeFor>): string {
+  return `--approval-mode=${mode}`
+}
+
 function hostSandbox(detail: string): SandboxDescription {
   return {
     backend: 'omp',
@@ -742,7 +746,9 @@ class OmpAgentSession implements AgentSession {
   ): Promise<OmpRpcClient> {
     const client = new OmpRpcClient({
       ...options,
-      args: [`--tools.approvalMode=${permissionMode}`]
+      // Public OMP CLI flag (v17+). Dotted config keys are not CLI options and
+      // make oclif terminate with a usage error before RPC becomes ready.
+      args: [ompApprovalModeArg(permissionMode)]
     })
     try {
       await client.waitUntilReady()

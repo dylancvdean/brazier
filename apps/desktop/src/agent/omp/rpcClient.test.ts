@@ -105,4 +105,20 @@ describe.skipIf(process.platform === 'win32')('OmpRpcClient', () => {
 
     expect(onExit).toHaveBeenCalledWith(null, 'SIGKILL')
   }, 5_000)
+
+  it('includes bounded sidecar stderr in startup failures', async () => {
+    const binary = rpcFixture()
+    // Replace the ready fixture with a process that emits the diagnostic and
+    // exits before the RPC ready frame.
+    writeFileSync(
+      binary,
+      `#!/usr/bin/env node\nprocess.stderr.write('Error: Nonexistent flag --bad-option\\n')\nprocess.exit(2)\n`
+    )
+    chmodSync(binary, 0o755)
+    const client = new OmpRpcClient({ binary })
+
+    await expect(client.waitUntilReady()).rejects.toThrow(
+      'omp exited with code 2.\nError: Nonexistent flag --bad-option'
+    )
+  })
 })
