@@ -2573,8 +2573,10 @@ struct GeneratedMediaContext {
     persisted: OpenAiMessage,
 }
 
-/// Build immediate system context carrying whatever a tool just produced as
-/// media, when the model can see it.
+/// Build immediate user context carrying whatever a tool just produced as
+/// media, when the model can see it. A tool result is already in the middle of
+/// the conversation, so this must not be a `system` message: llama.cpp chat
+/// templates require system instructions to lead the conversation.
 ///
 /// The live message contains engine-ready image parts. The transcript keeps
 /// blob references so the conversation remains small and can be hydrated again
@@ -2662,14 +2664,14 @@ async fn generated_media_context_messages(
     live_parts.insert(0, status);
     Some(GeneratedMediaContext {
         live: OpenAiMessage {
-            role: "system".to_owned(),
+            role: "user".to_owned(),
             content: serde_json::Value::Array(live_parts),
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
         },
         persisted: OpenAiMessage {
-            role: "system".to_owned(),
+            role: "user".to_owned(),
             content: serde_json::Value::Array(persisted_parts),
             tool_calls: None,
             tool_call_id: None,
@@ -3022,7 +3024,7 @@ mod tests {
         let context = generated_media_context_messages(dir.path(), &caps, &settings, &invocation)
             .await
             .expect("context");
-        assert_eq!(context.live.role, "system");
+        assert_eq!(context.live.role, "user");
         assert_eq!(
             context.live.content.pointer("/1/type"),
             Some(&json!("image_url"))
@@ -3079,6 +3081,25 @@ mod tests {
                 .await
                 .is_none()
         );
+
+        let pdf_invocation = tools::ToolInvocation {
+            call_id: "call-pdf".into(),
+            name: "fetch_url".into(),
+            arguments: r#"{"url":"https://example.com/report.pdf"}"#.into(),
+            output: "Fetched PDF.".into(),
+            is_error: false,
+            media: vec![tools::ToolMedia {
+                sha256: "pdf123".into(),
+                mime_type: "application/pdf".into(),
+                name: Some("report.pdf".into()),
+            }],
+        };
+        let pdf_context =
+            generated_media_context_messages(dir.path(), &caps, &settings, &pdf_invocation)
+                .await
+                .expect("PDF context");
+        assert_eq!(pdf_context.live.role, "user");
+
         caps.input_modalities.push("image".into());
         settings.show_generated_images_to_model = false;
         assert!(

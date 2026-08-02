@@ -407,6 +407,53 @@ fn put<T: Into<serde_json::Value>>(body: &mut serde_json::Value, key: &str, valu
     }
 }
 
+/// Keep the wire conversation compatible with llama.cpp chat templates. Most
+/// templates accept one leading system message and reject any system message
+/// after the conversation has started. Generated document/media context used
+/// to be persisted as a late system message, so turn those late entries into
+/// user context and merge multiple leading system messages into one.
+fn normalize_system_messages(messages: &mut Vec<serde_json::Value>) {
+    let leading_system_count = messages
+        .iter()
+        .take_while(|message| {
+            message.get("role").and_then(serde_json::Value::as_str) == Some("system")
+        })
+        .count();
+    if leading_system_count > 1 {
+        let mut merged_content = messages[0]["content"].clone();
+        for message in messages.drain(1..leading_system_count) {
+            merged_content = merge_message_content(merged_content, message["content"].clone());
+        }
+        messages[0]["content"] = merged_content;
+    }
+    for message in messages.iter_mut().skip(1) {
+        if message.get("role").and_then(serde_json::Value::as_str) == Some("system") {
+            message["role"] = serde_json::Value::String("user".to_owned());
+        }
+    }
+}
+
+fn merge_message_content(left: serde_json::Value, right: serde_json::Value) -> serde_json::Value {
+    match (left, right) {
+        (serde_json::Value::String(left), serde_json::Value::String(right)) => {
+            serde_json::Value::String(format!("{left}\n\n{right}"))
+        }
+        (serde_json::Value::Array(mut left), serde_json::Value::Array(right)) => {
+            left.extend(right);
+            serde_json::Value::Array(left)
+        }
+        (serde_json::Value::Array(mut left), serde_json::Value::String(right)) => {
+            left.push(serde_json::json!({"type": "text", "text": right}));
+            serde_json::Value::Array(left)
+        }
+        (serde_json::Value::String(left), serde_json::Value::Array(mut right)) => {
+            right.insert(0, serde_json::json!({"type": "text", "text": left}));
+            serde_json::Value::Array(right)
+        }
+        (left, right) => serde_json::Value::String(format!("{left}\n\n{right}")),
+    }
+}
+
 /// Translate a Brazier chat request into the JSON body expected by llama-server.
 pub fn translate_chat_request(
     request: &ChatCompletionRequest,
@@ -459,6 +506,7 @@ pub fn translate_chat_request(
             serde_json::json!({ "role": "system", "content": prompt }),
         );
     }
+    normalize_system_messages(&mut messages);
 
     let temperature = request
         .temperature
@@ -2571,6 +2619,70 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][0]["content"], "Answer in French.");
         assert_eq!(body["messages"][1]["content"], "Hello");
+    }
+
+    #[test]
+    fn late_system_context_is_sent_as_user_context() {
+        let settings = RuntimeSettings::default();
+        let mut request = plain_request();
+        request.messages = vec![
+            request.messages[0].clone(),
+            OpenAiMessage {
+                role: "system".into(),
+                content: json!([
+                    {"type": "text", "text": "The PDF page is attached."},
+                    {"type": "text", "text": "[attachment: page (image/png)]"}
+                ]),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ];
+        let body = translate_chat_request(&request, ChatContext::local(&settings, "local", true));
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(
+            body["messages"][1]["content"][0]["text"],
+            "The PDF page is attached."
+        );
+    }
+
+    #[test]
+    fn leading_system_messages_are_merged_for_template_compatibility() {
+        let settings = RuntimeSettings::default();
+        let mut request = plain_request();
+        request.messages.insert(
+            0,
+            OpenAiMessage {
+                role: "system".into(),
+                content: json!("Caller instructions."),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        );
+        let profile = TextProfile {
+            system_prompt: Some("Profile instructions.".into()),
+            ..TextProfile::default()
+        };
+        let body = translate_chat_request(
+            &request,
+            ChatContext {
+                settings: &settings,
+                profile: Some(&profile),
+                dialect: SamplerDialect::LlamaCpp,
+                model_alias: "local",
+                stream: false,
+                harmony: false,
+            },
+        );
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(
+            body["messages"][0]["content"],
+            "Profile instructions.\n\nCaller instructions."
+        );
+        assert_eq!(body["messages"][1]["role"], "user");
     }
 
     #[test]

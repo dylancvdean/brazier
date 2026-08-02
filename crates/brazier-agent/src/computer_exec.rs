@@ -581,6 +581,7 @@ impl ComputerBroker {
                 },
                 ComputerTarget::Desktop => Ok(computer_desktop::execute_desktop_action(
                     &driver_action,
+                    &viewport,
                     self.action_settle_delay_ms(),
                 )
                 .await),

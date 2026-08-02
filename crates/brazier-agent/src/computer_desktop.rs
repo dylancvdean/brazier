@@ -174,8 +174,49 @@ fn png_viewport(bytes: &[u8]) -> Option<ComputerViewport> {
     Some(ComputerViewport {
         width: u32::from_be_bytes(bytes[16..20].try_into().ok()?),
         height: u32::from_be_bytes(bytes[20..24].try_into().ok()?),
-        device_pixel_ratio: Some(1.0),
+        // Retina screenshots contain physical pixels, while System Events
+        // addresses the same display in logical points. `screencapture` puts
+        // the display DPI in pHYs, so retain it with the viewport instead of
+        // assuming that every Mac display is 1x.
+        device_pixel_ratio: Some(png_device_pixel_ratio(bytes).unwrap_or(1.0)),
     })
+}
+
+/// Read the PNG pixels-per-metre metadata written by macOS `screencapture`.
+/// The PNG header itself only reports the physical framebuffer size; pHYs is
+/// what lets us convert that size back to the logical point space used by
+/// System Events. A missing or nonsensical chunk is deliberately treated as
+/// 1x so other screenshot providers keep their existing behavior.
+fn png_device_pixel_ratio(bytes: &[u8]) -> Option<f32> {
+    if bytes.len() < 8 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let mut offset = 8_usize;
+    while offset.checked_add(12)? <= bytes.len() {
+        let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
+        let data_start = offset.checked_add(8)?;
+        let data_end = data_start.checked_add(length)?;
+        let chunk_end = data_end.checked_add(4)?;
+        if chunk_end > bytes.len() {
+            return None;
+        }
+        if &bytes[offset + 4..offset + 8] == b"pHYs" && length >= 9 && bytes[data_start + 8] == 1 {
+            let x_pixels_per_metre =
+                u32::from_be_bytes(bytes[data_start..data_start + 4].try_into().ok()?);
+            let y_pixels_per_metre =
+                u32::from_be_bytes(bytes[data_start + 4..data_start + 8].try_into().ok()?);
+            if x_pixels_per_metre == 0 || y_pixels_per_metre == 0 {
+                return None;
+            }
+            // PNG stores pixels per metre; macOS logical points are 1/72 inch.
+            let dpi =
+                (f64::from(x_pixels_per_metre) + f64::from(y_pixels_per_metre)) * 0.0254 / 2.0;
+            let ratio = dpi / 72.0;
+            return (ratio.is_finite() && (0.5..=4.0).contains(&ratio)).then_some(ratio as f32);
+        }
+        offset = chunk_end;
+    }
+    None
 }
 
 async fn screenshot() -> Result<ComputerActionResult, String> {
@@ -235,21 +276,38 @@ async fn mac_screenshot_bytes() -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "macos")]
-async fn mac_action(action: &ComputerAction) -> Result<(), String> {
+fn mac_logical_point(viewport: &ComputerViewport, x: f64, y: f64) -> (f64, f64) {
+    let device_pixel_ratio = viewport
+        .device_pixel_ratio
+        .filter(|ratio| ratio.is_finite() && *ratio > 0.0)
+        .map(f64::from)
+        .unwrap_or(1.0);
+    (x / device_pixel_ratio, y / device_pixel_ratio)
+}
+
+#[cfg(target_os = "macos")]
+async fn mac_action(action: &ComputerAction, viewport: &ComputerViewport) -> Result<(), String> {
     let script = match action {
         ComputerAction::LeftClick { x, y } => {
+            let (x, y) = mac_logical_point(viewport, *x, *y);
             format!("tell application \"System Events\" to click at {{{x}, {y}}}")
         }
-        ComputerAction::RightClick { x, y } => format!(
-            "tell application \"System Events\" to key down control\nclick at {{{x}, {y}}}\nkey up control"
-        ),
+        ComputerAction::RightClick { x, y } => {
+            let (x, y) = mac_logical_point(viewport, *x, *y);
+            format!(
+                "tell application \"System Events\" to key down control\nclick at {{{x}, {y}}}\nkey up control"
+            )
+        }
         ComputerAction::DoubleClick { x, y } => {
+            let (x, y) = mac_logical_point(viewport, *x, *y);
             format!("tell application \"System Events\" to click at {{{x}, {y}}} twice")
         }
         ComputerAction::TripleClick { x, y } => {
+            let (x, y) = mac_logical_point(viewport, *x, *y);
             format!("tell application \"System Events\" to click at {{{x}, {y}}} three times")
         }
         ComputerAction::MouseMove { x, y } => {
+            let (x, y) = mac_logical_point(viewport, *x, *y);
             format!("tell application \"System Events\" to move mouse to {{{x}, {y}}}")
         }
         ComputerAction::LeftClickDrag {
@@ -257,9 +315,13 @@ async fn mac_action(action: &ComputerAction) -> Result<(), String> {
             start_y,
             end_x,
             end_y,
-        } => format!(
-            "tell application \"System Events\" to drag from {{{start_x}, {start_y}}} to {{{end_x}, {end_y}}}"
-        ),
+        } => {
+            let (start_x, start_y) = mac_logical_point(viewport, *start_x, *start_y);
+            let (end_x, end_y) = mac_logical_point(viewport, *end_x, *end_y);
+            format!(
+                "tell application \"System Events\" to drag from {{{start_x}, {start_y}}} to {{{end_x}, {end_y}}}"
+            )
+        }
         ComputerAction::Keypress { keys } => format!(
             "tell application \"System Events\" to key code {}",
             mac_key(keys)?
@@ -408,6 +470,7 @@ fn wayland_keysym(key: &str) -> Result<u32, String> {
 
 pub async fn execute_desktop_action(
     action: &ComputerAction,
+    viewport: &ComputerViewport,
     settle_delay_ms: u64,
 ) -> ComputerActionResult {
     let status = probe_os_permissions();
@@ -423,7 +486,7 @@ pub async fn execute_desktop_action(
         });
     }
     #[cfg(target_os = "macos")]
-    let execution = mac_action(action).await;
+    let execution = mac_action(action, viewport).await;
     #[cfg(target_os = "linux")]
     let execution = linux_action(action).await;
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -468,6 +531,42 @@ mod tests {
             png_viewport(&png).map(|size| (size.width, size.height)),
             Some((1920, 1080))
         );
+    }
+
+    #[test]
+    fn reads_retina_scale_from_png_phys_metadata() {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&1920_u32.to_be_bytes());
+        ihdr.extend_from_slice(&1080_u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        append_png_chunk(&mut png, b"IHDR", &ihdr);
+        let mut phys = Vec::new();
+        phys.extend_from_slice(&5669_u32.to_be_bytes());
+        phys.extend_from_slice(&5669_u32.to_be_bytes());
+        phys.push(1);
+        append_png_chunk(&mut png, b"pHYs", &phys);
+
+        let viewport = png_viewport(&png).expect("viewport");
+        assert!((viewport.device_pixel_ratio.unwrap() - 2.0).abs() < 0.001);
+    }
+
+    fn append_png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        png.extend_from_slice(kind);
+        png.extend_from_slice(data);
+        png.extend_from_slice(&[0; 4]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn converts_retina_pixels_to_system_events_points() {
+        let viewport = ComputerViewport {
+            width: 2880,
+            height: 1800,
+            device_pixel_ratio: Some(2.0),
+        };
+        assert_eq!(mac_logical_point(&viewport, 1440.0, 900.0), (720.0, 450.0));
     }
 
     #[cfg(target_os = "linux")]
