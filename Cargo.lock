@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "brazier-agent"
-version = "0.2.10-beta.41"
+version = "0.2.10-beta.42"
 dependencies = [
  "anyhow",
  "base64",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "brazier-formats"
-version = "0.2.10-beta.41"
+version = "0.2.10-beta.42"
 dependencies = [
  "anyhow",
  "tempfile",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "brazier-input-guard"
-version = "0.2.10-beta.41"
+version = "0.2.10-beta.42"
 dependencies = [
  "anyhow",
  "libc",
@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "brazier-protocol"
-version = "0.2.10-beta.41"
+version = "0.2.10-beta.42"
 dependencies = [
  "hex",
  "serde",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "brazier-runtime"
-version = "0.2.10-beta.41"
+version = "0.2.10-beta.42"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "brazier-safety"
-version = "0.2.10-beta.41"
+version = "0.2.10-beta.42"
 dependencies = [
  "anyhow",
  "futures",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "brazier-storage"
-version = "0.2.10-beta.41"
+version = "0.2.10-beta.42"
 dependencies = [
  "anyhow",
  "base64",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "brazierd"
-version = "0.2.10-beta.41"
+version = "0.2.10-beta.42"
 dependencies = [
  "anyhow",
  "async-stream",
