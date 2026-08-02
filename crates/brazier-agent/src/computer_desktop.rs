@@ -15,6 +15,8 @@ use brazier_protocol::computer_types::{
 };
 #[cfg(target_os = "macos")]
 use tokio::process::Command;
+#[cfg(target_os = "macos")]
+use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
 fn binary(name: &str) -> bool {
@@ -178,11 +180,7 @@ fn png_viewport(bytes: &[u8]) -> Option<ComputerViewport> {
 
 async fn screenshot() -> Result<ComputerActionResult, String> {
     #[cfg(target_os = "macos")]
-    let bytes = command(
-        "screencapture",
-        &["-x".into(), "-t".into(), "png".into(), "-".into()],
-    )
-    .await?;
+    let bytes = mac_screenshot_bytes().await?;
     #[cfg(all(target_os = "linux"))]
     let bytes = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         crate::computer_portal::screenshot().await?
@@ -202,6 +200,38 @@ async fn screenshot() -> Result<ComputerActionResult, String> {
         needs_approval: false,
         approval_id: None,
     })
+}
+
+#[cfg(target_os = "macos")]
+async fn mac_screenshot_bytes() -> Result<Vec<u8>, String> {
+    // macOS `screencapture` writes to a file path; unlike the Linux capture
+    // tools, a `-` argument is not stdout. Keep the file private and unique so
+    // concurrent sessions cannot collide, then remove it after reading it.
+    let path = std::env::temp_dir().join(format!(
+        "brazier-computer-use-{}.png",
+        Uuid::new_v4().simple()
+    ));
+    let path_arg = path.to_string_lossy().into_owned();
+    let capture = command(
+        "screencapture",
+        &["-x".into(), "-t".into(), "png".into(), path_arg],
+    )
+    .await;
+    let bytes = match capture {
+        Ok(_) => tokio::fs::read(&path)
+            .await
+            .map_err(|error| format!("read macOS screenshot: {error}")),
+        Err(error) => Err(error),
+    };
+    let _ = tokio::fs::remove_file(&path).await;
+    let bytes = bytes?;
+    if bytes.len() < 8 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return Err(format!(
+            "macOS screencapture did not produce a PNG ({} bytes)",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
 }
 
 #[cfg(target_os = "macos")]
