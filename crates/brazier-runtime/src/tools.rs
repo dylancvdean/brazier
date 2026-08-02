@@ -139,7 +139,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fetch_url",
-                "description": "Fetch a public http(s) URL and return text content. Public PDFs are saved as conversation attachments and read by page; set render_pages for scans/layout when using a vision model. Private and local addresses are blocked.",
+                "description": "Fetch a public http(s) URL and return text content. Public PDFs are saved as conversation attachments and read by page; PDF links returned by MCP web tools use the same path. Set render_pages for scans/layout when using a vision model. Private and local addresses are blocked.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -306,7 +306,7 @@ fn catalog_for_config(js_config: &crate::js_sandbox::JsSandboxConfig) -> Value {
                 "name": "fetch_url",
                 "title": "Web fetch",
                 "description": format!(
-                    "Bounded retrieval of public web pages (max {} KB, {}s timeout). Local and private addresses are blocked.",
+                    "Bounded retrieval of public web pages (max {} KB, {}s timeout); MCP PDF links use the same guarded downloader. Local and private addresses are blocked.",
                     FETCH_MAX_BYTES / 1024,
                     FETCH_TIMEOUT.as_secs()
                 ),
@@ -495,9 +495,9 @@ async fn simple_tool(
 }
 
 /// What a built-in tool produced: text for the model, plus any blobs.
-struct ToolOutput {
-    text: String,
-    media: Vec<ToolMedia>,
+pub(crate) struct ToolOutput {
+    pub(crate) text: String,
+    pub(crate) media: Vec<ToolMedia>,
 }
 
 impl From<String> for ToolOutput {
@@ -1167,12 +1167,17 @@ pub fn html_to_text(html: &str) -> String {
     collapsed.trim().to_owned()
 }
 
-async fn fetch_url(
-    _client: &reqwest::Client,
-    data_dir: &std::path::Path,
-    url: &str,
-    args: &Value,
-) -> anyhow::Result<ToolOutput> {
+struct DownloadedUrl {
+    final_url: reqwest::Url,
+    content_type: String,
+    bytes: Vec<u8>,
+}
+
+fn downloaded_is_pdf(download: &DownloadedUrl) -> bool {
+    download.content_type.contains("application/pdf") || download.bytes.starts_with(b"%PDF-")
+}
+
+async fn download_url(url: &str) -> anyhow::Result<DownloadedUrl> {
     let mut parsed = reqwest::Url::parse(url).context("invalid URL")?;
     anyhow::ensure!(
         matches!(parsed.scheme(), "http" | "https"),
@@ -1237,33 +1242,82 @@ async fn fetch_url(
             if pdf_content { "document" } else { "web fetch" }
         );
     }
-    let is_pdf = pdf_content || bytes.starts_with(b"%PDF-");
-    if is_pdf {
-        let name = parsed
-            .path_segments()
-            .and_then(|mut parts| parts.next_back())
-            .filter(|part| !part.is_empty())
-            .unwrap_or("download.pdf");
-        let blob =
-            crate::blob_store::store_bytes(data_dir, &bytes, "application/pdf", Some(name)).await?;
-        let document = crate::tool_registry::ConversationDocument {
-            sha256: blob.sha256.clone(),
-            mime_type: "application/pdf".to_owned(),
-            name: name.to_owned(),
-        };
-        let mut read_args = args.clone();
-        read_args["document"] = Value::String(blob.sha256.clone());
-        let mut read = doc_read_tool(data_dir, &read_args, &[document]).await?;
-        read.media.push(ToolMedia {
-            sha256: blob.sha256,
-            mime_type: "application/pdf".into(),
-            name: Some(name.to_owned()),
-        });
-        return Ok(ToolOutput {
-            text: format!("Fetched and attached PDF {name}.\n\n{}", read.text),
-            media: read.media,
-        });
+    Ok(DownloadedUrl {
+        final_url: parsed,
+        content_type,
+        bytes,
+    })
+}
+
+async fn ingest_pdf(
+    data_dir: &std::path::Path,
+    download: DownloadedUrl,
+    args: &Value,
+) -> anyhow::Result<ToolOutput> {
+    anyhow::ensure!(downloaded_is_pdf(&download), "response is not a PDF");
+    let name = download
+        .final_url
+        .path_segments()
+        .and_then(|mut parts| parts.next_back())
+        .filter(|part| !part.is_empty())
+        .unwrap_or("download.pdf");
+    ingest_pdf_bytes(data_dir, &download.bytes, name, args).await
+}
+
+pub(crate) async fn ingest_pdf_bytes(
+    data_dir: &std::path::Path,
+    bytes: &[u8],
+    name: &str,
+    args: &Value,
+) -> anyhow::Result<ToolOutput> {
+    anyhow::ensure!(bytes.starts_with(b"%PDF-"), "resource is not a PDF");
+    let blob =
+        crate::blob_store::store_bytes(data_dir, bytes, "application/pdf", Some(name)).await?;
+    let document = crate::tool_registry::ConversationDocument {
+        sha256: blob.sha256.clone(),
+        mime_type: "application/pdf".to_owned(),
+        name: name.to_owned(),
+    };
+    let mut read_args = args.clone();
+    read_args["document"] = Value::String(blob.sha256.clone());
+    let mut read = doc_read_tool(data_dir, &read_args, &[document]).await?;
+    read.media.push(ToolMedia {
+        sha256: blob.sha256,
+        mime_type: "application/pdf".into(),
+        name: Some(name.to_owned()),
+    });
+    Ok(ToolOutput {
+        text: format!("Fetched and attached PDF {name}.\n\n{}", read.text),
+        media: read.media,
+    })
+}
+
+/// Fetch a URL surfaced by another tool, attaching it only when it is a PDF.
+/// The caller can keep the original tool's text when this returns `None`.
+pub(crate) async fn fetch_pdf_candidate(
+    data_dir: &std::path::Path,
+    url: &str,
+) -> anyhow::Result<Option<(String, Vec<ToolMedia>)>> {
+    let download = download_url(url).await?;
+    if !downloaded_is_pdf(&download) {
+        return Ok(None);
     }
+    let output = ingest_pdf(data_dir, download, &json!({})).await?;
+    Ok(Some((output.text, output.media)))
+}
+
+async fn fetch_url(
+    _client: &reqwest::Client,
+    data_dir: &std::path::Path,
+    url: &str,
+    args: &Value,
+) -> anyhow::Result<ToolOutput> {
+    let download = download_url(url).await?;
+    if downloaded_is_pdf(&download) {
+        return ingest_pdf(data_dir, download, args).await;
+    }
+    let content_type = download.content_type;
+    let bytes = download.bytes;
     anyhow::ensure!(
         content_type.is_empty()
             || content_type.contains("text/")

@@ -2593,7 +2593,12 @@ async fn generated_media_context_messages(
         .input_modalities
         .iter()
         .any(|modality| modality == "image");
-    let from_document = invocation.name == "doc_read" || invocation.name == "fetch_url";
+    let from_document = invocation.name == "doc_read"
+        || invocation.name == "fetch_url"
+        || invocation
+            .media
+            .iter()
+            .any(|media| media.mime_type == "application/pdf");
     if !vision && !from_document {
         return None;
     }

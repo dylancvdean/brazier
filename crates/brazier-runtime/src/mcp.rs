@@ -280,7 +280,7 @@ impl JsonRpcClient {
         Ok(entries)
     }
 
-    async fn call_tool(&mut self, name: &str, arguments: Value) -> anyhow::Result<String> {
+    async fn call_tool(&mut self, name: &str, arguments: Value) -> anyhow::Result<Value> {
         let result = self
             .request(
                 "tools/call",
@@ -290,7 +290,7 @@ impl JsonRpcClient {
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             anyhow::bail!("{}", content_to_text(&result));
         }
-        Ok(content_to_text(&result))
+        Ok(result)
     }
 }
 
@@ -307,7 +307,22 @@ fn content_to_text(result: &Value) -> String {
                 }
             }
             Some(other) => {
-                parts.push(format!("[{other} content omitted]"));
+                if other == "resource_link" {
+                    let name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("resource");
+                    let uri = item.get("uri").and_then(Value::as_str).unwrap_or("");
+                    parts.push(format!("[{name}] {uri}"));
+                } else if other == "resource" {
+                    let uri = item
+                        .pointer("/resource/uri")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    parts.push(format!("[resource] {uri}"));
+                } else {
+                    parts.push(format!("[{other} content omitted]"));
+                }
             }
             None => {}
         }
@@ -317,6 +332,94 @@ fn content_to_text(result: &Value) -> String {
     } else {
         parts.join("\n")
     }
+}
+
+const MAX_AUTOMATIC_PDF_CANDIDATES: usize = 3;
+
+fn pdf_url_candidate(value: &str) -> Option<String> {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return None;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let path = url.path().to_ascii_lowercase();
+    if path.ends_with(".pdf") {
+        return Some(value.to_owned());
+    }
+    // Search providers sometimes wrap the real result in a redirect URL such
+    // as `...?uddg=https%3A%2F%2Fhost%2Fpaper.pdf`.
+    url.query_pairs()
+        .map(|(_, value)| value.into_owned())
+        .find_map(|value| pdf_url_candidate(&value))
+        .or_else(|| {
+            url.query()
+                .is_some_and(|query| query.to_ascii_lowercase().contains(".pdf"))
+                .then_some(value.to_owned())
+        })
+}
+
+fn candidate_urls(text: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for token in text.split_whitespace() {
+        let mut rest = token;
+        while let Some(index) = rest.find("http") {
+            let candidate = rest[index..].trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '"' | '\'' | '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' | ',' | ';' | '.'
+                )
+            });
+            if let Some(candidate) = pdf_url_candidate(candidate)
+                && !candidates.iter().any(|url| url == &candidate)
+            {
+                candidates.push(candidate);
+            }
+            if candidates.len() == MAX_AUTOMATIC_PDF_CANDIDATES {
+                break;
+            }
+            rest = &rest[index + 4..];
+        }
+        if candidates.len() == MAX_AUTOMATIC_PDF_CANDIDATES {
+            break;
+        }
+    }
+    candidates
+}
+
+fn embedded_pdf_resources(result: &Value) -> Vec<(String, Vec<u8>)> {
+    let Some(content) = result.get("content").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut resources = Vec::new();
+    for item in content {
+        let Some(resource) = item.get("resource") else {
+            continue;
+        };
+        if resource
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .is_none_or(|mime| mime != "application/pdf")
+        {
+            continue;
+        }
+        let Some(blob) = resource.get("blob").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, blob)
+        else {
+            continue;
+        };
+        let name = resource
+            .get("uri")
+            .and_then(Value::as_str)
+            .and_then(|uri| uri.rsplit('/').next())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("mcp-resource.pdf")
+            .to_owned();
+        resources.push((name, bytes));
+    }
+    resources
 }
 
 pub async fn refresh_tools(data_dir: &Path, server_id: &str) -> anyhow::Result<Vec<McpToolEntry>> {
@@ -378,14 +481,45 @@ pub async fn call_tool(
         serde_json::from_str(arguments).unwrap_or_else(|_| json!({ "input": arguments }));
     match JsonRpcClient::connect(server).await {
         Ok(mut client) => match client.call_tool(tool_name, parsed_args).await {
-            Ok(output) => ToolInvocation {
-                call_id,
-                name: openai_tool_name(server_id, tool_name),
-                arguments: arguments.to_owned(),
-                output,
-                is_error: false,
-                media: Vec::new(),
-            },
+            Ok(result) => {
+                let mut output = content_to_text(&result);
+                let mut media = Vec::new();
+                let serialized_result = serde_json::to_string(&result).unwrap_or_default();
+                for url in candidate_urls(&format!("{output} {serialized_result}")) {
+                    match crate::tools::fetch_pdf_candidate(data_dir, &url).await {
+                        Ok(Some((document_output, document_media))) => {
+                            output.push_str(&format!("\n\n[MCP PDF handoff]\n{document_output}"));
+                            media.extend(document_media);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            output.push_str(&format!(
+                                "\n\n[PDF handoff failed for {url}: {error:#}]"
+                            ));
+                        }
+                    }
+                }
+                for (name, bytes) in embedded_pdf_resources(&result) {
+                    match crate::tools::ingest_pdf_bytes(data_dir, &bytes, &name, &json!({})).await
+                    {
+                        Ok(document) => {
+                            output.push_str(&format!("\n\n[MCP PDF resource]\n{}", document.text));
+                            media.extend(document.media);
+                        }
+                        Err(error) => output.push_str(&format!(
+                            "\n\n[PDF resource handoff failed for {name}: {error:#}]"
+                        )),
+                    }
+                }
+                ToolInvocation {
+                    call_id,
+                    name: openai_tool_name(server_id, tool_name),
+                    arguments: arguments.to_owned(),
+                    output,
+                    is_error: false,
+                    media,
+                }
+            }
             Err(error) => ToolInvocation {
                 call_id,
                 name: openai_tool_name(server_id, tool_name),
@@ -418,6 +552,60 @@ mod tests {
         assert_eq!(
             parse_tool_name(&full),
             Some(("filesystem".into(), "read_file".into()))
+        );
+    }
+
+    #[test]
+    fn extracts_pdf_urls_from_plain_and_markdown_text() {
+        let urls = candidate_urls(
+            "See https://example.com/paper.pdf, [the report](https://example.com/report.PDF).",
+        );
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/paper.pdf".to_owned(),
+                "https://example.com/report.PDF".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn extracts_pdf_url_from_a_search_redirect() {
+        let urls =
+            candidate_urls("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpaper.pdf");
+        assert_eq!(urls, vec!["https://example.com/paper.pdf"]);
+    }
+
+    #[test]
+    fn preserves_mcp_resource_links_as_text() {
+        let result = json!({
+            "content": [{
+                "type": "resource_link",
+                "name": "paper",
+                "uri": "https://example.com/paper.pdf"
+            }]
+        });
+        let text = content_to_text(&result);
+        assert!(text.contains("paper"));
+        assert!(text.contains("paper.pdf"));
+    }
+
+    #[test]
+    fn finds_embedded_pdf_resources() {
+        let result = json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "https://example.com/paper.pdf",
+                    "mimeType": "application/pdf",
+                    "blob": "JVBERi0xLjQ="
+                }
+            }]
+        });
+        let resources = embedded_pdf_resources(&result);
+        assert_eq!(
+            resources,
+            vec![("paper.pdf".to_owned(), b"%PDF-1.4".to_vec())]
         );
     }
 
