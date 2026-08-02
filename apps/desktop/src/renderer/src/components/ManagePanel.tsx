@@ -97,8 +97,11 @@ import {
   refreshMcpServer,
   updateMcpServer,
   fetchComputerPermissions,
+  fetchComputerUsePreference,
   requestComputerPermissions,
+  saveComputerUsePreference,
   fetchWorkspacePreference,
+  type ComputerUsePreference,
   type OsPermissionStatus,
   type SdcppBundle,
   type SdcppProposal,
@@ -832,6 +835,8 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [permissions, setPermissions] = useState<OsPermissionStatus | null>(null)
   const [requestingComputerPermissions, setRequestingComputerPermissions] = useState(false)
+  const [computerPreference, setComputerPreference] = useState<ComputerUsePreference | null>(null)
+  const [savingComputerPreference, setSavingComputerPreference] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -870,6 +875,14 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
       })
       .catch(() => {
         if (!cancelled) setPermissions(null)
+      })
+
+    void fetchComputerUsePreference()
+      .then((preference) => {
+        if (!cancelled) setComputerPreference(preference)
+      })
+      .catch((cause) => {
+        if (!cancelled) props.onError(errorText(cause))
       })
 
     return () => {
@@ -967,6 +980,22 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
     }
   }
 
+  async function saveActionSettleDelay(milliseconds: number): Promise<void> {
+    const action_settle_delay_ms = Math.max(0, Math.min(10_000, Math.round(milliseconds)))
+    const previous = computerPreference
+    setComputerPreference({ action_settle_delay_ms })
+    setSavingComputerPreference(true)
+    props.onError(null)
+    try {
+      setComputerPreference(await saveComputerUsePreference({ action_settle_delay_ms }))
+    } catch (cause) {
+      setComputerPreference(previous)
+      props.onError(errorText(cause))
+    } finally {
+      setSavingComputerPreference(false)
+    }
+  }
+
   return (
     <section>
       <header className="manage-heading">
@@ -1060,6 +1089,32 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
           Desktop capture, input injection, the always-visible safety overlay, and the global
           emergency shortcut are all required. Browser target does not need these OS grants.
         </p>
+        <label className="model-field" style={{ maxWidth: 360, marginBottom: 16 }}>
+          <span>Action settle delay (milliseconds)</span>
+          <input
+            type="number"
+            min={0}
+            max={10_000}
+            step={50}
+            value={computerPreference?.action_settle_delay_ms ?? 750}
+            disabled={!computerPreference || savingComputerPreference}
+            onChange={(event) =>
+              setComputerPreference({
+                action_settle_delay_ms: Number(event.target.value)
+              })
+            }
+            onBlur={(event) => void saveActionSettleDelay(Number(event.target.value))}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.currentTarget.blur()
+              }
+            }}
+          />
+          <small>
+            Wait after an input action before capturing the next screenshot. Explicit wait actions
+            are not delayed again.
+          </small>
+        </label>
         {permissions ? (
           <dl className="customization-permissions">
             <div>

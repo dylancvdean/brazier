@@ -99,7 +99,11 @@ impl CdpBrowserSession {
         let _ = std::fs::remove_dir_all(&self.profile_dir);
     }
 
-    async fn execute(&mut self, action: &ComputerAction) -> Result<ComputerActionResult> {
+    async fn execute(
+        &mut self,
+        action: &ComputerAction,
+        settle_delay_ms: u64,
+    ) -> Result<ComputerActionResult> {
         let ws_url = self.page_websocket().await?;
         let (mut socket, _) = timeout(Duration::from_secs(5), connect_async(&ws_url))
             .await
@@ -246,6 +250,13 @@ impl CdpBrowserSession {
                     .await;
             }
         };
+        if !matches!(
+            action,
+            ComputerAction::Screenshot | ComputerAction::Wait { .. }
+        ) && settle_delay_ms > 0
+        {
+            sleep(Duration::from_millis(settle_delay_ms)).await;
+        }
         self.result(
             ComputerActionStatus::Ok,
             Some(message),
@@ -652,8 +663,18 @@ impl BrowserSessionRegistry {
         let (url, title) = session.metadata().await?;
         Ok((session.viewport.clone(), url, title))
     }
-    pub async fn execute(&self, id: &str, action: &ComputerAction) -> Result<ComputerActionResult> {
-        self.session(id).await?.lock().await.execute(action).await
+    pub async fn execute(
+        &self,
+        id: &str,
+        action: &ComputerAction,
+        settle_delay_ms: u64,
+    ) -> Result<ComputerActionResult> {
+        self.session(id)
+            .await?
+            .lock()
+            .await
+            .execute(action, settle_delay_ms)
+            .await
     }
 }
 pub type SharedBrowserRegistry = Arc<BrowserSessionRegistry>;
@@ -729,14 +750,14 @@ mod tests {
         let wait_registry = Arc::clone(&registry);
         let wait = tokio::spawn(async move {
             wait_registry
-                .execute(&first, &ComputerAction::Wait { milliseconds: 400 })
+                .execute(&first, &ComputerAction::Wait { milliseconds: 400 }, 0)
                 .await
                 .unwrap();
         });
         sleep(Duration::from_millis(30)).await;
         let start = std::time::Instant::now();
         registry
-            .execute(&second, &ComputerAction::Screenshot)
+            .execute(&second, &ComputerAction::Screenshot, 0)
             .await
             .unwrap();
         assert!(start.elapsed() < Duration::from_millis(300));
@@ -778,12 +799,13 @@ mod tests {
                 &ComputerAction::VisitUrl {
                     url: format!("http://{address}"),
                 },
+                0,
             )
             .await
             .unwrap();
         assert_eq!(navigated.title.as_deref(), Some("ready"));
         registry
-            .execute(&id, &ComputerAction::LeftClick { x: 20.0, y: 20.0 })
+            .execute(&id, &ComputerAction::LeftClick { x: 20.0, y: 20.0 }, 0)
             .await
             .unwrap();
         let typed = registry
@@ -792,6 +814,7 @@ mod tests {
                 &ComputerAction::Type {
                     text: "hello".into(),
                 },
+                0,
             )
             .await
             .unwrap();
@@ -802,6 +825,7 @@ mod tests {
                 &ComputerAction::Keypress {
                     keys: vec!["CTRL".into(), "a".into()],
                 },
+                0,
             )
             .await
             .unwrap();
@@ -811,12 +835,13 @@ mod tests {
                 &ComputerAction::Type {
                     text: "replaced".into(),
                 },
+                0,
             )
             .await
             .unwrap();
         assert_eq!(replaced.title.as_deref(), Some("typed:replaced"));
         let clicked = registry
-            .execute(&id, &ComputerAction::LeftClick { x: 25.0, y: 75.0 })
+            .execute(&id, &ComputerAction::LeftClick { x: 25.0, y: 75.0 }, 0)
             .await
             .unwrap();
         assert_eq!(clicked.title.as_deref(), Some("clicked"));

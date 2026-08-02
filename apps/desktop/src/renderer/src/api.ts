@@ -80,6 +80,23 @@ export async function requestComputerPermissions(): Promise<OsPermissionStatus> 
   return request('/api/v1/computer/permissions', { method: 'POST' })
 }
 
+export type ComputerUsePreference = {
+  action_settle_delay_ms: number
+}
+
+export function fetchComputerUsePreference(): Promise<ComputerUsePreference> {
+  return request('/api/v1/preferences/computer')
+}
+
+export function saveComputerUsePreference(
+  preference: ComputerUsePreference
+): Promise<ComputerUsePreference> {
+  return request('/api/v1/preferences/computer', {
+    method: 'PUT',
+    body: JSON.stringify(preference)
+  })
+}
+
 export type ComputerViewport = {
   width: number
   height: number

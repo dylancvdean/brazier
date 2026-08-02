@@ -139,6 +139,17 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&active_downloads),
         Arc::clone(&runtime),
     );
+    let computer_broker =
+        brazierd::computer_exec::ComputerBroker::open(data_dir.join("computer_sessions.json"))
+            .await?;
+    let computer_preference = db
+        .application_preference(brazierd::api::COMPUTER_PREFERENCE_KEY)
+        .await?;
+    let action_settle_delay_ms = computer_preference
+        .as_ref()
+        .and_then(|value| value["action_settle_delay_ms"].as_u64())
+        .unwrap_or(brazierd::computer_exec::DEFAULT_ACTION_SETTLE_DELAY_MS);
+    computer_broker.set_action_settle_delay_ms(action_settle_delay_ms);
     let state = AppState {
         db,
         runtime: Arc::clone(&runtime),
@@ -151,10 +162,7 @@ async fn main() -> anyhow::Result<()> {
         download_queue,
         runtimes_cache: Arc::new(Mutex::new(None)),
         agent_broker: Arc::new(brazierd::agent_exec::AgentBroker::new()),
-        computer_broker: Arc::new(
-            brazierd::computer_exec::ComputerBroker::open(data_dir.join("computer_sessions.json"))
-                .await?,
-        ),
+        computer_broker: Arc::new(computer_broker),
     };
 
     let port = args.port.unwrap_or(if args.service {

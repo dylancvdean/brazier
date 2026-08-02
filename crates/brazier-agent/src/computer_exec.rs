@@ -7,7 +7,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, bail};
@@ -73,7 +76,11 @@ pub struct ComputerBroker {
     /// Serializes durable snapshots. State is copied while this is held, then
     /// written after releasing the session mutex; snapshots cannot regress.
     persistence: Mutex<()>,
+    action_settle_delay_ms: AtomicU64,
 }
+
+pub const DEFAULT_ACTION_SETTLE_DELAY_MS: u64 = 750;
+pub const MAX_ACTION_SETTLE_DELAY_MS: u64 = 10_000;
 
 impl ComputerBroker {
     /// Ephemeral broker intended for unit tests. Daemon code must use
@@ -133,7 +140,18 @@ impl ComputerBroker {
             approvals_changed: Arc::new(Notify::new()),
             persist_path,
             persistence: Mutex::new(()),
+            action_settle_delay_ms: AtomicU64::new(DEFAULT_ACTION_SETTLE_DELAY_MS),
         }
+    }
+    pub fn action_settle_delay_ms(&self) -> u64 {
+        self.action_settle_delay_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn set_action_settle_delay_ms(&self, milliseconds: u64) {
+        self.action_settle_delay_ms.store(
+            milliseconds.min(MAX_ACTION_SETTLE_DELAY_MS),
+            Ordering::Relaxed,
+        );
     }
     pub fn os_permissions(&self) -> OsPermissionStatus {
         computer_desktop::probe_os_permissions()
@@ -554,12 +572,18 @@ impl ComputerBroker {
             }),
             _ => match target {
                 ComputerTarget::Browser => match self.ensure_browser(&request.session_id).await {
-                    Ok(id) => self.browsers.execute(&id, &driver_action).await,
+                    Ok(id) => {
+                        self.browsers
+                            .execute(&id, &driver_action, self.action_settle_delay_ms())
+                            .await
+                    }
                     Err(error) => Err(error),
                 },
-                ComputerTarget::Desktop => {
-                    Ok(computer_desktop::execute_desktop_action(&driver_action).await)
-                }
+                ComputerTarget::Desktop => Ok(computer_desktop::execute_desktop_action(
+                    &driver_action,
+                    self.action_settle_delay_ms(),
+                )
+                .await),
             },
         };
         match executed {
@@ -691,6 +715,17 @@ fn now_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_settle_delay_defaults_and_is_bounded() {
+        let broker = ComputerBroker::new();
+        assert_eq!(broker.action_settle_delay_ms(), 750);
+        broker.set_action_settle_delay_ms(1_250);
+        assert_eq!(broker.action_settle_delay_ms(), 1_250);
+        broker.set_action_settle_delay_ms(MAX_ACTION_SETTLE_DELAY_MS + 1);
+        assert_eq!(broker.action_settle_delay_ms(), MAX_ACTION_SETTLE_DELAY_MS);
+    }
+
     #[tokio::test]
     async fn persistent_session_keeps_steps_memories_and_pending_approvals() {
         let dir = tempfile::tempdir().unwrap();

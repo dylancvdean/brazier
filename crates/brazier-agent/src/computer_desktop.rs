@@ -376,7 +376,10 @@ fn wayland_keysym(key: &str) -> Result<u32, String> {
     }
 }
 
-pub async fn execute_desktop_action(action: &ComputerAction) -> ComputerActionResult {
+pub async fn execute_desktop_action(
+    action: &ComputerAction,
+    settle_delay_ms: u64,
+) -> ComputerActionResult {
     let status = probe_os_permissions();
     if !desktop_permitted(&status) {
         return result(ComputerActionStatus::Refused, status.detail);
@@ -396,12 +399,17 @@ pub async fn execute_desktop_action(action: &ComputerAction) -> ComputerActionRe
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let execution: Result<(), String> = Err("unsupported platform".into());
     match execution {
-        Ok(()) => screenshot().await.unwrap_or_else(|e| {
-            result(
-                ComputerActionStatus::Error,
-                Some(format!("Action succeeded but screenshot failed: {e}")),
-            )
-        }),
+        Ok(()) => {
+            if !matches!(action, ComputerAction::Wait { .. }) && settle_delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(settle_delay_ms)).await;
+            }
+            screenshot().await.unwrap_or_else(|e| {
+                result(
+                    ComputerActionStatus::Error,
+                    Some(format!("Action succeeded but screenshot failed: {e}")),
+                )
+            })
+        }
         Err(e) => result(
             ComputerActionStatus::Error,
             Some(format!("Desktop {} failed: {e}", action.kind())),

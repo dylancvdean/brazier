@@ -317,6 +317,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             get(workspace_preference).put(update_workspace_preference),
         )
         .route(
+            "/api/v1/preferences/computer",
+            get(computer_preference).put(update_computer_preference),
+        )
+        .route(
             "/api/v1/computer/permissions",
             get(computer_os_permissions).post(request_computer_os_permissions),
         )
@@ -1541,6 +1545,61 @@ async fn update_workspace_preference(
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(json!({ "modes": modes })))
+}
+
+pub const COMPUTER_PREFERENCE_KEY: &str = "computer";
+
+fn computer_settle_delay(value: Option<&Value>) -> u64 {
+    value
+        .and_then(|value| value["action_settle_delay_ms"].as_u64())
+        .unwrap_or(crate::computer_exec::DEFAULT_ACTION_SETTLE_DELAY_MS)
+        .min(crate::computer_exec::MAX_ACTION_SETTLE_DELAY_MS)
+}
+
+async fn computer_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let stored = state
+        .db
+        .application_preference(COMPUTER_PREFERENCE_KEY)
+        .await
+        .map_err(ApiError::internal)?;
+    let action_settle_delay_ms = computer_settle_delay(stored.as_ref());
+    state
+        .computer_broker
+        .set_action_settle_delay_ms(action_settle_delay_ms);
+    Ok(Json(
+        json!({ "action_settle_delay_ms": action_settle_delay_ms }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateComputerPreference {
+    action_settle_delay_ms: u64,
+}
+
+async fn update_computer_preference(
+    State(state): State<AppState>,
+    Json(preference): Json<UpdateComputerPreference>,
+) -> ApiResult<Json<Value>> {
+    if preference.action_settle_delay_ms > crate::computer_exec::MAX_ACTION_SETTLE_DELAY_MS {
+        return Err(ApiError::bad_request(format!(
+            "Computer action settle delay must be between 0 and {} milliseconds.",
+            crate::computer_exec::MAX_ACTION_SETTLE_DELAY_MS
+        )));
+    }
+    state
+        .db
+        .set_application_preference(
+            COMPUTER_PREFERENCE_KEY,
+            &json!({ "action_settle_delay_ms": preference.action_settle_delay_ms }),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    state
+        .computer_broker
+        .set_action_settle_delay_ms(preference.action_settle_delay_ms);
+    Ok(Json(
+        json!({ "action_settle_delay_ms": preference.action_settle_delay_ms }),
+    ))
 }
 
 async fn computer_os_permissions(State(state): State<AppState>) -> Json<Value> {
