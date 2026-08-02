@@ -20,6 +20,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } | null
     throw new Error(payload?.error?.message ?? `Request failed with status ${response.status}.`)
   }
+  // Successful commands such as stop and safety-authority intentionally use
+  // 204 No Content. Calling Response.json() for those responses throws
+  // "Unexpected end of JSON input" and can make a completed control-plane
+  // operation look like an inference failure.
+  if (response.status === 204 || response.status === 205) return undefined as T
   return response.json() as Promise<T>
 }
 

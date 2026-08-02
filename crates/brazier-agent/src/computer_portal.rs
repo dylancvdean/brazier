@@ -197,7 +197,7 @@ pub async fn screenshot() -> Result<Vec<u8>, String> {
         .map_err(|e| format!("read portal screenshot: {e}"))
 }
 
-async fn create_session() -> Result<PortalSession, String> {
+async fn create_session_attempt(restore_token: Option<&str>) -> Result<PortalSession, String> {
     let connection = portal_connection().await?;
     let remote = proxy(&connection, ROOT, "org.freedesktop.portal.RemoteDesktop").await?;
     let session_token = token("brazier_session");
@@ -223,7 +223,9 @@ async fn create_session() -> Result<PortalSession, String> {
             request.as_str()
         ));
     }
-    let mut results = response_from(responses).await?;
+    let mut results = response_from(responses)
+        .await
+        .map_err(|error| format!("CreateSession: {error}"))?;
     // The portal specification preserves this result as a string for backward
     // compatibility, even though its content is an object path.
     let path: String = value(&mut results, "session_handle")?;
@@ -244,12 +246,14 @@ async fn create_session() -> Result<PortalSession, String> {
     if request.as_str() != expected_request_path(&connection, &source_token)? {
         return Err("desktop portal returned an unexpected SelectSources handle".into());
     }
-    response_from(source_response).await?;
+    response_from(source_response)
+        .await
+        .map_err(|error| format!("SelectSources: {error}"))?;
 
     let (mut device_options, device_token) = request_options();
     device_options.insert("types".into(), OwnedValue::from(3_u32));
     device_options.insert("persist_mode".into(), OwnedValue::from(2_u32));
-    if let Some(restore_token) = load_restore_token() {
+    if let Some(restore_token) = restore_token {
         device_options.insert("restore_token".into(), string_value(&restore_token));
     }
     let device_response = response_listener(&connection, &device_token).await?;
@@ -260,7 +264,9 @@ async fn create_session() -> Result<PortalSession, String> {
     if request.as_str() != expected_request_path(&connection, &device_token)? {
         return Err("desktop portal returned an unexpected SelectDevices handle".into());
     }
-    response_from(device_response).await?;
+    response_from(device_response)
+        .await
+        .map_err(|error| format!("SelectDevices: {error}"))?;
     let (start_options, start_token) = request_options();
     let start_response = response_listener(&connection, &start_token).await?;
     let request: OwnedObjectPath = remote
@@ -270,7 +276,9 @@ async fn create_session() -> Result<PortalSession, String> {
     if request.as_str() != expected_request_path(&connection, &start_token)? {
         return Err("desktop portal returned an unexpected Start handle".into());
     }
-    let mut results = response_from(start_response).await?;
+    let mut results = response_from(start_response)
+        .await
+        .map_err(|error| format!("Start: {error}"))?;
     if let Ok(restore_token) = value::<String>(&mut results, "restore_token") {
         save_restore_token(&restore_token);
     }
@@ -284,6 +292,31 @@ async fn create_session() -> Result<PortalSession, String> {
         path,
         stream,
     })
+}
+
+async fn create_session() -> Result<PortalSession, String> {
+    let restore_token = load_restore_token();
+    let first = create_session_attempt(restore_token.as_deref()).await;
+    let Err(restored_error) = first else {
+        return first;
+    };
+
+    // KDE can retain a restore token after the corresponding permission-store
+    // entry has disappeared. Some portal versions then leave SelectDevices or
+    // Start unanswered instead of rejecting the stale token. Retry once without
+    // restoration so the compositor can present a fresh consent dialog. The
+    // existing token is deliberately kept until a successful Start replaces it.
+    if restore_token.is_some()
+        && (restored_error.starts_with("SelectDevices:") || restored_error.starts_with("Start:"))
+    {
+        return create_session_attempt(None).await.map_err(|fresh_error| {
+            format!(
+                "Restoring the saved Wayland permission failed ({restored_error}). Retrying with a fresh consent request also failed ({fresh_error})"
+            )
+        });
+    }
+
+    Err(restored_error)
 }
 
 async fn with_session<T>(operation: impl FnOnce(&PortalSession) -> T) -> Result<T, String> {
