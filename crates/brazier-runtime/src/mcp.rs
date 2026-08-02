@@ -17,7 +17,7 @@ use tokio::{
     process::Command,
 };
 
-use crate::tools::ToolInvocation;
+use crate::{toolchain_hints::resolve_command, tools::ToolInvocation};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const TOOL_PREFIX: &str = "mcp/";
@@ -159,7 +159,15 @@ struct JsonRpcClient {
 
 impl JsonRpcClient {
     async fn connect(config: &McpServerConfig) -> anyhow::Result<Self> {
-        let mut command = Command::new(&config.command);
+        // GUI-launched Electron apps do not inherit the user's shell PATH.
+        // Resolve named commands through the runtime's user-scoped locations
+        // so Homebrew-installed MCP launchers such as `uvx` work on macOS.
+        let executable = if Path::new(&config.command).is_absolute() {
+            PathBuf::from(&config.command)
+        } else {
+            resolve_command(&config.command).unwrap_or_else(|| PathBuf::from(&config.command))
+        };
+        let mut command = Command::new(executable);
         command
             .args(&config.args)
             .envs(&config.env)
