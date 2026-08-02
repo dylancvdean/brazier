@@ -340,6 +340,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/computer/sessions/{id}/stop",
             post(stop_computer_session),
         )
+        .route(
+            "/api/v1/computer/sessions/{id}/safety-authority",
+            post(set_computer_safety_authority),
+        )
         .route("/api/v1/computer/exec", post(computer_exec_action))
         .route(
             "/api/v1/computer/approvals/{id}",
@@ -1543,9 +1547,7 @@ async fn computer_os_permissions(State(state): State<AppState>) -> Json<Value> {
     Json(json!(state.computer_broker.os_permissions()))
 }
 
-async fn request_computer_os_permissions(
-    State(state): State<AppState>,
-) -> ApiResult<Json<Value>> {
+async fn request_computer_os_permissions(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let status = state
         .computer_broker
         .request_os_permissions()
@@ -1624,7 +1626,29 @@ async fn stop_computer_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    state.computer_broker.stop(&id).await.map_err(ApiError::not_found)?;
+    state
+        .computer_broker
+        .stop(&id)
+        .await
+        .map_err(ApiError::not_found)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct ComputerSafetyAuthority {
+    active: bool,
+}
+
+async fn set_computer_safety_authority(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ComputerSafetyAuthority>,
+) -> ApiResult<StatusCode> {
+    state
+        .computer_broker
+        .set_desktop_authority(&id, body.active)
+        .await
+        .map_err(ApiError::bad_request)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

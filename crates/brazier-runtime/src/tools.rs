@@ -411,8 +411,12 @@ pub async fn execute_with_context(
         },
         "fetch_url" => match (data_dir, parsed.get("url").and_then(Value::as_str)) {
             (Some(dir), Some(url)) => fetch_url(client, dir, url, &parsed).await,
-            (None, _) => Err(anyhow::anyhow!("fetch_url requires daemon data directory context")),
-            (_, None) => Err(anyhow::anyhow!("fetch_url requires a `url` string argument")),
+            (None, _) => Err(anyhow::anyhow!(
+                "fetch_url requires daemon data directory context"
+            )),
+            (_, None) => Err(anyhow::anyhow!(
+                "fetch_url requires a `url` string argument"
+            )),
         },
         other => simple_tool(client, data_dir, other, &parsed)
             .await
@@ -1202,7 +1206,10 @@ async fn fetch_url(
             .and_then(|value| value.to_str().ok())
             .context("redirect response has no valid Location header")?;
         parsed = parsed.join(next).context("invalid redirect URL")?;
-        anyhow::ensure!(matches!(parsed.scheme(), "http" | "https"), "redirected to unsupported URL scheme");
+        anyhow::ensure!(
+            matches!(parsed.scheme(), "http" | "https"),
+            "redirected to unsupported URL scheme"
+        );
     };
     let status = response.status();
     anyhow::ensure!(status.is_success(), "server returned {status}");
@@ -1224,7 +1231,11 @@ async fn fetch_url(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("read response body")?;
         bytes.extend_from_slice(&chunk);
-        anyhow::ensure!(bytes.len() <= byte_limit, "response exceeds the {} limit", if pdf_content { "document" } else { "web fetch" });
+        anyhow::ensure!(
+            bytes.len() <= byte_limit,
+            "response exceeds the {} limit",
+            if pdf_content { "document" } else { "web fetch" }
+        );
     }
     let is_pdf = pdf_content || bytes.starts_with(b"%PDF-");
     if is_pdf {
@@ -1233,7 +1244,8 @@ async fn fetch_url(
             .and_then(|mut parts| parts.next_back())
             .filter(|part| !part.is_empty())
             .unwrap_or("download.pdf");
-        let blob = crate::blob_store::store_bytes(data_dir, &bytes, "application/pdf", Some(name)).await?;
+        let blob =
+            crate::blob_store::store_bytes(data_dir, &bytes, "application/pdf", Some(name)).await?;
         let document = crate::tool_registry::ConversationDocument {
             sha256: blob.sha256.clone(),
             mime_type: "application/pdf".to_owned(),

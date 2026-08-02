@@ -1,0 +1,20 @@
+[package]
+name = "brazier-safety"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fail-closed native safety indicator and Escape hatch for Brazier Computer Use"
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+tempfile = "3.20"
+tokio.workspace = true
+uuid.workspace = true
+x11rb.workspace = true
+zbus.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }

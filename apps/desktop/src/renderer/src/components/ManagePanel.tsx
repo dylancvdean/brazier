@@ -136,6 +136,7 @@ type DiscoverEngine =
   | 'streaming-asr'
   | 'stable-diffusion.cpp'
   | 'personaplex'
+type InputGuardStatus = Awaited<ReturnType<Window['brazier']['computer']['inputGuardStatus']>>
 type BuildEngine =
   | 'llama.cpp'
   | 'mlx-lm'
@@ -720,6 +721,105 @@ function permissionStateLabel(state: OsPermissionStatus['screen_capture']): stri
   }
 }
 
+function InputGuardSetup(props: { onError: (message: string | null) => void }): React.JSX.Element {
+  const [status, setStatus] = useState<InputGuardStatus | null>(null)
+  const [installing, setInstalling] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void window.brazier.computer.inputGuardStatus()
+      .then((next) => {
+        if (!cancelled) setStatus(next)
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setStatus({
+            supported: true,
+            installed: false,
+            secure: false,
+            ready: false,
+            current: false,
+            version: null,
+            detail: errorText(cause)
+          })
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  async function install(): Promise<void> {
+    setInstalling(true)
+    props.onError(null)
+    try {
+      setStatus(await window.brazier.computer.setupInputGuard())
+    } catch (cause) {
+      props.onError(errorText(cause))
+      try {
+        setStatus(await window.brazier.computer.inputGuardStatus())
+      } catch {
+        // Keep the prior status when the local probe itself is unavailable.
+      }
+    } finally {
+      setInstalling(false)
+    }
+  }
+
+  return (
+    <div>
+      <p className="model-help">
+        The desktop portal is preferred. This small privileged watcher is used only when the
+        compositor cannot activate the global shortcut. It runs only during Computer Use,
+        recognizes Ctrl+Shift+Esc, and never reports individual keys.
+      </p>
+      <dl className="customization-permissions">
+        <div>
+          <dt>Status</dt>
+          <dd>
+            {status?.ready && status.current
+              ? 'Ready'
+              : status?.ready
+                ? 'Update available'
+                : status?.installed
+                  ? 'Needs repair'
+                  : 'Not installed'}
+          </dd>
+        </div>
+        {status?.version ? (
+          <div>
+            <dt>Version</dt>
+            <dd>{status.version}</dd>
+          </div>
+        ) : null}
+        <div>
+          <dt>Detail</dt>
+          <dd>{status?.detail ?? 'Checking the local safety fallback…'}</dd>
+        </div>
+      </dl>
+      <button
+        type="button"
+        disabled={installing}
+        onClick={() => void install()}
+        style={{ marginTop: 12 }}
+      >
+        {installing ? (
+          <LoaderCircle className="spin" size={14} />
+        ) : (
+          <ShieldAlert size={14} />
+        )}
+        {installing
+          ? 'Waiting for administrator approval…'
+          : status?.ready && status.current
+            ? 'Reinstall safety fallback'
+            : status?.installed
+              ? 'Repair safety fallback'
+              : 'Install safety fallback'}
+      </button>
+    </div>
+  )
+}
+
 function CustomizationSection(props: SectionProps): React.JSX.Element {
   const [modes, setModes] = useState<WorkspaceModesPreference>(DEFAULT_WORKSPACE_MODES)
   const [modesLoading, setModesLoading] = useState(true)
@@ -850,7 +950,11 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
     setRequestingComputerPermissions(true)
     props.onError(null)
     try {
-      setPermissions(await requestComputerPermissions())
+      const [nextPermissions] = await Promise.all([
+        requestComputerPermissions(),
+        window.brazier.computer.prepareSafety()
+      ])
+      setPermissions(nextPermissions)
     } catch (cause) {
       props.onError(errorText(cause))
       try {
@@ -953,8 +1057,8 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
       <div className="settings-group">
         <div className="section-label">Computer Use permissions</div>
         <p className="model-help">
-          Desktop capture and input injection status for Computer Use. Browser target does not need
-          these OS grants.
+          Desktop capture, input injection, the always-visible safety overlay, and the global
+          emergency shortcut are all required. Browser target does not need these OS grants.
         </p>
         {permissions ? (
           <dl className="customization-permissions">
@@ -989,6 +1093,12 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
         ) : (
           <p className="model-help">Could not read OS permission status from the daemon.</p>
         )}
+        {window.brazier.platform === 'linux' ? (
+          <div style={{ marginTop: 14 }}>
+            <div className="section-label">Wayland emergency fallback</div>
+            <InputGuardSetup onError={props.onError} />
+          </div>
+        ) : null}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
           <button
             type="button"
@@ -999,7 +1109,9 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
             {requestingComputerPermissions ? 'Waiting for OS approval…' : 'Request desktop access'}
           </button>
           <span className="model-help">
-            On Wayland this opens the compositor’s Screen Share and Remote Desktop approval prompt.
+            On Wayland this requests Screen Share, Remote Desktop, and Ctrl+Shift+Esc. X11 and macOS
+            use Esc. If Wayland cannot activate the shortcut, install the privileged emergency
+            fallback above. Computer Use stays disabled unless one guard is verified.
           </span>
         </div>
       </div>
@@ -1360,6 +1472,22 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
         {notice && <p className="model-help">{notice}</p>}
       </div>
 
+      {window.brazier.platform === 'linux' ? (
+        <div className="settings-group">
+          <div className="section-label">Wayland emergency fallback</div>
+          <InputGuardSetup onError={props.onError} />
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={() => props.onSectionChange('customization')}
+            style={{ marginTop: 10 }}
+          >
+            <Settings2 size={14} />
+            Review all desktop permissions
+          </button>
+        </div>
+      ) : null}
+
       <div className="settings-group">
         <div className="section-label">What Brazier manages</div>
         <p className="model-help">
@@ -1367,7 +1495,7 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
           projector is loaded automatically when the model starts, and the runtime uses the
           hardware target selected under Runtimes. Browser tasks use an installed Chromium-family
           browser in a fresh dedicated profile; desktop control remains opt-in and reports its OS
-          permission requirements under Customization.
+          permission requirements in Computer Use settings.
         </p>
       </div>
     </section>

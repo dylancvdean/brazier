@@ -14,6 +14,7 @@ import {
   computerExec,
   computerScreenshot,
   stopComputerSession,
+  setComputerSafetyAuthority,
   createComputerSession,
   decideComputerApproval,
   deleteComputerSession,
@@ -69,7 +70,7 @@ const PERMISSION_LABELS: Record<
   },
   'allow-all': {
     title: 'Allow all',
-    detail: 'Run all supported actions without approval. The always-visible Esc emergency stop remains active.'
+    detail: 'Run all supported actions without approval. The always-visible emergency shortcut remains active.'
   }
 }
 
@@ -209,6 +210,9 @@ export function ComputerMode(props: Props): React.JSX.Element {
   const stop = useCallback(async (): Promise<void> => {
     abortRef.current?.abort()
     abortRef.current = null
+    // Revoke the native overlay/input guard before waiting on the daemon. This
+    // remains immediate even if the HTTP service is wedged or has crashed.
+    await window.brazier.computer.setActive(false)
     const active = sessionRef.current
     if (active?.target === 'desktop') {
       try {
@@ -341,6 +345,17 @@ export function ComputerMode(props: Props): React.JSX.Element {
         sessionRef.current = active
         await refreshSessions()
       }
+      if (active.target === 'desktop') {
+        // Fail closed: no screenshot, model turn, approval, or OS action may
+        // begin until both the native overlay and Esc watcher report READY.
+        await window.brazier.computer.setActive(true)
+        try {
+          await setComputerSafetyAuthority(active.id, true)
+        } catch (cause) {
+          await window.brazier.computer.setActive(false)
+          throw cause
+        }
+      }
       // User prompts (including answers to ask_user and ordinary follow-ups)
       // are durable and become part of every resumed/reloaded history.
       await appendComputerStep(active.id, { role: 'user', content: userText })
@@ -348,6 +363,11 @@ export function ComputerMode(props: Props): React.JSX.Element {
     } catch (cause) {
       if ((cause as Error).name !== 'AbortError') onError(errorText(cause))
     } finally {
+      const active = sessionRef.current
+      if (active?.target === 'desktop') {
+        void setComputerSafetyAuthority(active.id, false).catch(() => undefined)
+      }
+      void window.brazier.computer.setActive(false)
       setRunning(false)
       if (abortRef.current === controller) abortRef.current = null
       setLiveThought('')
@@ -359,7 +379,20 @@ export function ComputerMode(props: Props): React.JSX.Element {
   async function resolveApproval(approve: boolean): Promise<void> {
     if (!pendingApproval || !session) return
     onError(null)
+    let safetyActive = false
     try {
+      // Approval executes the pending action inside the broker call, so the
+      // safety boundary must be established before sending the decision.
+      if (approve && session.target === 'desktop') {
+        await window.brazier.computer.setActive(true)
+        try {
+          await setComputerSafetyAuthority(session.id, true)
+        } catch (cause) {
+          await window.brazier.computer.setActive(false)
+          throw cause
+        }
+        safetyActive = true
+      }
       const { result } = await decideComputerApproval(pendingApproval.approvalId, approve)
       setPendingApproval(null)
       if (result) {
@@ -384,6 +417,11 @@ export function ComputerMode(props: Props): React.JSX.Element {
       }
     } catch (cause) {
       onError(errorText(cause))
+    } finally {
+      if (safetyActive) {
+        void setComputerSafetyAuthority(session.id, false).catch(() => undefined)
+        void window.brazier.computer.setActive(false)
+      }
     }
   }
 
@@ -426,14 +464,6 @@ export function ComputerMode(props: Props): React.JSX.Element {
       void window.brazier.computer.setActive(false)
     }
   }, [])
-
-  // The main process owns the global Escape binding, so this fires even when a
-  // controlled native app is focused. Limit the banner to real host control;
-  // browser sessions remain contained in their isolated Chromium process.
-  useEffect(() => {
-    void window.brazier.computer.setActive(running && target === 'desktop')
-    return () => { void window.brazier.computer.setActive(false) }
-  }, [running, target])
 
   useEffect(() => window.brazier.computer.onEscape(() => { void stop() }), [stop])
 

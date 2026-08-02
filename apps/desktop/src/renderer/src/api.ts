@@ -235,6 +235,19 @@ export async function stopComputerSession(sessionId: string): Promise<void> {
   })
 }
 
+export async function setComputerSafetyAuthority(
+  sessionId: string,
+  active: boolean
+): Promise<void> {
+  await request(
+    `/api/v1/computer/sessions/${encodeURIComponent(sessionId)}/safety-authority`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ active })
+    }
+  )
+}
+
 export async function computerExec(body: {
   session_id: string
   action: ComputerAction

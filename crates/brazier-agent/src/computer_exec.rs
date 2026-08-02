@@ -48,6 +48,9 @@ struct LiveSession {
     /// Serializes an individual browser/desktop session without blocking any
     /// other session while Chromium waits or performs input.
     action_gate: Arc<Mutex<()>>,
+    /// Ephemeral, fail-closed authority established only after the desktop app
+    /// has a visible native safety overlay and a working Esc watcher.
+    desktop_authorized: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -108,6 +111,7 @@ impl ComputerBroker {
                                 steps: item.steps,
                                 pending: item.pending,
                                 action_gate: Arc::new(Mutex::new(())),
+                                desktop_authorized: false,
                             },
                         )
                     })
@@ -236,6 +240,7 @@ impl ComputerBroker {
                 steps: Vec::new(),
                 pending: HashMap::new(),
                 action_gate: Arc::new(Mutex::new(())),
+                desktop_authorized: false,
             },
         );
         self.persist().await?;
@@ -399,7 +404,7 @@ impl ComputerBroker {
     pub async fn execute(&self, request: ComputerExecRequest) -> Result<ComputerActionResult> {
         let gate = self.action_gate(&request.session_id).await?;
         let _gate = gate.lock().await;
-        let (target, mode, viewport) = {
+        let (target, mode, viewport, desktop_authorized) = {
             let sessions = self.sessions.lock().await;
             let session = sessions
                 .get(&request.session_id)
@@ -408,8 +413,24 @@ impl ComputerBroker {
                 session.record.target,
                 session.record.permission_mode,
                 session.record.viewport.clone(),
+                session.desktop_authorized,
             )
         };
+        let needs_desktop_authority = target == ComputerTarget::Desktop
+            && !matches!(
+                &request.action,
+                ComputerAction::Memorize { .. }
+                    | ComputerAction::AskUser { .. }
+                    | ComputerAction::Terminate { .. }
+            );
+        if needs_desktop_authority && !desktop_authorized {
+            let result = Self::refusal(
+                "Desktop control is locked because the always-visible safety overlay and Esc emergency stop are not active.",
+            );
+            self.record(&request.session_id, request.action, result.clone())
+                .await?;
+            return Ok(result);
+        }
         let decision = computer_policy::decide(&ComputerPolicyRequest {
             target,
             mode,
@@ -626,6 +647,7 @@ impl ComputerBroker {
                 .get_mut(session_id)
                 .with_context(|| format!("unknown computer session {session_id}"))?;
             session.record.running = false;
+            session.desktop_authorized = false;
             session.record.target
         };
         #[cfg(target_os = "linux")]
@@ -633,6 +655,23 @@ impl ComputerBroker {
             crate::computer_portal::close_session().await;
         }
         self.persist().await
+    }
+
+    /// Gate every host desktop action behind the independently established
+    /// native safety indicator. This lease is deliberately never persisted.
+    pub async fn set_desktop_authority(&self, session_id: &str, authorized: bool) -> Result<()> {
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .with_context(|| format!("unknown computer session {session_id}"))?;
+        if authorized && session.record.target != ComputerTarget::Desktop {
+            bail!("desktop safety authority can only be granted to a desktop session");
+        }
+        session.desktop_authorized = authorized;
+        if !authorized {
+            session.record.running = false;
+        }
+        Ok(())
     }
 }
 impl Default for ComputerBroker {
@@ -704,6 +743,39 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn desktop_authority_is_ephemeral_and_stop_revokes_it() {
+        let broker = ComputerBroker::new();
+        let session = broker
+            .create_session(
+                None,
+                ComputerTarget::Desktop,
+                None,
+                ComputerPermissionMode::AllowAll,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let refused = broker.screenshot(&session.id).await.unwrap();
+        assert_eq!(refused.status, ComputerActionStatus::Refused);
+        assert!(
+            refused
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("safety overlay")
+        );
+
+        broker
+            .set_desktop_authority(&session.id, true)
+            .await
+            .unwrap();
+        assert!(broker.sessions.lock().await[&session.id].desktop_authorized);
+        broker.stop(&session.id).await.unwrap();
+        assert!(!broker.sessions.lock().await[&session.id].desktop_authorized);
     }
     #[tokio::test]
     async fn refused_actions_are_recorded_once() {

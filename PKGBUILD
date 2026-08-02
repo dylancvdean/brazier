@@ -30,6 +30,7 @@ optdepends=(
   'glslang: SPIR-V shader tooling for Vulkan engine builds'
   'uv: create Python environments for vLLM, streaming ASR, and PersonaPlex'
   'ffmpeg: sample video frames for vision models and convert audio for transcription'
+  'polkit: authorize installation of the optional Wayland emergency-key fallback'
 )
 # source=("${pkgname}::git+${url}.git#branch=master")
 # Package the checkout that contains this PKGBUILD. `makepkg` clones it into
@@ -55,7 +56,7 @@ build() {
   cargo clean
   pnpm --filter @brazier/desktop run build:agent
   pnpm --filter @brazier/desktop exec electron-vite build
-  cargo build --release --locked -p brazierd
+  cargo build --release --locked -p brazierd -p brazier-safety -p brazier-input-guard
 }
 
 package() {
@@ -70,6 +71,10 @@ package() {
     "${pkgdir}/usr/lib/${pkgname}/node_modules"
   install -Dm644 apps/desktop/package.json "${pkgdir}/usr/lib/${pkgname}/package.json"
   install -Dm755 target/release/brazierd "${pkgdir}/usr/lib/${pkgname}/brazierd"
+  install -Dm755 target/release/brazier-safety "${pkgdir}/usr/lib/${pkgname}/brazier-safety"
+  # Ship an ordinary source copy. Settings installs the explicitly authorized,
+  # root-owned setgid copy at /usr/lib/brazier-input-guard only on request.
+  install -Dm755 target/release/brazier-input-guard "${pkgdir}/usr/lib/${pkgname}/brazier-input-guard"
   install -Dm644 apps/desktop/build/icon.png "${pkgdir}/usr/share/pixmaps/${pkgname}.png"
   install -Dm644 apps/desktop/build/icon.png "${pkgdir}/usr/share/icons/hicolor/1024x1024/apps/${pkgname}.png"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

@@ -129,7 +129,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cargo build --release --locked -p brazierd
+          cargo build --release --locked -p brazierd -p brazier-safety -p brazier-input-guard
           pnpm --filter @brazier/desktop run build
           pnpm --filter @brazier/desktop exec electron-builder --linux AppImage --x64 --publish never
       - uses: actions/upload-artifact@v4

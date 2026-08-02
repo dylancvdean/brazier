@@ -2589,11 +2589,12 @@ async fn generated_media_context_messages(
     if invocation.media.is_empty() || invocation.is_error {
         return None;
     }
-    let vision = model_caps.input_modalities.iter().any(|modality| modality == "image");
+    let vision = model_caps
+        .input_modalities
+        .iter()
+        .any(|modality| modality == "image");
     let from_document = invocation.name == "doc_read" || invocation.name == "fetch_url";
-    if !vision
-        && !from_document
-    {
+    if !vision && !from_document {
         return None;
     }
     let mut persisted_parts = Vec::new();
@@ -2628,10 +2629,14 @@ async fn generated_media_context_messages(
         }));
         if media.mime_type == "application/pdf" {
             live_parts.push(crate::documents::attachment_notice(
-                name, &media.mime_type, &media.sha256, None,
+                name,
+                &media.mime_type,
+                &media.sha256,
+                None,
             ));
-        } else if vision && let Ok(parts) =
-            media::generated_media_parts(data_dir, &media.sha256, &media.mime_type).await
+        } else if vision
+            && let Ok(parts) =
+                media::generated_media_parts(data_dir, &media.sha256, &media.mime_type).await
         {
             live_parts.extend(parts);
         }

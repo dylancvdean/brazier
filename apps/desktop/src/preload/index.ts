@@ -20,6 +20,16 @@ export type BrazierServerSettings = {
   jitLoading: boolean
 }
 
+export type BrazierInputGuardStatus = {
+  supported: boolean
+  installed: boolean
+  secure: boolean
+  ready: boolean
+  current: boolean
+  version: string | null
+  detail: string
+}
+
 const invokeAgent = (command: WorkerCommandInput): Promise<unknown> =>
   ipcRenderer.invoke(AGENT_IPC.invoke, command)
 
@@ -91,6 +101,11 @@ contextBridge.exposeInMainWorld('brazier', {
   revealFile: (path: string): Promise<void> => ipcRenderer.invoke('brazier:reveal-file', path),
   computer: {
     setActive: (active: boolean): Promise<void> => ipcRenderer.invoke('brazier:computer:set-active', active),
+    prepareSafety: (): Promise<void> => ipcRenderer.invoke('brazier:computer:prepare-safety'),
+    inputGuardStatus: (): Promise<BrazierInputGuardStatus> =>
+      ipcRenderer.invoke('brazier:computer:input-guard-status'),
+    setupInputGuard: (): Promise<BrazierInputGuardStatus> =>
+      ipcRenderer.invoke('brazier:computer:setup-input-guard'),
     onEscape: (listener: () => void): (() => void) => {
       const handler = (): void => listener()
       ipcRenderer.on('brazier:computer:escape', handler)

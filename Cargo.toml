@@ -2,8 +2,10 @@
 members = [
     "crates/brazier-agent",
     "crates/brazier-formats",
+    "crates/brazier-input-guard",
     "crates/brazier-protocol",
     "crates/brazier-runtime",
+    "crates/brazier-safety",
     "crates/brazier-storage",
     "crates/brazierd",
 ]
@@ -43,5 +45,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 zbus = { version = "5.18", default-features = false, features = ["tokio"] }
-x11rb = { version = "0.13", features = ["xtest"] }
+x11rb = { version = "0.13", features = ["randr", "shape", "xinput", "xtest"] }
 png = "0.17"

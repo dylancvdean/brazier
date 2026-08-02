@@ -202,14 +202,34 @@ impl ComputerAction {
                 let (x, y) = point(*x, *y);
                 Self::MouseMove { x, y }
             }
-            Self::LeftClickDrag { start_x, start_y, end_x, end_y } => {
+            Self::LeftClickDrag {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+            } => {
                 let (start_x, start_y) = point(*start_x, *start_y);
                 let (end_x, end_y) = point(*end_x, *end_y);
-                Self::LeftClickDrag { start_x, start_y, end_x, end_y }
+                Self::LeftClickDrag {
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                }
             }
-            Self::Scroll { x, y, delta_x, delta_y } => {
+            Self::Scroll {
+                x,
+                y,
+                delta_x,
+                delta_y,
+            } => {
                 let (x, y) = point(*x, *y);
-                Self::Scroll { x, y, delta_x: *delta_x, delta_y: *delta_y }
+                Self::Scroll {
+                    x,
+                    y,
+                    delta_x: *delta_x,
+                    delta_y: *delta_y,
+                }
             }
             _ => self.clone(),
         }

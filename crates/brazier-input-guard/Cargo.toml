@@ -1,0 +1,13 @@
+[package]
+name = "brazier-input-guard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal privileged emergency-chord watcher for Brazier Computer Use"
+
+[dependencies]
+anyhow.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

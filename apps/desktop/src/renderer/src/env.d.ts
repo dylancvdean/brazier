@@ -66,6 +66,25 @@ declare global {
       revealFile(path: string): Promise<void>
       computer: {
         setActive(active: boolean): Promise<void>
+        prepareSafety(): Promise<void>
+        inputGuardStatus(): Promise<{
+          supported: boolean
+          installed: boolean
+          secure: boolean
+          ready: boolean
+          current: boolean
+          version: string | null
+          detail: string
+        }>
+        setupInputGuard(): Promise<{
+          supported: boolean
+          installed: boolean
+          secure: boolean
+          ready: boolean
+          current: boolean
+          version: string | null
+          detail: string
+        }>
         onEscape(listener: () => void): () => void
       }
       /**

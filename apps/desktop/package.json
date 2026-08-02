@@ -75,7 +75,10 @@
         "to": "bin",
         "filter": [
           "brazierd",
-          "brazierd.exe"
+          "brazierd.exe",
+          "brazier-safety",
+          "brazier-safety.exe",
+          "brazier-input-guard"
         ]
       },
       {

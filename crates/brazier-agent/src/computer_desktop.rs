@@ -128,7 +128,14 @@ pub async fn request_os_permissions() -> Result<OsPermissionStatus, String> {
     #[cfg(target_os = "macos")]
     {
         let _ = screenshot().await?;
-        command("osascript", &["-e".into(), "tell application \"System Events\" to get name of first process".into()]).await?;
+        command(
+            "osascript",
+            &[
+                "-e".into(),
+                "tell application \"System Events\" to get name of first process".into(),
+            ],
+        )
+        .await?;
     }
     Ok(probe_os_permissions())
 }
@@ -181,7 +188,8 @@ async fn screenshot() -> Result<ComputerActionResult, String> {
         crate::computer_portal::screenshot().await?
     } else {
         tokio::task::spawn_blocking(crate::computer_x11::screenshot)
-            .await.map_err(|error| error.to_string())??
+            .await
+            .map_err(|error| error.to_string())??
     };
     Ok(ComputerActionResult {
         status: ComputerActionStatus::Ok,
@@ -289,13 +297,25 @@ async fn linux_action(action: &ComputerAction) -> Result<(), String> {
             ComputerAction::DoubleClick { x, y } => crate::computer_x11::click(x, y, 1, 2),
             ComputerAction::TripleClick { x, y } => crate::computer_x11::click(x, y, 1, 3),
             ComputerAction::MouseMove { x, y } => crate::computer_x11::move_to(x, y),
-            ComputerAction::LeftClickDrag { start_x, start_y, end_x, end_y } => crate::computer_x11::drag(start_x, start_y, end_x, end_y),
+            ComputerAction::LeftClickDrag {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+            } => crate::computer_x11::drag(start_x, start_y, end_x, end_y),
             ComputerAction::Type { text } => crate::computer_x11::type_text(&text),
-            ComputerAction::Keypress { keys } => { for key in keys { crate::computer_x11::key(wayland_keysym(&key)?)?; } Ok(()) }
+            ComputerAction::Keypress { keys } => {
+                for key in keys {
+                    crate::computer_x11::key(wayland_keysym(&key)?)?;
+                }
+                Ok(())
+            }
             ComputerAction::Scroll { delta_y, .. } => crate::computer_x11::scroll(delta_y),
             _ => Err("This action is not available on the desktop.".into()),
         }
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 #[cfg(target_os = "linux")]
 async fn wayland_action(action: &ComputerAction) -> Result<(), String> {
@@ -305,15 +325,32 @@ async fn wayland_action(action: &ComputerAction) -> Result<(), String> {
     }
     match action {
         ComputerAction::MouseMove { x, y } => crate::computer_portal::pointer_motion(*x, *y).await,
-        ComputerAction::LeftClick { x, y } => crate::computer_portal::pointer_button(*x, *y, 272, 1).await,
-        ComputerAction::RightClick { x, y } => crate::computer_portal::pointer_button(*x, *y, 273, 1).await,
-        ComputerAction::DoubleClick { x, y } => crate::computer_portal::pointer_button(*x, *y, 272, 2).await,
-        ComputerAction::TripleClick { x, y } => crate::computer_portal::pointer_button(*x, *y, 272, 3).await,
-        ComputerAction::LeftClickDrag { start_x, start_y, end_x, end_y } => crate::computer_portal::pointer_drag(*start_x, *start_y, *end_x, *end_y).await,
-        ComputerAction::Scroll { delta_x, delta_y, .. } => crate::computer_portal::scroll(*delta_x, *delta_y).await,
+        ComputerAction::LeftClick { x, y } => {
+            crate::computer_portal::pointer_button(*x, *y, 272, 1).await
+        }
+        ComputerAction::RightClick { x, y } => {
+            crate::computer_portal::pointer_button(*x, *y, 273, 1).await
+        }
+        ComputerAction::DoubleClick { x, y } => {
+            crate::computer_portal::pointer_button(*x, *y, 272, 2).await
+        }
+        ComputerAction::TripleClick { x, y } => {
+            crate::computer_portal::pointer_button(*x, *y, 272, 3).await
+        }
+        ComputerAction::LeftClickDrag {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+        } => crate::computer_portal::pointer_drag(*start_x, *start_y, *end_x, *end_y).await,
+        ComputerAction::Scroll {
+            delta_x, delta_y, ..
+        } => crate::computer_portal::scroll(*delta_x, *delta_y).await,
         ComputerAction::Type { text } => crate::computer_portal::type_text(text).await,
         ComputerAction::Keypress { keys } => {
-            for key in keys { crate::computer_portal::key(wayland_keysym(key)?).await?; }
+            for key in keys {
+                crate::computer_portal::key(wayland_keysym(key)?).await?;
+            }
             Ok(())
         }
         _ => Err("This action is not available through the Wayland desktop portal.".into()),

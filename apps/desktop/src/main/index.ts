@@ -1,10 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync, type WriteStream } from 'node:fs'
+import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync, type WriteStream } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, shell } from 'electron'
 
 import { AgentSupervisor, registerAgentIpc } from './agent'
 import {
@@ -96,20 +96,348 @@ type Connection = {
 }
 
 let computerSafetyOverlay: BrowserWindow | null = null
+let nativeComputerSafety: ChildProcessWithoutNullStreams | null = null
+let computerSafetyStarting: Promise<void> | null = null
+let computerSafetyGeneration = 0
+let computerOverlayWatchdog: NodeJS.Timeout | null = null
 let computerUseActive = false
 
-/** A system-level indicator, deliberately independent of the renderer UI.
- * It is click-through so it cannot steal a target click, while Escape remains
- * a global shortcut even when the controlled application owns focus. */
-function setComputerUseActive(active: boolean): void {
-  computerUseActive = active
+type InputGuardStatus = {
+  supported: boolean
+  installed: boolean
+  secure: boolean
+  ready: boolean
+  current: boolean
+  version: string | null
+  detail: string
+}
+
+const INPUT_GUARD_INSTALLED_PATH = '/usr/lib/brazier-input-guard'
+
+function inputGuardSourcePath(): string {
+  const executable = 'brazier-input-guard'
+  const installedSource = join(__dirname, '../..', executable)
+  if (process.env.BRAZIER_INSTALLED === '1' || existsSync(installedSource)) {
+    return installedSource
+  }
+  if (app.isPackaged) return join(process.resourcesPath, 'bin', executable)
+  return join(repositoryRoot(), 'target', 'debug', executable)
+}
+
+function runChild(
+  command: string,
+  args: string[],
+  timeoutMs = 15_000
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
+  return new Promise((resolveChild, rejectChild) => {
+    const child = spawn(command, args, {
+      cwd: installedApp ? undefined : repositoryRoot(),
+      env: {
+        ...process.env,
+        ...(COMPUTER_WAYLAND_DISPLAY ? { WAYLAND_DISPLAY: COMPUTER_WAYLAND_DISPLAY } : {})
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
+    })
+    let stdout = ''
+    let stderr = ''
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM')
+      rejectChild(new Error(`${command} timed out.`))
+    }, timeoutMs)
+    child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk.toString()}`.slice(-8192) })
+    child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-8192) })
+    child.once('error', (error) => {
+      clearTimeout(timeout)
+      rejectChild(error)
+    })
+    child.once('exit', (code, signal) => {
+      clearTimeout(timeout)
+      resolveChild({ code, signal, stdout, stderr })
+    })
+  })
+}
+
+async function inputGuardStatus(): Promise<InputGuardStatus> {
+  if (process.platform !== 'linux') {
+    return {
+      supported: false,
+      installed: false,
+      secure: false,
+      ready: false,
+      current: false,
+      version: null,
+      detail: 'The privileged keyboard safety fallback is only used on Linux.'
+    }
+  }
+
+  let metadata
+  try {
+    metadata = lstatSync(INPUT_GUARD_INSTALLED_PATH)
+  } catch {
+    return {
+      supported: true,
+      installed: false,
+      secure: false,
+      ready: false,
+      current: false,
+      version: null,
+      detail: 'Not installed. The Wayland portal remains the preferred emergency shortcut.'
+    }
+  }
+  const mode = metadata.mode & 0o7777
+  const secure = metadata.isFile() && metadata.uid === 0 && (mode & 0o2000) !== 0 && (mode & 0o022) === 0
+  if (!secure) {
+    return {
+      supported: true,
+      installed: true,
+      secure: false,
+      ready: false,
+      current: false,
+      version: null,
+      detail: `${INPUT_GUARD_INSTALLED_PATH} has unsafe ownership or permissions. Repair the installation before using it.`
+    }
+  }
+
+  try {
+    const result = await runChild(INPUT_GUARD_INSTALLED_PATH, ['--probe'], 5_000)
+    const readyLine = result.stdout.split('\n').find((line) => line.startsWith('READY '))
+    const version = readyLine?.slice('READY '.length).trim() || null
+    const ready = result.code === 0 && version !== null
+    const current = version === app.getVersion()
+    return {
+      supported: true,
+      installed: true,
+      secure: true,
+      ready,
+      current,
+      version,
+      detail: ready
+        ? current
+          ? 'Ready. It runs only while Computer Use is active and reports only Ctrl+Shift+Esc.'
+          : `Version ${version ?? 'unknown'} is installed; update it to match Brazier ${app.getVersion()}.`
+        : result.stderr.trim() || 'The installed fallback could not open a keyboard input device.'
+    }
+  } catch (cause) {
+    return {
+      supported: true,
+      installed: true,
+      secure: true,
+      ready: false,
+      current: false,
+      version: null,
+      detail: cause instanceof Error ? cause.message : String(cause)
+    }
+  }
+}
+
+async function ensureInputGuardSource(): Promise<string> {
+  const source = inputGuardSourcePath()
+  if (!installedApp && !existsSync(source)) {
+    const build = await runChild('cargo', ['build', '-p', 'brazier-input-guard'], 120_000)
+    if (build.code !== 0) {
+      throw new Error(build.stderr.trim() || 'Could not build the keyboard safety fallback.')
+    }
+  }
+  if (!existsSync(source)) {
+    throw new Error('This Brazier installation does not contain brazier-input-guard.')
+  }
+  return source
+}
+
+async function setupInputGuard(): Promise<InputGuardStatus> {
+  if (process.platform !== 'linux') throw new Error('The input guard is only available on Linux.')
+  const source = await ensureInputGuardSource()
+  const pkexec = existsSync('/usr/bin/pkexec') ? '/usr/bin/pkexec' : 'pkexec'
+  const install = await runChild(
+    pkexec,
+    ['/usr/bin/install', '-o', 'root', '-g', 'input', '-m', '2755', source, INPUT_GUARD_INSTALLED_PATH],
+    120_000
+  )
+  if (install.code !== 0) {
+    const detail = install.stderr.trim()
+    throw new Error(detail || 'Administrator authorization was cancelled or the input guard could not be installed.')
+  }
+  const status = await inputGuardStatus()
+  if (!status.ready) throw new Error(status.detail)
+  return status
+}
+
+function positionComputerSafetyOverlay(): void {
+  if (!computerSafetyOverlay || computerSafetyOverlay.isDestroyed()) return
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+  const { x, y, width } = display.workArea
+  const [overlayWidth] = computerSafetyOverlay.getSize()
+  computerSafetyOverlay.setPosition(Math.round(x + (width - overlayWidth) / 2), y + 16, false)
+}
+
+function stopComputerOverlayWatchdog(): void {
+  if (computerOverlayWatchdog) clearInterval(computerOverlayWatchdog)
+  computerOverlayWatchdog = null
+}
+
+function stopNativeComputerSafety(): void {
+  const child = nativeComputerSafety
+  nativeComputerSafety = null
+  if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')
+}
+
+function broadcastComputerEscape(reason?: string): void {
+  if (!computerUseActive && !computerSafetyStarting) return
+  if (reason) report(`[computer-safety] ${reason}`, 'warn')
+  computerUseActive = false
+  computerSafetyGeneration += 1
+  computerSafetyStarting = null
+  stopNativeComputerSafety()
+  stopComputerOverlayWatchdog()
+  computerSafetyOverlay?.hide()
+  globalShortcut.unregister('Escape')
+  for (const candidate of BrowserWindow.getAllWindows()) {
+    if (candidate !== computerSafetyOverlay && !candidate.isDestroyed()) {
+      candidate.webContents.send('brazier:computer:escape')
+    }
+  }
+}
+
+function nativeSafetyCommand(prepare: boolean): { command: string; args: string[] } {
+  const executable = process.platform === 'win32' ? 'brazier-safety.exe' : 'brazier-safety'
+  const installedSafety = join(__dirname, '../..', executable)
+  const useInstalledSafety = process.env.BRAZIER_INSTALLED === '1' || existsSync(installedSafety)
+  if (useInstalledSafety) {
+    return { command: installedSafety, args: prepare ? ['--prepare'] : [] }
+  }
+  if (app.isPackaged) {
+    return {
+      command: join(process.resourcesPath, 'bin', executable),
+      args: prepare ? ['--prepare'] : []
+    }
+  }
+  return {
+    command: 'cargo',
+    args: ['run', '-q', '-p', 'brazier-safety', '--', ...(prepare ? ['--prepare'] : [])]
+  }
+}
+
+function launchNativeComputerSafety(prepare: boolean): Promise<ChildProcessWithoutNullStreams> {
+  const { command, args } = nativeSafetyCommand(prepare)
+  const child = spawn(command, args, {
+    cwd: installedApp ? undefined : repositoryRoot(),
+    env: {
+      ...process.env,
+      ...(COMPUTER_WAYLAND_DISPLAY ? { WAYLAND_DISPLAY: COMPUTER_WAYLAND_DISPLAY } : {}),
+      RUSTUP_TOOLCHAIN: process.env.RUSTUP_TOOLCHAIN ?? 'stable'
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true
+  })
+  let errorOutput = ''
+  child.stderr.on('data', (chunk) => {
+    errorOutput = `${errorOutput}${chunk.toString()}`.slice(-4096)
+    const line = `[computer-safety] ${chunk}`
+    process.stderr.write(line)
+    appendLog(line)
+  })
+
+  return new Promise((resolveSafety, rejectSafety) => {
+    let ready = false
+    let buffer = ''
+    const diagnostic = (): string => {
+      const detail = errorOutput.trim()
+      return detail ? ` ${detail}` : ''
+    }
+    const timeout = setTimeout(() => {
+      if (ready) return
+      child.kill('SIGTERM')
+      rejectSafety(new Error(
+        `Timed out establishing the always-visible Computer Use safety overlay and Esc emergency stop.${diagnostic()}`
+      ))
+    }, 90_000)
+    const failBeforeReady = (message: string): void => {
+      if (ready) return
+      clearTimeout(timeout)
+      rejectSafety(new Error(message))
+    }
+    child.once('error', (error) => {
+      failBeforeReady(`Could not start the Computer Use safety helper: ${error.message}`)
+    })
+    child.on('exit', (code, signal) => {
+      const status = signal ? `signal ${signal}` : `status ${code ?? 'unknown'}`
+      if (!ready) {
+        failBeforeReady(`Computer Use safety helper exited before it was ready (${status}).${diagnostic()}`)
+      } else if (!prepare && nativeComputerSafety === child && computerUseActive) {
+        broadcastComputerEscape(`Safety helper exited unexpectedly (${status}); computer use was stopped.`)
+      }
+    })
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk.toString()
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (line === 'READY' && !ready) {
+          ready = true
+          clearTimeout(timeout)
+          resolveSafety(child)
+        } else if (line === 'ESC' && !prepare) {
+          broadcastComputerEscape('Esc emergency stop pressed.')
+        }
+      }
+    })
+  })
+}
+
+async function prepareComputerSafety(): Promise<void> {
+  if (process.platform !== 'linux') return
+  const child = await launchNativeComputerSafety(true)
+  // --prepare exits as soon as the compositor has stored the shortcut. Close
+  // its input as a second guarantee that no preparation process can linger.
+  child.stdin.end()
+}
+
+/** Establish the security indicator and Escape hatch before desktop authority
+ * is granted. Linux uses a separate native process so compositor or renderer
+ * failure revokes control instead of leaving an invisible session running. */
+async function setComputerUseActive(active: boolean): Promise<void> {
   if (!active) {
+    computerUseActive = false
+    computerSafetyGeneration += 1
+    computerSafetyStarting = null
+    stopNativeComputerSafety()
+    stopComputerOverlayWatchdog()
     computerSafetyOverlay?.hide()
+    globalShortcut.unregister('Escape')
     return
+  }
+  if (computerUseActive) return
+  if (computerSafetyStarting) return computerSafetyStarting
+
+  const generation = ++computerSafetyGeneration
+  if (process.platform === 'linux') {
+    computerSafetyStarting = (async () => {
+      const child = await launchNativeComputerSafety(false)
+      if (generation !== computerSafetyGeneration) {
+        child.kill('SIGTERM')
+        throw new Error('Computer Use safety startup was cancelled.')
+      }
+      nativeComputerSafety = child
+      computerUseActive = true
+    })()
+    try {
+      await computerSafetyStarting
+    } finally {
+      if (generation === computerSafetyGeneration) computerSafetyStarting = null
+    }
+    return
+  }
+
+  const shortcutRegistered = globalShortcut.register('Escape', () => {
+    broadcastComputerEscape('Esc emergency stop pressed.')
+  })
+  if (!shortcutRegistered) {
+    throw new Error('Could not reserve Esc as the Computer Use emergency stop; desktop control was not started.')
   }
   if (!computerSafetyOverlay || computerSafetyOverlay.isDestroyed()) {
     computerSafetyOverlay = new BrowserWindow({
-      width: 286, height: 48, x: 24, y: 24, frame: false, transparent: true,
+      width: 286, height: 48, frame: false, transparent: true,
       resizable: false, movable: false, focusable: false, skipTaskbar: true,
       alwaysOnTop: true,
       webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true }
@@ -117,9 +445,25 @@ function setComputerUseActive(active: boolean): void {
     computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
     computerSafetyOverlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
     computerSafetyOverlay.setIgnoreMouseEvents(true, { forward: true })
-    computerSafetyOverlay.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html><style>body{margin:0;background:transparent;font:600 14px -apple-system,BlinkMacSystemFont,sans-serif;color:#fff}div{height:48px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:10px;border:1px solid #ff8c69;border-radius:12px;background:#31140eeF;box-shadow:0 8px 30px #0008}b{color:#ffad91}kbd{padding:3px 7px;border:1px solid #ffffff55;border-radius:5px;background:#0008;font:600 12px inherit}</style><div><b>Computer Use active</b><span><kbd>Esc</kbd> to stop</span></div>`))
+    computerSafetyOverlay.on('ready-to-show', () => {
+      positionComputerSafetyOverlay()
+      computerSafetyOverlay?.setAlwaysOnTop(true, 'screen-saver')
+      computerSafetyOverlay?.moveTop()
+    })
+    await computerSafetyOverlay.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html><style>body{margin:0;background:transparent;font:600 14px -apple-system,BlinkMacSystemFont,sans-serif;color:#fff}div{height:48px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:10px;border:1px solid #ff8c69;border-radius:12px;background:#31140eeF;box-shadow:0 8px 30px #0008}b{color:#ffad91}kbd{padding:3px 7px;border:1px solid #ffffff55;border-radius:5px;background:#0008;font:600 12px inherit}</style><div><b>Computer Use active</b><span><kbd>Esc</kbd> to stop</span></div>`))
   }
+  positionComputerSafetyOverlay()
+  computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
   computerSafetyOverlay.showInactive()
+  computerSafetyOverlay.moveTop()
+  computerOverlayWatchdog = setInterval(() => {
+    if (!computerUseActive || !computerSafetyOverlay || computerSafetyOverlay.isDestroyed()) return
+    positionComputerSafetyOverlay()
+    computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
+    computerSafetyOverlay.showInactive()
+    computerSafetyOverlay.moveTop()
+  }, 250)
+  computerUseActive = true
 }
 
 export type ServerSettings = {
@@ -467,20 +811,6 @@ async function createWindow(): Promise<void> {
     }
   })
 
-  // Register once per app lifecycle. Sending a renderer event instead of
-  // merely hiding the banner makes Escape cancel the model loop immediately.
-  globalShortcut.unregister('Escape')
-  globalShortcut.register('Escape', () => {
-    if (!computerUseActive) return
-    computerUseActive = false
-    computerSafetyOverlay?.hide()
-    for (const candidate of BrowserWindow.getAllWindows()) {
-      if (candidate !== computerSafetyOverlay && !candidate.isDestroyed()) {
-        candidate.webContents.send('brazier:computer:escape')
-      }
-    }
-  })
-
   attachContextMenu(window)
 
   window.once('ready-to-show', () => {
@@ -595,9 +925,11 @@ app.whenReady().then(async () => {
   }
   connection = startDaemon()
   ipcMain.handle('brazier:connection', () => connection)
-  ipcMain.handle('brazier:computer:set-active', (_event, active: boolean) => {
-    setComputerUseActive(active === true)
-  })
+  ipcMain.handle('brazier:computer:set-active', (_event, active: boolean) =>
+    setComputerUseActive(active === true))
+  ipcMain.handle('brazier:computer:prepare-safety', () => prepareComputerSafety())
+  ipcMain.handle('brazier:computer:input-guard-status', () => inputGuardStatus())
+  ipcMain.handle('brazier:computer:setup-input-guard', () => setupInputGuard())
   ipcMain.handle('brazier:server-settings', (): ServerSettings => publicServerSettings(loadServerSettings()))
   ipcMain.handle(
     'brazier:save-server-settings',
@@ -728,6 +1060,11 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
+  computerUseActive = false
+  computerSafetyGeneration += 1
+  stopNativeComputerSafety()
+  stopComputerOverlayWatchdog()
+  globalShortcut.unregister('Escape')
   void agent.shutdown()
   daemon?.kill()
 })
