@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  filenameWithExtension,
   messagesForCompletion,
   prefillProgressLabel,
   reasoningAfterTranscriptBoundary
@@ -171,5 +172,16 @@ describe('prefillProgressLabel', () => {
         elapsed_ms: 10
       })
     ).toBe('Prefilling 128 / 128 tokens')
+  })
+})
+
+describe('filenameWithExtension', () => {
+  it('adds a PDF extension when a generated or rendered name has none', () => {
+    expect(filenameWithExtension('generated-image', 'application/pdf', 'fallback.pdf')).toBe(
+      'generated-image.pdf'
+    )
+    expect(filenameWithExtension('report.pdf', 'application/pdf', 'fallback.pdf')).toBe(
+      'report.pdf'
+    )
   })
 })

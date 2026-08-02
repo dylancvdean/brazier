@@ -31,6 +31,9 @@ const RENDER_DPI: u32 = 150;
 
 const EXTRACT_TIMEOUT: Duration = Duration::from_secs(120);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+const POPPLER_TOOLS: [&str; 3] = ["pdftotext", "pdfinfo", "pdftoppm"];
+const POPPLER_INSTALL_HINT: &str = "Install Poppler (for example `brew install poppler`, `apt install poppler-utils`, or \
+     `winget install oschwartz10612.Poppler`) and restart Brazier.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentKind {
@@ -81,6 +84,49 @@ pub fn kind_for_name(name: &str) -> Option<DocumentKind> {
 /// (as opposed to plain text, which is inlined directly).
 pub fn is_supported_document(mime_type: &str, name: &str) -> bool {
     kind_for_mime(mime_type, name).is_some()
+}
+
+/// Return the Poppler utilities that this PDF pipeline cannot currently find.
+pub fn missing_poppler_tools() -> Vec<&'static str> {
+    POPPLER_TOOLS
+        .iter()
+        .copied()
+        .filter(|name| resolve_command(name).is_none())
+        .collect()
+}
+
+/// Explain a missing Poppler installation in terms a desktop user can act on.
+pub fn poppler_missing_message() -> Option<String> {
+    poppler_missing_message_for(&missing_poppler_tools())
+}
+
+fn poppler_missing_message_for(missing: &[&str]) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    let utilities = missing
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let subject = if missing.len() == 1 {
+        "Poppler utility"
+    } else {
+        "Poppler utilities"
+    };
+    Some(format!(
+        "PDF support is unavailable because {subject} {utilities} are missing. \
+         {POPPLER_INSTALL_HINT}"
+    ))
+}
+
+/// Fail before a PDF attachment reaches model generation when its runtime is
+/// unavailable, instead of deferring the error to a hidden `doc_read` call.
+pub fn ensure_poppler_available() -> anyhow::Result<()> {
+    if let Some(message) = poppler_missing_message() {
+        anyhow::bail!("{message}");
+    }
+    Ok(())
 }
 
 /// What came back from a text extraction.
@@ -139,6 +185,31 @@ pub struct RenderedPage {
     pub bytes: Vec<u8>,
 }
 
+/// A stable display/save name for a page rendered from a document.
+pub fn rendered_page_name(document_name: &str, page: u32) -> String {
+    let stem = Path::new(document_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("document");
+    let safe_stem: String = stem
+        .chars()
+        .map(|character| {
+            if character == '/' || character == '\\' || character.is_control() {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let stem = if safe_stem.is_empty() {
+        "document"
+    } else {
+        safe_stem.as_str()
+    };
+    format!("{stem}-page-{page}.png")
+}
+
 impl RenderedPage {
     /// Base64 of the page image, without a data-URL prefix.
     pub fn base64_data(&self) -> String {
@@ -149,11 +220,7 @@ impl RenderedPage {
 
 fn poppler_tool(name: &str) -> anyhow::Result<std::path::PathBuf> {
     resolve_command(name).with_context(|| {
-        format!(
-            "Reading PDFs requires the `{name}` utility. Install Poppler (for example \
-             `brew install poppler`, `apt install poppler-utils`, or \
-             `winget install oschwartz10612.Poppler`) and restart Brazier."
-        )
+        format!("Reading PDFs requires the `{name}` utility. {POPPLER_INSTALL_HINT}")
     })
 }
 
@@ -174,8 +241,8 @@ async fn run_with_timeout(
     Ok(output)
 }
 
-/// PDF page count via `pdfinfo`. `Ok(None)` means Poppler is not installed;
-/// callers treat the count as unknown rather than failing.
+/// PDF page count via `pdfinfo`. `Ok(None)` means `pdfinfo` was unavailable or
+/// did not report a parseable count; callers treat the count as unknown.
 pub async fn page_count(path: &Path) -> anyhow::Result<Option<u32>> {
     let Some(pdfinfo) = resolve_command("pdfinfo") else {
         return Ok(None);
@@ -925,5 +992,26 @@ mod tests {
         let digest = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         assert_eq!(short_document_id(digest), &digest[..DOCUMENT_ID_PREFIX_LEN]);
         assert_eq!(short_document_id("abc"), "abc");
+    }
+
+    #[test]
+    fn rendered_page_names_keep_the_document_name() {
+        assert_eq!(
+            rendered_page_name("Quarterly report.pdf", 3),
+            "Quarterly report-page-3.png"
+        );
+        assert_eq!(
+            rendered_page_name("archive/report.pdf", 1),
+            "report-page-1.png"
+        );
+    }
+
+    #[test]
+    fn missing_poppler_message_includes_install_guidance() {
+        let message = poppler_missing_message_for(&["pdftotext"]).expect("missing utility");
+        assert!(message.contains("pdftotext"), "{message}");
+        assert!(message.contains("brew install poppler"), "{message}");
+        assert!(message.contains("restart Brazier"), "{message}");
+        assert!(poppler_missing_message_for(&[]).is_none());
     }
 }

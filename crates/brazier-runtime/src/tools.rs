@@ -33,7 +33,8 @@ pub struct ToolInvocation {
 pub struct ToolMedia {
     pub sha256: String,
     pub mime_type: String,
-    /// Original display name when the media is a document fetched from the web.
+    /// Original display/save name when the media came from a named attachment
+    /// or a rendered/generated file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
@@ -584,6 +585,9 @@ async fn doc_read_tool(
     let path = crate::blob_store::blob_path(data_dir, &document.sha256)
         .context("document blob is missing")?;
     anyhow::ensure!(path.is_file(), "that document is no longer stored locally");
+    if kind == crate::documents::DocumentKind::Pdf {
+        crate::documents::ensure_poppler_available()?;
+    }
 
     let render = args
         .get("render_pages")
@@ -624,7 +628,10 @@ async fn doc_read_tool(
                 .map(|page| ToolMedia {
                     sha256: page.sha256,
                     mime_type: page.mime_type,
-                    name: None,
+                    name: Some(crate::documents::rendered_page_name(
+                        &document.name,
+                        page.page,
+                    )),
                 })
                 .collect(),
         });
@@ -787,7 +794,7 @@ async fn generate_image_tool(
         media: vec![ToolMedia {
             sha256: blob.sha256.clone(),
             mime_type: "image/png".to_owned(),
-            name: None,
+            name: Some("generated.png".to_owned()),
         }],
     })
 }
@@ -864,19 +871,13 @@ async fn generate_video_tool(
     } else {
         "video/mp4"
     };
-    let blob = crate::blob_store::store_bytes(
-        data_dir,
-        &bytes,
-        mime,
-        Some(
-            result
-                .output_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("generated.mp4"),
-        ),
-    )
-    .await?;
+    let output_name = result
+        .output_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("generated.mp4")
+        .to_owned();
+    let blob = crate::blob_store::store_bytes(data_dir, &bytes, mime, Some(&output_name)).await?;
     let _ = tokio::fs::remove_file(&result.output_path).await;
     Ok(ToolOutput {
         text: format!(
@@ -888,7 +889,7 @@ async fn generate_video_tool(
         media: vec![ToolMedia {
             sha256: blob.sha256.clone(),
             mime_type: mime.to_owned(),
-            name: None,
+            name: Some(output_name),
         }],
     })
 }

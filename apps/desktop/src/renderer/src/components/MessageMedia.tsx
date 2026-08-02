@@ -78,7 +78,7 @@ export function MessageMedia({
             {url && isAudio && <audio src={url} controls />}
             {!url && <div className="message-media-placeholder">Loading…</div>}
             <figcaption>
-              <span>{blob.mime_type}</span>
+              <span>{blob.original_name ?? blob.mime_type}</span>
               <button
                 type="button"
                 className="chip-button subtle"

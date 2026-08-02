@@ -3099,6 +3099,13 @@ mod tests {
                 .await
                 .expect("PDF context");
         assert_eq!(pdf_context.live.role, "user");
+        assert_eq!(
+            pdf_context
+                .persisted
+                .content
+                .pointer("/1/brazier_blob/name"),
+            Some(&json!("report.pdf"))
+        );
 
         caps.input_modalities.push("image".into());
         settings.show_generated_images_to_model = false;

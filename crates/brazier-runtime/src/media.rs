@@ -188,9 +188,9 @@ pub async fn prepare_messages(
                 // it is, then let doc_read pull ranges on demand.
                 emit("prepare_document", &format!("Preparing document {name}…"));
                 let path = blob_store::blob_path(ctx.data_dir, sha256)?;
-                let pages = if crate::documents::kind_for_mime(mime, name)
-                    == Some(crate::documents::DocumentKind::Pdf)
-                {
+                let kind = crate::documents::kind_for_mime(mime, name);
+                let pages = if kind == Some(crate::documents::DocumentKind::Pdf) {
+                    crate::documents::ensure_poppler_available()?;
                     crate::documents::page_count(&path).await.unwrap_or(None)
                 } else {
                     None

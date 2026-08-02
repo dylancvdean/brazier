@@ -341,7 +341,13 @@ function ToolChips({
   records: ToolCallRecord[]
   onError?: (message: string) => void
 }): React.JSX.Element {
-  const media = records.flatMap((record) => record.media ?? [])
+  const media = records.flatMap((record) =>
+    (record.media ?? []).map((blob) => ({
+      sha256: blob.sha256,
+      mime_type: blob.mime_type,
+      original_name: blob.name
+    }))
+  )
   return (
     <>
       <div className="tool-chip-row">
@@ -1535,9 +1541,13 @@ export function App(): React.JSX.Element {
             brazier_blob: {
               sha256: media.sha256,
               mime_type: media.mime_type,
-              name: media.mime_type.startsWith('video/')
-                ? `generated-video-${index + 1}`
-                : `generated-image-${index + 1}`
+              name:
+                media.name ??
+                (media.mime_type === 'application/pdf'
+                  ? `document-${index + 1}.pdf`
+                  : media.mime_type.startsWith('video/')
+                    ? `generated-video-${index + 1}.mp4`
+                    : `generated-image-${index + 1}.png`)
             }
           })),
           model: selectedModel,

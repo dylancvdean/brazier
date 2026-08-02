@@ -879,7 +879,7 @@ export type ToolCallRecord = {
   output: string
   is_error: boolean
   /** Media produced by this tool, available immediately while it is running. */
-  media?: Array<{ sha256: string; mime_type: string }>
+  media?: Array<{ sha256: string; mime_type: string; name?: string | null }>
 }
 
 export type RuntimeForkHint = {
@@ -2597,10 +2597,34 @@ function extensionForMime(mimeType: string): string {
     'image/jpeg': 'jpg',
     'image/webp': 'webp',
     'image/gif': 'gif',
+    'image/svg+xml': 'svg',
     'video/mp4': 'mp4',
-    'video/webm': 'webm'
+    'video/webm': 'webm',
+    'video/quicktime': 'mov',
+    'application/pdf': 'pdf',
+    'application/rtf': 'rtf',
+    'text/rtf': 'rtf',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'text/plain': 'txt',
+    'text/markdown': 'md',
+    'text/csv': 'csv',
+    'application/json': 'json',
+    'application/xml': 'xml'
   }
-  return known[mimeType] ?? mimeType.split('/').at(-1) ?? 'bin'
+  const normalized = mimeType.split(';', 1)[0].trim().toLowerCase()
+  const suffix = normalized.split('/').at(-1)
+  return known[normalized] ?? (suffix && /^[a-z0-9]+$/.test(suffix) ? suffix : 'bin')
+}
+
+export function filenameWithExtension(
+  name: string | null | undefined,
+  mimeType: string,
+  fallback: string
+): string {
+  const trimmed = name?.trim()
+  if (!trimmed) return fallback
+  return /\.[^./\\]+$/.test(trimmed) ? trimmed : `${trimmed}.${extensionForMime(mimeType)}`
 }
 
 /**
@@ -2621,8 +2645,9 @@ export async function saveBlobToDisk(
   const response = await fetch(`${daemon.address}/api/v1/blobs/${sha256}`, { headers })
   if (!response.ok) throw new Error(`Could not read that file (${response.status}).`)
   const bytes = await response.arrayBuffer()
-  const fallback = `brazier-${sha256.slice(0, 12)}.${extensionForMime(mimeType)}`
-  return window.brazier.saveFile(suggestedName || fallback, bytes)
+  const extension = extensionForMime(mimeType)
+  const fallback = `brazier-${sha256.slice(0, 12)}.${extension}`
+  return window.brazier.saveFile(filenameWithExtension(suggestedName, mimeType, fallback), bytes)
 }
 
 /** Download the daemon's privacy-filtered diagnostic archive and save it natively. */
