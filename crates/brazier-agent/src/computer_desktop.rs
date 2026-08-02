@@ -308,7 +308,7 @@ async fn mac_action(action: &ComputerAction, viewport: &ComputerViewport) -> Res
         }
         ComputerAction::MouseMove { x, y } => {
             let (x, y) = mac_logical_point(viewport, *x, *y);
-            format!("tell application \"System Events\" to move mouse to {{{x}, {y}}}")
+            return mac_mouse_move(x, y).await;
         }
         ComputerAction::LeftClickDrag {
             start_x,
@@ -318,9 +318,7 @@ async fn mac_action(action: &ComputerAction, viewport: &ComputerViewport) -> Res
         } => {
             let (start_x, start_y) = mac_logical_point(viewport, *start_x, *start_y);
             let (end_x, end_y) = mac_logical_point(viewport, *end_x, *end_y);
-            format!(
-                "tell application \"System Events\" to drag from {{{start_x}, {start_y}}} to {{{end_x}, {end_y}}}"
-            )
+            return mac_mouse_drag(start_x, start_y, end_x, end_y).await;
         }
         ComputerAction::Keypress { keys } => format!(
             "tell application \"System Events\" to key code {}",
@@ -356,6 +354,45 @@ async fn mac_action(action: &ComputerAction, viewport: &ComputerViewport) -> Res
     command("osascript", &["-e".into(), script])
         .await
         .map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+async fn mac_mouse_move(x: f64, y: f64) -> Result<(), String> {
+    mac_post_mouse_events(format!("post($.kCGEventMouseMoved, {x}, {y});")).await
+}
+
+#[cfg(target_os = "macos")]
+async fn mac_mouse_drag(start_x: f64, start_y: f64, end_x: f64, end_y: f64) -> Result<(), String> {
+    mac_post_mouse_events(format!(
+        "post($.kCGEventMouseMoved, {start_x}, {start_y});\n\
+         post($.kCGEventLeftMouseDown, {start_x}, {start_y});\n\
+         post($.kCGEventLeftMouseDragged, {end_x}, {end_y});\n\
+         post($.kCGEventLeftMouseUp, {end_x}, {end_y});"
+    ))
+    .await
+}
+
+/// Post pointer events through CoreGraphics. System Events exposes `click at`
+/// for process targets, but it has no `mouse` variable or `move mouse` command;
+/// JXA is a system-provided bridge to the same Accessibility-authorized event
+/// API without requiring a third-party `cliclick` installation.
+#[cfg(target_os = "macos")]
+async fn mac_post_mouse_events(body: String) -> Result<(), String> {
+    let script = format!(
+        "ObjC.import('CoreGraphics');\n\
+         function post(type, x, y) {{\n\
+             var event = $.CGEventCreateMouseEvent(null, type, $.CGPointMake(x, y), $.kCGMouseButtonLeft);\n\
+             if (event === null) throw new Error('CoreGraphics could not create mouse event');\n\
+             $.CGEventPost($.kCGHIDEventTap, event);\n\
+         }}\n\
+         {body}"
+    );
+    command(
+        "osascript",
+        &["-l".into(), "JavaScript".into(), "-e".into(), script],
+    )
+    .await
+    .map(|_| ())
 }
 #[cfg(target_os = "macos")]
 fn mac_key(keys: &[String]) -> Result<u16, String> {
