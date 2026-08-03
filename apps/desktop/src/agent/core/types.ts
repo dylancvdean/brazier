@@ -432,6 +432,20 @@ export interface AgentSession {
   getState(): AgentSessionState
   composerSuggestions?(): Promise<AgentComposerSuggestion[]>
   /**
+   * Subscribe to a runtime's own event frames (e.g. the OMP RPC stdout stream)
+   * outside the run stream, so the GUI can render runtime-specific state that
+   * the shared event model does not carry. Implemented only by runtimes that
+   * have such a stream (Pi has none). Returns an unsubscribe function.
+   */
+  subscribeRuntimeFrames?(listener: (payload: Record<string, unknown>) => void): () => void
+  /**
+   * Send an arbitrary runtime command and resolve its raw response frame.
+   * Implemented only by runtimes with a native command surface (OMP); Pi has
+   * no equivalent. Optional so the worker protocol can stay open-ended while
+   * every runtime keeps its own vocabulary.
+   */
+  sendRuntimeCommand?(command: Record<string, unknown>): Promise<Record<string, unknown>>
+  /**
    * Replace the in-memory transcript (and optional system prompt) with what the
    * daemon stored. Required when reopening a session so model context matches
    * the history shown in the UI.

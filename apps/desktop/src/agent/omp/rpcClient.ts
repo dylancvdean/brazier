@@ -9,7 +9,19 @@ import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process'
 import { Buffer } from 'node:buffer'
 import { createInterface } from 'node:readline'
 
-export type OmpRpcFrame = Record<string, unknown>
+import type {
+  OmpAvailableCommand,
+  OmpModel,
+  OmpRpcCommand,
+  OmpRpcFrame,
+  OmpRpcResponse,
+  OmpSessionState,
+  OmpSubagentSnapshot,
+  OmpThinkingLevel,
+  OmpTodoPhase
+} from './rpcTypes'
+
+export type { OmpRpcFrame } from './rpcTypes'
 export type OmpFrameListener = (frame: OmpRpcFrame) => void
 
 export type OmpRpcClientOptions = {
@@ -240,6 +252,159 @@ export class OmpRpcClient {
   /** Fire-and-forget stdin write (host_tool_result, extension_ui_response, …). */
   send(frame: OmpRpcFrame): void {
     this.write(frame)
+  }
+
+  /** Run a typed RPC command and resolve its `data` payload. */
+  private async call<T>(command: OmpRpcCommand): Promise<T> {
+    const response = await this.request(command as OmpRpcFrame)
+    return response.data as T
+  }
+
+  // --- Prompting -------------------------------------------------------------
+
+  steer(message: string, images?: unknown[]): Promise<void> {
+    return this.call({ type: 'steer', message, ...(images ? { images } : {}) })
+  }
+
+  followUp(message: string, images?: unknown[]): Promise<void> {
+    return this.call({ type: 'follow_up', message, ...(images ? { images } : {}) })
+  }
+
+  abortAndPrompt(message: string, images?: unknown[]): Promise<void> {
+    return this.call({ type: 'abort_and_prompt', message, ...(images ? { images } : {}) })
+  }
+
+  // --- State -----------------------------------------------------------------
+
+  getState(): Promise<OmpSessionState> {
+    return this.call({ type: 'get_state' })
+  }
+
+  getAvailableCommands(): Promise<OmpAvailableCommand[]> {
+    return this.call<{ commands: OmpAvailableCommand[] }>({ type: 'get_available_commands' }).then(
+      (data) => data.commands
+    )
+  }
+
+  getAvailableModels(): Promise<OmpModel[]> {
+    return this.call<{ models: OmpModel[] }>({ type: 'get_available_models' }).then(
+      (data) => data.models
+    )
+  }
+
+  setModel(provider: string, modelId: string): Promise<OmpModel> {
+    return this.call({ type: 'set_model', provider, modelId })
+  }
+
+  cycleModel(): Promise<unknown> {
+    return this.call({ type: 'cycle_model' })
+  }
+
+  setThinkingLevel(level: OmpThinkingLevel): Promise<void> {
+    return this.call({ type: 'set_thinking_level', level })
+  }
+
+  cycleThinkingLevel(): Promise<unknown> {
+    return this.call({ type: 'cycle_thinking_level' })
+  }
+
+  setFastMode(enabled: boolean): Promise<{ enabled: boolean; active: boolean }> {
+    return this.call({ type: 'set_fast_mode', enabled })
+  }
+
+  setAutoCompaction(enabled: boolean): Promise<void> {
+    return this.call({ type: 'set_auto_compaction', enabled })
+  }
+
+  setAutoRetry(enabled: boolean): Promise<void> {
+    return this.call({ type: 'set_auto_retry', enabled })
+  }
+
+  abortRetry(): Promise<void> {
+    return this.call({ type: 'abort_retry' })
+  }
+
+  setSteeringMode(mode: 'all' | 'one-at-a-time'): Promise<void> {
+    return this.call({ type: 'set_steering_mode', mode })
+  }
+
+  setFollowUpMode(mode: 'all' | 'one-at-a-time'): Promise<void> {
+    return this.call({ type: 'set_follow_up_mode', mode })
+  }
+
+  setInterruptMode(mode: 'immediate' | 'wait'): Promise<void> {
+    return this.call({ type: 'set_interrupt_mode', mode })
+  }
+
+  setTodos(phases: OmpTodoPhase[]): Promise<OmpTodoPhase[]> {
+    return this.call<{ todoPhases: OmpTodoPhase[] }>({ type: 'set_todos', phases }).then(
+      (data) => data.todoPhases
+    )
+  }
+
+  setSubagentSubscription(level: 'off' | 'progress' | 'events'): Promise<void> {
+    return this.call({ type: 'set_subagent_subscription', level })
+  }
+
+  getSubagents(): Promise<OmpSubagentSnapshot[]> {
+    return this.call<{ subagents: OmpSubagentSnapshot[] }>({ type: 'get_subagents' }).then(
+      (data) => data.subagents
+    )
+  }
+
+  // --- Session ---------------------------------------------------------------
+
+  getSessionStats(): Promise<unknown> {
+    return this.call({ type: 'get_session_stats' })
+  }
+
+  setSessionName(name: string): Promise<void> {
+    return this.call({ type: 'set_session_name', name })
+  }
+
+  getLastAssistantText(): Promise<string | null> {
+    return this.call<{ text: string | null }>({ type: 'get_last_assistant_text' }).then(
+      (data) => data.text
+    )
+  }
+
+  getMessages(): Promise<unknown[]> {
+    return this.call<{ messages: unknown[] }>({ type: 'get_messages' }).then((data) => data.messages)
+  }
+
+  exportHtml(outputPath?: string): Promise<string> {
+    return this.call<{ path: string }>({ type: 'export_html', ...(outputPath ? { outputPath } : {}) }).then(
+      (data) => data.path
+    )
+  }
+
+  newSession(parentSession?: string): Promise<void> {
+    return this.call({ type: 'new_session', ...(parentSession ? { parentSession } : {}) })
+  }
+
+  // --- Bash / login ----------------------------------------------------------
+
+  bash(command: string): Promise<unknown> {
+    return this.call({ type: 'bash', command })
+  }
+
+  abortBash(): Promise<void> {
+    return this.call({ type: 'abort_bash' })
+  }
+
+  getLoginProviders(): Promise<Array<{ id: string; name: string; available: boolean; authenticated: boolean }>> {
+    return this.call<{ providers: Array<{ id: string; name: string; available: boolean; authenticated: boolean }> }>(
+      { type: 'get_login_providers' }
+    ).then((data) => data.providers)
+  }
+
+  login(providerId: string): Promise<void> {
+    return this.call({ type: 'login', providerId })
+  }
+
+  /** Raw typed response access for commands without a dedicated helper. */
+  command(command: OmpRpcCommand): Promise<OmpRpcResponse> {
+    return this.request(command as OmpRpcFrame) as Promise<OmpRpcResponse>
   }
 
   async dispose(): Promise<void> {

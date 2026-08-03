@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, type Mock } from 'vitest'
 
+import type { WorkerMessage } from './core/protocol'
 import type { AgentMessage, AgentRuntime, AgentSession, AgentSessionState } from './core/types'
 import { AgentWorkerCore } from './workerCore'
 
@@ -256,5 +257,158 @@ describe('AgentWorkerCore.openSession', () => {
     expect(piCreate).not.toHaveBeenCalled()
     expect(broker.systemPrompt).not.toHaveBeenCalled()
     expect(ompCreate).toHaveBeenCalledWith(expect.objectContaining({ systemPrompt: '' }))
+  })
+})
+
+describe('AgentWorkerCore runtime frames and commands', () => {
+  /** Core with a session that exposes a runtime frame stream, already open. */
+  async function openOmpCore(): Promise<{
+    core: AgentWorkerCore
+    posts: WorkerMessage[]
+    emit: (payload: Record<string, unknown>) => void
+    runtimeCommand: Mock
+  }> {
+    const posts: WorkerMessage[] = []
+    const core = new AgentWorkerCore((message) => {
+      posts.push(message as WorkerMessage)
+    })
+    const frameListenerRef: { current?: (payload: Record<string, unknown>) => void } = {}
+    const runtimeCommand = vi.fn(async (command: Record<string, unknown>) => ({ echo: command }))
+    const session: AgentSession = {
+      ...mockSession('sess-omp'),
+      getState: () => ({
+        ...mockSession('sess-omp').getState(),
+        runtimeId: 'omp'
+      }),
+      subscribeRuntimeFrames: (listener) => {
+        frameListenerRef.current = listener
+        return () => {
+          if (frameListenerRef.current === listener) frameListenerRef.current = undefined
+        }
+      },
+      sendRuntimeCommand: runtimeCommand
+    }
+    const broker = {
+      session: vi.fn(async () => ({
+        session: {
+          id: 'sess-omp',
+          title: 'Task',
+          model: 'model-a',
+          runtime_id: 'omp',
+          permission_mode: 'ask',
+          permission_settings: {
+            auto_approve_host_actions: false,
+            auto_approve_sandboxed_actions: true
+          },
+          enabled_tools: null,
+          workspace_path: '/tmp',
+          created_at: '2026-01-01',
+          updated_at: '2026-01-01'
+        },
+        messages: [],
+        tool_executions: [],
+        pending_approvals: [],
+        grants: [],
+        sandbox: {
+          backend: 'test',
+          isolated: false,
+          sandboxed_execution: false,
+          filesystem_scoping: false,
+          network_isolation: false,
+          process_isolation: false,
+          profiles: [],
+          detail: 'host'
+        }
+      })),
+      systemPrompt: vi.fn(async () => ({ system_prompt: 'prompt' })),
+      tools: vi.fn(async () => []),
+      textProfile: vi.fn(async () => ({ context_size: 4096 })),
+      runtimeInferenceSettings: vi.fn(async () => ({ context_size: 4096 }))
+    }
+    await core.handle({
+      type: 'init',
+      requestId: 'init',
+      connection: { address: 'http://127.0.0.1:1', apiKey: null }
+    })
+    ;(core as unknown as { broker: typeof broker }).broker = broker
+    ;(core as unknown as { tools: [] }).tools = []
+    ;(core as unknown as { sessions: Map<string, AgentSession> }).sessions.set('sess-omp', session)
+
+    // Open once to arm the frame subscription without rehydrating the injected session.
+    await core.handle({ type: 'open-session', requestId: 'open', sessionId: 'sess-omp' })
+    return {
+      core,
+      posts,
+      emit: (payload) => frameListenerRef.current?.(payload),
+      runtimeCommand
+    }
+  }
+
+  it('forwards runtime frames to the renderer with session and runtime ids', async () => {
+    const { emit, posts } = await openOmpCore()
+    posts.length = 0
+
+    emit({ type: 'command_output', text: 'review summary' })
+
+    const forwarded = posts.find((message) => message.type === 'runtime-frame')
+    expect(forwarded).toMatchObject({
+      type: 'runtime-frame',
+      sessionId: 'sess-omp',
+      runtimeId: 'omp',
+      payload: { type: 'command_output', text: 'review summary' }
+    })
+  })
+
+  it('does not stack frame listeners when a session is reopened', async () => {
+    const { core, emit, posts } = await openOmpCore()
+
+    await core.handle({ type: 'open-session', requestId: 'open2', sessionId: 'sess-omp' })
+    posts.length = 0
+    emit({ type: 'notice', message: 'once' })
+
+    const forwarded = posts.filter((message) => message.type === 'runtime-frame')
+    expect(forwarded).toHaveLength(1)
+  })
+
+  it('stops forwarding frames after the session is closed', async () => {
+    const { core, emit, posts } = await openOmpCore()
+
+    await core.handle({ type: 'close-session', requestId: 'close', sessionId: 'sess-omp' })
+    posts.length = 0
+    emit({ type: 'notice', message: 'after close' })
+
+    expect(posts.filter((message) => message.type === 'runtime-frame')).toHaveLength(0)
+  })
+
+  it('routes runtime-command through the session and returns its response frame', async () => {
+    const { core, posts, runtimeCommand } = await openOmpCore()
+
+    await core.handle({
+      type: 'runtime-command',
+      requestId: 'cmd',
+      sessionId: 'sess-omp',
+      runtimeId: 'omp',
+      command: { type: 'get_state' }
+    })
+
+    expect(runtimeCommand).toHaveBeenCalledWith({ type: 'get_state' })
+    const result = posts.find((message) => message.type === 'result' && message.requestId === 'cmd')
+    expect(result).toMatchObject({ ok: true, data: { echo: { type: 'get_state' } } })
+  })
+
+  it('rejects runtime-command for a mismatched runtime id without calling the session', async () => {
+    const { core, posts, runtimeCommand } = await openOmpCore()
+
+    await core.handle({
+      type: 'runtime-command',
+      requestId: 'cmd',
+      sessionId: 'sess-omp',
+      runtimeId: 'pi',
+      command: { type: 'get_state' }
+    })
+
+    expect(runtimeCommand).not.toHaveBeenCalled()
+    const result = posts.find((message) => message.type === 'result' && message.requestId === 'cmd')
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining('does not match') })
   })
 })

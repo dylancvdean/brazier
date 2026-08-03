@@ -456,6 +456,27 @@ class OmpAgentSession implements AgentSession {
     ]
   }
 
+  /**
+   * Mirror the sidecar's raw RPC stdout stream. The worker forwards each frame
+   * to the renderer so OMP-specific state (command output, live command lists,
+   * notices, config/session updates, subagent frames) can be rendered without
+   * squeezing it through the shared event model. Frames are forwarded losslessly
+   * — unknown frame types are never dropped before the renderer sees them.
+   */
+  subscribeRuntimeFrames(listener: (payload: Record<string, unknown>) => void): () => void {
+    return this.requireClient().onFrame(listener)
+  }
+
+  /**
+   * Send an arbitrary typed RPC command to the sidecar and resolve its raw
+   * response frame. This is the escape hatch the worker protocol needs so the
+   * GUI can drive any OMP surface (get_state, roles, subagents, bash, …)
+   * without a new worker command per feature.
+   */
+  sendRuntimeCommand(command: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.requireClient().request(command)
+  }
+
   rehydrate(messages: AgentMessage[], _systemPrompt?: string): void {
     if (this.disposed) throw new Error('Cannot rehydrate a disposed agent session.')
     this.messages = [...messages]

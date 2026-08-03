@@ -23,6 +23,8 @@ export class AgentWorkerCore {
   private readonly runtimes = new Map<string, AgentRuntime>()
   private tools?: AgentToolDefinition[]
   private readonly sessions = new Map<string, AgentSession>()
+  /** Runtime-frame subscriptions per open session, so a mode switch cannot stack listeners. */
+  private readonly frameSubscriptions = new Map<string, () => void>()
   /** Runs in flight, so a cancel can reach the right session. */
   private readonly running = new Set<string>()
 
@@ -122,9 +124,24 @@ export class AgentWorkerCore {
         this.post({ type: 'session-state', sessionId: session.id, state: session.getState() })
         return session.getState()
       }
+      case 'runtime-command': {
+        const session = await this.openSession(command.sessionId, { rehydrate: false })
+        if (!session.sendRuntimeCommand) {
+          throw new Error(
+            `Runtime \`${session.getState().runtimeId}\` does not accept direct commands.`
+          )
+        }
+        if (command.runtimeId && command.runtimeId !== session.getState().runtimeId) {
+          throw new Error(
+            `Runtime \`${command.runtimeId}\` does not match session \`${session.id}\`.`
+          )
+        }
+        return await session.sendRuntimeCommand(command.command)
+      }
       case 'close-session': {
         const session = this.sessions.get(command.sessionId)
         if (session) {
+          this.unsubscribeFrames(session.id)
           await session.dispose()
           this.sessions.delete(command.sessionId)
         }
@@ -134,6 +151,14 @@ export class AgentWorkerCore {
         for (const session of this.sessions.values()) {
           await session.dispose()
         }
+        for (const unsubscribe of this.frameSubscriptions.values()) {
+          try {
+            unsubscribe()
+          } catch {
+            // A session may have already torn down its frame stream.
+          }
+        }
+        this.frameSubscriptions.clear()
         this.sessions.clear()
         for (const runtime of this.runtimes.values()) {
           await runtime.dispose()
@@ -151,6 +176,32 @@ export class AgentWorkerCore {
   private requireBroker(): BrokerClient {
     if (!this.broker) throw new Error('The agent worker has not been initialized.')
     return this.broker
+  }
+
+  private unsubscribeFrames(sessionId: string): void {
+    const unsubscribe = this.frameSubscriptions.get(sessionId)
+    if (!unsubscribe) return
+    this.frameSubscriptions.delete(sessionId)
+    try {
+      unsubscribe()
+    } catch {
+      // The session may have already closed its frame stream.
+    }
+  }
+
+  /**
+   * Mirror a runtime's own event stream to the renderer. Only runtimes that
+   * expose one (OMP) participate; Pi stays silent. Frames are forwarded
+   * losslessly so the GUI can render runtime-specific state without the worker
+   * needing to understand it, and so an unknown future frame is never dropped
+   * before the renderer can decide what to do with it.
+   */
+  private subscribeFrames(session: AgentSession, runtimeId: string): void {
+    if (!session.subscribeRuntimeFrames || this.frameSubscriptions.has(session.id)) return
+    const unsubscribe = session.subscribeRuntimeFrames((payload) => {
+      this.post({ type: 'runtime-frame', sessionId: session.id, runtimeId, payload })
+    })
+    this.frameSubscriptions.set(session.id, unsubscribe)
   }
 
   private runtimeFor(runtimeId: string): AgentRuntime {
@@ -214,6 +265,7 @@ export class AgentWorkerCore {
     if (existing) {
       existing.rehydrate(messages, prompt.system_prompt)
       await existing.refreshInferencePrefs()
+      this.subscribeFrames(existing, runtime.descriptor.id)
       return existing
     }
     const session = await runtime.createSession({
@@ -254,6 +306,7 @@ export class AgentWorkerCore {
     })
     await session.refreshInferencePrefs()
     this.sessions.set(sessionId, session)
+    this.subscribeFrames(session, runtime.descriptor.id)
     return session
   }
 }

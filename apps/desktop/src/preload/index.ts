@@ -53,6 +53,15 @@ const agent = {
     invokeAgent({ type: 'composer-suggestions', sessionId }) as Promise<Array<{ value: string; description: string }>>,
   setPermissionMode: (sessionId: string, mode: AgentPermissionMode): Promise<unknown> =>
     invokeAgent({ type: 'set-permission-mode', sessionId, mode }),
+  /**
+   * Drive an arbitrary runtime command (OMP RPC) and resolve its response
+   * frame. Optional `runtimeId` guards against routing to the wrong session.
+   */
+  runtimeCommand: (
+    sessionId: string,
+    runtimeId: string | undefined,
+    command: Record<string, unknown>
+  ): Promise<unknown> => invokeAgent({ type: 'runtime-command', sessionId, runtimeId, command }),
   closeSession: (sessionId: string): Promise<unknown> =>
     invokeAgent({ type: 'close-session', sessionId }),
   status: (): Promise<{ running: boolean; crashes: number }> =>

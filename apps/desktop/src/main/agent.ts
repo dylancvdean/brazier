@@ -25,7 +25,7 @@ type Pending = {
 }
 
 /** Requests that may run for a long time (a run waits on the model and the user). */
-const LONG_RUNNING: WorkerCommand['type'][] = ['run']
+const LONG_RUNNING: WorkerCommand['type'][] = ['run', 'runtime-command']
 const SHORT_REQUEST_TIMEOUT_MS = 60_000
 /** A stop is a safety control, so a wedged runtime gets only a short grace period. */
 const CANCEL_GRACE_MS = 2_000
@@ -92,7 +92,8 @@ export class AgentSupervisor {
         return
       }
       case 'event':
-      case 'session-state': {
+      case 'session-state':
+      case 'runtime-frame': {
         this.broadcast(AGENT_IPC.event, message)
         return
       }

@@ -1,4 +1,5 @@
 import {
+  Activity,
   AlertTriangle,
   Bot,
   Check,
@@ -14,7 +15,7 @@ import {
   Wrench,
   X
 } from 'lucide-react'
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react'
 
 import type {
   AgentApproval,
@@ -52,6 +53,7 @@ import {
 import { showsBrazierSandboxStatus } from '../agentRuntimeDisplay'
 import { prefillProgressLabel, type LocalModel, type PrefillProgress } from '../api'
 import { modelDisplayName } from '../model-utils'
+import { EMPTY_OMP_SIDECAR, ompSidecarReducer } from '../ompSidecar'
 import { Markdown } from './Markdown'
 import { ReasoningDisclosure } from './ReasoningDisclosure'
 import { ToolsMenu } from './ToolsMenu'
@@ -693,6 +695,8 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [artifact, setArtifact] = useState<{ id: string; text: string } | null>(null)
   const [ompSuggestions, setOmpSuggestions] = useState<Array<{ value: string; description: string }>>([])
+  /** Live OMP sidecar stream (command output, slash commands, session events). */
+  const [ompSidecar, dispatchOmpSidecar] = useReducer(ompSidecarReducer, EMPTY_OMP_SIDECAR)
   const scrollAnchor = useRef<HTMLDivElement>(null)
   const sessionIdRef = useRef<string | null>(null)
 
@@ -724,6 +728,11 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   useEffect(() => {
     sessionIdRef.current = session?.id ?? null
+  }, [session?.id])
+
+  // The OMP sidecar stream belongs to one task. Drop it when the task changes.
+  useEffect(() => {
+    dispatchOmpSidecar({ type: 'reset' })
   }, [session?.id])
 
   useEffect(() => {
@@ -1009,6 +1018,14 @@ export function AgentMode(props: Props): React.JSX.Element {
       if (message.type === 'event') {
         if (message.sessionId !== sessionIdRef.current) return
         applyEvent(message.event)
+        return
+      }
+      if (message.type === 'runtime-frame') {
+        // The worker mirrors the OMP sidecar's stdout stream. Surface whatever
+        // it emits; unknown frame types land in the generic events record.
+        if (message.sessionId !== sessionIdRef.current) return
+        if (message.runtimeId !== 'omp') return
+        dispatchOmpSidecar({ type: 'frame', frame: message.payload })
         return
       }
       if (message.type === 'log' && message.level === 'error') {
@@ -1509,6 +1526,23 @@ export function AgentMode(props: Props): React.JSX.Element {
     : !workspace
       ? 'Choose a workspace folder…'
       : ''
+  /**
+   * Composer completions for OMP: magic words plus the live slash-command list.
+   * Live `available_commands_update` frames win over the snapshot fetched at
+   * session open, and duplicates collapse on the command value.
+   */
+  const ompCompletions = useMemo(() => {
+    if (activeRuntimeId !== 'omp') return undefined
+    const merged = new Map<string, { value: string; description: string }>([
+      ['ultrathink', { value: 'ultrathink', description: 'Use the highest supported reasoning effort for this turn.' }],
+      ['orchestrate', { value: 'orchestrate', description: 'Plan, delegate independent work, and verify the result.' }],
+      ['workflowz', { value: 'workflowz', description: 'Build a deterministic multi-subagent workflow when task tools are available.' }]
+    ])
+    for (const entry of [...ompSuggestions, ...ompSidecar.commands]) {
+      merged.set(entry.value, entry)
+    }
+    return [...merged.values()]
+  }, [activeRuntimeId, ompSuggestions, ompSidecar.commands])
   // The parent keeps these controls between child renders. Route actions
   // through a ref so a UI-only state change (notably the pre-session worktree
   // toggle) can never leave the shared composer holding an older `send`.
@@ -1525,18 +1559,10 @@ export function AgentMode(props: Props): React.JSX.Element {
         : running
           ? 'The agent is working. Stop it to send something else…'
           : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`,
-      suggestions:
-        activeRuntimeId === 'omp'
-          ? [
-              { value: 'ultrathink', description: 'Use the highest supported reasoning effort for this turn.' },
-              { value: 'orchestrate', description: 'Plan, delegate independent work, and verify the result.' },
-              { value: 'workflowz', description: 'Build a deterministic multi-subagent workflow when task tools are available.' },
-              ...ompSuggestions.filter((entry) => !['ultrathink', 'orchestrate', 'workflowz'].includes(entry.value))
-            ]
-          : undefined
+      suggestions: ompCompletions
     })
     return () => onComposerChange?.(null)
-  }, [onComposerChange, running, blockedReason, modelLabel, workspace, activeRuntimeId, ompSuggestions])
+  }, [onComposerChange, running, blockedReason, modelLabel, workspace, ompCompletions])
 
   // Same pattern for the app sidebar: Agent mode replaces conversations with
   // directory-grouped tasks, so the list and its actions live up there.
@@ -1688,6 +1714,24 @@ export function AgentMode(props: Props): React.JSX.Element {
           <Bot size={13} />
           {runtimeLabel(activeRuntimeId)}
         </span>
+        {ompRuntime && ompSidecar.recentFrames.length > 0 && (
+          <details className="omp-events" title="Recent Oh My Pi sidecar events">
+            <summary>
+              <Activity size={13} />
+              <span>
+                OMP events · {ompSidecar.recentFrames.length}
+              </span>
+            </summary>
+            <div className="omp-events-list">
+              {[...ompSidecar.recentFrames].reverse().map((frame) => (
+                <div key={frame.id} title={frame.type}>
+                  <span className="omp-events-type">{frame.type}</span>
+                  <span className="omp-events-detail">{frame.detail}</span>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
         {sandbox && showsBrazierSandboxStatus(activeRuntimeId) && (
           <SandboxBadge sandbox={sandbox} />
         )}
@@ -1848,6 +1892,19 @@ export function AgentMode(props: Props): React.JSX.Element {
             </article>
           )
         })}
+
+        {ompRuntime &&
+          ompSidecar.commandOutputs.map((output) => (
+            <article className="agent-message omp-command" key={output.id}>
+              <div className="avatar">
+                <Terminal size={16} />
+              </div>
+              <div className="agent-message-body">
+                <strong>OMP command output</strong>
+                <pre>{output.text}</pre>
+              </div>
+            </article>
+          ))}
 
         {approvals.map((approval) => (
           <ApprovalCard key={approval.id} approval={approval} onDecide={(...args) => void decide(...args)} busy={deciding} />
