@@ -1,12 +1,17 @@
-use std::{convert::Infallible, path::PathBuf, time::Duration};
+use std::{
+    convert::Infallible,
+    net::SocketAddr,
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::Context as _;
 use async_stream::stream;
 use axum::http::header;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query, Request, State},
+    http::{HeaderMap, HeaderValue, StatusCode, request::Parts},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -1631,10 +1636,63 @@ struct CreateComputerSession {
     model_id: Option<String>,
     permission_mode: Option<String>,
     viewport: Option<crate::computer_types::ComputerViewport>,
+    /// Required for skip-permissions / allow-all. Desktop UI sets this after an
+    /// explicit mode choice so a bare bearer token cannot silently elevate.
+    #[serde(default)]
+    confirm_elevated_permissions: bool,
+}
+
+/// Peer address when the server was started with connect-info; absent in
+/// `oneshot` unit tests, which are treated as loopback.
+struct ClientAddr(Option<SocketAddr>);
+
+impl<S> FromRequestParts<S> for ClientAddr
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| *addr),
+        ))
+    }
+}
+
+fn client_is_loopback(client: &ClientAddr) -> bool {
+    client
+        .0
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(true)
+}
+
+fn require_elevated_permission_step_up(
+    elevated: bool,
+    confirmed: bool,
+    loopback: bool,
+) -> ApiResult<()> {
+    if !elevated {
+        return Ok(());
+    }
+    if !confirmed {
+        return Err(ApiError::bad_request(
+            "elevated permission modes require confirm_elevated_permissions=true",
+        ));
+    }
+    if !loopback {
+        return Err(ApiError::bad_request(
+            "elevated permission modes can only be set by a loopback client",
+        ));
+    }
+    Ok(())
 }
 
 async fn create_computer_session(
     State(state): State<AppState>,
+    client: ClientAddr,
     Json(body): Json<CreateComputerSession>,
 ) -> ApiResult<Json<Value>> {
     let target = match body.target.as_deref().unwrap_or("browser") {
@@ -1647,6 +1705,16 @@ async fn create_computer_session(
         "allow-all" => crate::computer_types::ComputerPermissionMode::AllowAll,
         _ => crate::computer_types::ComputerPermissionMode::Ask,
     };
+    let elevated = matches!(
+        permission_mode,
+        crate::computer_types::ComputerPermissionMode::SkipPermissions
+            | crate::computer_types::ComputerPermissionMode::AllowAll
+    );
+    require_elevated_permission_step_up(
+        elevated,
+        body.confirm_elevated_permissions,
+        client_is_loopback(&client),
+    )?;
     let session = state
         .computer_broker
         .create_session(
@@ -5663,6 +5731,7 @@ async fn list_agent_sessions(State(state): State<AppState>) -> ApiResult<Json<Va
 
 async fn create_agent_session(
     State(state): State<AppState>,
+    client: ClientAddr,
     Json(mut request): Json<crate::agent_types::CreateAgentSession>,
 ) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
     let confine = request.confine_to_worktree;
@@ -5690,6 +5759,17 @@ async fn create_agent_session(
             "Oh My Pi does not use Brazier's OS sandbox. Choose Ask or Skip permissions, or use the Pi runtime.",
         ));
     }
+    let elevated = matches!(
+        request.permission_mode,
+        Some(crate::agent_types::AgentPermissionMode::SkipPermissions)
+    ) || request
+        .permission_settings
+        .is_some_and(|settings| settings.auto_approve_host_actions);
+    require_elevated_permission_step_up(
+        elevated,
+        request.confirm_elevated_permissions,
+        client_is_loopback(&client),
+    )?;
     request.runtime_id = Some(runtime_id);
     let mut session = state
         .db
@@ -5756,10 +5836,12 @@ async fn get_agent_session(
 async fn patch_agent_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    client: ClientAddr,
     Json(mut update): Json<crate::agent_types::UpdateAgentSession>,
 ) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
     let confine = update.confine_to_worktree.take();
     let discard_unapplied = update.discard_unapplied.take().unwrap_or(false);
+    let confirm_elevated = update.confirm_elevated_permissions.take().unwrap_or(false);
     let has_other_updates = update.title.is_some()
         || update.workspace_path.is_some()
         || update.model.is_some()
@@ -5798,6 +5880,26 @@ async fn patch_agent_session(
             set_worktree_confinement(&state, session, enabled, discard_unapplied).await?,
         ));
     }
+    let existing = state
+        .db
+        .agent_session(&id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let elevating_mode = matches!(
+        update.permission_mode,
+        Some(crate::agent_types::AgentPermissionMode::SkipPermissions)
+    ) && !matches!(
+        existing.permission_mode,
+        crate::agent_types::AgentPermissionMode::SkipPermissions
+    );
+    let elevating_host = update.permission_settings.is_some_and(|settings| {
+        settings.auto_approve_host_actions && !existing.permission_settings.auto_approve_host_actions
+    });
+    require_elevated_permission_step_up(
+        elevating_mode || elevating_host,
+        confirm_elevated,
+        client_is_loopback(&client),
+    )?;
     let session = state
         .db
         .update_agent_session(&id, update)
@@ -7597,6 +7699,48 @@ done
     }
 
     #[tokio::test]
+    async fn elevated_permission_modes_require_explicit_confirmation() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (status, body) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test",
+                "permission_mode": "skip-permissions"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("confirm_elevated_permissions"),
+            "{body}"
+        );
+
+        let (status, body) = json_request(
+            &app,
+            "POST",
+            "/api/v1/computer/sessions",
+            json!({ "permission_mode": "allow-all" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("confirm_elevated_permissions"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_session_restricted_to_some_tools_refuses_the_others() {
         let dir = tempdir().unwrap();
         let workspace = tempdir().unwrap();
@@ -7609,6 +7753,7 @@ done
                 "workspace_path": workspace.path().display().to_string(),
                 "model": "gguf:test",
                 "permission_mode": "skip-permissions",
+                "confirm_elevated_permissions": true,
                 "enabled_tools": ["fs_read", "fs_list"]
             }),
         )

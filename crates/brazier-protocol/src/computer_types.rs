@@ -337,6 +337,8 @@ pub enum ComputerActionStatus {
 #[serde(rename_all = "snake_case")]
 pub enum OsPermissionState {
     Granted,
+    /// Integration is present but the OS has not granted consent yet.
+    Denied,
     Missing,
     Unsupported,
     Unknown,

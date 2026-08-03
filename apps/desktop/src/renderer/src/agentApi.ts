@@ -185,9 +185,15 @@ export async function createAgentSession(input: {
   /** Isolate the session in a fresh git worktree of the workspace. */
   confine_to_worktree?: boolean
 }): Promise<AgentSessionSummary> {
+  const elevated =
+    input.permission_mode === 'skip-permissions' ||
+    Boolean(input.permission_settings?.auto_approve_host_actions)
   return request('/api/v1/agent/sessions', {
     method: 'POST',
-    body: JSON.stringify(input)
+    body: JSON.stringify({
+      ...input,
+      ...(elevated ? { confirm_elevated_permissions: true } : {})
+    })
   })
 }
 
@@ -209,9 +215,15 @@ export async function updateAgentSession(
     discard_unapplied?: boolean
   }
 ): Promise<AgentSessionSummary> {
+  const elevated =
+    update.permission_mode === 'skip-permissions' ||
+    Boolean(update.permission_settings?.auto_approve_host_actions)
   return request(`/api/v1/agent/sessions/${id}`, {
     method: 'PATCH',
-    body: JSON.stringify(update)
+    body: JSON.stringify({
+      ...update,
+      ...(elevated ? { confirm_elevated_permissions: true } : {})
+    })
   })
 }
 

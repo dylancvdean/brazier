@@ -5,9 +5,6 @@
 //! client, and Wayland requires compositor-approved tools/portals.  Nothing is
 //! silently emulated when the required integration is absent.
 
-#[cfg(target_os = "macos")]
-use std::process::Stdio;
-
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use brazier_protocol::computer_types::{
     ComputerAction, ComputerActionResult, ComputerActionStatus, ComputerViewport,
@@ -22,6 +19,36 @@ use uuid::Uuid;
 fn binary(name: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|paths| std::env::split_paths(&paths).any(|path| path.join(name).is_file()))
+}
+
+/// Query macOS TCC via the public preflight APIs. Binary presence alone must
+/// not be reported as Granted — Screen Recording / Accessibility consent is
+/// independent of `screencapture` / `osascript` being on PATH.
+#[cfg(target_os = "macos")]
+fn macos_tcc_states() -> (OsPermissionState, OsPermissionState) {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+    }
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    let screen = if !binary("screencapture") {
+        OsPermissionState::Missing
+    } else if unsafe { CGPreflightScreenCaptureAccess() } {
+        OsPermissionState::Granted
+    } else {
+        OsPermissionState::Denied
+    };
+    let input = if !binary("osascript") {
+        OsPermissionState::Missing
+    } else if unsafe { AXIsProcessTrusted() } {
+        OsPermissionState::Granted
+    } else {
+        OsPermissionState::Denied
+    };
+    (screen, input)
 }
 
 fn result(status: ComputerActionStatus, message: Option<String>) -> ComputerActionResult {
@@ -75,11 +102,23 @@ pub fn probe_os_permissions() -> OsPermissionStatus {
 
 #[cfg(target_os = "macos")]
 fn probe_macos() -> OsPermissionStatus {
-    OsPermissionStatus { platform: "macos".into(), display_server: "quartz".into(),
-        screen_capture: if binary("screencapture") { OsPermissionState::Granted } else { OsPermissionState::Missing },
-        input_injection: if binary("osascript") { OsPermissionState::Granted } else { OsPermissionState::Missing },
-        detail: Some("Brazier uses macOS Screen Recording for capture and Accessibility through System Events for input.".into()),
-        settings_hint: Some("If an action is refused, enable Brazier in System Settings → Privacy & Security → Screen Recording and Accessibility.".into()) }
+    let (screen_capture, input_injection) = macos_tcc_states();
+    let detail = match (&screen_capture, &input_injection) {
+        (OsPermissionState::Granted, OsPermissionState::Granted) => {
+            "Brazier has Screen Recording and Accessibility access for desktop computer use."
+        }
+        _ => {
+            "Brazier needs macOS Screen Recording for capture and Accessibility (System Events) for input. Use Request access, then approve Brazier in System Settings if prompted."
+        }
+    };
+    OsPermissionStatus {
+        platform: "macos".into(),
+        display_server: "quartz".into(),
+        screen_capture,
+        input_injection,
+        detail: Some(detail.into()),
+        settings_hint: Some("Enable Brazier in System Settings → Privacy & Security → Screen Recording and Accessibility.".into()),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -129,15 +168,28 @@ pub async fn request_os_permissions() -> Result<OsPermissionStatus, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = screenshot().await?;
-        command(
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGRequestScreenCaptureAccess() -> bool;
+        }
+        #[link(name = "ApplicationServices", kind = "framework")]
+        unsafe extern "C" {
+            fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+        }
+        // Prompt for Screen Recording / Accessibility when missing, then probe.
+        unsafe {
+            let _ = CGRequestScreenCaptureAccess();
+            let _ = AXIsProcessTrustedWithOptions(std::ptr::null());
+        }
+        let _ = screenshot().await;
+        let _ = command(
             "osascript",
             &[
                 "-e".into(),
                 "tell application \"System Events\" to get name of first process".into(),
             ],
         )
-        .await?;
+        .await;
     }
     Ok(probe_os_permissions())
 }
@@ -286,7 +338,11 @@ fn mac_logical_point(viewport: &ComputerViewport, x: f64, y: f64) -> (f64, f64) 
 }
 
 #[cfg(target_os = "macos")]
-async fn mac_action(action: &ComputerAction, viewport: &ComputerViewport) -> Result<(), String> {
+async fn mac_action(
+    action: &ComputerAction,
+    viewport: &ComputerViewport,
+    cancel: Option<&crate::computer_browser::ActionCancel>,
+) -> Result<(), String> {
     let script = match action {
         ComputerAction::LeftClick { x, y } => {
             let (x, y) = mac_logical_point(viewport, *x, *y);
@@ -329,21 +385,9 @@ async fn mac_action(action: &ComputerAction, viewport: &ComputerViewport) -> Res
             -delta_y.round() as i64
         ),
         ComputerAction::Type { text } => {
-            let mut child = Command::new("pbcopy")
-                .stdin(Stdio::piped())
-                .spawn()
-                .map_err(|e| e.to_string())?;
-            use tokio::io::AsyncWriteExt;
-            let Some(mut stdin) = child.stdin.take() else {
-                return Err("pbcopy did not provide stdin".into());
-            };
-            stdin
-                .write_all(text.as_bytes())
-                .await
-                .map_err(|e| e.to_string())?;
-            drop(stdin);
-            child.wait().await.map_err(|e| e.to_string())?;
-            "tell application \"System Events\" to keystroke \"v\" using command down".into()
+            // Type via System Events keystroke — never pbcopy/Cmd+V, which
+            // overwrites the user's clipboard as a side effect of agent input.
+            return mac_type_text(text, cancel).await;
         }
         ComputerAction::Wait { milliseconds } => {
             tokio::time::sleep(std::time::Duration::from_millis(*milliseconds)).await;
@@ -354,6 +398,37 @@ async fn mac_action(action: &ComputerAction, viewport: &ComputerViewport) -> Res
     command("osascript", &["-e".into(), script])
         .await
         .map(|_| ())
+}
+
+/// Type text through System Events without touching the pasteboard.
+#[cfg(target_os = "macos")]
+async fn mac_type_text(
+    text: &str,
+    cancel: Option<&crate::computer_browser::ActionCancel>,
+) -> Result<(), String> {
+    // AppleScript string literals cannot contain unescaped backslash or quote.
+    // Chunk so a single huge keystroke call cannot stall the Esc hatch forever.
+    for chunk in text
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(32)
+        .map(|chars| chars.iter().collect::<String>())
+    {
+        if cancel.is_some_and(|c| c.is_cancelled()) {
+            return Err("computer action cancelled".into());
+        }
+        let escaped = chunk.replace('\\', "\\\\").replace('"', "\\\"");
+        command(
+            "osascript",
+            &[
+                "-e".into(),
+                format!("tell application \"System Events\" to keystroke \"{escaped}\""),
+            ],
+        )
+        .await
+        .map(|_| ())?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -414,9 +489,12 @@ fn mac_key(keys: &[String]) -> Result<u16, String> {
 }
 
 #[cfg(target_os = "linux")]
-async fn linux_action(action: &ComputerAction) -> Result<(), String> {
+async fn linux_action(
+    action: &ComputerAction,
+    cancel: Option<&crate::computer_browser::ActionCancel>,
+) -> Result<(), String> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        return wayland_action(action).await;
+        return wayland_action(action, cancel).await;
     }
     tokio::task::spawn_blocking({
         let action = action.clone();
@@ -447,10 +525,16 @@ async fn linux_action(action: &ComputerAction) -> Result<(), String> {
     .map_err(|error| error.to_string())?
 }
 #[cfg(target_os = "linux")]
-async fn wayland_action(action: &ComputerAction) -> Result<(), String> {
+async fn wayland_action(
+    action: &ComputerAction,
+    cancel: Option<&crate::computer_browser::ActionCancel>,
+) -> Result<(), String> {
     if let ComputerAction::Wait { milliseconds } = action {
-        tokio::time::sleep(std::time::Duration::from_millis(*milliseconds)).await;
-        return Ok(());
+        return cancellable_desktop_sleep(
+            std::time::Duration::from_millis(*milliseconds),
+            cancel,
+        )
+        .await;
     }
     match action {
         ComputerAction::MouseMove { x, y } => crate::computer_portal::pointer_motion(*x, *y).await,
@@ -475,9 +559,12 @@ async fn wayland_action(action: &ComputerAction) -> Result<(), String> {
         ComputerAction::Scroll {
             delta_x, delta_y, ..
         } => crate::computer_portal::scroll(*delta_x, *delta_y).await,
-        ComputerAction::Type { text } => crate::computer_portal::type_text(text).await,
+        ComputerAction::Type { text } => crate::computer_portal::type_text(text, cancel).await,
         ComputerAction::Keypress { keys } => {
             for key in keys {
+                if cancel.is_some_and(|c| c.is_cancelled()) {
+                    return Err("computer action cancelled".into());
+                }
                 crate::computer_portal::key(wayland_keysym(key)?).await?;
             }
             Ok(())
@@ -509,6 +596,7 @@ pub async fn execute_desktop_action(
     action: &ComputerAction,
     viewport: &ComputerViewport,
     settle_delay_ms: u64,
+    cancel: Option<&crate::computer_browser::ActionCancel>,
 ) -> ComputerActionResult {
     let status = probe_os_permissions();
     if !desktop_permitted(&status) {
@@ -522,16 +610,41 @@ pub async fn execute_desktop_action(
             )
         });
     }
+    if let ComputerAction::Wait { milliseconds } = action {
+        if let Err(error) = cancellable_desktop_sleep(
+            std::time::Duration::from_millis(*milliseconds),
+            cancel,
+        )
+        .await
+        {
+            return result(ComputerActionStatus::Error, Some(error));
+        }
+        return screenshot().await.unwrap_or_else(|e| {
+            result(
+                ComputerActionStatus::Error,
+                Some(format!("Wait succeeded but screenshot failed: {e}")),
+            )
+        });
+    }
     #[cfg(target_os = "macos")]
-    let execution = mac_action(action, viewport).await;
+    let execution = mac_action(action, viewport, cancel).await;
     #[cfg(target_os = "linux")]
-    let execution = linux_action(action).await;
+    let execution = {
+        let _ = viewport;
+        linux_action(action, cancel).await
+    };
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let execution: Result<(), String> = Err("unsupported platform".into());
     match execution {
         Ok(()) => {
-            if !matches!(action, ComputerAction::Wait { .. }) && settle_delay_ms > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(settle_delay_ms)).await;
+            if settle_delay_ms > 0
+                && let Err(error) = cancellable_desktop_sleep(
+                    std::time::Duration::from_millis(settle_delay_ms),
+                    cancel,
+                )
+                .await
+            {
+                return result(ComputerActionStatus::Error, Some(error));
             }
             screenshot().await.unwrap_or_else(|e| {
                 result(
@@ -544,6 +657,20 @@ pub async fn execute_desktop_action(
             ComputerActionStatus::Error,
             Some(format!("Desktop {} failed: {e}", action.kind())),
         ),
+    }
+}
+
+async fn cancellable_desktop_sleep(
+    duration: std::time::Duration,
+    cancel: Option<&crate::computer_browser::ActionCancel>,
+) -> Result<(), String> {
+    let Some(cancel) = cancel else {
+        tokio::time::sleep(duration).await;
+        return Ok(());
+    };
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => Ok(()),
+        _ = cancel.cancelled() => Err("computer action cancelled".into()),
     }
 }
 

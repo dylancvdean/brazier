@@ -475,13 +475,50 @@ fn sbpl_quote(path: &Path) -> String {
     format!("\"{escaped}\"")
 }
 
+/// System locations compilers and package managers need. Deliberately excludes
+/// `$HOME` — Bubblewrap hides the home directory with a tmpfs, and Seatbelt
+/// must not be weaker by granting a global `(allow file-read*)`.
+const SEATBELT_SYSTEM_READ_PATHS: &[&str] = &[
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/opt",
+    "/Library",
+    "/System",
+    "/Applications",
+    "/dev",
+    "/etc",
+    "/private/etc",
+    "/private/var/db",
+    "/var/db",
+    "/private/tmp",
+    "/tmp",
+];
+
+/// Toolchain caches that commonly live under `$HOME` but are not user documents.
+/// Credential files inside these trees are still denied via [`secret_paths`].
+const SEATBELT_HOME_TOOLCHAIN_PATHS: &[&str] = &[
+    ".cargo",
+    ".rustup",
+    ".local/share/uv",
+    ".cache/uv",
+    ".cache/pip",
+    ".cache/go-build",
+    ".cache/typescript",
+    ".npm",
+    ".node",
+    ".bun",
+    ".local/share/pnpm",
+];
+
 /// Generate a Seatbelt profile.
 ///
 /// Rule order is the whole security argument, because the last matching SBPL
 /// rule wins:
 ///
 /// 1. deny everything,
-/// 2. allow the broad reads a compiler needs,
+/// 2. allow reads of system paths, the workspace, scratch, and known toolchain
+///    caches (not the rest of `$HOME`),
 /// 3. deny credential paths, overriding those reads,
 /// 4. allow writes to the workspace and the session scratch directory last, so
 ///    they survive step 3 — the scratch directory lives under Brazier's data
@@ -496,7 +533,25 @@ pub fn seatbelt_profile(request: &SandboxRequest<'_>) -> String {
     profile.push_str("(allow process-fork)\n(allow process-exec)\n");
     profile.push_str("(allow signal)\n(allow sysctl-read)\n");
     profile.push_str("(allow mach-lookup)\n(allow ipc-posix-shm)\n");
-    profile.push_str("(allow file-read-metadata)\n(allow file-read*)\n");
+    profile.push_str("(allow file-read-metadata)\n");
+    for path in SEATBELT_SYSTEM_READ_PATHS {
+        profile.push_str(&format!(
+            "(allow file-read* (subpath {}))\n",
+            sbpl_quote(Path::new(path))
+        ));
+    }
+    profile.push_str(&format!(
+        "(allow file-read* (subpath {}))\n",
+        sbpl_quote(request.workspace)
+    ));
+    if let Some(home) = home_directory() {
+        for relative in SEATBELT_HOME_TOOLCHAIN_PATHS {
+            profile.push_str(&format!(
+                "(allow file-read* (subpath {}))\n",
+                sbpl_quote(&home.join(relative))
+            ));
+        }
+    }
     // /dev is needed for null, tty, and random; it holds no user content.
     profile.push_str("(allow file-write* (subpath \"/dev\"))\n");
     profile.push_str("(allow file-ioctl (subpath \"/dev\"))\n");
@@ -508,7 +563,7 @@ pub fn seatbelt_profile(request: &SandboxRequest<'_>) -> String {
         profile.push_str("(deny network*)\n");
     }
 
-    // Credential denials come after the broad read allowance.
+    // Credential denials come after the read allowances they override.
     for secret in secret_paths(request.data_dir) {
         profile.push_str(&format!(
             "(deny file-read* file-write* (subpath {}))\n",
@@ -705,13 +760,18 @@ mod tests {
         assert!(profile.starts_with("(version 1)\n(deny default)"));
         assert!(profile.contains("(deny network*)"));
         assert!(profile.contains("(allow file-write* (subpath \"/tmp/ws\"))"));
-        // Credential denials must come after the broad read allowance,
-        // because the last matching SBPL rule wins.
-        let read_all = profile.find("(allow file-read*)").expect("read rule");
+        assert!(profile.contains("(allow file-read* (subpath \"/usr\"))"));
+        assert!(profile.contains("(allow file-read* (subpath \"/tmp/ws\"))"));
+        // No blanket home read — only explicit system/toolchain/workspace paths.
+        assert!(!profile.contains("(allow file-read*)\n"));
+        // Credential denials must come after the read allowances they override.
+        let read_usr = profile
+            .find("(allow file-read* (subpath \"/usr\"))")
+            .expect("system read rule");
         let deny_secret = profile
             .find("(deny file-read* file-write* (subpath")
             .unwrap_or(usize::MAX);
-        assert!(deny_secret > read_all, "secret denials must override reads");
+        assert!(deny_secret > read_usr, "secret denials must override reads");
     }
 
     #[test]

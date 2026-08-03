@@ -65,7 +65,12 @@ export type ComputerTarget = 'browser' | 'desktop'
 
 export type ComputerPermissionMode = 'ask' | 'browser-only' | 'skip-permissions' | 'allow-all'
 
-export type OsPermissionState = 'granted' | 'missing' | 'unsupported' | 'unknown'
+export type OsPermissionState =
+  | 'granted'
+  | 'denied'
+  | 'missing'
+  | 'unsupported'
+  | 'unknown'
 
 export type OsPermissionStatus = {
   platform: string
@@ -196,9 +201,14 @@ export async function createComputerSession(body: {
   permission_mode?: ComputerPermissionMode
   viewport?: ComputerViewport
 }): Promise<ComputerSession> {
+  const elevated =
+    body.permission_mode === 'skip-permissions' || body.permission_mode === 'allow-all'
   return request('/api/v1/computer/sessions', {
     method: 'POST',
-    body: JSON.stringify(body)
+    body: JSON.stringify({
+      ...body,
+      ...(elevated ? { confirm_elevated_permissions: true } : {})
+    })
   })
 }
 

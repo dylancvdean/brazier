@@ -23,7 +23,7 @@ use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use crate::{
-    computer_browser::{BrowserSessionRegistry, SharedBrowserRegistry},
+    computer_browser::{ActionCancel, BrowserSessionRegistry, SharedBrowserRegistry},
     computer_desktop::{self, desktop_permitted},
     computer_policy::{self, ComputerPolicyDecision, ComputerPolicyRequest},
 };
@@ -54,6 +54,9 @@ struct LiveSession {
     /// Ephemeral, fail-closed authority established only after the desktop app
     /// has a visible native safety overlay and a working Esc watcher.
     desktop_authorized: bool,
+    /// Esc/stop sets the flag and notifies waiters so in-flight Wait/settle
+    /// delays abort instead of continuing after authority is revoked.
+    cancel: Arc<ActionCancel>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -119,6 +122,7 @@ impl ComputerBroker {
                                 pending: item.pending,
                                 action_gate: Arc::new(Mutex::new(())),
                                 desktop_authorized: false,
+                                cancel: Arc::new(ActionCancel::new()),
                             },
                         )
                     })
@@ -259,6 +263,7 @@ impl ComputerBroker {
                 pending: HashMap::new(),
                 action_gate: Arc::new(Mutex::new(())),
                 desktop_authorized: false,
+                cancel: Arc::new(ActionCancel::new()),
             },
         );
         self.persist().await?;
@@ -536,6 +541,14 @@ impl ComputerBroker {
         // updated the session viewport and immediately before an OS/browser
         // driver receives the action.
         let driver_action = request.action.scaled_for_viewport(&viewport);
+        let cancel = {
+            let sessions = self.sessions.lock().await;
+            let session = sessions
+                .get(&request.session_id)
+                .context("session disappeared")?;
+            session.cancel.reset();
+            session.cancel.clone()
+        };
         let executed = match &request.action {
             ComputerAction::Memorize { fact } => Ok(ComputerActionResult {
                 status: ComputerActionStatus::Ok,
@@ -574,7 +587,12 @@ impl ComputerBroker {
                 ComputerTarget::Browser => match self.ensure_browser(&request.session_id).await {
                     Ok(id) => {
                         self.browsers
-                            .execute(&id, &driver_action, self.action_settle_delay_ms())
+                            .execute(
+                                &id,
+                                &driver_action,
+                                self.action_settle_delay_ms(),
+                                Some(cancel.as_ref()),
+                            )
                             .await
                     }
                     Err(error) => Err(error),
@@ -583,6 +601,7 @@ impl ComputerBroker {
                     &driver_action,
                     &viewport,
                     self.action_settle_delay_ms(),
+                    Some(cancel.as_ref()),
                 )
                 .await),
             },
@@ -673,6 +692,7 @@ impl ComputerBroker {
                 .with_context(|| format!("unknown computer session {session_id}"))?;
             session.record.running = false;
             session.desktop_authorized = false;
+            session.cancel.trip();
             session.record.target
         };
         #[cfg(target_os = "linux")]
@@ -693,6 +713,7 @@ impl ComputerBroker {
                 if session.record.target == ComputerTarget::Desktop || session.desktop_authorized {
                     session.desktop_authorized = false;
                     session.record.running = false;
+                    session.cancel.trip();
                     had_desktop = true;
                 }
             }

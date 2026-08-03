@@ -6,7 +6,8 @@
 
 use std::{
     collections::HashMap,
-    net::{IpAddr, TcpListener},
+    net::IpAddr,
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     path::PathBuf,
     process::Stdio,
     sync::Arc,
@@ -16,45 +17,165 @@ use anyhow::{Context, Result, bail};
 use brazier_protocol::computer_types::{
     ComputerAction, ComputerActionResult, ComputerActionStatus, ComputerViewport,
 };
-use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
     sync::Mutex,
     time::{Duration, sleep, timeout},
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
 const DRIVER_UNAVAILABLE: &str =
     "Browser computer use requires a working Chromium installation; no action was performed.";
-type CdpSocket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Cooperative cancel signal for an in-flight computer action (Esc / stop).
+pub struct ActionCancel {
+    cancelled: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ActionCancel {
+    pub fn new() -> Self {
+        Self {
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub fn reset(&self) {
+        self.cancelled
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn trip(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub async fn cancelled(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+            if self.is_cancelled() {
+                return;
+            }
+        }
+    }
+}
+
+impl Default for ActionCancel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Private CDP transport over Chromium's `--remote-debugging-pipe`.
+///
+/// Unlike `--remote-debugging-port`, this never opens a TCP listener that any
+/// local process could attach to for the session lifetime.
+struct CdpPipe {
+    reader: tokio::fs::File,
+    writer: tokio::fs::File,
+    next_id: u64,
+    /// Flattened page-target session id for Page/Input/Runtime commands.
+    page_session_id: String,
+}
+
+impl CdpPipe {
+    async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.call_raw(method, params, Some(&self.page_session_id.clone()))
+            .await
+    }
+
+    async fn call_browser(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.call_raw(method, params, None).await
+    }
+
+    async fn call_raw(
+        &mut self,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+    ) -> Result<Value> {
+        let request_id = self.next_id;
+        self.next_id += 1;
+        let mut message = json!({"id": request_id, "method": method, "params": params});
+        if let Some(session_id) = session_id {
+            message["sessionId"] = Value::String(session_id.to_owned());
+        }
+        let mut bytes = message.to_string().into_bytes();
+        bytes.push(0);
+        timeout(Duration::from_secs(10), self.writer.write_all(&bytes))
+            .await
+            .context("timed out sending Chromium command")?
+            .context("send Chromium command")?;
+        let mut buffer = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 8192];
+            let read = timeout(Duration::from_secs(10), self.reader.read(&mut chunk))
+                .await
+                .context("timed out waiting for Chromium response")?
+                .context("read Chromium response")?;
+            if read == 0 {
+                bail!("Chromium DevTools pipe closed while executing {method}");
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            while let Some(end) = buffer.iter().position(|byte| *byte == 0) {
+                let frame = String::from_utf8_lossy(&buffer[..end]).into_owned();
+                buffer.drain(..=end);
+                let response: Value =
+                    serde_json::from_str(&frame).context("decode Chromium response")?;
+                if response.get("id").and_then(Value::as_u64) != Some(request_id) {
+                    continue;
+                }
+                if let Some(error) = response.get("error") {
+                    bail!("Chromium {method} failed: {error}");
+                }
+                return Ok(response.get("result").cloned().unwrap_or(Value::Null));
+            }
+        }
+    }
+}
 
 struct CdpBrowserSession {
     id: String,
     viewport: ComputerViewport,
-    debug_url: String,
     process: Child,
     profile_dir: PathBuf,
+    pipe: CdpPipe,
 }
 
 impl CdpBrowserSession {
     async fn launch(viewport: ComputerViewport, executable: Option<&str>) -> Result<Self> {
         let executable =
             find_chromium(executable).ok_or_else(|| anyhow::anyhow!(DRIVER_UNAVAILABLE))?;
-        let listener = TcpListener::bind("127.0.0.1:0").context("reserve Chromium debug port")?;
-        let port = listener.local_addr()?.port();
-        drop(listener);
         let profile_dir = std::env::temp_dir().join(format!("brazier-computer-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&profile_dir).context("create isolated Chromium profile")?;
+
+        // Chromium reads CDP from FD 3 and writes responses to FD 4.
+        let (to_chrome_read, to_chrome_write) =
+            std::io::pipe().context("create Chromium CDP input pipe")?;
+        let (from_chrome_read, from_chrome_write) =
+            std::io::pipe().context("create Chromium CDP output pipe")?;
+        let to_chrome_read_fd = to_chrome_read.as_raw_fd();
+        let from_chrome_write_fd = from_chrome_write.as_raw_fd();
+
         let mut command = Command::new(&executable);
         command
             .arg("--headless=new")
             .arg("--disable-gpu")
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
-            .arg(format!("--remote-debugging-port={port}"))
+            .arg("--remote-debugging-pipe")
             .arg(format!("--user-data-dir={}", profile_dir.display()))
             .arg(format!(
                 "--window-size={},{}",
@@ -65,38 +186,58 @@ impl CdpBrowserSession {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command.kill_on_drop(true);
-        let mut process = command
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(to_chrome_read_fd, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(from_chrome_write_fd, 4) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let process = command
             .spawn()
             .with_context(|| format!("launch Chromium at {executable}"))?;
-        let debug_url = format!("http://127.0.0.1:{port}");
-        for _ in 0..40 {
-            if let Ok(Ok(response)) = timeout(
-                Duration::from_secs(1),
-                reqwest::get(format!("{debug_url}/json/version")),
-            )
+        // Parent keeps the write end of the input pipe and the read end of the
+        // output pipe; close the ends Chromium already inherited.
+        drop(to_chrome_read);
+        drop(from_chrome_write);
+
+        let reader = tokio::fs::File::from_std(std::fs::File::from(unsafe {
+            OwnedFd::from_raw_fd(from_chrome_read.into_raw_fd())
+        }));
+        let writer = tokio::fs::File::from_std(std::fs::File::from(unsafe {
+            OwnedFd::from_raw_fd(to_chrome_write.into_raw_fd())
+        }));
+        let mut pipe = CdpPipe {
+            reader,
+            writer,
+            next_id: 1,
+            page_session_id: String::new(),
+        };
+        let page_session_id = match timeout(Duration::from_secs(5), attach_page_session(&mut pipe))
             .await
-                && response.status().is_success()
-            {
-                return Ok(Self {
-                    id: Uuid::new_v4().to_string(),
-                    viewport,
-                    debug_url,
-                    process,
-                    profile_dir,
-                });
-            }
-            if let Some(status) = process.try_wait().context("check Chromium process")? {
+        {
+            Ok(Ok(session_id)) => session_id,
+            Ok(Err(error)) => {
                 let _ = std::fs::remove_dir_all(&profile_dir);
-                bail!(
-                    "Chromium exited during startup ({status}); no browser action was performed."
-                );
+                return Err(error).context("attach Chromium page session");
             }
-            sleep(Duration::from_millis(100)).await;
-        }
-        let _ = process.kill().await;
-        let _ = process.wait().await;
-        let _ = std::fs::remove_dir_all(&profile_dir);
-        bail!("Chromium did not expose its DevTools endpoint; no browser action was performed.")
+            Err(_) => {
+                let _ = std::fs::remove_dir_all(&profile_dir);
+                bail!("Chromium did not expose a page target over the DevTools pipe");
+            }
+        };
+        pipe.page_session_id = page_session_id;
+        Ok(Self {
+            id: Uuid::new_v4().to_string(),
+            viewport,
+            process,
+            profile_dir,
+            pipe,
+        })
     }
 
     async fn close(&mut self) {
@@ -109,74 +250,60 @@ impl CdpBrowserSession {
         &mut self,
         action: &ComputerAction,
         settle_delay_ms: u64,
+        cancel: Option<&ActionCancel>,
     ) -> Result<ComputerActionResult> {
-        let ws_url = self.page_websocket().await?;
-        let (mut socket, _) = timeout(Duration::from_secs(5), connect_async(&ws_url))
-            .await
-            .context("timed out connecting to Chromium DevTools")??;
-        let mut next_id = 1_u64;
-        cdp(
-            &mut socket,
-            &mut next_id,
-            "Emulation.setDeviceMetricsOverride",
-            json!({
-                "width": self.viewport.width,
-                "height": self.viewport.height,
-                "deviceScaleFactor": self.viewport.device_pixel_ratio.unwrap_or(1.0),
-                "mobile": false,
-            }),
-        )
-        .await?;
+        self.pipe
+            .call(
+                "Emulation.setDeviceMetricsOverride",
+                json!({
+                    "width": self.viewport.width,
+                    "height": self.viewport.height,
+                    "deviceScaleFactor": self.viewport.device_pixel_ratio.unwrap_or(1.0),
+                    "mobile": false,
+                }),
+            )
+            .await?;
         let message = match action {
             ComputerAction::Screenshot => "Captured browser viewport.".to_owned(),
             ComputerAction::VisitUrl { url } => {
                 ensure_public_navigation_url(url).await?;
-                cdp(
-                    &mut socket,
-                    &mut next_id,
-                    "Page.navigate",
-                    json!({"url": url}),
-                )
-                .await?;
-                wait_for_page_ready(&mut socket, &mut next_id).await?;
+                self.pipe
+                    .call("Page.navigate", json!({"url": url}))
+                    .await?;
+                wait_for_page_ready(&mut self.pipe).await?;
                 format!("Navigated to {url}")
             }
             ComputerAction::WebSearch { query } => {
                 let url = format!("https://duckduckgo.com/?q={}", urlencoding_lite(query));
-                cdp(
-                    &mut socket,
-                    &mut next_id,
-                    "Page.navigate",
-                    json!({"url": url}),
-                )
-                .await?;
-                wait_for_page_ready(&mut socket, &mut next_id).await?;
+                self.pipe
+                    .call("Page.navigate", json!({"url": url}))
+                    .await?;
+                wait_for_page_ready(&mut self.pipe).await?;
                 format!("Opened search for {query}")
             }
             ComputerAction::LeftClick { x, y } => {
-                mouse_click(&mut socket, &mut next_id, *x, *y, 1, "left").await?;
+                mouse_click(&mut self.pipe, *x, *y, 1, "left").await?;
                 format!("Clicked at ({x:.0}, {y:.0})")
             }
             ComputerAction::RightClick { x, y } => {
-                mouse_click(&mut socket, &mut next_id, *x, *y, 1, "right").await?;
+                mouse_click(&mut self.pipe, *x, *y, 1, "right").await?;
                 format!("Right-clicked at ({x:.0}, {y:.0})")
             }
             ComputerAction::DoubleClick { x, y } => {
-                mouse_click(&mut socket, &mut next_id, *x, *y, 2, "left").await?;
+                mouse_click(&mut self.pipe, *x, *y, 2, "left").await?;
                 format!("Double-clicked at ({x:.0}, {y:.0})")
             }
             ComputerAction::TripleClick { x, y } => {
-                mouse_click(&mut socket, &mut next_id, *x, *y, 3, "left").await?;
+                mouse_click(&mut self.pipe, *x, *y, 3, "left").await?;
                 format!("Triple-clicked at ({x:.0}, {y:.0})")
             }
             ComputerAction::MouseMove { x, y } => {
-                cdp(
-                    &mut socket,
-                    &mut next_id,
-                    "Input.dispatchMouseEvent",
-                    json!({"type":"mouseMoved","x":x,"y":y}),
-                )
-                .await?;
+                self.pipe
+                    .call(
+                        "Input.dispatchMouseEvent",
+                        json!({"type":"mouseMoved","x":x,"y":y}),
+                    )
+                    .await?;
                 format!("Moved pointer to ({x:.0}, {y:.0})")
             }
             ComputerAction::LeftClickDrag {
@@ -185,29 +312,24 @@ impl CdpBrowserSession {
                 end_x,
                 end_y,
             } => {
-                cdp(&mut socket, &mut next_id, "Input.dispatchMouseEvent", json!({"type":"mousePressed","x":start_x,"y":start_y,"button":"left","clickCount":1})).await?;
-                cdp(
-                    &mut socket,
-                    &mut next_id,
-                    "Input.dispatchMouseEvent",
-                    json!({"type":"mouseMoved","x":end_x,"y":end_y,"button":"left","buttons":1}),
-                )
-                .await?;
-                cdp(&mut socket, &mut next_id, "Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":end_x,"y":end_y,"button":"left","clickCount":1})).await?;
+                self.pipe.call("Input.dispatchMouseEvent", json!({"type":"mousePressed","x":start_x,"y":start_y,"button":"left","clickCount":1})).await?;
+                self.pipe
+                    .call(
+                        "Input.dispatchMouseEvent",
+                        json!({"type":"mouseMoved","x":end_x,"y":end_y,"button":"left","buttons":1}),
+                    )
+                    .await?;
+                self.pipe.call("Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":end_x,"y":end_y,"button":"left","clickCount":1})).await?;
                 format!("Dragged ({start_x:.0},{start_y:.0}) to ({end_x:.0},{end_y:.0})")
             }
             ComputerAction::Type { text } => {
-                cdp(
-                    &mut socket,
-                    &mut next_id,
-                    "Input.insertText",
-                    json!({"text": text}),
-                )
-                .await?;
+                self.pipe
+                    .call("Input.insertText", json!({"text": text}))
+                    .await?;
                 format!("Typed {} chars", text.chars().count())
             }
             ComputerAction::Keypress { keys } => {
-                dispatch_keys(&mut socket, &mut next_id, keys).await?;
+                dispatch_keys(&mut self.pipe, keys).await?;
                 format!("Pressed {}", keys.join("+"))
             }
             ComputerAction::Scroll {
@@ -216,17 +338,17 @@ impl CdpBrowserSession {
                 delta_x,
                 delta_y,
             } => {
-                cdp(
-                    &mut socket,
-                    &mut next_id,
-                    "Input.dispatchMouseEvent",
-                    json!({"type":"mouseWheel","x":x,"y":y,"deltaX":delta_x,"deltaY":delta_y}),
-                )
-                .await?;
+                self.pipe
+                    .call(
+                        "Input.dispatchMouseEvent",
+                        json!({"type":"mouseWheel","x":x,"y":y,"deltaX":delta_x,"deltaY":delta_y}),
+                    )
+                    .await?;
                 format!("Scrolled at ({x:.0}, {y:.0})")
             }
             ComputerAction::Wait { milliseconds } => {
-                sleep(Duration::from_millis((*milliseconds).min(10_000))).await;
+                cancellable_sleep(Duration::from_millis((*milliseconds).min(10_000)), cancel)
+                    .await?;
                 format!("Waited {milliseconds}ms")
             }
             ComputerAction::Memorize { fact } => format!("Memorized: {fact}"),
@@ -236,7 +358,6 @@ impl CdpBrowserSession {
                         ComputerActionStatus::WaitingForUser,
                         Some(question.clone()),
                         true,
-                        None,
                     )
                     .await;
             }
@@ -246,7 +367,6 @@ impl CdpBrowserSession {
                         ComputerActionStatus::Finished,
                         response.clone().or_else(|| Some("Task finished.".into())),
                         false,
-                        None,
                     )
                     .await;
             }
@@ -256,82 +376,35 @@ impl CdpBrowserSession {
             ComputerAction::Screenshot | ComputerAction::Wait { .. }
         ) && settle_delay_ms > 0
         {
-            sleep(Duration::from_millis(settle_delay_ms)).await;
+            cancellable_sleep(Duration::from_millis(settle_delay_ms), cancel).await?;
         }
-        self.result(
-            ComputerActionStatus::Ok,
-            Some(message),
-            false,
-            Some(&mut socket),
-        )
-        .await
-    }
-
-    async fn page_websocket(&self) -> Result<String> {
-        let pages: Vec<Value> = timeout(
-            Duration::from_secs(5),
-            reqwest::get(format!("{}/json", self.debug_url)),
-        )
-        .await
-        .context("timed out querying Chromium pages")??
-        .error_for_status()?
-        .json()
-        .await
-        .context("decode Chromium pages")?;
-        pages
-            .into_iter()
-            .find(|page| page.get("type").and_then(Value::as_str) == Some("page"))
-            .and_then(|page| {
-                page.get("webSocketDebuggerUrl")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .context("Chromium has no controllable page")
+        self.result(ComputerActionStatus::Ok, Some(message), false)
+            .await
     }
 
     async fn result(
-        &self,
+        &mut self,
         status: ComputerActionStatus,
         message: Option<String>,
         needs_approval: bool,
-        socket: Option<&mut CdpSocket>,
     ) -> Result<ComputerActionResult> {
-        if let Some(socket) = socket {
-            return self
-                .result_from_socket(status, message, needs_approval, socket)
-                .await;
-        }
-        let ws_url = self.page_websocket().await?;
-        let (mut socket, _) = timeout(Duration::from_secs(5), connect_async(&ws_url))
-            .await
-            .context("timed out connecting to Chromium for screenshot")??;
-        self.result_from_socket(status, message, needs_approval, &mut socket)
-            .await
-    }
-
-    async fn result_from_socket(
-        &self,
-        status: ComputerActionStatus,
-        message: Option<String>,
-        needs_approval: bool,
-        socket: &mut CdpSocket,
-    ) -> Result<ComputerActionResult> {
-        let mut id = 10_000;
-        let capture = cdp(
-            socket,
-            &mut id,
-            "Page.captureScreenshot",
-            json!({"format":"png"}),
-        )
-        .await?;
+        let capture = self
+            .pipe
+            .call("Page.captureScreenshot", json!({"format":"png"}))
+            .await?;
         let screenshot_base64 = capture
             .get("data")
             .and_then(Value::as_str)
             .map(str::to_owned)
             .context("Chromium screenshot missing image data")?;
-        let info = cdp(socket, &mut id, "Runtime.evaluate", json!({"expression":"JSON.stringify({url: location.href, title: document.title})","returnByValue":true})).await?;
+        let info = self
+            .pipe
+            .call(
+                "Runtime.evaluate",
+                json!({"expression":"JSON.stringify({url: location.href, title: document.title})","returnByValue":true}),
+            )
+            .await?;
         let metadata = info
-            // `cdp` unwraps the protocol envelope and returns `result`.
             .pointer("/result/value")
             .and_then(Value::as_str)
             .and_then(|value| serde_json::from_str::<Value>(value).ok())
@@ -355,13 +428,14 @@ impl CdpBrowserSession {
         })
     }
 
-    async fn metadata(&self) -> Result<(Option<String>, Option<String>)> {
-        let ws_url = self.page_websocket().await?;
-        let (mut socket, _) = timeout(Duration::from_secs(5), connect_async(&ws_url))
-            .await
-            .context("timed out connecting to Chromium for metadata")??;
-        let mut id = 1;
-        let response = cdp(&mut socket, &mut id, "Runtime.evaluate", json!({"expression":"JSON.stringify({url: location.href, title: document.title})","returnByValue":true})).await?;
+    async fn metadata(&mut self) -> Result<(Option<String>, Option<String>)> {
+        let response = self
+            .pipe
+            .call(
+                "Runtime.evaluate",
+                json!({"expression":"JSON.stringify({url: location.href, title: document.title})","returnByValue":true}),
+            )
+            .await?;
         let metadata = response
             .pointer("/result/value")
             .and_then(Value::as_str)
@@ -389,56 +463,64 @@ impl Drop for CdpBrowserSession {
     }
 }
 
-async fn cdp(socket: &mut CdpSocket, id: &mut u64, method: &str, params: Value) -> Result<Value> {
-    let request_id = *id;
-    *id += 1;
-    socket
-        .send(Message::Text(
-            json!({"id":request_id,"method":method,"params":params})
-                .to_string()
-                .into(),
-        ))
-        .await
-        .context("send Chromium command")?;
-    while let Some(frame) = timeout(Duration::from_secs(10), socket.next())
-        .await
-        .context("timed out waiting for Chromium response")?
-    {
-        let frame = frame.context("read Chromium response")?;
-        if let Message::Text(text) = frame {
-            let response: Value =
-                serde_json::from_str(&text).context("decode Chromium response")?;
-            if response.get("id").and_then(Value::as_u64) == Some(request_id) {
-                if let Some(error) = response.get("error") {
-                    bail!("Chromium {method} failed: {error}");
-                }
-                return Ok(response.get("result").cloned().unwrap_or(Value::Null));
-            }
+async fn attach_page_session(pipe: &mut CdpPipe) -> Result<String> {
+    // Poll Target.getTargets until the initial about:blank page appears.
+    for _ in 0..50 {
+        let targets = pipe
+            .call_browser("Target.getTargets", json!({}))
+            .await?;
+        let page = targets
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|target| target.get("type").and_then(Value::as_str) == Some("page"));
+        if let Some(page) = page {
+            let target_id = page
+                .get("targetId")
+                .and_then(Value::as_str)
+                .context("page target missing id")?;
+            let attached = pipe
+                .call_browser(
+                    "Target.attachToTarget",
+                    json!({"targetId": target_id, "flatten": true}),
+                )
+                .await?;
+            return attached
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .context("attachToTarget missing sessionId");
         }
+        sleep(Duration::from_millis(100)).await;
     }
-    bail!("Chromium DevTools closed while executing {method}")
+    bail!("Chromium has no controllable page")
+}
+
+async fn cancellable_sleep(duration: Duration, cancel: Option<&ActionCancel>) -> Result<()> {
+    let Some(cancel) = cancel else {
+        sleep(duration).await;
+        return Ok(());
+    };
+    tokio::select! {
+        _ = sleep(duration) => Ok(()),
+        _ = cancel.cancelled() => bail!("computer action cancelled"),
+    }
 }
 
 async fn mouse_click(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    id: &mut u64,
+    pipe: &mut CdpPipe,
     x: f64,
     y: f64,
     count: u8,
     button: &str,
 ) -> Result<()> {
-    cdp(
-        socket,
-        id,
+    pipe.call(
         "Input.dispatchMouseEvent",
         json!({"type":"mousePressed","x":x,"y":y,"button":button,"clickCount":count}),
     )
     .await?;
-    cdp(
-        socket,
-        id,
+    pipe.call(
         "Input.dispatchMouseEvent",
         json!({"type":"mouseReleased","x":x,"y":y,"button":button,"clickCount":count}),
     )
@@ -446,7 +528,7 @@ async fn mouse_click(
     Ok(())
 }
 
-async fn dispatch_keys(socket: &mut CdpSocket, id: &mut u64, keys: &[String]) -> Result<()> {
+async fn dispatch_keys(pipe: &mut CdpPipe, keys: &[String]) -> Result<()> {
     if keys.is_empty() {
         bail!("Keypress requires at least one key.");
     }
@@ -456,34 +538,26 @@ async fn dispatch_keys(socket: &mut CdpSocket, id: &mut u64, keys: &[String]) ->
     // Press modifiers first, keep their bitfield on ordinary keys, then release
     // in reverse. This makes Ctrl+A/Command+A real shortcuts rather than text.
     for key in keys.iter().filter(|key| key.modifier != 0) {
-        cdp(
-            socket,
-            id,
+        pipe.call(
             "Input.dispatchKeyEvent",
             json!({"type":"rawKeyDown","key":key.key,"code":key.code,"modifiers":key.modifier,"windowsVirtualKeyCode":key.virtual_key,"nativeVirtualKeyCode":key.virtual_key}),
         )
         .await?;
     }
     for key in &ordinary {
-        cdp(
-            socket,
-            id,
+        pipe.call(
             "Input.dispatchKeyEvent",
             json!({"type":if modifiers == 0 { "keyDown" } else { "rawKeyDown" },"key":key.key,"code":key.code,"modifiers":modifiers,"windowsVirtualKeyCode":key.virtual_key,"nativeVirtualKeyCode":key.virtual_key}),
         )
         .await?;
-        cdp(
-            socket,
-            id,
+        pipe.call(
             "Input.dispatchKeyEvent",
             json!({"type":"keyUp","key":key.key,"code":key.code,"modifiers":modifiers,"windowsVirtualKeyCode":key.virtual_key,"nativeVirtualKeyCode":key.virtual_key}),
         )
         .await?;
     }
     for key in keys.iter().rev().filter(|key| key.modifier != 0) {
-        cdp(
-            socket,
-            id,
+        pipe.call(
             "Input.dispatchKeyEvent",
             json!({"type":"keyUp","key":key.key,"code":key.code,"modifiers":0,"windowsVirtualKeyCode":key.virtual_key,"nativeVirtualKeyCode":key.virtual_key}),
         )
@@ -537,20 +611,14 @@ fn normalize_key(raw: &str) -> NormalizedKey {
     }
 }
 
-async fn wait_for_page_ready(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    id: &mut u64,
-) -> Result<()> {
+async fn wait_for_page_ready(pipe: &mut CdpPipe) -> Result<()> {
     for _ in 0..50 {
-        let ready = cdp(
-            socket,
-            id,
-            "Runtime.evaluate",
-            json!({"expression":"document.readyState","returnByValue":true}),
-        )
-        .await?;
+        let ready = pipe
+            .call(
+                "Runtime.evaluate",
+                json!({"expression":"document.readyState","returnByValue":true}),
+            )
+            .await?;
         if matches!(
             ready.pointer("/result/value").and_then(Value::as_str),
             Some("interactive" | "complete")
@@ -745,7 +813,7 @@ impl BrowserSessionRegistry {
         id: &str,
     ) -> Result<(ComputerViewport, Option<String>, Option<String>)> {
         let session = self.session(id).await?;
-        let session = session.lock().await;
+        let mut session = session.lock().await;
         let (url, title) = session.metadata().await?;
         Ok((session.viewport.clone(), url, title))
     }
@@ -754,12 +822,13 @@ impl BrowserSessionRegistry {
         id: &str,
         action: &ComputerAction,
         settle_delay_ms: u64,
+        cancel: Option<&ActionCancel>,
     ) -> Result<ComputerActionResult> {
         self.session(id)
             .await?
             .lock()
             .await
-            .execute(action, settle_delay_ms)
+            .execute(action, settle_delay_ms, cancel)
             .await
     }
 }
@@ -863,14 +932,14 @@ mod tests {
         let wait_registry = Arc::clone(&registry);
         let wait = tokio::spawn(async move {
             wait_registry
-                .execute(&first, &ComputerAction::Wait { milliseconds: 400 }, 0)
+                .execute(&first, &ComputerAction::Wait { milliseconds: 400 }, 0, None)
                 .await
                 .unwrap();
         });
         sleep(Duration::from_millis(30)).await;
         let start = std::time::Instant::now();
         registry
-            .execute(&second, &ComputerAction::Screenshot, 0)
+            .execute(&second, &ComputerAction::Screenshot, 0, None)
             .await
             .unwrap();
         assert!(start.elapsed() < Duration::from_millis(300));
@@ -913,12 +982,13 @@ mod tests {
                     url: format!("http://{address}"),
                 },
                 0,
+                None,
             )
             .await
             .unwrap();
         assert_eq!(navigated.title.as_deref(), Some("ready"));
         registry
-            .execute(&id, &ComputerAction::LeftClick { x: 20.0, y: 20.0 }, 0)
+            .execute(&id, &ComputerAction::LeftClick { x: 20.0, y: 20.0 }, 0, None)
             .await
             .unwrap();
         let typed = registry
@@ -928,6 +998,7 @@ mod tests {
                     text: "hello".into(),
                 },
                 0,
+                None,
             )
             .await
             .unwrap();
@@ -939,6 +1010,7 @@ mod tests {
                     keys: vec!["CTRL".into(), "a".into()],
                 },
                 0,
+                None,
             )
             .await
             .unwrap();
@@ -949,12 +1021,13 @@ mod tests {
                     text: "replaced".into(),
                 },
                 0,
+                None,
             )
             .await
             .unwrap();
         assert_eq!(replaced.title.as_deref(), Some("typed:replaced"));
         let clicked = registry
-            .execute(&id, &ComputerAction::LeftClick { x: 25.0, y: 75.0 }, 0)
+            .execute(&id, &ComputerAction::LeftClick { x: 25.0, y: 75.0 }, 0, None)
             .await
             .unwrap();
         assert_eq!(clicked.title.as_deref(), Some("clicked"));

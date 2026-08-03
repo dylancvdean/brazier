@@ -420,8 +420,14 @@ pub async fn key(keysym: u32) -> Result<(), String> {
     .await?;
     remote_call("NotifyKeyboardKeysym", &(path, options(), keysym, 0_u32)).await
 }
-pub async fn type_text(text: &str) -> Result<(), String> {
+pub async fn type_text(
+    text: &str,
+    cancel: Option<&crate::computer_browser::ActionCancel>,
+) -> Result<(), String> {
     for character in text.chars() {
+        if cancel.is_some_and(|c| c.is_cancelled()) {
+            return Err("computer action cancelled".into());
+        }
         key(if character.is_ascii() {
             character as u32
         } else {

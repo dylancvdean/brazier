@@ -221,9 +221,15 @@ export class BrokerClient {
     enabled_tools?: string[]
     confine_to_worktree?: boolean
   }): Promise<DaemonSessionRecord> {
+    const elevated =
+      input.permission_mode === 'skip-permissions' ||
+      Boolean(input.permission_settings?.auto_approve_host_actions)
     return this.request('/api/v1/agent/sessions', {
       method: 'POST',
-      body: JSON.stringify(input)
+      body: JSON.stringify({
+        ...input,
+        ...(elevated ? { confirm_elevated_permissions: true } : {})
+      })
     })
   }
 
@@ -291,9 +297,18 @@ export class BrokerClient {
     sessionId: string,
     update: Record<string, unknown>
   ): Promise<DaemonSessionRecord> {
+    const settings = update.permission_settings as
+      | { auto_approve_host_actions?: boolean }
+      | undefined
+    const elevated =
+      update.permission_mode === 'skip-permissions' ||
+      Boolean(settings?.auto_approve_host_actions)
     return this.request(`/api/v1/agent/sessions/${sessionId}`, {
       method: 'PATCH',
-      body: JSON.stringify(update)
+      body: JSON.stringify({
+        ...update,
+        ...(elevated ? { confirm_elevated_permissions: true } : {})
+      })
     })
   }
 

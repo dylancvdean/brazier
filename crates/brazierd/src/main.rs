@@ -190,7 +190,11 @@ async fn main() -> anyhow::Result<()> {
         }))?
     );
     tracing::info!(%address, data_dir = %data_dir.display(), "brazier daemon ready");
-    axum::serve(listener, api::router_with_origins(state, allowed_origins))
+    axum::serve(
+        listener,
+        api::router_with_origins(state, allowed_origins)
+            .into_make_service_with_connect_info::<SocketAddr>(),
+    )
         .with_graceful_shutdown(shutdown_signal(runtime))
         .await
         .context("serve daemon")

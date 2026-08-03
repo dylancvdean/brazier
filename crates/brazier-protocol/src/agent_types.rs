@@ -359,6 +359,11 @@ pub struct CreateAgentSession {
     /// fresh worktree so the agent cannot dirty the user's current checkout.
     #[serde(default)]
     pub confine_to_worktree: bool,
+    /// Required when creating with skip-permissions or host auto-approval.
+    /// The desktop UI sets this after an explicit mode choice; remote clients
+    /// must confirm elevation the same way.
+    #[serde(default)]
+    pub confirm_elevated_permissions: bool,
 }
 
 /// Stock agent framework adapters the daemon advertises.
@@ -398,6 +403,9 @@ pub struct UpdateAgentSession {
     /// confirmation; ignored when enabling confinement.
     #[serde(default)]
     pub discard_unapplied: Option<bool>,
+    /// Required when elevating to skip-permissions or host auto-approval.
+    #[serde(default)]
+    pub confirm_elevated_permissions: Option<bool>,
 }
 
 /// One persisted transcript entry. The payload is the runtime-neutral message

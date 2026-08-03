@@ -1867,6 +1867,10 @@ mod tests {
                     }),
                     enabled_tools: None,
                     confine_to_worktree: false,
+                    confirm_elevated_permissions: matches!(
+                        mode,
+                        AgentPermissionMode::SkipPermissions
+                    ),
                 })
                 .await
                 .expect("session");

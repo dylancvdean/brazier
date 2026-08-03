@@ -365,7 +365,9 @@ fn argument_str<'a>(arguments: &'a serde_json::Value, key: &str) -> Option<&'a s
 }
 
 /// Identity used for session-wide grants: the shape of the action, not its
-/// exact arguments. Approving `cargo` once should not re-prompt per command.
+/// exact arguments. Shell grants cover `program` plus the first non-flag
+/// subcommand (`cargo test` ≠ `cargo build`), so approving one cargo subcommand
+/// cannot silently authorize arbitrary later argv under the same binary.
 ///
 /// Paths outside the workspace are the exception: their key names the resolved
 /// path, so granting a read of one file grants that file and nothing else.
@@ -383,11 +385,11 @@ fn scope_key(
         return format!("shell-input:{process}");
     }
     if spec.executes {
-        let program = argument_str(arguments, "command")
-            .and_then(|command| command.split_whitespace().next())
-            .unwrap_or(tool);
         let suffix = if wants_network { "+network" } else { "" };
-        return format!("run:{program}{suffix}");
+        let key = argument_str(arguments, "command")
+            .map(exec_scope_program)
+            .unwrap_or_else(|| tool.to_owned());
+        return format!("run:{key}{suffix}");
     }
     if let Some(outside) = paths.iter().find(|path| !path.inside_workspace) {
         let verb = if outside.write { "fs-write" } else { "fs-read" };
@@ -404,6 +406,24 @@ fn proposed_command(tool: &str, arguments: &serde_json::Value) -> Option<String>
         return None;
     }
     argument_str(arguments, "command").map(str::to_owned)
+}
+
+/// `program` or `program:subcommand` for session-scoped shell grants.
+///
+/// The first non-flag token after the program is treated as the subcommand so
+/// `cargo --locked test` and `cargo test` share a grant, while `cargo build`
+/// does not.
+fn exec_scope_program(command: &str) -> String {
+    let mut tokens = command.split_whitespace();
+    let program = tokens.next().unwrap_or("shell");
+    let basename = std::path::Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    match tokens.find(|token| !token.starts_with('-')) {
+        Some(subcommand) => format!("{basename}:{subcommand}"),
+        None => basename.to_owned(),
+    }
 }
 
 /// One-line description of what will happen, shown in the approval dialog.
@@ -1207,17 +1227,18 @@ mod tests {
             } => {
                 assert_eq!(profile, SandboxProfile::WorkspaceNetwork);
                 assert!(elevation.requested_network_access);
-                assert_eq!(scope_key, "run:curl+network");
+                assert_eq!(scope_key, "run:curl:https://example.com+network");
             }
             other => panic!("expected approval, got {other:?}"),
         }
     }
 
     #[test]
-    fn shell_scope_keys_group_by_program() {
+    fn shell_scope_keys_group_by_program_and_subcommand() {
         let backend = backend();
-        let first = json!({ "command": "cargo test" });
-        let second = json!({ "command": "cargo build --release" });
+        let test_cmd = json!({ "command": "cargo test" });
+        let test_locked = json!({ "command": "cargo --locked test -q" });
+        let build_cmd = json!({ "command": "cargo build --release" });
         let key_of = |arguments: &serde_json::Value| match decide(&base(
             "shell_run",
             arguments,
@@ -1229,8 +1250,10 @@ mod tests {
             PolicyDecision::RequireApproval { scope_key, .. } => scope_key,
             other => panic!("expected approval, got {other:?}"),
         };
-        assert_eq!(key_of(&first), "run:cargo");
-        assert_eq!(key_of(&first), key_of(&second));
+        assert_eq!(key_of(&test_cmd), "run:cargo:test");
+        assert_eq!(key_of(&test_cmd), key_of(&test_locked));
+        assert_eq!(key_of(&build_cmd), "run:cargo:build");
+        assert_ne!(key_of(&test_cmd), key_of(&build_cmd));
     }
 
     #[test]
