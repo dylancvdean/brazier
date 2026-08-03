@@ -25,6 +25,7 @@ import type {
   SandboxDescription,
   ToolExecutionRecord
 } from '../../../agent/core/types'
+import type { OmpExtensionUiResponse } from '../../../agent/omp/rpcTypes'
 import type { WorkerMessage } from '../../../agent/core/protocol'
 import {
   applyAgentWorktree,
@@ -54,6 +55,7 @@ import { prefillProgressLabel, type LocalModel, type PrefillProgress } from '../
 import { modelDisplayName } from '../model-utils'
 import { EMPTY_OMP_SIDECAR, ompSidecarReducer } from '../ompSidecar'
 import { Markdown } from './Markdown'
+import { OmpDialog } from './OmpDialog'
 import { OmpSessionPanel } from './OmpSessionPanel'
 import { ReasoningDisclosure } from './ReasoningDisclosure'
 import { ToolsMenu } from './ToolsMenu'
@@ -1352,6 +1354,15 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }
 
+  /** Answer an extension-UI dialog; the runtime forwards the response to OMP. */
+  function resolveOmpDialog(response: OmpExtensionUiResponse): void {
+    if (!session) return
+    dispatchOmpSidecar({ type: 'dialog-resolved' })
+    void window.brazier.agent
+      .runtimeCommand(session.id, 'omp', { type: 'resolve_extension_ui', response })
+      .catch((cause: unknown) => onError(errorText(cause)))
+  }
+
   async function openPromptEditor(): Promise<void> {
     if (ompRuntime) {
       setPromptLoading(false)
@@ -1985,6 +1996,10 @@ export function AgentMode(props: Props): React.JSX.Element {
       </div>
 
       {/* No composer here: the window has one, at the bottom, for every mode. */}
+
+      {ompRuntime && ompSidecar.pendingDialog && (
+        <OmpDialog dialog={ompSidecar.pendingDialog} onResolve={resolveOmpDialog} />
+      )}
 
       {artifact && (
         <div className="agent-artifact-overlay" role="dialog">

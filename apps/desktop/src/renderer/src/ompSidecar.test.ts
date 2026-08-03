@@ -313,6 +313,58 @@ describe('ompSidecarReducer', () => {
     })
     expect(state.recentFrames).toHaveLength(0)
   })
+
+  it('surfaces extension-UI requests as a pending dialog', () => {
+    let state = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: { type: 'extension_ui_request', id: 'ui-1', method: 'confirm', title: 'Run?', message: 'git push?' }
+    })
+    expect(state.pendingDialog).toMatchObject({ kind: 'confirm', id: 'ui-1', title: 'Run?', message: 'git push?' })
+
+    state = ompSidecarReducer(state, {
+      type: 'frame',
+      frame: {
+        type: 'extension_ui_request',
+        id: 'ui-2',
+        method: 'select',
+        title: 'Pick',
+        options: ['a', 'b']
+      }
+    })
+    expect(state.pendingDialog).toMatchObject({ kind: 'select', id: 'ui-2', options: ['a', 'b'] })
+  })
+
+  it('drops the pending dialog when the sidecar cancels it', () => {
+    const seeded = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: { type: 'extension_ui_request', id: 'ui-1', method: 'input', title: 'Name' }
+    })
+    const state = ompSidecarReducer(seeded, {
+      type: 'frame',
+      frame: { type: 'extension_ui_request', id: 'other', method: 'cancel', targetId: 'ui-1' }
+    })
+    expect(state.pendingDialog).toBeNull()
+  })
+
+  it('clears the pending dialog on dialog-resolved and keeps unrelated state', () => {
+    const seeded = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: { type: 'extension_ui_request', id: 'ui-1', method: 'editor', title: 'Compose' }
+    })
+    const state = ompSidecarReducer(seeded, { type: 'dialog-resolved' })
+    expect(state.pendingDialog).toBeNull()
+    expect(state.commands).toEqual([])
+  })
+
+  it('records OMP notify requests as notification events', () => {
+    const state = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: { type: 'extension_ui_request', id: 'n-1', method: 'notify', message: 'Login needed' }
+    })
+    expect(state.recentFrames).toEqual([
+      expect.objectContaining({ type: 'notification', detail: 'Login needed' })
+    ])
+  })
 })
 
 describe('frameDetail', () => {

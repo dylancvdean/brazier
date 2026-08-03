@@ -86,6 +86,13 @@ export type OmpSubagentView = {
   lastUpdate?: number
 }
 
+/** An interactive extension-UI request surfaced to the GUI for an answer. */
+export type OmpPendingDialog =
+  | { kind: 'confirm'; id: string; title: string; message: string }
+  | { kind: 'select'; id: string; title: string; options: string[] }
+  | { kind: 'input'; id: string; title: string; placeholder?: string }
+  | { kind: 'editor'; id: string; title: string; prefill?: string }
+
 export type OmpSidecarState = {
   /** Live slash-command list from `available_commands_update` frames. */
   commands: OmpCommandSuggestion[]
@@ -95,6 +102,8 @@ export type OmpSidecarState = {
   session: OmpSessionInfo | null
   /** Task subagents, indexed by id, newest activity last. */
   subagents: OmpSubagentView[]
+  /** The extension-UI dialog waiting on the user, if any. */
+  pendingDialog: OmpPendingDialog | null
   /** Bounded record of frames the GUI does not render richly yet. */
   recentFrames: OmpRecentFrame[]
 }
@@ -104,6 +113,7 @@ export const EMPTY_OMP_SIDECAR: OmpSidecarState = {
   commandOutputs: [],
   session: null,
   subagents: [],
+  pendingDialog: null,
   recentFrames: []
 }
 
@@ -128,8 +138,7 @@ const IGNORED_FRAME_TYPES = new Set([
   'tool_execution_update',
   'tool_execution_end',
   'host_tool_call',
-  'host_tool_cancel',
-  'extension_ui_request'
+  'host_tool_cancel'
 ])
 
 function suggestionValue(raw: string): string {
@@ -286,6 +295,53 @@ function subagentFromSnapshot(snapshot: OmpSubagentSnapshot): OmpSubagentView {
   }
 }
 
+/** Fold an extension-UI request into a surfaced dialog (or an event record). */
+function dialogFromFrame(state: OmpSidecarState, frame: OmpRpcFrame): OmpSidecarState {
+  const id = asString(frame.id)
+  if (!id) return state
+  const method = String(frame.method ?? '')
+  const title = asString(frame.title) ?? 'Oh My Pi'
+
+  if (method === 'select') {
+    const options = Array.isArray(frame.options)
+      ? frame.options.filter((option): option is string => typeof option === 'string')
+      : []
+    if (options.length === 0) return state
+    return { ...state, pendingDialog: { kind: 'select', id, title, options } }
+  }
+  if (method === 'confirm') {
+    const message = asString(frame.message) ?? ''
+    return { ...state, pendingDialog: { kind: 'confirm', id, title, message } }
+  }
+  if (method === 'input') {
+    return { ...state, pendingDialog: { kind: 'input', id, title, placeholder: asString(frame.placeholder) } }
+  }
+  if (method === 'editor') {
+    return { ...state, pendingDialog: { kind: 'editor', id, title, prefill: asString(frame.prefill) } }
+  }
+  if (method === 'cancel') {
+    const targetId = asString(frame.targetId)
+    if (targetId && state.pendingDialog?.id === targetId) {
+      return { ...state, pendingDialog: null }
+    }
+    return state
+  }
+  if (method === 'notify') {
+    const message = asString(frame.message)
+    if (!message) return state
+    const recentFrame: OmpRecentFrame = {
+      id: crypto.randomUUID(),
+      type: 'notification',
+      detail: message,
+      timestamp: new Date().toISOString()
+    }
+    return { ...state, recentFrames: [...state.recentFrames, recentFrame].slice(-MAX_RECENT_FRAMES) }
+  }
+  // setStatus / setTitle / set_editor_text / open_url are auto-resolved by the
+  // runtime; nothing to render here.
+  return state
+}
+
 /** Short human-readable summary of a frame for the generic events record. */
 export function frameDetail(frame: OmpRpcFrame): string {
   switch (frame.type) {
@@ -340,13 +396,20 @@ export function frameDetail(frame: OmpRpcFrame): string {
   }
 }
 
-export type OmpSidecarAction = { type: 'frame'; frame: OmpRpcFrame } | { type: 'reset' }
+export type OmpSidecarAction =
+  | { type: 'frame'; frame: OmpRpcFrame }
+  | { type: 'reset' }
+  | { type: 'dialog-resolved' }
 
 export function ompSidecarReducer(
   state: OmpSidecarState,
   action: OmpSidecarAction
 ): OmpSidecarState {
   if (action.type === 'reset') return EMPTY_OMP_SIDECAR
+  if (action.type === 'dialog-resolved') {
+    if (!state.pendingDialog) return state
+    return { ...state, pendingDialog: null }
+  }
   const frame = action.frame
   const type = String(frame.type ?? '')
 
@@ -460,6 +523,9 @@ export function ompSidecarReducer(
     case 'subagent_event': {
       // The full event stream is heavy; the panel reads lifecycle + progress.
       return state
+    }
+    case 'extension_ui_request': {
+      return dialogFromFrame(state, frame)
     }
     case 'thinking_level_changed': {
       const level = asString(frame.thinkingLevel)

@@ -42,7 +42,16 @@ import type {
   ToolExecutionRecord
 } from '../core/types'
 import { detectOmpBinary } from './detect'
+import {
+  configYamlWithModelRoles,
+  configYamlWithSettings,
+  sanitizeOmpSettings
+} from './ompSettings'
+import type { OmpExtensionUiResponse } from './rpcTypes'
 import { OmpRpcClient, type OmpRpcFrame } from './rpcClient'
+
+/** How long the runtime holds a surfaced dialog before unblocking the sidecar. */
+const DEFAULT_DIALOG_TIMEOUT_MS = 120_000
 
 const DESCRIPTOR: AgentRuntimeDescriptor = {
   id: 'omp',
@@ -185,11 +194,27 @@ export function promptWithBrazierHistory(
   return `${sections.join('\n\n')}\n\n## Current user request\n${userText}`
 }
 
-/** OMP-supported custom provider definition for Brazier's authenticated API. */
+/** One Brazier chat model advertised to OMP, with its routing hints. */
+export type OmpBrazierModel = {
+  id: string
+  name: string
+  contextWindow?: number
+  maxTokens?: number
+  reasoning: boolean
+  supportsTools: boolean
+  /** Whether the model accepts image input (drives the `vision` role). */
+  vision: boolean
+}
+
+/**
+ * OMP-supported custom provider definition for Brazier's authenticated API.
+ * Advertises every chat model the daemon serves so OMP's role routing
+ * (`smol`/`slow`/`plan`/`vision`/`task`/`advisor`/…) can pick appropriate local
+ * models instead of forcing every role through the single session model.
+ */
 export function ompBrazierModelsConfig(
   baseUrl: string,
-  model: AgentModelReference,
-  capabilities: AgentModelCapabilities
+  models: OmpBrazierModel[]
 ): Record<string, unknown> {
   return {
     providers: {
@@ -199,35 +224,81 @@ export function ompBrazierModelsConfig(
         authHeader: true,
         api: 'openai-completions',
         discovery: { type: 'openai-models-list' },
-        models: [
-          {
-            id: model.id,
-            name: model.name || model.id,
-            reasoning: capabilities.supportsReasoningStream,
-            // Brazier's current capability contract does not report vision support.
-            // Declaring image input makes OMP send images to text-only local models.
-            input: ['text'],
-            supportsTools: capabilities.nativeToolCalling,
-            ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
-            ...(model.maxTokens ? { maxTokens: model.maxTokens } : {})
-          }
-        ]
+        models: models.map((entry) => ({
+          id: entry.id,
+          name: entry.name,
+          reasoning: entry.reasoning,
+          input: entry.vision ? ['text', 'image'] : ['text'],
+          supportsTools: entry.supportsTools,
+          ...(entry.contextWindow ? { contextWindow: entry.contextWindow } : {}),
+          ...(entry.maxTokens ? { maxTokens: entry.maxTokens } : {})
+        }))
       }
     }
   }
 }
 
+/** Remove a top-level YAML key and its indented block, leaving the rest intact. */
+export { stripTopLevelKey } from './ompSettings'
+
+/**
+ * Merge `modelRoles` into a config YAML string. The block replaces any existing
+ * top-level `modelRoles:` so the profile editor is authoritative without the
+ * runtime needing a YAML parser.
+ */
+export { configYamlWithModelRoles } from './ompSettings'
+
+/**
+ * Build the provider catalog from the daemon's chat model list, always ensuring
+ * the session's selected model is present (the catalog is what `get_available_models`
+ * and role routing see). Capabilities come from the daemon's own report; the
+ * selected model falls back to the inference heuristic when the list is empty.
+ */
+export function buildBrazierModelCatalog(
+  daemonModels: Array<{ id?: string; capabilities?: { input_modalities?: string[]; tools?: boolean; reasoning?: boolean; max_context_length?: number | null } | null }> | null,
+  selected: AgentModelReference,
+  selectedCapabilities: AgentModelCapabilities
+): OmpBrazierModel[] {
+  const seen = new Set<string>()
+  const catalog: OmpBrazierModel[] = []
+  for (const entry of daemonModels ?? []) {
+    const id = entry?.id
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    const caps = entry.capabilities
+    catalog.push({
+      id,
+      name: id,
+      reasoning: Boolean(caps?.reasoning),
+      supportsTools: caps?.tools === true,
+      vision: Boolean(caps?.input_modalities?.includes('image')),
+      contextWindow: caps?.max_context_length ?? undefined
+    })
+  }
+  if (!seen.has(selected.id)) {
+    catalog.unshift({
+      id: selected.id,
+      name: selected.name || selected.id,
+      reasoning: selectedCapabilities.supportsReasoningStream,
+      supportsTools: selectedCapabilities.nativeToolCalling,
+      vision: false,
+      ...(selected.contextWindow ? { contextWindow: selected.contextWindow } : {}),
+      ...(selected.maxTokens ? { maxTokens: selected.maxTokens } : {})
+    })
+  }
+  return catalog
+}
+
 async function createOmpAgentDir(
   baseUrl: string,
-  model: AgentModelReference,
-  capabilities: AgentModelCapabilities,
+  models: OmpBrazierModel[],
   configYaml?: string
 ): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'brazier-omp-'))
   try {
     await writeFile(
       join(directory, 'models.yml'),
-      `${JSON.stringify(ompBrazierModelsConfig(baseUrl, model, capabilities), null, 2)}\n`,
+      `${JSON.stringify(ompBrazierModelsConfig(baseUrl, models), null, 2)}\n`,
       { mode: 0o600 }
     )
     if (configYaml?.trim()) {
@@ -337,6 +408,8 @@ class OmpAgentSession implements AgentSession {
   private activeRun: { runId: string; abort: boolean; controller: AbortController } | null = null
   private needsContextSeed: boolean
   private readonly sequencer = new EventSequencer()
+  /** Extension-UI dialogs waiting on the user, keyed by the sidecar's dialog id. */
+  private readonly pendingDialogs = new Map<string, { timer: NodeJS.Timeout }>()
 
   private constructor(
     broker: BrokerClient,
@@ -370,13 +443,17 @@ class OmpAgentSession implements AgentSession {
       hostSandbox(
         "Oh My Pi runs as a privileged harness. Tool effects are not mediated by Brazier's OS sandbox."
       )
+    this.attachExtensionUiHandling()
   }
 
   static async open(
     broker: BrokerClient,
     options: CreateAgentSessionOptions
   ): Promise<OmpAgentSession> {
-    const preference = await broker.agentPreference().catch(() => null)
+    const [preference, daemonModels] = await Promise.all([
+      broker.agentPreference().catch(() => null),
+      broker.models().catch(() => null)
+    ])
     const profile = preference?.omp_profile ?? undefined
     const binary = detectOmpBinary(profile?.binary_path)
     if (!binary) {
@@ -387,11 +464,14 @@ class OmpAgentSession implements AgentSession {
     const permissionMode = options.preloaded?.session.permission_mode ?? 'ask'
     const approvalMode = approvalModeFor(permissionMode)
     const cwd = options.preloaded?.session.workspace_path || process.cwd()
+    const catalog = buildBrazierModelCatalog(daemonModels, options.model, options.capabilities)
     const agentDir = await createOmpAgentDir(
       broker.openAiBaseUrl(),
-      options.model,
-      options.capabilities,
-      profile?.config_yaml
+      catalog,
+      configYamlWithSettings(
+        configYamlWithModelRoles(profile?.config_yaml, profile?.model_roles ?? {}),
+        sanitizeOmpSettings(profile?.settings)
+      )
     )
     const sidecar: OmpSidecarOptions = {
       binary: binary.path,
@@ -472,9 +552,17 @@ class OmpAgentSession implements AgentSession {
    * Send an arbitrary typed RPC command to the sidecar and resolve its raw
    * response frame. This is the escape hatch the worker protocol needs so the
    * GUI can drive any OMP surface (get_state, roles, subagents, bash, …)
-   * without a new worker command per feature.
+   * without a new worker command per feature. One command is handled locally:
+   * `resolve_extension_ui` answers a dialog the GUI surfaced.
    */
-  sendRuntimeCommand(command: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async sendRuntimeCommand(command: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (command.type === 'resolve_extension_ui') {
+      const response = command.response
+      if (!response || typeof response !== 'object' || typeof (response as OmpExtensionUiResponse).id !== 'string') {
+        throw new Error('Malformed extension-UI resolution.')
+      }
+      return this.resolveExtensionUi(response as OmpExtensionUiResponse)
+    }
     return this.requireClient().request(command)
   }
 
@@ -510,7 +598,10 @@ class OmpAgentSession implements AgentSession {
     const replacement = await OmpAgentSession.startSidecar(this.sidecar, approvalModeFor(mode))
     const previous = this.requireClient()
     const previousNeedsContextSeed = this.needsContextSeed
+    // Any dialog the old sidecar held is gone with it.
+    this.clearPendingDialogs()
     this.client = replacement
+    this.attachExtensionUiHandling()
     try {
       await this.configureModel(this.model)
       await this.configureHostTools()
@@ -610,10 +701,6 @@ class OmpAgentSession implements AgentSession {
       }
       if (type === 'host_tool_call') {
         void this.handleHostToolCall(frame, runId, push, event)
-        return
-      }
-      if (type === 'extension_ui_request') {
-        void this.handleExtensionUi(frame)
         return
       }
       if (type === 'message_update' || type === 'message_end') {
@@ -828,6 +915,7 @@ class OmpAgentSession implements AgentSession {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
+    this.clearPendingDialogs()
     await this.client?.dispose()
     this.client = null
     await rm(this.sidecar.agentDir, { recursive: true, force: true })
@@ -1064,21 +1152,77 @@ class OmpAgentSession implements AgentSession {
     const client = this.requireClient()
     const id = String(frame.id ?? '')
     const method = String(frame.method ?? '')
-    if (method === 'notify' || method === 'setStatus' || method === 'setTitle') {
+    // Fire-and-forget status/notification methods resolve immediately.
+    if (
+      method === 'notify' ||
+      method === 'setStatus' ||
+      method === 'setTitle' ||
+      method === 'set_editor_text' ||
+      method === 'open_url'
+    ) {
       client.send({ type: 'extension_ui_response', id, confirmed: true })
       return
     }
-    if (method === 'confirm') {
-      const auto = this.permissionMode === 'skip-permissions'
-      client.send({
-        type: 'extension_ui_response',
-        id,
-        confirmed: auto,
-        cancelled: !auto
+    if (method === 'cancel') {
+      // The sidecar is retracting a dialog it no longer needs.
+      this.clearPendingDialog(String(frame.targetId ?? ''))
+      return
+    }
+    // The yolo tier opts out of prompts entirely: confirmations auto-approve.
+    if (method === 'confirm' && this.permissionMode === 'skip-permissions') {
+      client.send({ type: 'extension_ui_response', id, confirmed: true })
+      return
+    }
+    if (method === 'select' || method === 'confirm' || method === 'input' || method === 'editor') {
+      // Hold the dialog open for the GUI. A backstop timer unblocks the sidecar
+      // even if the GUI never answers (or the session changes under it).
+      this.pendingDialogs.set(id, {
+        timer: setTimeout(() => {
+          this.pendingDialogs.delete(id)
+          client.send({ type: 'extension_ui_response', id, cancelled: true, timedOut: true })
+          // Surface the timeout so the GUI does not keep a stale dialog open.
+          client.emitLocalFrame({
+            type: 'extension_ui_request',
+            id: `${id}-timeout`,
+            method: 'cancel',
+            targetId: id
+          })
+        }, DEFAULT_DIALOG_TIMEOUT_MS)
       })
       return
     }
+    // Unknown method: fail closed rather than hang the sidecar.
     client.send({ type: 'extension_ui_response', id, cancelled: true })
+  }
+
+  private clearPendingDialog(id: string): void {
+    const entry = this.pendingDialogs.get(id)
+    if (!entry) return
+    clearTimeout(entry.timer)
+    this.pendingDialogs.delete(id)
+  }
+
+  private clearPendingDialogs(): void {
+    for (const [, entry] of this.pendingDialogs) clearTimeout(entry.timer)
+    this.pendingDialogs.clear()
+  }
+
+  /** Resolve a dialog the GUI answered; returns whether it was still pending. */
+  private resolveExtensionUi(response: OmpExtensionUiResponse): { resolved: boolean } {
+    const pending = this.pendingDialogs.has(response.id)
+    this.clearPendingDialog(response.id)
+    if (!pending) return { resolved: false }
+    this.requireClient().send(response)
+    return { resolved: true }
+  }
+
+  /** Route extension-UI requests centrally so they work inside and outside a run. */
+  private attachExtensionUiHandling(): void {
+    this.client?.onFrame((frame) => {
+      if (frame.type === 'extension_ui_request') {
+        this.handleExtensionUi(frame).catch(() => undefined)
+      }
+    })
   }
 
   private requireClient(): OmpRpcClient {

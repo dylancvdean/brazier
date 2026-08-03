@@ -79,6 +79,10 @@ export type AgentPreference = {
   omp_profile?: {
     binary_path?: string
     config_yaml?: string
+    /** OMP role → Brazier model id (`smol`, `plan`, `advisor`, `vision`, …). */
+    model_roles?: Record<string, string>
+    /** Structured OMP config.yml overrides, keyed by dotted path. */
+    settings?: Record<string, string | number | boolean>
   } | null
 }
 

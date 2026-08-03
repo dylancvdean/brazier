@@ -254,6 +254,15 @@ export class OmpRpcClient {
     this.write(frame)
   }
 
+  /**
+   * Inject a host-originated frame into the listener stream without writing to
+   * the sidecar. Used to signal the GUI about runtime-side state (e.g. a dialog
+   * the runtime timed out) that the sidecar would otherwise not announce.
+   */
+  emitLocalFrame(frame: OmpRpcFrame): void {
+    this.emit(frame)
+  }
+
   /** Run a typed RPC command and resolve its `data` payload. */
   private async call<T>(command: OmpRpcCommand): Promise<T> {
     const response = await this.request(command as OmpRpcFrame)

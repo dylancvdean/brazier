@@ -113,6 +113,11 @@ import {
   saveAgentPreference,
   type AgentRuntimeInfo
 } from '../agentApi'
+import {
+  OMP_SETTINGS_FIELDS,
+  sanitizeOmpSettings,
+  type OmpSettings
+} from '../../../agent/omp/ompSettings'
 import { RecommendedModels } from './RecommendedModels'
 import { CapabilityIcons, capabilityFlags, hubCapabilityFlags } from './CapabilityIcons'
 import {
@@ -5047,6 +5052,30 @@ function ToolchainChecklist({ tools }: { tools: ToolchainTool[] }): React.JSX.El
   )
 }
 
+/** OMP model roles users can pin to specific local models (default is the top-bar model). */
+const OMP_MODEL_ROLES = [
+  { id: 'smol', label: 'Smol', description: 'Cheap subagent fan-out' },
+  { id: 'slow', label: 'Slow', description: 'Deep reasoning' },
+  { id: 'plan', label: 'Plan', description: 'Plan mode' },
+  { id: 'commit', label: 'Commit', description: 'Commit messages & changelogs' },
+  { id: 'vision', label: 'Vision', description: 'Image analysis' },
+  { id: 'designer', label: 'Designer', description: 'Design work' },
+  { id: 'task', label: 'Task', description: 'Subagent spawns' },
+  { id: 'advisor', label: 'Advisor', description: 'Second-model review' },
+  { id: 'tiny', label: 'Tiny', description: 'Smallest & fastest model' }
+]
+
+/** The structured settings fields, grouped in schema order for the form. */
+const OMP_SETTINGS_GROUPS = (() => {
+  const groups: Array<{ name: string; fields: typeof OMP_SETTINGS_FIELDS }> = []
+  for (const field of OMP_SETTINGS_FIELDS) {
+    const group = groups.find((entry) => entry.name === field.group)
+    if (group) group.fields.push(field)
+    else groups.push({ name: field.group, fields: [field] })
+  }
+  return groups
+})()
+
 function AgentSection(props: SectionProps): React.JSX.Element {
   const [runtimes, setRuntimes] = useState<AgentRuntimeInfo[]>([])
   const [selected, setSelected] = useState('pi')
@@ -5055,6 +5084,8 @@ function AgentSection(props: SectionProps): React.JSX.Element {
   const [savedNotice, setSavedNotice] = useState<string | null>(null)
   const [ompBinaryPath, setOmpBinaryPath] = useState('')
   const [ompConfigYaml, setOmpConfigYaml] = useState('')
+  const [ompModelRoles, setOmpModelRoles] = useState<Record<string, string>>({})
+  const [ompSettings, setOmpSettings] = useState<OmpSettings>({})
 
   async function reload(): Promise<void> {
     setLoading(true)
@@ -5068,6 +5099,8 @@ function AgentSection(props: SectionProps): React.JSX.Element {
       setSelected(preference.default_runtime_id || capabilities.default_runtime_id || 'pi')
       setOmpBinaryPath(preference.omp_profile?.binary_path ?? '')
       setOmpConfigYaml(preference.omp_profile?.config_yaml ?? '')
+      setOmpModelRoles(preference.omp_profile?.model_roles ?? {})
+      setOmpSettings(sanitizeOmpSettings(preference.omp_profile?.settings))
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -5086,7 +5119,15 @@ function AgentSection(props: SectionProps): React.JSX.Element {
     props.onError(null)
     setSavedNotice(null)
     try {
-      const saved = await saveAgentPreference({ default_runtime_id: runtimeId, omp_profile: { binary_path: ompBinaryPath, config_yaml: ompConfigYaml } })
+      const saved = await saveAgentPreference({
+        default_runtime_id: runtimeId,
+        omp_profile: {
+          binary_path: ompBinaryPath,
+          config_yaml: ompConfigYaml,
+          model_roles: ompModelRoles,
+          settings: ompSettings
+        }
+      })
       setSelected(saved.default_runtime_id)
       setSavedNotice(
         saved.default_runtime_id === 'omp'
@@ -5108,7 +5149,12 @@ function AgentSection(props: SectionProps): React.JSX.Element {
     try {
       const saved = await saveAgentPreference({
         default_runtime_id: selected,
-        omp_profile: { binary_path: ompBinaryPath.trim(), config_yaml: ompConfigYaml }
+        omp_profile: {
+          binary_path: ompBinaryPath.trim(),
+          config_yaml: ompConfigYaml,
+          model_roles: ompModelRoles,
+          settings: ompSettings
+        }
       })
       setSavedNotice(saved.default_runtime_id === 'omp' ? 'OMP profile saved. New OMP tasks will use it.' : 'OMP profile saved.')
     } catch (cause) {
@@ -5116,6 +5162,16 @@ function AgentSection(props: SectionProps): React.JSX.Element {
     } finally {
       setSaving(false)
     }
+  }
+
+  /** Set or clear one structured setting (empty clears it back to OMP default). */
+  function setOmpSetting(path: string, value: string | number | boolean | undefined): void {
+    setOmpSettings((current) => {
+      const next = { ...current }
+      if (value === undefined) delete next[path]
+      else next[path] = value
+      return next
+    })
   }
 
   return (
@@ -5190,11 +5246,130 @@ function AgentSection(props: SectionProps): React.JSX.Element {
               <span>OMP executable (optional)</span>
               <input value={ompBinaryPath} onChange={(event) => setOmpBinaryPath(event.target.value)} placeholder="Discover omp from PATH" disabled={saving} />
             </label>
+            <div className="omp-settings-editor">
+              {OMP_SETTINGS_GROUPS.map((group) => (
+                <div className="omp-settings-group" key={group.name}>
+                  <div className="section-label">{group.name}</div>
+                  <div className="omp-settings-fields">
+                    {group.fields.map((field) => (
+                      <label className="omp-setting" key={field.path}>
+                        <span className="omp-setting-label">
+                          <strong>{field.label}</strong>
+                          <small>{field.description}</small>
+                        </span>
+                        {field.type === 'enum' && (
+                          <select
+                            value={
+                              typeof ompSettings[field.path] === 'string'
+                                ? (ompSettings[field.path] as string)
+                                : ''
+                            }
+                            disabled={saving}
+                            onChange={(event) => setOmpSetting(field.path, event.target.value || undefined)}
+                          >
+                            <option value="">(unset — OMP default)</option>
+                            {field.options?.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        {field.type === 'boolean' && (
+                          <select
+                            value={
+                              typeof ompSettings[field.path] === 'boolean'
+                                ? ompSettings[field.path]
+                                  ? 'true'
+                                  : 'false'
+                                : ''
+                            }
+                            disabled={saving}
+                            onChange={(event) => {
+                              const value = event.target.value
+                              setOmpSetting(field.path, value === '' ? undefined : value === 'true')
+                            }}
+                          >
+                            <option value="">(unset — OMP default)</option>
+                            <option value="true">true</option>
+                            <option value="false">false</option>
+                          </select>
+                        )}
+                        {field.type === 'number' && (
+                          <input
+                            type="number"
+                            min={field.min}
+                            max={field.max}
+                            step={field.step}
+                            placeholder={field.placeholder ?? 'unset'}
+                            disabled={saving}
+                            value={
+                              typeof ompSettings[field.path] === 'number'
+                                ? String(ompSettings[field.path])
+                                : ''
+                            }
+                            onChange={(event) => {
+                              const raw = event.target.value
+                              if (raw === '') {
+                                setOmpSetting(field.path, undefined)
+                                return
+                              }
+                              const value = Number(raw)
+                              if (Number.isFinite(value)) setOmpSetting(field.path, value)
+                            }}
+                          />
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
             <label className="settings-field">
-              <span>Advanced OMP YAML</span>
-              <textarea value={ompConfigYaml} onChange={(event) => setOmpConfigYaml(event.target.value)} placeholder={'defaultThinkingLevel: high\ncompaction:\n  enabled: true\nlsp:\n  enabled: true'} rows={10} disabled={saving} />
+              <span>Additional OMP YAML (merged below the form)</span>
+              <textarea value={ompConfigYaml} onChange={(event) => setOmpConfigYaml(event.target.value)} placeholder={'theme:\n  dark: titanium'} rows={6} disabled={saving} />
             </label>
-            <p className="model-help">Use this for thinking, sampling, compaction, retry, edit, LSP, browser/web-search, and tool-timeout settings. Brazier still chooses the model and session approval mode.</p>
+            <p className="model-help">The form above writes structured OMP settings; this raw YAML covers anything else and is merged in. Brazier still chooses the model and session approval mode.</p>
+            <div className="omp-model-roles">
+              <div className="section-label">Model roles</div>
+              <p className="model-help">
+                Route OMP roles to specific local models. The model in the top bar is the{' '}
+                <code>default</code> role. Assignments are written into the sidecar&apos;s{' '}
+                <code>config.yml</code> when an OMP task starts, so all models are advertised and
+                role routing can fan out across them.
+              </p>
+              <div className="omp-model-roles-list">
+                {OMP_MODEL_ROLES.map((role) => (
+                  <label className="omp-model-role" key={role.id}>
+                    <span className="omp-model-role-label">
+                      <strong>{role.label}</strong>
+                      <small>{role.description}</small>
+                    </span>
+                    <select
+                      value={ompModelRoles[role.id] ?? ''}
+                      disabled={saving}
+                      onChange={(event) =>
+                        setOmpModelRoles((current) => {
+                          const next = { ...current }
+                          const value = event.target.value
+                          if (value) next[role.id] = value
+                          else delete next[role.id]
+                          return next
+                        })
+                      }
+                    >
+                      <option value="">(unset — OMP default)</option>
+                      {props.models.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {modelDisplayName(model.id, model).title}
+                          {model.capabilities?.input_modalities?.includes('image') ? ' · vision' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+            </div>
             <button className="secondary-action" onClick={() => void saveOmpProfile()} disabled={saving}>Save OMP profile</button>
           </div>
 
