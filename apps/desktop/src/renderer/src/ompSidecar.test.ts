@@ -121,6 +121,107 @@ describe('ompSidecarReducer', () => {
     const reset = ompSidecarReducer(seeded, { type: 'reset' })
     expect(reset).toEqual(EMPTY_OMP_SIDECAR)
   })
+
+  it('folds get_state snapshots into session metadata', () => {
+    const state = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: {
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          sessionId: 'sess-1',
+          sessionName: 'OMP task',
+          model: { provider: 'brazier', id: 'gguf:model.gguf' },
+          thinkingLevel: 'high',
+          fastModeEnabled: true,
+          fastModeActive: true,
+          autoCompactionEnabled: false,
+          isStreaming: false,
+          isCompacting: false,
+          tokensPerSecond: 12,
+          contextUsage: { tokens: 40000, contextWindow: 200000, percent: 20 },
+          todoPhases: [
+            { id: 'phase-1', name: 'T', tasks: [{ id: 't1', content: 'Do it', status: 'in_progress' }] }
+          ]
+        }
+      }
+    })
+    expect(state.session).toMatchObject({
+      title: 'OMP task',
+      sessionId: 'sess-1',
+      modelId: 'gguf:model.gguf',
+      modelName: 'gguf:model.gguf',
+      thinkingLevel: 'high',
+      fastModeEnabled: true,
+      fastModeActive: true,
+      autoCompactionEnabled: false,
+      tokensPerSecond: 12,
+      contextUsage: { tokens: 40000, contextWindow: 200000, percent: 20 },
+      todoPhases: [{ id: 'phase-1', name: 'T', tasks: [{ id: 't1', content: 'Do it', status: 'in_progress' }] }]
+    })
+  })
+
+  it('updates fast mode and thinking level from command responses', () => {
+    let state = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: { type: 'response', command: 'set_fast_mode', success: true, data: { enabled: true, active: true } }
+    })
+    expect(state.session).toMatchObject({ fastModeEnabled: true, fastModeActive: true })
+    state = ompSidecarReducer(state, {
+      type: 'frame',
+      frame: { type: 'response', command: 'cycle_thinking_level', success: true, data: { level: 'max' } }
+    })
+    expect(state.session).toMatchObject({ thinkingLevel: 'max' })
+  })
+
+  it('tracks thinking level changes from events', () => {
+    const state = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: { type: 'thinking_level_changed', thinkingLevel: 'low' }
+    })
+    expect(state.session).toMatchObject({ thinkingLevel: 'low' })
+  })
+
+  it('merges todo_reminder items into existing phases by id', () => {
+    const seeded = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: {
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: {
+          todoPhases: [
+            { id: 'phase-1', name: 'T', tasks: [{ id: 't1', content: 'Do it', status: 'pending' }] }
+          ]
+        }
+      }
+    })
+    const state = ompSidecarReducer(seeded, {
+      type: 'frame',
+      frame: {
+        type: 'todo_reminder',
+        todos: [{ id: 't1', content: 'Do it', status: 'in_progress' }],
+        attempt: 1,
+        maxAttempts: 2
+      }
+    })
+    expect(state.session?.todoPhases?.[0]?.tasks[0]).toMatchObject({ id: 't1', status: 'in_progress' })
+  })
+
+  it('clears todos on todo_auto_clear', () => {
+    const seeded = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: {
+        type: 'response',
+        command: 'get_state',
+        success: true,
+        data: { todoPhases: [{ id: 'p', name: 'T', tasks: [] }] }
+      }
+    })
+    const cleared = ompSidecarReducer(seeded, { type: 'frame', frame: { type: 'todo_auto_clear' } })
+    expect(cleared.session?.todoPhases).toEqual([])
+  })
 })
 
 describe('frameDetail', () => {

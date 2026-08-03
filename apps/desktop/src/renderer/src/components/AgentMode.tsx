@@ -1,5 +1,4 @@
 import {
-  Activity,
   AlertTriangle,
   Bot,
   Check,
@@ -55,6 +54,7 @@ import { prefillProgressLabel, type LocalModel, type PrefillProgress } from '../
 import { modelDisplayName } from '../model-utils'
 import { EMPTY_OMP_SIDECAR, ompSidecarReducer } from '../ompSidecar'
 import { Markdown } from './Markdown'
+import { OmpSessionPanel } from './OmpSessionPanel'
 import { ReasoningDisclosure } from './ReasoningDisclosure'
 import { ToolsMenu } from './ToolsMenu'
 
@@ -735,6 +735,21 @@ export function AgentMode(props: Props): React.JSX.Element {
     dispatchOmpSidecar({ type: 'reset' })
   }, [session?.id])
 
+  // Poll the sidecar's session state so the OMP session panel stays live
+  // between events. Responses arrive as runtime frames and fold into the
+  // reducer; the request itself is fire-and-forget.
+  useEffect(() => {
+    if (!session || !ompRuntime) return
+    const refresh = (): void => {
+      void window.brazier.agent
+        .runtimeCommand(session.id, 'omp', { type: 'get_state' })
+        .catch(() => undefined)
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 2000)
+    return () => window.clearInterval(timer)
+  }, [session?.id, ompRuntime])
+
   useEffect(() => {
     void fetchAgentCapabilities()
       .then((caps) => {
@@ -1327,6 +1342,16 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }
 
+  /** Drive a small OMP RPC command; responses refresh the session panel. */
+  async function ompCommand(command: Record<string, unknown>): Promise<void> {
+    if (!session) return
+    try {
+      await window.brazier.agent.runtimeCommand(session.id, 'omp', command)
+    } catch (cause) {
+      onError(errorText(cause))
+    }
+  }
+
   async function openPromptEditor(): Promise<void> {
     if (ompRuntime) {
       setPromptLoading(false)
@@ -1714,23 +1739,15 @@ export function AgentMode(props: Props): React.JSX.Element {
           <Bot size={13} />
           {runtimeLabel(activeRuntimeId)}
         </span>
-        {ompRuntime && ompSidecar.recentFrames.length > 0 && (
-          <details className="omp-events" title="Recent Oh My Pi sidecar events">
-            <summary>
-              <Activity size={13} />
-              <span>
-                OMP events · {ompSidecar.recentFrames.length}
-              </span>
-            </summary>
-            <div className="omp-events-list">
-              {[...ompSidecar.recentFrames].reverse().map((frame) => (
-                <div key={frame.id} title={frame.type}>
-                  <span className="omp-events-type">{frame.type}</span>
-                  <span className="omp-events-detail">{frame.detail}</span>
-                </div>
-              ))}
-            </div>
-          </details>
+        {ompRuntime && (
+          <OmpSessionPanel
+            info={ompSidecar.session}
+            recentFrames={ompSidecar.recentFrames}
+            busy={running}
+            onSetFastMode={(enabled) => void ompCommand({ type: 'set_fast_mode', enabled })}
+            onSetAutoCompaction={(enabled) => void ompCommand({ type: 'set_auto_compaction', enabled })}
+            onCycleThinking={() => void ompCommand({ type: 'cycle_thinking_level' })}
+          />
         )}
         {sandbox && showsBrazierSandboxStatus(activeRuntimeId) && (
           <SandboxBadge sandbox={sandbox} />

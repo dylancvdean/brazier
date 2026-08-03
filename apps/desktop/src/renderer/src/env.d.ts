@@ -106,6 +106,11 @@ declare global {
           sessionId: string,
           mode: import('../../agent/core/types').AgentPermissionMode
         ): Promise<unknown>
+        runtimeCommand(
+          sessionId: string,
+          runtimeId: string | undefined,
+          command: Record<string, unknown>
+        ): Promise<unknown>
         closeSession(sessionId: string): Promise<unknown>
         status(): Promise<{ running: boolean; crashes: number }>
         onMessage(listener: (message: import('../../agent/core/protocol').WorkerMessage) => void): () => void

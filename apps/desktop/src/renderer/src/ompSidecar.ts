@@ -12,7 +12,13 @@
  * here so the "recent OMP events" list stays free of duplicates.
  */
 
-import type { OmpAvailableCommand, OmpRpcFrame } from '../../agent/omp/rpcTypes'
+import type {
+  OmpAvailableCommand,
+  OmpRpcFrame,
+  OmpSessionState,
+  OmpTodoItem,
+  OmpTodoPhase
+} from '../../agent/omp/rpcTypes'
 
 export type OmpCommandSuggestion = { value: string; description: string }
 
@@ -29,11 +35,26 @@ export type OmpRecentFrame = {
   timestamp: string
 }
 
+export type OmpContextUsage = {
+  tokens?: number
+  contextWindow?: number
+  percent?: number
+}
+
 export type OmpSessionInfo = {
   title?: string
   sessionId?: string
+  modelId?: string
   modelName?: string
   thinkingLevel?: string
+  contextUsage?: OmpContextUsage
+  fastModeEnabled?: boolean
+  fastModeActive?: boolean
+  autoCompactionEnabled?: boolean
+  isStreaming?: boolean
+  isCompacting?: boolean
+  tokensPerSecond?: number | null
+  todoPhases?: OmpTodoPhase[]
 }
 
 export type OmpSidecarState = {
@@ -41,7 +62,7 @@ export type OmpSidecarState = {
   commands: OmpCommandSuggestion[]
   /** Recent `command_output` blocks, newest last. */
   commandOutputs: OmpCommandOutput[]
-  /** Latest session metadata from `session_info_update` / `config_update`. */
+  /** Latest session metadata from `get_state` / session/config updates. */
   session: OmpSessionInfo | null
   /** Bounded record of frames the GUI does not render richly yet. */
   recentFrames: OmpRecentFrame[]
@@ -98,6 +119,58 @@ function dedupeCommands(commands: OmpCommandSuggestion[]): OmpCommandSuggestion[
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/** Fold a `get_state` snapshot into the session metadata without losing fields. */
+function sessionInfoFromState(prev: OmpSessionInfo | null, data: OmpSessionState): OmpSessionInfo {
+  const next: OmpSessionInfo = { ...(prev ?? {}) }
+  const model = data.model && typeof data.model === 'object' ? data.model : undefined
+  const modelId = asString(model?.id)
+  const modelName = asString(model?.name)
+  if (modelId) next.modelId = modelId
+  if (modelName) next.modelName = modelName
+  else if (modelId) next.modelName = modelId
+  if (asString(data.thinkingLevel)) next.thinkingLevel = asString(data.thinkingLevel)
+  if (typeof data.contextUsage === 'object' && data.contextUsage !== null) {
+    next.contextUsage = {
+      tokens: asNumber(data.contextUsage.tokens),
+      contextWindow: asNumber(data.contextUsage.contextWindow),
+      percent: asNumber(data.contextUsage.percent)
+    }
+  }
+  if (asBoolean(data.fastModeEnabled) !== undefined) next.fastModeEnabled = asBoolean(data.fastModeEnabled)
+  if (asBoolean(data.fastModeActive) !== undefined) next.fastModeActive = asBoolean(data.fastModeActive)
+  if (asBoolean(data.autoCompactionEnabled) !== undefined) {
+    next.autoCompactionEnabled = asBoolean(data.autoCompactionEnabled)
+  }
+  if (asBoolean(data.isStreaming) !== undefined) next.isStreaming = asBoolean(data.isStreaming)
+  if (asBoolean(data.isCompacting) !== undefined) next.isCompacting = asBoolean(data.isCompacting)
+  if (asNumber(data.tokensPerSecond) !== undefined) next.tokensPerSecond = asNumber(data.tokensPerSecond)
+  if (Array.isArray(data.todoPhases)) next.todoPhases = data.todoPhases
+  if (asString(data.sessionName)) next.title = asString(data.sessionName)
+  if (asString(data.sessionId)) next.sessionId = asString(data.sessionId)
+  return next
+}
+
+/** Merge a flat `todo_reminder` item list into the phase view by task id. */
+function mergeTodosIntoPhases(phases: OmpTodoPhase[] | undefined, todos: OmpTodoItem[]): OmpTodoPhase[] {
+  if (todos.length === 0) return phases ?? []
+  const byId = new Map(todos.map((item) => [item.id, item]))
+  if (!phases || phases.length === 0) {
+    return [{ id: 'tasks', name: 'Tasks', tasks: todos }]
+  }
+  return phases.map((phase) => ({
+    ...phase,
+    tasks: phase.tasks.map((task) => byId.get(task.id) ?? task)
+  }))
 }
 
 /** Short human-readable summary of a frame for the generic events record. */
@@ -214,6 +287,58 @@ export function ompSidecarReducer(
           ...(thinkingLevel ? { thinkingLevel } : {})
         }
       }
+    }
+    case 'response': {
+      // The worker forwards every command response too. The state bar reads the
+      // ones that carry session state; the rest are transport noise.
+      if (frame.success !== true || typeof frame.command !== 'string') return state
+      switch (frame.command) {
+        case 'get_state': {
+          const data = frame.data
+          if (!data || typeof data !== 'object') return state
+          return { ...state, session: sessionInfoFromState(state.session, data as OmpSessionState) }
+        }
+        case 'set_fast_mode': {
+          const enabled = asBoolean((frame.data as Record<string, unknown> | undefined)?.enabled)
+          const active = asBoolean((frame.data as Record<string, unknown> | undefined)?.active)
+          if (enabled === undefined && active === undefined) return state
+          return {
+            ...state,
+            session: {
+              ...(state.session ?? {}),
+              ...(enabled !== undefined ? { fastModeEnabled: enabled } : {}),
+              ...(active !== undefined ? { fastModeActive: active } : {})
+            }
+          }
+        }
+        case 'cycle_thinking_level': {
+          const level = asString((frame.data as Record<string, unknown> | undefined)?.level)
+          if (!level) return state
+          return { ...state, session: { ...(state.session ?? {}), thinkingLevel: level } }
+        }
+        default:
+          return state
+      }
+    }
+    case 'thinking_level_changed': {
+      const level = asString(frame.thinkingLevel)
+      if (!level) return state
+      return { ...state, session: { ...(state.session ?? {}), thinkingLevel: level } }
+    }
+    case 'todo_reminder': {
+      const todos = Array.isArray(frame.todos) ? (frame.todos as OmpTodoItem[]) : []
+      if (todos.length === 0) return state
+      return {
+        ...state,
+        session: {
+          ...(state.session ?? {}),
+          todoPhases: mergeTodosIntoPhases(state.session?.todoPhases, todos)
+        }
+      }
+    }
+    case 'todo_auto_clear': {
+      if (!state.session?.todoPhases?.length) return state
+      return { ...state, session: { ...state.session, todoPhases: [] } }
     }
     default: {
       if (IGNORED_FRAME_TYPES.has(type)) return state
