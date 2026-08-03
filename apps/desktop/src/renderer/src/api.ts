@@ -1342,8 +1342,8 @@ export type ManagedEngineStatus = {
   targets: ManagedLlamaTargetStatus[]
 }
 
-export async function fetchManagedLlamaStatus(): Promise<ManagedEngineStatus> {
-  return request('/api/v1/engines/llama.cpp/managed-status')
+export async function fetchManagedLlamaStatus(force = false): Promise<ManagedEngineStatus> {
+  return request(`/api/v1/engines/llama.cpp/managed-status${force ? '?force=1' : ''}`)
 }
 
 export async function ensureLlamaEngine(
@@ -1364,10 +1364,10 @@ export async function ensureLlamaEngine(
   return { binary: result.binary, status: result.status ?? 'ready' }
 }
 
-export async function fetchManagedWhisperStatus(): Promise<
-  ManagedEngineStatus & { managed_supported: boolean; note?: string | null }
-> {
-  return request('/api/v1/engines/whisper.cpp/managed-status')
+export async function fetchManagedWhisperStatus(
+  force = false
+): Promise<ManagedEngineStatus & { managed_supported: boolean; note?: string | null }> {
+  return request(`/api/v1/engines/whisper.cpp/managed-status${force ? '?force=1' : ''}`)
 }
 
 export async function ensureWhisperEngine(
@@ -1388,8 +1388,8 @@ export async function ensureWhisperEngine(
   return { binary: result.binary, status: result.status ?? 'ready' }
 }
 
-export async function fetchManagedSdcppStatus(): Promise<ManagedEngineStatus> {
-  return request('/api/v1/engines/stable-diffusion.cpp/managed-status')
+export async function fetchManagedSdcppStatus(force = false): Promise<ManagedEngineStatus> {
+  return request(`/api/v1/engines/stable-diffusion.cpp/managed-status${force ? '?force=1' : ''}`)
 }
 
 export async function ensureSdcppEngine(

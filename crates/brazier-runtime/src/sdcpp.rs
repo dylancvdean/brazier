@@ -244,8 +244,13 @@ pub struct ReleaseAsset {
 ///
 /// Status views call this on every open, so a stale-but-instant answer beats
 /// a blocking lookup; the refresh it triggers lands in time for the next one.
-pub fn cached_release_tag(client: &reqwest::Client) -> crate::github_releases::CachedRelease {
-    crate::github_releases::cached_or_refresh(client, GITHUB_API, USER_AGENT)
+/// Pass `force` to bypass the cache window and refresh immediately (a manual
+/// "check for updates" action).
+pub fn cached_release_tag(
+    client: &reqwest::Client,
+    force: bool,
+) -> crate::github_releases::CachedRelease {
+    crate::github_releases::cached_or_refresh(client, GITHUB_API, USER_AGENT, force)
 }
 
 /// Resolve the preferred managed binary download for this platform/target.

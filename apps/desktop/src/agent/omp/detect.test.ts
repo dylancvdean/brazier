@@ -22,6 +22,7 @@ describe.skipIf(process.platform === 'win32')('detectOmpBinary', () => {
     vi.stubEnv('BRAZIER_OMP_PATH', candidate)
     vi.stubEnv('OMP_PATH', '')
     vi.stubEnv('PATH', directory)
+    vi.stubEnv('HOME', join(directory, 'home'))
 
     expect(detectOmpBinary()).toBeNull()
 
@@ -35,7 +36,23 @@ describe.skipIf(process.platform === 'win32')('detectOmpBinary', () => {
     vi.stubEnv('BRAZIER_OMP_PATH', '')
     vi.stubEnv('OMP_PATH', '')
     vi.stubEnv('PATH', directory)
+    vi.stubEnv('HOME', join(directory, 'home'))
 
     expect(detectOmpBinary()).toBeNull()
+  })
+
+  it('finds omp under HOME/.local/bin when the desktop PATH omits it', () => {
+    directory = mkdtempSync(join(tmpdir(), 'brazier-omp-detect-'))
+    const localBin = join(directory, '.local', 'bin')
+    mkdirSync(localBin, { recursive: true })
+    const candidate = join(localBin, 'omp')
+    writeFileSync(candidate, '#!/bin/sh\nexit 0\n')
+    chmodSync(candidate, 0o755)
+    vi.stubEnv('BRAZIER_OMP_PATH', '')
+    vi.stubEnv('OMP_PATH', '')
+    vi.stubEnv('PATH', '/usr/bin')
+    vi.stubEnv('HOME', directory)
+
+    expect(detectOmpBinary()).toEqual({ path: candidate, source: 'path' })
   })
 })

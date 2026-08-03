@@ -31,8 +31,14 @@ export function detectOmpBinary(configuredPath?: string): OmpBinary | null {
     return { path: override, source: 'env' }
   }
   const pathVar = process.env.PATH ?? ''
-  for (const directory of pathVar.split(delimiter)) {
-    if (!directory) continue
+  const directories = pathVar.split(delimiter).filter(Boolean)
+  // Desktop-launched GUI sessions (systemd, .desktop files) often omit
+  // user-local bin dirs from PATH even though interactive shells include them,
+  // so `omp` installed under `~/.local/bin` would otherwise go unseen.
+  if (process.platform !== 'win32' && process.env.HOME) {
+    directories.push(join(process.env.HOME, '.local', 'bin'), join(process.env.HOME, 'bin'))
+  }
+  for (const directory of directories) {
     for (const name of ['omp', 'omp.exe']) {
       const candidate = join(directory, name)
       if (isExecutable(candidate)) {

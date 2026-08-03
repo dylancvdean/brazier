@@ -202,10 +202,17 @@ pub async fn latest_release(
 }
 
 /// Whatever is cached right now, kicking off a background refresh when the
-/// entry is missing or stale. Never contacts GitHub on the calling task.
-pub fn cached_or_refresh(client: &reqwest::Client, url: &str, user_agent: &str) -> CachedRelease {
+/// entry is missing or stale — or unconditionally when `force` is set, so a
+/// manual "check for updates" can notice a release published within the cache
+/// window. Never contacts GitHub on the calling task.
+pub fn cached_or_refresh(
+    client: &reqwest::Client,
+    url: &str,
+    user_agent: &str,
+    force: bool,
+) -> CachedRelease {
     let cached = entry(url);
-    let needs_refresh = cached.as_ref().is_none_or(Entry::is_stale);
+    let needs_refresh = force || cached.as_ref().is_none_or(Entry::is_stale);
     let mut refreshing = is_refreshing(url);
     if needs_refresh && claim_refresh(url) {
         refreshing = true;
@@ -277,5 +284,45 @@ mod tests {
         assert!(is_refreshing(url));
         release_refresh(url);
         assert!(!is_refreshing(url));
+    }
+
+    #[tokio::test]
+    async fn force_bypasses_the_cache_window() {
+        let client = reqwest::Client::new();
+        let url = "https://127.0.0.1:1/force-refresh";
+        store(
+            url,
+            Release {
+                tag_name: "b1".into(),
+                assets: Vec::new(),
+            },
+        );
+
+        let served = cached_or_refresh(&client, url, "brazier-test", false);
+        assert!(
+            !served.refreshing,
+            "a fresh cache entry stays quiet without force"
+        );
+        assert_eq!(
+            served
+                .release
+                .as_ref()
+                .map(|release| release.tag_name.as_str()),
+            Some("b1")
+        );
+
+        let forced = cached_or_refresh(&client, url, "brazier-test", true);
+        assert!(
+            forced.refreshing,
+            "force triggers a refresh even within the cache window"
+        );
+        assert_eq!(
+            forced
+                .release
+                .as_ref()
+                .map(|release| release.tag_name.as_str()),
+            Some("b1"),
+            "the cached tag is still served while the refresh runs"
+        );
     }
 }

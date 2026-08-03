@@ -1438,8 +1438,19 @@ fn detect_omp_binary() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    let path_var = std::env::var_os("PATH")?;
-    for directory in std::env::split_paths(&path_var) {
+    let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default();
+    // Desktop-launched GUI sessions (systemd, .desktop files) often omit
+    // user-local bin dirs from PATH even though interactive shells include
+    // them, so `omp` installed under `~/.local/bin` would otherwise go unseen.
+    if cfg!(unix) {
+        if let Some(home) = std::env::var_os("HOME") {
+            directories.push(PathBuf::from(&home).join(".local").join("bin"));
+            directories.push(PathBuf::from(&home).join("bin"));
+        }
+    }
+    for directory in directories {
         for name in ["omp", "omp.exe"] {
             let candidate = directory.join(name);
             if candidate.is_file() {
@@ -3208,6 +3219,13 @@ struct StreamQuery {
     stream: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct ManagedStatusQuery {
+    /// Bypass the release-cache window and refresh upstream now.
+    #[serde(default)]
+    force: bool,
+}
+
 fn progress_channel() -> (
     mpsc::UnboundedSender<ProgressEvent>,
     mpsc::UnboundedReceiver<ProgressEvent>,
@@ -3235,12 +3253,15 @@ fn progress_sse(mut rx: mpsc::UnboundedReceiver<ProgressEvent>) -> Response {
         .into_response()
 }
 
-async fn managed_llama_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+async fn managed_llama_status(
+    State(state): State<AppState>,
+    Query(query): Query<ManagedStatusQuery>,
+) -> ApiResult<Json<Value>> {
     use crate::runtime_settings::RuntimeTarget;
 
     // Local install state answers immediately; the upstream tag is filled in
     // from cache, with `latest_pending` telling the UI a check is still running.
-    let cached = llama::cached_release_tag(&state.http);
+    let cached = llama::cached_release_tag(&state.http, query.force);
     let latest_tag = cached.release.map(|release| release.tag_name);
 
     let target_specs = [
@@ -3334,12 +3355,15 @@ async fn ensure_llama(
     progress_sse(rx)
 }
 
-async fn managed_whisper_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+async fn managed_whisper_status(
+    State(state): State<AppState>,
+    Query(query): Query<ManagedStatusQuery>,
+) -> ApiResult<Json<Value>> {
     use crate::runtime_settings::RuntimeTarget;
 
     let supported = whisper::managed_prebuilts_supported();
     let cached = if supported {
-        whisper::cached_release_tag(&state.http)
+        whisper::cached_release_tag(&state.http, query.force)
     } else {
         crate::github_releases::CachedRelease {
             release: None,
@@ -3439,10 +3463,13 @@ async fn ensure_whisper(
     progress_sse(rx)
 }
 
-async fn managed_sdcpp_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+async fn managed_sdcpp_status(
+    State(state): State<AppState>,
+    Query(query): Query<ManagedStatusQuery>,
+) -> ApiResult<Json<Value>> {
     use crate::runtime_settings::RuntimeTarget;
 
-    let cached = sdcpp::cached_release_tag(&state.http);
+    let cached = sdcpp::cached_release_tag(&state.http, query.force);
     let latest_tag = cached.release.map(|release| release.tag_name);
     let target_specs = [
         ("cpu", RuntimeTarget::Cpu),

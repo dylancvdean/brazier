@@ -3386,12 +3386,12 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     props.onPendingBuildConsumed?.()
   }, [props.pendingBuild, props.onPendingBuildConsumed])
 
-  async function refreshManagedStatuses(): Promise<void> {
+  async function refreshManagedStatuses(force = false): Promise<void> {
     try {
       const [llama, whisper, sdcpp] = await Promise.all([
-        fetchManagedLlamaStatus(),
-        fetchManagedWhisperStatus().catch(() => null),
-        fetchManagedSdcppStatus().catch(() => null)
+        fetchManagedLlamaStatus(force),
+        fetchManagedWhisperStatus(force).catch(() => null),
+        fetchManagedSdcppStatus(force).catch(() => null)
       ])
       setManagedStatuses(llama.targets)
       setUpdateCheckPending(
@@ -3752,7 +3752,22 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       </div>
 
       <div className="settings-group">
-        <div className="section-label">Available for your hardware</div>
+        <div className="settings-group-head">
+          <div className="section-label">Available for your hardware</div>
+          <button
+            className="chip-button subtle"
+            disabled={updateCheckPending}
+            title="Query upstream releases for managed prebuilts now, bypassing the update-check cache"
+            onClick={() => void refreshManagedStatuses(true)}
+          >
+            {updateCheckPending ? (
+              <LoaderCircle className="spin" size={13} />
+            ) : (
+              <RefreshCw size={13} />
+            )}
+            Check for updates
+          </button>
+        </div>
         {installProgress && (
           <JobProgressPanel progress={installProgress} active={installingTarget != null} />
         )}
