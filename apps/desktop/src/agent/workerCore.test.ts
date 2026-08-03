@@ -267,6 +267,7 @@ describe('AgentWorkerCore runtime frames and commands', () => {
     posts: WorkerMessage[]
     emit: (payload: Record<string, unknown>) => void
     runtimeCommand: Mock
+    resolveExtensionUi: Mock
   }> {
     const posts: WorkerMessage[] = []
     const core = new AgentWorkerCore((message) => {
@@ -274,6 +275,7 @@ describe('AgentWorkerCore runtime frames and commands', () => {
     })
     const frameListenerRef: { current?: (payload: Record<string, unknown>) => void } = {}
     const runtimeCommand = vi.fn(async (command: Record<string, unknown>) => ({ echo: command }))
+    const resolveExtensionUi = vi.fn(async (response: Record<string, unknown>) => ({ resolved: true }))
     const session: AgentSession = {
       ...mockSession('sess-omp'),
       getState: () => ({
@@ -286,7 +288,8 @@ describe('AgentWorkerCore runtime frames and commands', () => {
           if (frameListenerRef.current === listener) frameListenerRef.current = undefined
         }
       },
-      sendRuntimeCommand: runtimeCommand
+      sendRuntimeCommand: runtimeCommand,
+      resolveExtensionUi
     }
     const broker = {
       session: vi.fn(async () => ({
@@ -340,7 +343,8 @@ describe('AgentWorkerCore runtime frames and commands', () => {
       core,
       posts,
       emit: (payload) => frameListenerRef.current?.(payload),
-      runtimeCommand
+      runtimeCommand,
+      resolveExtensionUi
     }
   }
 
@@ -394,6 +398,25 @@ describe('AgentWorkerCore runtime frames and commands', () => {
     expect(runtimeCommand).toHaveBeenCalledWith({ type: 'get_state' })
     const result = posts.find((message) => message.type === 'result' && message.requestId === 'cmd')
     expect(result).toMatchObject({ ok: true, data: { echo: { type: 'get_state' } } })
+  })
+
+  it('routes extension-UI resolution through the session', async () => {
+    const { core, posts, resolveExtensionUi } = await openOmpCore()
+
+    await core.handle({
+      type: 'resolve-extension-ui',
+      requestId: 'resolve',
+      sessionId: 'sess-omp',
+      response: { type: 'extension_ui_response', id: 'ui-1', value: 'yes' }
+    })
+
+    expect(resolveExtensionUi).toHaveBeenCalledWith({
+      type: 'extension_ui_response',
+      id: 'ui-1',
+      value: 'yes'
+    })
+    const result = posts.find((message) => message.type === 'result' && message.requestId === 'resolve')
+    expect(result).toMatchObject({ ok: true, data: { resolved: true } })
   })
 
   it('rejects runtime-command for a mismatched runtime id without calling the session', async () => {

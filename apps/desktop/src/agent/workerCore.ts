@@ -138,6 +138,15 @@ export class AgentWorkerCore {
         }
         return await session.sendRuntimeCommand(command.command)
       }
+      case 'resolve-extension-ui': {
+        const session = await this.openSession(command.sessionId, { rehydrate: false })
+        if (!session.resolveExtensionUi) {
+          throw new Error(
+            `Runtime \`${session.getState().runtimeId}\` has no extension-UI dialogs.`
+          )
+        }
+        return await session.resolveExtensionUi(command.response)
+      }
       case 'close-session': {
         const session = this.sessions.get(command.sessionId)
         if (session) {

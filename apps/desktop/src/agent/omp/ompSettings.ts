@@ -133,18 +133,10 @@ export const OMP_SETTINGS_FIELDS: OmpSettingField[] = [
     placeholder: '-1 = default'
   },
   // Tools
-  {
-    path: 'tools.approvalMode',
-    group: 'Tools',
-    label: 'Approval mode',
-    description: 'The prompt tier for OMP built-in tools.',
-    type: 'enum',
-    options: [
-      { value: 'always-ask', label: 'always-ask' },
-      { value: 'write', label: 'write' },
-      { value: 'yolo', label: 'yolo' }
-    ]
-  },
+  // NOTE: `tools.approvalMode` is deliberately not exposed here. Brazier's
+  // permission-mode selector launches the sidecar with `--approval-mode`, a CLI
+  // runtime override that OMP applies above config.yml — so a config value here
+  // would never take effect.
   {
     path: 'tools.maxTimeout',
     group: 'Tools',

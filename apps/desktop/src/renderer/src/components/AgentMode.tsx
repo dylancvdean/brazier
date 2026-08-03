@@ -739,13 +739,20 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   // Poll the sidecar's session state so the OMP session panel stays live
   // between events. Responses arrive as runtime frames and fold into the
-  // reducer; the request itself is fire-and-forget.
+  // reducer; the request itself is fire-and-forget. A wedged sidecar must not
+  // stack overlapping polls, so a new request is skipped while one is in flight.
   useEffect(() => {
     if (!session || !ompRuntime) return
+    let inFlight = false
     const refresh = (): void => {
+      if (inFlight) return
+      inFlight = true
       void window.brazier.agent
         .runtimeCommand(session.id, 'omp', { type: 'get_state' })
         .catch(() => undefined)
+        .finally(() => {
+          inFlight = false
+        })
     }
     refresh()
     const timer = window.setInterval(refresh, 2000)
@@ -1359,7 +1366,7 @@ export function AgentMode(props: Props): React.JSX.Element {
     if (!session) return
     dispatchOmpSidecar({ type: 'dialog-resolved' })
     void window.brazier.agent
-      .runtimeCommand(session.id, 'omp', { type: 'resolve_extension_ui', response })
+      .resolveExtensionUi(session.id, response)
       .catch((cause: unknown) => onError(errorText(cause)))
   }
 

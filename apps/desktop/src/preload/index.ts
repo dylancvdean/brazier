@@ -62,6 +62,11 @@ const agent = {
     runtimeId: string | undefined,
     command: Record<string, unknown>
   ): Promise<unknown> => invokeAgent({ type: 'runtime-command', sessionId, runtimeId, command }),
+  /** Answer an extension-UI dialog the runtime is holding open for the user. */
+  resolveExtensionUi: (
+    sessionId: string,
+    response: Record<string, unknown>
+  ): Promise<unknown> => invokeAgent({ type: 'resolve-extension-ui', sessionId, response }),
   closeSession: (sessionId: string): Promise<unknown> =>
     invokeAgent({ type: 'close-session', sessionId }),
   status: (): Promise<{ running: boolean; crashes: number }> =>

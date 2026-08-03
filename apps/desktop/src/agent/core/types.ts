@@ -439,6 +439,13 @@ export interface AgentSession {
    */
   subscribeRuntimeFrames?(listener: (payload: Record<string, unknown>) => void): () => void
   /**
+   * Answer an extension-UI dialog the runtime is holding open for the user.
+   * Implemented only by runtimes with a native dialog surface (OMP); Pi has no
+   * equivalent. The `response` is the raw `extension_ui_response` frame to
+   * forward to the runtime's own host.
+   */
+  resolveExtensionUi?(response: Record<string, unknown>): Promise<Record<string, unknown>>
+  /**
    * Send an arbitrary runtime command and resolve its raw response frame.
    * Implemented only by runtimes with a native command surface (OMP); Pi has
    * no equivalent. Optional so the worker protocol can stay open-ended while

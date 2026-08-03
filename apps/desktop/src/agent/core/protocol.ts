@@ -45,6 +45,13 @@ export type WorkerCommand =
       runtimeId?: string
       command: Record<string, unknown>
     }
+  | {
+      type: 'resolve-extension-ui'
+      requestId: string
+      sessionId: string
+      /** `extension_ui_response` frame for a dialog the runtime is holding. */
+      response: Record<string, unknown>
+    }
   | { type: 'close-session'; requestId: string; sessionId: string }
   | { type: 'shutdown'; requestId: string }
 

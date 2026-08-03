@@ -51,7 +51,11 @@ import type { OmpExtensionUiResponse } from './rpcTypes'
 import { OmpRpcClient, type OmpRpcFrame } from './rpcClient'
 
 /** How long the runtime holds a surfaced dialog before unblocking the sidecar. */
-const DEFAULT_DIALOG_TIMEOUT_MS = 120_000
+function dialogTimeoutMs(): number {
+  const raw = process.env.BRAZIER_OMP_DIALOG_TIMEOUT_MS
+  const parsed = raw ? Number(raw) : NaN
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 120_000
+}
 
 const DESCRIPTOR: AgentRuntimeDescriptor = {
   id: 'omp',
@@ -552,18 +556,26 @@ class OmpAgentSession implements AgentSession {
    * Send an arbitrary typed RPC command to the sidecar and resolve its raw
    * response frame. This is the escape hatch the worker protocol needs so the
    * GUI can drive any OMP surface (get_state, roles, subagents, bash, …)
-   * without a new worker command per feature. One command is handled locally:
-   * `resolve_extension_ui` answers a dialog the GUI surfaced.
+   * without a new worker command per feature.
    */
-  async sendRuntimeCommand(command: Record<string, unknown>): Promise<Record<string, unknown>> {
-    if (command.type === 'resolve_extension_ui') {
-      const response = command.response
-      if (!response || typeof response !== 'object' || typeof (response as OmpExtensionUiResponse).id !== 'string') {
-        throw new Error('Malformed extension-UI resolution.')
-      }
-      return this.resolveExtensionUi(response as OmpExtensionUiResponse)
-    }
+  sendRuntimeCommand(command: Record<string, unknown>): Promise<Record<string, unknown>> {
     return this.requireClient().request(command)
+  }
+
+  /**
+   * Answer an extension-UI dialog the sidecar is waiting on. The worker routes
+   * this to the session via the `resolve-extension-ui` command; OMP dialog
+   * ids are validated here so a stale response cannot leak to the sidecar.
+   */
+  async resolveExtensionUi(response: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (
+      !response ||
+      typeof response !== 'object' ||
+      typeof (response as OmpExtensionUiResponse).id !== 'string'
+    ) {
+      throw new Error('Malformed extension-UI resolution.')
+    }
+    return this.resolveExtensionUiResponse(response as OmpExtensionUiResponse)
   }
 
   rehydrate(messages: AgentMessage[], _systemPrompt?: string): void {
@@ -1187,7 +1199,7 @@ class OmpAgentSession implements AgentSession {
             method: 'cancel',
             targetId: id
           })
-        }, DEFAULT_DIALOG_TIMEOUT_MS)
+        }, dialogTimeoutMs())
       })
       return
     }
@@ -1208,7 +1220,7 @@ class OmpAgentSession implements AgentSession {
   }
 
   /** Resolve a dialog the GUI answered; returns whether it was still pending. */
-  private resolveExtensionUi(response: OmpExtensionUiResponse): { resolved: boolean } {
+  private resolveExtensionUiResponse(response: OmpExtensionUiResponse): { resolved: boolean } {
     const pending = this.pendingDialogs.has(response.id)
     this.clearPendingDialog(response.id)
     if (!pending) return { resolved: false }
