@@ -1,0 +1,57 @@
+{
+  "id": "vllm-omni",
+  "display_name": "vLLM-Omni",
+  "upstream_origins": [
+    "https://github.com/vllm-project/vllm-omni.git",
+    "https://github.com/vllm-project/vllm-omni",
+    "https://github.com/vllm-project/vllm.git",
+    "https://github.com/vllm-project/vllm"
+  ],
+  "supported_platforms": ["linux-x64", "linux-arm64"],
+  "skip_checkout": true,
+  "steps": [
+    {
+      "label": "Create isolated environment",
+      "program": "uv",
+      "args": ["venv", "--python", "3.12", "{venv}"]
+    }
+  ],
+  "target_steps": {
+    "cpu": [
+      {
+        "label": "Install matching vLLM CPU build",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "vllm==0.26.0", "--torch-backend", "cpu"]
+      },
+      {
+        "label": "Install vLLM-Omni",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "vllm-omni==0.26.0"]
+      }
+    ],
+    "cuda": [
+      {
+        "label": "Install matching vLLM CUDA build",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "vllm==0.26.0", "--torch-backend", "auto"]
+      },
+      {
+        "label": "Install vLLM-Omni",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "vllm-omni==0.26.0"]
+      }
+    ],
+    "rocm": [
+      {
+        "label": "Install matching vLLM ROCm build",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "vllm==0.26.0", "--torch-backend", "rocm"]
+      },
+      {
+        "label": "Install vLLM-Omni",
+        "program": "uv",
+        "args": ["pip", "install", "--python", "{python}", "vllm-omni==0.26.0"]
+      }
+    ]
+  }
+}

@@ -226,7 +226,9 @@ what is left is mostly the difference between working and trustworthy.
   (Moshi MLX for Apple Silicon shipped: the `personaplex-mlx` recipe, the
   `local_web` backend, and activation are in place.)
 - Broader generation families beyond sd.cpp (e.g. Diffusers for Hunyuan/CogVideoX)
-  if needed.
+  if needed. **vLLM-Omni** is in progress on `feature/vllm-omni-gen` as an
+  alternative image/video backend (Linux CUDA/ROCm; Diffusers HF repos; origin-aware
+  server residency — per-job for tool calls, long-lived in Generate mode).
 
 ## Agent mode follow-ons
 

@@ -54,10 +54,10 @@ impl ModelKind {
 
 /// The kind of settings a model id takes.
 pub fn kind_for(model_id: &str) -> ModelKind {
-    if model_id.starts_with("sdcpp-image:") {
+    if model_id.starts_with("sdcpp-image:") || model_id.starts_with("vllm-omni-image:") {
         return ModelKind::Image;
     }
-    if model_id.starts_with("sdcpp-video:") {
+    if model_id.starts_with("sdcpp-video:") || model_id.starts_with("vllm-omni-video:") {
         return ModelKind::Video;
     }
     if model_id.starts_with("whisper:") || model_id.starts_with("streaming-asr:") {

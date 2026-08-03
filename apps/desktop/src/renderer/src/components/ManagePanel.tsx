@@ -87,6 +87,7 @@ import {
   type RuntimeSettings,
   type RuntimeTarget,
   type VllmModelSettings,
+  type VllmOmniModelSettings,
   saveRuntimeSettings,
   saveSupportBundle,
   saveWorkspacePreference,
@@ -145,6 +146,7 @@ type BuildEngine =
   | 'mlx-lm'
   | 'mlx-vlm'
   | 'vllm'
+  | 'vllm-omni'
   | 'whisper.cpp'
   | 'streaming-asr'
   | 'stable-diffusion.cpp'
@@ -178,6 +180,7 @@ const DISCOVER_ENGINE_LABELS: Record<DiscoverEngine, string> = {
 const BUILD_ENGINE_LABELS: Record<BuildEngine, string> = {
   ...DISCOVER_ENGINE_LABELS,
   vllm: 'Language · vLLM (experimental)',
+  'vllm-omni': 'Gen · vLLM-Omni (Linux)',
   'personaplex-mlx': 'Voice · PersonaPlex MLX',
   whisperkit: 'ASR · WhisperKit'
 }
@@ -205,6 +208,10 @@ const BUILD_ENGINE_DEFAULTS: Record<
   },
   vllm: {
     repository: 'https://github.com/vllm-project/vllm',
+    revision: 'main'
+  },
+  'vllm-omni': {
+    repository: 'https://github.com/vllm-project/vllm-omni',
     revision: 'main'
   },
   'whisper.cpp': {
@@ -1945,6 +1952,227 @@ function VllmServedModels({ settings, onSaved, onError }: { settings: RuntimeSet
   </div>
 }
 
+function VllmOmniServedModels({ settings, onSaved, onError }: { settings: RuntimeSettings; onSaved: (settings: RuntimeSettings) => void; onError: (message: string | null) => void }): React.JSX.Element {
+  const [models, setModels] = useState<VllmOmniModelSettings[]>(settings.vllm_omni_models ?? [])
+  const [draft, setDraft] = useState<VllmOmniModelSettings>({
+    repository: '',
+    modality: 'image',
+    supports_init_image: false,
+    revision: null,
+    dtype: null,
+    gpu_memory_utilization: null,
+    tensor_parallel_size: null,
+    trust_remote_code: false,
+    extra_args: []
+  })
+  const [saving, setSaving] = useState(false)
+  useEffect(() => setModels(settings.vllm_omni_models ?? []), [settings.vllm_omni_models])
+  async function persist(next: VllmOmniModelSettings[]): Promise<void> {
+    setSaving(true)
+    onError(null)
+    try {
+      const saved = await saveRuntimeSettings({ ...settings, vllm_omni_models: next })
+      setModels(next)
+      onSaved(saved)
+    } catch (cause) {
+      onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+  return (
+    <div className="settings-group vllm-omni-served-models">
+      <div className="section-label">Generation models (vLLM-Omni)</div>
+      <p className="model-help">
+        Register Diffusers Hugging Face repositories for image or video generation. Tool calls start
+        the server per job; Generate mode keeps it warm across clicks.
+      </p>
+      {models.map((model, index) => (
+        <details key={`${model.modality}:${model.repository}`} className="runtime-card" open>
+          <summary>
+            <strong>{model.repository}</strong>
+            <span className="active-badge">{model.modality}</span>
+          </summary>
+          <div className="settings-grid">
+            <label>
+              <span>Modality</span>
+              <select
+                value={model.modality}
+                onChange={(e) => {
+                  const next = [...models]
+                  next[index] = { ...model, modality: e.target.value }
+                  setModels(next)
+                }}
+              >
+                <option value="image">Image</option>
+                <option value="video">Video</option>
+              </select>
+            </label>
+            <label>
+              <span>Revision</span>
+              <input
+                value={model.revision ?? ''}
+                onChange={(e) => {
+                  const next = [...models]
+                  next[index] = { ...model, revision: e.target.value || null }
+                  setModels(next)
+                }}
+                placeholder="main"
+              />
+            </label>
+            <label>
+              <span>Precision</span>
+              <select
+                value={model.dtype ?? ''}
+                onChange={(e) => {
+                  const next = [...models]
+                  next[index] = { ...model, dtype: e.target.value || null }
+                  setModels(next)
+                }}
+              >
+                <option value="">Auto</option>
+                <option value="bfloat16">bfloat16</option>
+                <option value="float16">float16</option>
+                <option value="float32">float32</option>
+              </select>
+            </label>
+            <label>
+              <span>GPU memory limit</span>
+              <input
+                type="number"
+                min={0.1}
+                max={1}
+                step={0.05}
+                value={model.gpu_memory_utilization ?? ''}
+                onChange={(e) => {
+                  const next = [...models]
+                  next[index] = {
+                    ...model,
+                    gpu_memory_utilization: e.target.value ? Number(e.target.value) : null
+                  }
+                  setModels(next)
+                }}
+                placeholder="0.90"
+              />
+            </label>
+            <label>
+              <span>Tensor parallel GPUs</span>
+              <input
+                type="number"
+                min={1}
+                value={model.tensor_parallel_size ?? ''}
+                onChange={(e) => {
+                  const next = [...models]
+                  next[index] = {
+                    ...model,
+                    tensor_parallel_size: e.target.value ? Number(e.target.value) : null
+                  }
+                  setModels(next)
+                }}
+              />
+            </label>
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={model.trust_remote_code}
+                onChange={(e) => {
+                  const next = [...models]
+                  next[index] = { ...model, trust_remote_code: e.target.checked }
+                  setModels(next)
+                }}
+              />
+              <span>Trust remote code</span>
+            </label>
+            {model.modality === 'video' && (
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={model.supports_init_image}
+                  onChange={(e) => {
+                    const next = [...models]
+                    next[index] = { ...model, supports_init_image: e.target.checked }
+                    setModels(next)
+                  }}
+                />
+                <span>Image-to-video (accepts init image)</span>
+              </label>
+            )}
+            <label className="span-2">
+              <span>Additional arguments (one token per line)</span>
+              <textarea
+                value={model.extra_args.join('\n')}
+                onChange={(e) => {
+                  const next = [...models]
+                  next[index] = {
+                    ...model,
+                    extra_args: e.target.value
+                      .split('\n')
+                      .map((x) => x.trim())
+                      .filter(Boolean)
+                  }
+                  setModels(next)
+                }}
+              />
+            </label>
+          </div>
+          <div className="runtime-actions">
+            <button
+              className="chip-button danger"
+              disabled={saving}
+              onClick={() => void persist(models.filter((_, i) => i !== index))}
+            >
+              Remove
+            </button>
+            <button className="primary-action" disabled={saving} onClick={() => void persist(models)}>
+              Save launch options
+            </button>
+          </div>
+        </details>
+      ))}
+      <div className="settings-grid">
+        <label>
+          <span>Add Diffusers repository</span>
+          <input
+            value={draft.repository}
+            onChange={(e) => setDraft({ ...draft, repository: e.target.value })}
+            placeholder="Qwen/Qwen-Image"
+          />
+        </label>
+        <label>
+          <span>Modality</span>
+          <select
+            value={draft.modality}
+            onChange={(e) => setDraft({ ...draft, modality: e.target.value })}
+          >
+            <option value="image">Image</option>
+            <option value="video">Video</option>
+          </select>
+        </label>
+        <div className="runtime-actions">
+          <button
+            className="chip-button"
+            disabled={
+              !draft.repository.trim() ||
+              saving ||
+              models.some(
+                (m) =>
+                  m.repository === draft.repository.trim() && m.modality === draft.modality
+              )
+            }
+            onClick={() => {
+              const next = [...models, { ...draft, repository: draft.repository.trim() }]
+              setDraft({ ...draft, repository: '' })
+              void persist(next)
+            }}
+          >
+            Add model
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [bundles, setBundles] = useState<SdcppBundle[]>([])
@@ -3144,6 +3372,9 @@ export function targetSupportedByBuildEngine(
   engine: BuildEngine,
   target: RuntimeTarget
 ): boolean {
+  if (engine === 'vllm-omni') {
+    return target === 'cpu' || target === 'cuda' || target === 'rocm'
+  }
   return engine !== 'vllm' || target !== 'vulkan'
 }
 
@@ -3198,7 +3429,7 @@ type RuntimeTab = 'language' | 'speech' | 'media'
 const RUNTIME_TAB_ENGINES: Record<RuntimeTab, string[]> = {
   language: ['llama.cpp', 'mlx-lm', 'mlx-vlm', 'vllm'],
   speech: ['whisper.cpp', 'whisperkit', 'streaming-asr', 'personaplex', 'personaplex-mlx'],
-  media: ['stable-diffusion.cpp']
+  media: ['stable-diffusion.cpp', 'vllm-omni']
 }
 
 const RUNTIME_TABS: ReadonlyArray<readonly [RuntimeTab, string]> = [
@@ -3213,6 +3444,7 @@ const BUILD_ENGINE_PLATFORMS: Partial<Record<BuildEngine, string[]>> = {
   'mlx-lm': ['macos-arm64'],
   'mlx-vlm': ['macos-arm64'],
   vllm: ['linux-x64', 'linux-arm64', 'macos-arm64'],
+  'vllm-omni': ['linux-x64', 'linux-arm64'],
   'streaming-asr': ['macos-arm64', 'macos-x64', 'linux-x64', 'linux-arm64'],
   'stable-diffusion.cpp': [
     'linux-x64',
@@ -3308,6 +3540,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       'mlx-lm',
       'mlx-vlm',
       'vllm',
+      'vllm-omni',
       'streaming-asr',
       'stable-diffusion.cpp',
       'personaplex',
@@ -3573,6 +3806,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     buildEngine === 'mlx-lm' ||
     buildEngine === 'mlx-vlm' ||
     buildEngine === 'vllm' ||
+    buildEngine === 'vllm-omni' ||
     buildEngine === 'streaming-asr' ||
     buildEngine === 'personaplex' ||
     buildEngine === 'personaplex-mlx'
@@ -4086,6 +4320,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
               {runtime.engine === 'vllm' && runtime.active && props.settings && (
                 <VllmServedModels settings={props.settings} onSaved={props.onSettingsSaved} onError={props.onError} />
               )}
+              {runtime.engine === 'vllm-omni' && runtime.active && props.settings && (
+                <VllmOmniServedModels settings={props.settings} onSaved={props.onSettingsSaved} onError={props.onError} />
+              )}
             </article>
             )
           })}
@@ -4130,6 +4367,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                       'mlx-lm',
                       'mlx-vlm',
                       'vllm',
+                      'vllm-omni',
                       'streaming-asr',
                       'stable-diffusion.cpp',
                       'personaplex',
@@ -4177,7 +4415,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 twenty minutes in because cmake is missing is a worse way to
                 learn it, and nothing here elevates or installs on its own. */}
               <ToolchainChecklist tools={toolchainTools} />
-              {(buildEngine === 'vllm' || (!isPythonBuild && !isSwiftBuild)) && (
+              {(buildEngine === 'vllm' ||
+                buildEngine === 'vllm-omni' ||
+                (!isPythonBuild && !isSwiftBuild)) && (
                 <label>
                   <span>Target</span>
                   <select
@@ -4414,7 +4654,11 @@ function EngineSection(props: SectionProps): React.JSX.Element {
             >
               <option value="">None</option>
               {props.models
-                .filter((model) => model.id.startsWith('sdcpp-image:'))
+                .filter(
+                  (model) =>
+                    model.id.startsWith('sdcpp-image:') ||
+                    model.id.startsWith('vllm-omni-image:')
+                )
                 .map((model) => (
                   <option key={model.id} value={model.id}>
                     {modelDisplayName(model.id, model).title}
@@ -4435,7 +4679,11 @@ function EngineSection(props: SectionProps): React.JSX.Element {
             >
               <option value="">None</option>
               {props.models
-                .filter((model) => model.id.startsWith('sdcpp-video:'))
+                .filter(
+                  (model) =>
+                    model.id.startsWith('sdcpp-video:') ||
+                    model.id.startsWith('vllm-omni-video:')
+                )
                 .map((model) => (
                   <option key={model.id} value={model.id}>
                     {modelDisplayName(model.id, model).title}

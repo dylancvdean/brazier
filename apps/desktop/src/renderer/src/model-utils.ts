@@ -58,19 +58,26 @@ export function isChatModel(model: LocalModel | undefined): boolean {
     engine !== 'whisper.cpp' &&
     engine !== 'streaming-asr' &&
     engine !== 'stable-diffusion.cpp' &&
+    engine !== 'vllm-omni' &&
     engine !== 'personaplex' &&
     !model?.id.startsWith('sdcpp-image:') &&
     !model?.id.startsWith('sdcpp-video:') &&
+    !model?.id.startsWith('vllm-omni-image:') &&
+    !model?.id.startsWith('vllm-omni-video:') &&
     !model?.id.startsWith('personaplex:')
   )
 }
 
 export function isImageGenModel(model: LocalModel | undefined): boolean {
-  return Boolean(model?.id.startsWith('sdcpp-image:'))
+  return Boolean(
+    model?.id.startsWith('sdcpp-image:') || model?.id.startsWith('vllm-omni-image:')
+  )
 }
 
 export function isVideoGenModel(model: LocalModel | undefined): boolean {
-  return Boolean(model?.id.startsWith('sdcpp-video:'))
+  return Boolean(
+    model?.id.startsWith('sdcpp-video:') || model?.id.startsWith('vllm-omni-video:')
+  )
 }
 
 export function isVoiceModel(model: LocalModel | undefined): boolean {
@@ -105,8 +112,8 @@ export function isComputerUseModel(model: LocalModel | undefined): boolean {
  * a stored profile is allowed to contain.
  */
 export function modelKindFor(modelId: string): ModelKind {
-  if (modelId.startsWith('sdcpp-image:')) return 'image'
-  if (modelId.startsWith('sdcpp-video:')) return 'video'
+  if (modelId.startsWith('sdcpp-image:') || modelId.startsWith('vllm-omni-image:')) return 'image'
+  if (modelId.startsWith('sdcpp-video:') || modelId.startsWith('vllm-omni-video:')) return 'video'
   if (modelId.startsWith('whisper:') || modelId.startsWith('streaming-asr:')) {
     return 'transcription'
   }

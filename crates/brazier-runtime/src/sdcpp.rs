@@ -12,8 +12,8 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering},
+        Arc, Mutex,
+        atomic::{AtomicU32, Ordering as AtomicOrdering},
     },
     time::{Duration, Instant},
 };
@@ -23,14 +23,20 @@ use flate2::read::GzDecoder;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tar::Archive;
-use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex as AsyncMutex, sync::Notify};
+use tokio::{io::AsyncWriteExt, process::Command};
 
 use crate::{
+    generation::{self, ActiveGeneration, JobRegistration},
     model_settings::DiffusionProfile,
     models_store,
     progress::{ProgressCallback, ProgressEvent},
     runtime_settings::RuntimeTarget,
     types::{ModelCapabilities, ModelDescriptor},
+};
+
+// Re-export job control so existing API/tools imports keep working.
+pub use crate::generation::{
+    active_generation, cancel_active_generation, BusyError, CancelledError, GenerationOrigin,
 };
 
 pub const ENGINE: &str = "stable-diffusion.cpp";
@@ -921,158 +927,13 @@ pub fn list_models(data_dir: &Path) -> anyhow::Result<Vec<ModelDescriptor>> {
 }
 
 // ---------------------------------------------------------------------------
-// Job runners
+// Job runners (GPU lock + ActiveGeneration live in `generation`)
 // ---------------------------------------------------------------------------
 
-/// Single-flight lock protecting the GPU: only one sd-cli job may run at a time.
-static JOB_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
-
-fn job_lock() -> &'static AsyncMutex<()> {
-    JOB_LOCK.get_or_init(|| AsyncMutex::new(()))
-}
-
-/// Returned when another generation job is already running.
-#[derive(Debug)]
-pub struct BusyError;
-
-impl std::fmt::Display for BusyError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "stable-diffusion.cpp is busy running another generation job"
-        )
-    }
-}
-
-impl std::error::Error for BusyError {}
-
-/// Returned when the user stopped a generation from the interface.
-///
-/// A distinct type because this is not a failure: a model that asked for the
-/// picture needs to hear that the person decided against it, not that the
-/// engine broke.
-#[derive(Debug)]
-pub struct CancelledError;
-
-impl std::fmt::Display for CancelledError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "generation was stopped by the user")
-    }
-}
-
-impl std::error::Error for CancelledError {}
-
-/// Who asked for a generation, so the interface can say whose prompt it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GenerationOrigin {
-    /// Typed by the person, in Generate mode.
-    #[default]
-    User,
-    /// Requested by a model through the generate tools.
-    Model,
-}
-
-/// What a running generation is doing, for the interface to show and stop.
-///
-/// A model-driven generation is otherwise opaque: it can run for hours on the
-/// strength of a prompt the user never saw, so everything needed to judge it —
-/// and to decide to stop it — is published here while it runs.
-#[derive(Debug, Clone, Serialize)]
-pub struct ActiveGeneration {
-    pub id: String,
-    pub modality: Modality,
-    pub model_id: String,
-    pub prompt: String,
-    pub negative_prompt: Option<String>,
-    /// Blob the conditioning image came from, so the interface can show it.
-    pub init_image_blob: Option<String>,
-    pub origin: GenerationOrigin,
-    /// How long it has been running, refreshed on every read.
-    pub elapsed_secs: u64,
-    /// When this job will be given up on, so a long render is not a mystery.
-    pub timeout_secs: u64,
-    /// Diffusion sampling progress reported by sd-cli.
-    pub current_step: u32,
-    pub total_steps: u32,
-}
-
-struct RunningJob {
-    info: ActiveGeneration,
-    started: Instant,
-    cancel: Arc<AtomicBool>,
-    notify: Arc<Notify>,
-    current_step: Arc<AtomicU32>,
-}
-
-static RUNNING: OnceLock<Mutex<Option<RunningJob>>> = OnceLock::new();
-
-fn running() -> &'static Mutex<Option<RunningJob>> {
-    RUNNING.get_or_init(|| Mutex::new(None))
-}
-
-/// The generation in flight, if any, with its elapsed time brought up to date.
-pub fn active_generation() -> Option<ActiveGeneration> {
-    let guard = running().lock().expect("generation lock");
-    guard.as_ref().map(|job| {
-        let mut info = job.info.clone();
-        info.elapsed_secs = job.started.elapsed().as_secs();
-        info.current_step = job.current_step.load(AtomicOrdering::Relaxed);
-        info
-    })
-}
-
-/// Ask the running generation to stop. False when nothing is running.
-pub fn cancel_active_generation() -> bool {
-    let guard = running().lock().expect("generation lock");
-    match guard.as_ref() {
-        Some(job) => {
-            job.cancel.store(true, AtomicOrdering::SeqCst);
-            job.notify.notify_waiters();
-            true
-        }
-        None => false,
-    }
-}
-
-/// Registers a generation for the lifetime of the job and clears it on drop,
-/// so a panic cannot leave the interface showing a job that is not running.
-struct JobRegistration {
-    cancel: Arc<AtomicBool>,
-    notify: Arc<Notify>,
-    current_step: Arc<AtomicU32>,
-    total_steps: u32,
-}
-
-impl JobRegistration {
-    fn open(info: ActiveGeneration) -> Self {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let notify = Arc::new(Notify::new());
-        let current_step = Arc::new(AtomicU32::new(info.current_step));
-        let total_steps = info.total_steps;
-        *running().lock().expect("generation lock") = Some(RunningJob {
-            info,
-            started: Instant::now(),
-            cancel: Arc::clone(&cancel),
-            notify: Arc::clone(&notify),
-            current_step: Arc::clone(&current_step),
-        });
-        Self {
-            cancel,
-            notify,
-            current_step,
-            total_steps,
-        }
-    }
-
-    fn cancelled(&self) -> bool {
-        self.cancel.load(AtomicOrdering::SeqCst)
-    }
-}
-
-impl Drop for JobRegistration {
-    fn drop(&mut self) {
-        *running().lock().expect("generation lock") = None;
+fn to_gen_modality(modality: Modality) -> generation::Modality {
+    match modality {
+        Modality::Image => generation::Modality::Image,
+        Modality::Video => generation::Modality::Video,
     }
 }
 
@@ -1878,7 +1739,7 @@ pub async fn generate_image(
     request: &GenerateImageRequest,
     profile: Option<&DiffusionProfile>,
 ) -> anyhow::Result<GenerateResult> {
-    let _permit = job_lock().try_lock().map_err(|_| BusyError)?;
+    let _permit = generation::try_acquire_job().await?;
 
     let binary = resolve_binary(data_dir, binary_override)
         .filter(|path| path.is_file())
@@ -1966,7 +1827,7 @@ pub async fn generate_image(
     let timeout = effective_timeout(IMAGE_TIMEOUT, request.timeout_secs);
     let job = JobRegistration::open(ActiveGeneration {
         id: uuid::Uuid::new_v4().simple().to_string(),
-        modality: Modality::Image,
+        modality: to_gen_modality(Modality::Image),
         model_id: request.model_id.clone(),
         prompt: request.prompt.clone(),
         negative_prompt: negative.clone(),
@@ -2007,7 +1868,7 @@ pub async fn generate_video(
     request: &GenerateVideoRequest,
     profile: Option<&DiffusionProfile>,
 ) -> anyhow::Result<GenerateResult> {
-    let _permit = job_lock().try_lock().map_err(|_| BusyError)?;
+    let _permit = generation::try_acquire_job().await?;
 
     let binary = resolve_binary(data_dir, binary_override)
         .filter(|path| path.is_file())
@@ -2104,7 +1965,7 @@ pub async fn generate_video(
     let timeout = effective_timeout(video_timeout(steps, video_frames), request.timeout_secs);
     let job = JobRegistration::open(ActiveGeneration {
         id: uuid::Uuid::new_v4().simple().to_string(),
-        modality: Modality::Video,
+        modality: to_gen_modality(Modality::Video),
         model_id: request.model_id.clone(),
         prompt: request.prompt.clone(),
         negative_prompt: negative.clone(),

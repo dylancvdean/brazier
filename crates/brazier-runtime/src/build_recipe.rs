@@ -10,6 +10,7 @@ const LLAMA_CPP: &str = include_str!("../../../engine-recipes/llama.cpp.json");
 const MLX_LM: &str = include_str!("../../../engine-recipes/mlx-lm.json");
 const MLX_VLM: &str = include_str!("../../../engine-recipes/mlx-vlm.json");
 const VLLM: &str = include_str!("../../../engine-recipes/vllm.json");
+const VLLM_OMNI: &str = include_str!("../../../engine-recipes/vllm-omni.json");
 const WHISPER_CPP: &str = include_str!("../../../engine-recipes/whisper.cpp.json");
 const WHISPERKIT: &str = include_str!("../../../engine-recipes/whisperkit.json");
 const STREAMING_ASR: &str = include_str!("../../../engine-recipes/streaming-asr.json");
@@ -30,7 +31,13 @@ const STREAMING_ASR_MAIN: &str =
 pub fn is_python_engine(engine: &str) -> bool {
     matches!(
         engine,
-        "mlx-lm" | "mlx-vlm" | "vllm" | "streaming-asr" | "personaplex" | "personaplex-mlx"
+        "mlx-lm"
+            | "mlx-vlm"
+            | "vllm"
+            | "vllm-omni"
+            | "streaming-asr"
+            | "personaplex"
+            | "personaplex-mlx"
     )
 }
 
@@ -132,6 +139,7 @@ pub fn recipe(engine: &str) -> anyhow::Result<BuildRecipe> {
         "mlx-lm" => MLX_LM,
         "mlx-vlm" => MLX_VLM,
         "vllm" => VLLM,
+        "vllm-omni" => VLLM_OMNI,
         "whisper.cpp" => WHISPER_CPP,
         "whisperkit" => WHISPERKIT,
         "streaming-asr" => STREAMING_ASR,

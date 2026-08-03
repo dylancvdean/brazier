@@ -16,7 +16,7 @@ use crate::{
     progress::{ProgressCallback, ProgressEvent},
     remote, rocm,
     runtime_settings::{self, RuntimeSettings, RuntimeTarget},
-    runtimes, sdcpp, streaming_asr,
+    runtimes, sdcpp, streaming_asr, vllm_omni,
     tool_registry::{self, ToolContext},
     tools,
     types::{ChatCompletionRequest, ModelCapabilities, ModelDescriptor, OpenAiMessage},
@@ -424,6 +424,7 @@ impl Runtime {
                 library_label: None,
             });
         }
+        models.extend(vllm_omni::list_model_descriptors(&settings));
         *self.models_cache.lock().await = Some(models.clone());
         Ok(models)
     }
@@ -473,6 +474,8 @@ impl Runtime {
             "mlx_vlm_python": self.mlx.lock().await.vlm_python.as_ref().map(|path| path.display().to_string()),
             "vllm_python": self.vllm.lock().await.python.as_ref().map(|path| path.display().to_string()),
             "vllm_server": self.vllm.lock().await.server.as_ref().map(|server| serde_json::json!({"base_url": server.base_url, "model": server.model_ref})),
+            "vllm_omni_python": vllm_omni::shared_state().lock().await.python.as_ref().map(|path| path.display().to_string()),
+            "vllm_omni_server": vllm_omni::shared_state().lock().await.server.as_ref().map(|server| serde_json::json!({"base_url": server.base_url, "model": server.model_ref, "modality": format!("{:?}", server.modality).to_lowercase()})),
             "mlx_server": self.mlx_server_summary().await,
             "mlx_probe": mlx_probe,
             "managed_binary_path": llama::managed_binary_path(&self.data_dir).display().to_string(),
@@ -698,6 +701,15 @@ impl Runtime {
             mlx_lm: mlx.lm_python.clone(),
             mlx_vlm: mlx.vlm_python.clone(),
             vllm: self.vllm.lock().await.python.clone(),
+            vllm_omni: {
+                let shared = vllm_omni::shared_state().lock().await.python.clone();
+                shared.or_else(|| {
+                    self.settings
+                        .try_lock()
+                        .ok()
+                        .and_then(|s| s.vllm_omni_python.as_ref().map(PathBuf::from))
+                })
+            },
             whisper,
             streaming_asr,
             sdcpp,
@@ -746,6 +758,11 @@ impl Runtime {
                 let _ = server.stop().await;
             }
             vllm_state.python = settings.vllm_python.as_ref().map(PathBuf::from);
+            let mut omni_state = vllm_omni::shared_state().lock().await;
+            if let Some(mut server) = omni_state.server.take() {
+                let _ = server.stop().await;
+            }
+            omni_state.python = settings.vllm_omni_python.as_ref().map(PathBuf::from);
             let mut whisper = self.whisper.lock().await;
             whisper.binary = settings
                 .whisper_binary
@@ -875,6 +892,30 @@ impl Runtime {
         runtime_settings::save(&self.data_dir, &settings).await?;
         drop(settings);
         let mut state = self.vllm.lock().await;
+        if let Some(mut server) = state.server.take() {
+            let _ = server.stop().await;
+        }
+        state.python = Some(path.clone());
+        Ok(path)
+    }
+
+    /// Pin a vLLM-Omni interpreter for image/video generation.
+    pub async fn activate_vllm_omni(&self, path: PathBuf) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            path.is_file(),
+            "vLLM-Omni Python interpreter not found: {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            vllm_omni::python_appears_runnable(&path),
+            "{} failed an import check for vLLM-Omni",
+            path.display()
+        );
+        let mut settings = self.settings.lock().await;
+        settings.vllm_omni_python = Some(path.display().to_string());
+        runtime_settings::save(&self.data_dir, &settings).await?;
+        drop(settings);
+        let mut state = vllm_omni::shared_state().lock().await;
         if let Some(mut server) = state.server.take() {
             let _ = server.stop().await;
         }
@@ -1024,6 +1065,19 @@ impl Runtime {
                 vllm_state.python = None;
             }
         }
+        {
+            let mut omni = vllm_omni::shared_state().lock().await;
+            let served_from_deleted = omni
+                .server
+                .as_ref()
+                .is_some_and(|server| server.python == path);
+            if served_from_deleted && let Some(mut server) = omni.server.take() {
+                let _ = server.stop().await;
+            }
+            if omni.python.as_deref() == Some(path) {
+                omni.python = None;
+            }
+        }
         let mut mlx = self.mlx.lock().await;
         let served_from_deleted = mlx
             .server
@@ -1051,6 +1105,10 @@ impl Runtime {
         }
         if settings.vllm_python.as_deref() == Some(&path.display().to_string()) {
             settings.vllm_python = None;
+            changed = true;
+        }
+        if settings.vllm_omni_python.as_deref() == Some(&path.display().to_string()) {
+            settings.vllm_omni_python = None;
             changed = true;
         }
         if settings.whisper_binary.as_deref() == Some(&path.display().to_string()) {
@@ -1248,6 +1306,7 @@ impl Runtime {
             "mlx-lm" => self.activate_python(MlxKind::Lm, path).await,
             "mlx-vlm" => self.activate_python(MlxKind::Vlm, path).await,
             vllm::ENGINE => self.activate_vllm(path).await,
+            vllm_omni::ENGINE => self.activate_vllm_omni(path).await,
             crate::whisper::ENGINE | crate::whisperkit::ENGINE => self.activate_whisper(path).await,
             "streaming-asr" => self.activate_streaming_asr(path).await,
             crate::sdcpp::ENGINE => self.activate_sdcpp(path).await,
@@ -1282,6 +1341,7 @@ impl Runtime {
             "mlx-lm" => settings.mlx_lm_python = None,
             "mlx-vlm" => settings.mlx_vlm_python = None,
             vllm::ENGINE => settings.vllm_python = None,
+            vllm_omni::ENGINE => settings.vllm_omni_python = None,
             crate::whisper::ENGINE | crate::whisperkit::ENGINE => settings.whisper_binary = None,
             "streaming-asr" => settings.streaming_asr_python = None,
             crate::sdcpp::ENGINE => settings.sdcpp_binary = None,
@@ -1314,6 +1374,13 @@ impl Runtime {
             }
             vllm::ENGINE => {
                 let mut state = self.vllm.lock().await;
+                if let Some(mut server) = state.server.take() {
+                    let _ = server.stop().await;
+                }
+                state.python = None;
+            }
+            vllm_omni::ENGINE => {
+                let mut state = vllm_omni::shared_state().lock().await;
                 if let Some(mut server) = state.server.take() {
                     let _ = server.stop().await;
                 }
@@ -1489,6 +1556,99 @@ impl Runtime {
             guard.binary = Some(path.clone());
         }
         Ok(path)
+    }
+
+    /// Generate an image via sd.cpp or vLLM-Omni, chosen by model id prefix.
+    pub async fn generate_image(
+        &self,
+        request: sdcpp::GenerateImageRequest,
+        profile: Option<&crate::model_settings::DiffusionProfile>,
+    ) -> anyhow::Result<sdcpp::GenerateResult> {
+        if vllm_omni::is_omni_model_id(&request.model_id) {
+            let settings = self.settings().await;
+            let omni_request = vllm_omni::GenerateImageRequest {
+                prompt: request.prompt,
+                model_id: request.model_id,
+                negative_prompt: request.negative_prompt,
+                width: request.width,
+                height: request.height,
+                steps: request.steps,
+                seed: request.seed,
+                cfg_scale: request.cfg_scale,
+                guidance: request.guidance,
+                init_image: request.init_image,
+                init_image_blob: request.init_image_blob,
+                origin: request.origin,
+                timeout_secs: request.timeout_secs,
+            };
+            let result =
+                vllm_omni::generate_image(&self.data_dir, &settings, &omni_request, profile)
+                    .await?;
+            return Ok(sdcpp::GenerateResult {
+                output_path: result.output_path,
+                metadata: result.metadata,
+            });
+        }
+        let settings = self.settings().await;
+        sdcpp::generate_image(
+            &self.data_dir,
+            settings.sdcpp_binary.as_deref(),
+            &request,
+            profile,
+        )
+        .await
+    }
+
+    /// Generate a video via sd.cpp or vLLM-Omni, chosen by model id prefix.
+    pub async fn generate_video(
+        &self,
+        request: sdcpp::GenerateVideoRequest,
+        profile: Option<&crate::model_settings::DiffusionProfile>,
+    ) -> anyhow::Result<sdcpp::GenerateResult> {
+        if vllm_omni::is_omni_model_id(&request.model_id) {
+            let settings = self.settings().await;
+            let omni_request = vllm_omni::GenerateVideoRequest {
+                prompt: request.prompt,
+                model_id: request.model_id,
+                negative_prompt: request.negative_prompt,
+                width: request.width,
+                height: request.height,
+                steps: request.steps,
+                seed: request.seed,
+                cfg_scale: request.cfg_scale,
+                guidance: request.guidance,
+                init_image: request.init_image,
+                init_image_blob: request.init_image_blob,
+                origin: request.origin,
+                timeout_secs: request.timeout_secs,
+                video_frames: request.video_frames,
+                fps: request.fps,
+            };
+            let result =
+                vllm_omni::generate_video(&self.data_dir, &settings, &omni_request, profile)
+                    .await?;
+            return Ok(sdcpp::GenerateResult {
+                output_path: result.output_path,
+                metadata: result.metadata,
+            });
+        }
+        let settings = self.settings().await;
+        sdcpp::generate_video(
+            &self.data_dir,
+            settings.sdcpp_binary.as_deref(),
+            &request,
+            profile,
+        )
+        .await
+    }
+
+    /// Whether the configured model accepts an init image (img2img / i2v).
+    pub async fn generation_supports_init_image(&self, model_id: &str) -> bool {
+        if vllm_omni::is_omni_model_id(model_id) {
+            let settings = self.settings().await;
+            return vllm_omni::supports_init_image(&settings, model_id);
+        }
+        sdcpp::supports_init_image(&self.data_dir, model_id)
     }
 
     pub async fn ensure_sdcpp_binary_with_progress(
@@ -3325,6 +3485,7 @@ mod tests {
             "mlx-lm",
             "mlx-vlm",
             vllm::ENGINE,
+            vllm_omni::ENGINE,
             crate::whisper::ENGINE,
             "streaming-asr",
             crate::sdcpp::ENGINE,
@@ -3340,6 +3501,9 @@ mod tests {
                     "mlx-lm" => settings.mlx_lm_python = Some(path.display().to_string()),
                     "mlx-vlm" => settings.mlx_vlm_python = Some(path.display().to_string()),
                     vllm::ENGINE => settings.vllm_python = Some(path.display().to_string()),
+                    vllm_omni::ENGINE => {
+                        settings.vllm_omni_python = Some(path.display().to_string())
+                    }
                     crate::whisper::ENGINE => {
                         settings.whisper_binary = Some(path.display().to_string())
                     }
@@ -3358,6 +3522,9 @@ mod tests {
                 "mlx-lm" => runtime.mlx.lock().await.lm_python = Some(path.clone()),
                 "mlx-vlm" => runtime.mlx.lock().await.vlm_python = Some(path.clone()),
                 vllm::ENGINE => runtime.vllm.lock().await.python = Some(path.clone()),
+                vllm_omni::ENGINE => {
+                    vllm_omni::shared_state().lock().await.python = Some(path.clone())
+                }
                 crate::whisper::ENGINE => runtime.whisper.lock().await.binary = Some(path.clone()),
                 "streaming-asr" => runtime.streaming_asr.lock().await.python = Some(path.clone()),
                 crate::sdcpp::ENGINE => runtime.sdcpp.lock().await.binary = Some(path.clone()),
@@ -3387,6 +3554,7 @@ mod tests {
                 "mlx-lm" => active.mlx_lm,
                 "mlx-vlm" => active.mlx_vlm,
                 vllm::ENGINE => active.vllm,
+                vllm_omni::ENGINE => active.vllm_omni,
                 crate::whisper::ENGINE => active.whisper,
                 "streaming-asr" => active.streaming_asr,
                 crate::sdcpp::ENGINE => active.sdcpp,

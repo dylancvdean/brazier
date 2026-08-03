@@ -89,6 +89,12 @@ pub struct RuntimeSettings {
     /// their snapshot cache; Brazier owns only the explicit served-model list.
     #[serde(default)]
     pub vllm_models: Vec<VllmModelSettings>,
+    /// Absolute path of an activated vLLM-Omni Python interpreter (image/video gen).
+    #[serde(default)]
+    pub vllm_omni_python: Option<String>,
+    /// Registered vLLM-Omni Diffusers repositories for image/video generation.
+    #[serde(default)]
+    pub vllm_omni_models: Vec<VllmOmniModelSettings>,
     /// Absolute path of an activated whisper-cli binary.
     #[serde(default)]
     pub whisper_binary: Option<String>,
@@ -184,6 +190,39 @@ impl Default for VllmModelSettings {
     }
 }
 
+/// One Diffusers repository served by vLLM-Omni for image or video generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VllmOmniModelSettings {
+    pub repository: String,
+    /// `"image"` or `"video"`.
+    pub modality: String,
+    /// Whether this video model accepts an init image (I2V).
+    pub supports_init_image: bool,
+    pub revision: Option<String>,
+    pub dtype: Option<String>,
+    pub gpu_memory_utilization: Option<f32>,
+    pub tensor_parallel_size: Option<u32>,
+    pub trust_remote_code: bool,
+    pub extra_args: Vec<String>,
+}
+
+impl Default for VllmOmniModelSettings {
+    fn default() -> Self {
+        Self {
+            repository: String::new(),
+            modality: "image".to_owned(),
+            supports_init_image: false,
+            revision: None,
+            dtype: None,
+            gpu_memory_utilization: None,
+            tensor_parallel_size: None,
+            trust_remote_code: false,
+            extra_args: Vec::new(),
+        }
+    }
+}
+
 pub fn default_build_jobs() -> u16 {
     std::thread::available_parallelism()
         .map(|count| (count.get() / 2).max(1) as u16)
@@ -223,6 +262,8 @@ impl Default for RuntimeSettings {
             vllm_python: None,
             vllm_model: None,
             vllm_models: Vec::new(),
+            vllm_omni_python: None,
+            vllm_omni_models: Vec::new(),
             whisper_binary: None,
             whisper_model: None,
             streaming_asr_python: None,

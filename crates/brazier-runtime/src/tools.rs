@@ -85,7 +85,12 @@ fn describe_video_model(
                 user installs one."
             .to_owned();
     };
-    if crate::sdcpp::supports_init_image(data_dir, model_id) {
+    let supports_init = if crate::vllm_omni::is_omni_model_id(model_id) {
+        crate::vllm_omni::supports_init_image(settings, model_id)
+    } else {
+        crate::sdcpp::supports_init_image(data_dir, model_id)
+    };
+    if supports_init {
         format!(
             "The configured model (`{model_id}`) is an image-to-video model: it accepts \
              `init_image`, so a photo the user shared can be animated."
@@ -518,7 +523,7 @@ impl From<String> for ToolOutput {
 /// again.
 fn describe_generation_failure(error: anyhow::Error) -> anyhow::Error {
     if error
-        .downcast_ref::<crate::sdcpp::CancelledError>()
+        .downcast_ref::<crate::generation::CancelledError>()
         .is_some()
     {
         return anyhow::anyhow!(
@@ -770,13 +775,42 @@ async fn generate_image_tool(
         timeout_secs: Some(settings.generation_timeout_secs),
     };
     let profiles = crate::model_settings::load(data_dir);
-    let result = crate::sdcpp::generate_image(
-        data_dir,
-        settings.sdcpp_binary.as_deref(),
-        &request,
-        profiles.diffusion(&request.model_id),
-    )
-    .await
+    let result = if crate::vllm_omni::is_omni_model_id(&request.model_id) {
+        let omni = crate::vllm_omni::GenerateImageRequest {
+            prompt: request.prompt.clone(),
+            model_id: request.model_id.clone(),
+            negative_prompt: request.negative_prompt.clone(),
+            width: request.width,
+            height: request.height,
+            steps: request.steps,
+            seed: request.seed,
+            cfg_scale: request.cfg_scale,
+            guidance: request.guidance,
+            init_image: request.init_image.clone(),
+            init_image_blob: request.init_image_blob.clone(),
+            origin: request.origin,
+            timeout_secs: request.timeout_secs,
+        };
+        crate::vllm_omni::generate_image(
+            data_dir,
+            &settings,
+            &omni,
+            profiles.diffusion(&request.model_id),
+        )
+        .await
+        .map(|r| crate::sdcpp::GenerateResult {
+            output_path: r.output_path,
+            metadata: r.metadata,
+        })
+    } else {
+        crate::sdcpp::generate_image(
+            data_dir,
+            settings.sdcpp_binary.as_deref(),
+            &request,
+            profiles.diffusion(&request.model_id),
+        )
+        .await
+    }
     .map_err(describe_generation_failure)?;
     let bytes = tokio::fs::read(&result.output_path)
         .await
@@ -815,8 +849,13 @@ async fn generate_video_tool(
         .context("no default video generation model configured (set one in Manage → Engine)")?;
     let init_image = resolve_init_image(data_dir, args, images)?;
     if init_image.is_some() {
+        let supports = if crate::vllm_omni::is_omni_model_id(&model_id) {
+            crate::vllm_omni::supports_init_image(&settings, &model_id)
+        } else {
+            crate::sdcpp::supports_init_image(data_dir, &model_id)
+        };
         anyhow::ensure!(
-            crate::sdcpp::supports_init_image(data_dir, &model_id),
+            supports,
             "`{model_id}` is text-to-video only. Install an image-to-video model (for example Wan 2.2 TI2V) to animate an attached photo."
         );
     }
@@ -850,13 +889,44 @@ async fn generate_video_tool(
         fps: args.get("fps").and_then(Value::as_u64).map(|v| v as u32),
     };
     let profiles = crate::model_settings::load(data_dir);
-    let result = crate::sdcpp::generate_video(
-        data_dir,
-        settings.sdcpp_binary.as_deref(),
-        &request,
-        profiles.diffusion(&request.model_id),
-    )
-    .await
+    let result = if crate::vllm_omni::is_omni_model_id(&request.model_id) {
+        let omni = crate::vllm_omni::GenerateVideoRequest {
+            prompt: request.prompt.clone(),
+            model_id: request.model_id.clone(),
+            negative_prompt: request.negative_prompt.clone(),
+            width: request.width,
+            height: request.height,
+            steps: request.steps,
+            seed: request.seed,
+            cfg_scale: request.cfg_scale,
+            guidance: request.guidance,
+            init_image: request.init_image.clone(),
+            init_image_blob: request.init_image_blob.clone(),
+            origin: request.origin,
+            timeout_secs: request.timeout_secs,
+            video_frames: request.video_frames,
+            fps: request.fps,
+        };
+        crate::vllm_omni::generate_video(
+            data_dir,
+            &settings,
+            &omni,
+            profiles.diffusion(&request.model_id),
+        )
+        .await
+        .map(|r| crate::sdcpp::GenerateResult {
+            output_path: r.output_path,
+            metadata: r.metadata,
+        })
+    } else {
+        crate::sdcpp::generate_video(
+            data_dir,
+            settings.sdcpp_binary.as_deref(),
+            &request,
+            profiles.diffusion(&request.model_id),
+        )
+        .await
+    }
     .map_err(describe_generation_failure)?;
     let bytes = tokio::fs::read(&result.output_path)
         .await

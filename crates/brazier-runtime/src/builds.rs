@@ -399,7 +399,7 @@ fn rocm_torch_backend_for_version(version: &str) -> String {
 }
 
 fn build_environment(engine: &str, target: RuntimeTarget) -> Vec<(String, String)> {
-    if engine != crate::vllm::ENGINE {
+    if engine != crate::vllm::ENGINE && engine != crate::vllm_omni::ENGINE {
         return Vec::new();
     }
     match target {
@@ -416,6 +416,7 @@ fn build_environment(engine: &str, target: RuntimeTarget) -> Vec<(String, String
             ("UV_TORCH_BACKEND".into(), rocm_torch_backend()),
         ],
         // vLLM-Metal uses the macOS CPU vLLM core wheel plus its MLX plugin.
+        // vLLM-Omni does not support Metal; validation rejects it before build.
         RuntimeTarget::Metal => vec![("UV_TORCH_BACKEND".into(), "cpu".into())],
         RuntimeTarget::Auto => vec![("UV_TORCH_BACKEND".into(), "auto".into())],
         RuntimeTarget::Vulkan => Vec::new(),
@@ -427,6 +428,21 @@ fn validate_engine_target(
     target: RuntimeTarget,
     platform: &str,
 ) -> anyhow::Result<()> {
+    if engine == crate::vllm_omni::ENGINE {
+        anyhow::ensure!(
+            target != RuntimeTarget::Vulkan && target != RuntimeTarget::Metal,
+            "vLLM-Omni supports CPU, CUDA, and ROCm on Linux only (no Metal/Vulkan)"
+        );
+        anyhow::ensure!(
+            target != RuntimeTarget::Auto,
+            "vLLM-Omni builds require an explicit CPU, CUDA, or ROCm target"
+        );
+        anyhow::ensure!(
+            platform.starts_with("linux"),
+            "vLLM-Omni is Linux-only; macOS and Windows are not supported"
+        );
+        return Ok(());
+    }
     if engine != crate::vllm::ENGINE {
         return Ok(());
     }
@@ -586,6 +602,14 @@ fn install_python_env(venv: &Path, engine: &str) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(
             crate::vllm::python_appears_runnable(&python),
             "Python environment at {} failed an import check for vLLM",
+            python.display()
+        );
+        return Ok(python);
+    }
+    if engine == crate::vllm_omni::ENGINE {
+        anyhow::ensure!(
+            crate::vllm_omni::python_appears_runnable(&python),
+            "Python environment at {} failed an import check for vLLM-Omni",
             python.display()
         );
         return Ok(python);

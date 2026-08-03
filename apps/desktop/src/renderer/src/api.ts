@@ -353,6 +353,8 @@ export type RuntimeSettings = {
   vllm_python?: string | null
   vllm_model?: string | null
   vllm_models?: VllmModelSettings[]
+  vllm_omni_python?: string | null
+  vllm_omni_models?: VllmOmniModelSettings[]
   whisper_binary?: string | null
   whisper_model?: string | null
   streaming_asr_python?: string | null
@@ -388,6 +390,20 @@ export type VllmModelSettings = {
   trust_remote_code: boolean
   /** When true (default), vLLM starts with prefix caching enabled. */
   prefix_caching?: boolean
+  extra_args: string[]
+}
+
+/** Diffusers repo registered for vLLM-Omni image/video generation. */
+export type VllmOmniModelSettings = {
+  repository: string
+  /** `"image"` or `"video"`. */
+  modality: string
+  supports_init_image: boolean
+  revision?: string | null
+  dtype?: string | null
+  gpu_memory_utilization?: number | null
+  tensor_parallel_size?: number | null
+  trust_remote_code: boolean
   extra_args: string[]
 }
 

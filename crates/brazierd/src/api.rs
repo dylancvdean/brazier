@@ -640,16 +640,27 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         settings.streaming_asr_model.as_deref(),
     );
     let sdcpp_binary = sdcpp::resolve_binary(&state.data_dir, settings.sdcpp_binary.as_deref());
-    let image_gen_available = sdcpp_binary.is_some()
-        && settings
-            .default_image_gen_model
-            .as_deref()
-            .is_some_and(|id| sdcpp::path_for_model_id(&state.data_dir, id).is_ok());
-    let video_gen_available = sdcpp_binary.is_some()
-        && settings
-            .default_video_gen_model
-            .as_deref()
-            .is_some_and(|id| sdcpp::path_for_model_id(&state.data_dir, id).is_ok());
+    let omni_python = settings
+        .vllm_omni_python
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_file());
+    let image_gen_available = settings.default_image_gen_model.as_deref().is_some_and(|id| {
+        if brazier_runtime::vllm_omni::is_omni_model_id(id) {
+            omni_python.is_some()
+                && brazier_runtime::vllm_omni::find_model_settings(&settings, id).is_some()
+        } else {
+            sdcpp_binary.is_some() && sdcpp::path_for_model_id(&state.data_dir, id).is_ok()
+        }
+    });
+    let video_gen_available = settings.default_video_gen_model.as_deref().is_some_and(|id| {
+        if brazier_runtime::vllm_omni::is_omni_model_id(id) {
+            omni_python.is_some()
+                && brazier_runtime::vllm_omni::find_model_settings(&settings, id).is_some()
+        } else {
+            sdcpp_binary.is_some() && sdcpp::path_for_model_id(&state.data_dir, id).is_ok()
+        }
+    });
     let voice_python = voice::resolve_python(&state.data_dir, settings.voice_python.as_deref());
     let voice_model =
         voice::resolve_model_path(&state.data_dir, settings.default_voice_model.as_deref());
@@ -709,14 +720,14 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
                 "image_gen": {
                     "id": "image_gen",
                     "available": image_gen_available,
-                    "engine": "stable-diffusion.cpp",
-                    "summary": "Local image generation via sd-cli (SD/Flux/Qwen-Image). Chat tool or Generate mode."
+                    "engine": "stable-diffusion.cpp|vllm-omni",
+                    "summary": "Local image generation via sd-cli or vLLM-Omni. Chat tool or Generate mode."
                 },
                 "video_gen": {
                     "id": "video_gen",
                     "available": video_gen_available,
-                    "engine": "stable-diffusion.cpp",
-                    "summary": "Local video generation via sd-cli (Wan/LTX). Chat tool or Generate mode."
+                    "engine": "stable-diffusion.cpp|vllm-omni",
+                    "summary": "Local video generation via sd-cli or vLLM-Omni. Chat tool or Generate mode."
                 }
             }
         }
@@ -3524,6 +3535,11 @@ async fn generate_image(
     let gen_bytes = generation_model_bytes(&state.data_dir, &model_id);
     let profiles = model_settings::load(&state.data_dir);
     let profile = profiles.diffusion(&model_id).cloned();
+    let engine = if brazier_runtime::vllm_omni::is_omni_model_id(&model_id) {
+        brazier_runtime::vllm_omni::ENGINE
+    } else {
+        sdcpp::ENGINE
+    };
     let job = sdcpp::GenerateImageRequest {
         prompt: request.prompt,
         model_id,
@@ -3540,13 +3556,7 @@ async fn generate_image(
         timeout_secs: Some(settings.generation_timeout_secs),
     };
     let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
-    let generated = sdcpp::generate_image(
-        &state.data_dir,
-        settings.sdcpp_binary.as_deref(),
-        &job,
-        profile.as_ref(),
-    )
-    .await;
+    let generated = state.runtime.generate_image(job, profile.as_ref()).await;
     state.runtime.restore_after_generation(memory_plan).await;
     let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
@@ -3567,7 +3577,7 @@ async fn generate_image(
     Ok(Json(json!({
         "blob": blob,
         "metadata": result.metadata,
-        "engine": "stable-diffusion.cpp",
+        "engine": engine,
     })))
 }
 
@@ -3577,12 +3587,12 @@ async fn generate_image(
 /// prompt, conditioning image, and how long it has been going — rather than
 /// only when it finally produces something.
 async fn active_generation() -> Json<Value> {
-    Json(json!({ "active": sdcpp::active_generation() }))
+    Json(json!({ "active": brazier_runtime::generation::active_generation() }))
 }
 
 /// Stop the running generation.
 async fn cancel_generation() -> Json<Value> {
-    Json(json!({ "cancelled": sdcpp::cancel_active_generation() }))
+    Json(json!({ "cancelled": brazier_runtime::generation::cancel_active_generation() }))
 }
 
 async fn generate_video(
@@ -3605,6 +3615,11 @@ async fn generate_video(
     let gen_bytes = generation_model_bytes(&state.data_dir, &model_id);
     let profiles = model_settings::load(&state.data_dir);
     let profile = profiles.diffusion(&model_id).cloned();
+    let engine = if brazier_runtime::vllm_omni::is_omni_model_id(&model_id) {
+        brazier_runtime::vllm_omni::ENGINE
+    } else {
+        sdcpp::ENGINE
+    };
     let job = sdcpp::GenerateVideoRequest {
         prompt: request.prompt,
         model_id,
@@ -3623,13 +3638,7 @@ async fn generate_video(
         fps: request.fps,
     };
     let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
-    let generated = sdcpp::generate_video(
-        &state.data_dir,
-        settings.sdcpp_binary.as_deref(),
-        &job,
-        profile.as_ref(),
-    )
-    .await;
+    let generated = state.runtime.generate_video(job, profile.as_ref()).await;
     state.runtime.restore_after_generation(memory_plan).await;
     let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
@@ -3671,7 +3680,7 @@ async fn generate_video(
     Ok(Json(json!({
         "blob": blob,
         "metadata": result.metadata,
-        "engine": "stable-diffusion.cpp",
+        "engine": engine,
     })))
 }
 
