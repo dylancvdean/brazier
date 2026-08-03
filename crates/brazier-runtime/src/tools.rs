@@ -1070,7 +1070,9 @@ pub fn evaluate(expression: &str) -> anyhow::Result<f64> {
 
 // --- Bounded web retrieval ----------------------------------------------------
 
-fn ip_is_public(ip: std::net::IpAddr) -> bool {
+/// True when an address is safe for outbound tool fetches (not loopback,
+/// private, link-local, documentation, or similarly non-routable).
+pub fn ip_is_public(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
             !(v4.is_loopback()
@@ -1083,34 +1085,57 @@ fn ip_is_public(ip: std::net::IpAddr) -> bool {
                 || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])))
         }
         std::net::IpAddr::V6(v6) => {
+            // IPv4-mapped addresses must use the IPv4 policy; otherwise
+            // ::ffff:127.0.0.1 and ::ffff:169.254.169.254 look "public".
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ip_is_public(std::net::IpAddr::V4(v4));
+            }
+            let segments = v6.segments();
             !(v6.is_loopback()
                 || v6.is_unspecified()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
-                || (v6.segments()[0] & 0xffc0) == 0xfe80) // link local fe80::/10
+                || v6.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (segments[0] & 0xffc0) == 0xfe80 // link local fe80::/10
+                || (segments[0] == 0x2001 && segments[1] == 0xdb8)) // documentation
         }
     }
 }
 
-async fn guard_host(host: &str) -> anyhow::Result<()> {
+/// Resolve `host` and ensure every address is publicly routable. Returns the
+/// public addresses so callers can pin connects and avoid DNS rebinding.
+pub async fn resolve_public_host(
+    host: &str,
+    port: u16,
+) -> anyhow::Result<Vec<std::net::SocketAddr>> {
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         anyhow::ensure!(ip_is_public(ip), "address {ip} is not publicly routable");
-        return Ok(());
+        return Ok(vec![std::net::SocketAddr::new(ip, port)]);
     }
     anyhow::ensure!(
         !host.eq_ignore_ascii_case("localhost") && !host.ends_with(".local"),
         "local hostnames are not allowed"
     );
-    let addresses = tokio::net::lookup_host((host, 443))
+    let addresses = tokio::net::lookup_host((host, port))
         .await
         .with_context(|| format!("resolve host {host}"))?;
+    let mut public = Vec::new();
     for address in addresses {
         anyhow::ensure!(
             ip_is_public(address.ip()),
             "host {host} resolves to non-public address {}",
             address.ip()
         );
+        public.push(address);
     }
-    Ok(())
+    anyhow::ensure!(
+        !public.is_empty(),
+        "host {host} resolved to no addresses"
+    );
+    Ok(public)
+}
+
+pub async fn guard_host(host: &str) -> anyhow::Result<()> {
+    resolve_public_host(host, 443).await.map(|_| ())
 }
 
 /// Strip tags from HTML and collapse whitespace. Deliberately simple.
@@ -1185,19 +1210,32 @@ async fn download_url(url: &str) -> anyhow::Result<DownloadedUrl> {
         "only http and https URLs are supported"
     );
     // Do redirects ourselves: reqwest's default policy would follow a public
-    // URL to a private address after we checked only the first host.
-    let redirecting = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .context("build bounded fetch client")?;
+    // URL to a private address after we checked only the first host. Each hop
+    // also pins DNS to the addresses we already vetted so a rebinding TTL
+    // cannot steer the TCP connect at a private target.
     let mut redirects = 0_u8;
     let response = loop {
-        let host = parsed.host_str().context("URL has no host")?;
-        guard_host(host).await?;
-        let response = redirecting
+        let host = parsed
+            .host_str()
+            .context("URL has no host")?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned();
+        let port = parsed
+            .port_or_known_default()
+            .context("URL has no port")?;
+        let addresses = resolve_public_host(&host, port).await?;
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(FETCH_TIMEOUT);
+        // Pin every vetted address; reqwest uses these instead of re-resolving.
+        for address in &addresses {
+            builder = builder.resolve(&host, *address);
+        }
+        let client = builder.build().context("build bounded fetch client")?;
+        let response = client
             .get(parsed.clone())
             .header("user-agent", "brazier-tools/0.1 (+bounded-fetch)")
-            .timeout(FETCH_TIMEOUT)
             .send()
             .await
             .context("request failed")?;
@@ -1387,6 +1425,11 @@ mod tests {
         assert!(!ip_is_public("100.100.0.1".parse().unwrap()));
         assert!(!ip_is_public("fe80::1".parse().unwrap()));
         assert!(!ip_is_public("::1".parse().unwrap()));
+        assert!(!ip_is_public("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(!ip_is_public("::ffff:169.254.169.254".parse().unwrap()));
+        assert!(!ip_is_public("::ffff:10.0.0.1".parse().unwrap()));
+        assert!(!ip_is_public("2001:db8::1".parse().unwrap()));
+        assert!(!ip_is_public("ff02::1".parse().unwrap()));
         assert!(ip_is_public("93.184.216.34".parse().unwrap()));
         assert!(ip_is_public(
             "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap()

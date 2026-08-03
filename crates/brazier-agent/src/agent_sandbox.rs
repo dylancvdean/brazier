@@ -123,6 +123,9 @@ pub struct SandboxRequest<'a> {
     pub scratch: &'a Path,
     /// Working directory for the command; must be inside the workspace.
     pub cwd: &'a Path,
+    /// Brazier data directory. Denied for reads/writes inside the jail so a
+    /// custom `--data-dir` outside `$HOME` cannot leak the daemon DB or API key.
+    pub data_dir: Option<&'a Path>,
 }
 
 /// A command ready to spawn, with isolation and environment already applied.
@@ -506,7 +509,7 @@ pub fn seatbelt_profile(request: &SandboxRequest<'_>) -> String {
     }
 
     // Credential denials come after the broad read allowance.
-    for secret in secret_paths(None) {
+    for secret in secret_paths(request.data_dir) {
         profile.push_str(&format!(
             "(deny file-read* file-write* (subpath {}))\n",
             sbpl_quote(&secret)
@@ -578,6 +581,16 @@ pub fn bubblewrap_args(request: &SandboxRequest<'_>, unshare_net: bool) -> Vec<S
         args.push(home.display().to_string());
     }
 
+    // Custom --data-dir outside $HOME would otherwise stay readable via the
+    // root ro-bind. Hide it, then re-bind scratch (which lives under it).
+    if let Some(data_dir) = request.data_dir {
+        let hide = home_directory().is_none_or(|home| !data_dir.starts_with(&home));
+        if hide {
+            args.push("--tmpfs".into());
+            args.push(data_dir.display().to_string());
+        }
+    }
+
     args.push("--bind".into());
     args.push(request.scratch.display().to_string());
     args.push(request.scratch.display().to_string());
@@ -608,11 +621,21 @@ mod tests {
         workspace: &'a Path,
         scratch: &'a Path,
     ) -> SandboxRequest<'a> {
+        request_with_data_dir(profile, workspace, scratch, None)
+    }
+
+    fn request_with_data_dir<'a>(
+        profile: SandboxProfile,
+        workspace: &'a Path,
+        scratch: &'a Path,
+        data_dir: Option<&'a Path>,
+    ) -> SandboxRequest<'a> {
         SandboxRequest {
             profile,
             workspace,
             scratch,
             cwd: workspace,
+            data_dir,
         }
     }
 
@@ -721,7 +744,14 @@ mod tests {
         // temporary files.
         let workspace = PathBuf::from("/ws");
         let scratch = PathBuf::from("/data/agent/scratch/s1");
-        let profile = seatbelt_profile(&request(SandboxProfile::Workspace, &workspace, &scratch));
+        let data_dir = PathBuf::from("/data");
+        let profile = seatbelt_profile(&request_with_data_dir(
+            SandboxProfile::Workspace,
+            &workspace,
+            &scratch,
+            Some(&data_dir),
+        ));
+        assert!(profile.contains("(deny file-read* file-write* (subpath \"/data\"))"));
         let last_deny = profile
             .rfind("(deny file-read* file-write* (subpath")
             .expect("credential denials present");
@@ -731,6 +761,32 @@ mod tests {
         assert!(
             scratch_allow > last_deny,
             "the scratch grant must come after every denial"
+        );
+    }
+
+    #[test]
+    fn bubblewrap_hides_a_custom_data_dir_outside_home() {
+        let workspace = PathBuf::from("/tmp/ws");
+        let scratch = PathBuf::from("/var/lib/brazier/agent/scratch/s1");
+        let data_dir = PathBuf::from("/var/lib/brazier");
+        let args = bubblewrap_args(
+            &request_with_data_dir(
+                SandboxProfile::Workspace,
+                &workspace,
+                &scratch,
+                Some(&data_dir),
+            ),
+            true,
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("--tmpfs /var/lib/brazier"));
+        let data_tmpfs = joined.find("--tmpfs /var/lib/brazier").expect("data tmpfs");
+        let scratch_bind = joined
+            .find("--bind /var/lib/brazier/agent/scratch/s1")
+            .expect("scratch bind");
+        assert!(
+            scratch_bind > data_tmpfs,
+            "scratch must be re-bound after hiding data_dir"
         );
     }
 

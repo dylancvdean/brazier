@@ -678,7 +678,31 @@ impl ComputerBroker {
         #[cfg(target_os = "linux")]
         if target == ComputerTarget::Desktop && std::env::var_os("WAYLAND_DISPLAY").is_some() {
             crate::computer_portal::close_session().await;
+            crate::computer_portal::clear_restore_token();
         }
+        self.persist().await
+    }
+
+    /// Revoke desktop authority on every session. Used by the Electron main
+    /// process Esc hatch so a wedged renderer cannot leave injection live.
+    pub async fn revoke_all_desktop_authority(&self) -> Result<()> {
+        let mut had_desktop = false;
+        {
+            let mut sessions = self.sessions.lock().await;
+            for session in sessions.values_mut() {
+                if session.record.target == ComputerTarget::Desktop || session.desktop_authorized {
+                    session.desktop_authorized = false;
+                    session.record.running = false;
+                    had_desktop = true;
+                }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if had_desktop && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            crate::computer_portal::close_session().await;
+            crate::computer_portal::clear_restore_token();
+        }
+        let _ = had_desktop;
         self.persist().await
     }
 
@@ -698,6 +722,34 @@ impl ComputerBroker {
         }
         Ok(())
     }
+}
+
+/// Marker file written by the desktop main process only after the native
+/// overlay and Esc hatch report READY. Remote API clients cannot create this
+/// file over HTTP, so granting desktop authority requires a live local safety
+/// surface — not merely a bearer token.
+pub fn safety_overlay_marker_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("computer-safety-overlay.ready")
+}
+
+pub fn safety_overlay_is_ready(data_dir: &Path) -> bool {
+    safety_overlay_marker_path(data_dir).is_file()
+}
+
+pub fn write_safety_overlay_marker(data_dir: &Path) -> Result<()> {
+    let path = safety_overlay_marker_path(data_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("create safety overlay marker directory {}", parent.display())
+        })?;
+    }
+    std::fs::write(&path, b"ready\n")
+        .with_context(|| format!("write safety overlay marker {}", path.display()))
+}
+
+pub fn clear_safety_overlay_marker(data_dir: &Path) {
+    let path = safety_overlay_marker_path(data_dir);
+    let _ = std::fs::remove_file(path);
 }
 impl Default for ComputerBroker {
     fn default() -> Self {
@@ -812,6 +864,43 @@ mod tests {
         assert!(broker.sessions.lock().await[&session.id].desktop_authorized);
         broker.stop(&session.id).await.unwrap();
         assert!(!broker.sessions.lock().await[&session.id].desktop_authorized);
+    }
+
+    #[tokio::test]
+    async fn revoke_all_clears_every_desktop_session() {
+        let broker = ComputerBroker::new();
+        let first = broker
+            .create_session(
+                None,
+                ComputerTarget::Desktop,
+                None,
+                ComputerPermissionMode::AllowAll,
+                None,
+            )
+            .await
+            .unwrap();
+        let second = broker
+            .create_session(
+                None,
+                ComputerTarget::Desktop,
+                None,
+                ComputerPermissionMode::AllowAll,
+                None,
+            )
+            .await
+            .unwrap();
+        broker
+            .set_desktop_authority(&first.id, true)
+            .await
+            .unwrap();
+        broker
+            .set_desktop_authority(&second.id, true)
+            .await
+            .unwrap();
+        broker.revoke_all_desktop_authority().await.unwrap();
+        let sessions = broker.sessions.lock().await;
+        assert!(!sessions[&first.id].desktop_authorized);
+        assert!(!sessions[&second.id].desktop_authorized);
     }
     #[tokio::test]
     async fn refused_actions_are_recorded_once() {

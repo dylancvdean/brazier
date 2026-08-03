@@ -461,6 +461,8 @@ export function ComputerMode(props: Props): React.JSX.Element {
   useEffect(() => {
     return () => {
       abortRef.current?.abort()
+      // setActive(false) clears the overlay marker and revokes daemon desktop
+      // authority from main, even when this view unmounts mid-session.
       void window.brazier.computer.setActive(false)
     }
   }, [])

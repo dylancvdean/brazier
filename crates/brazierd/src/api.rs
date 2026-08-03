@@ -348,6 +348,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/computer/sessions/{id}/safety-authority",
             post(set_computer_safety_authority),
         )
+        .route(
+            "/api/v1/computer/desktop-authority/revoke-all",
+            post(revoke_all_desktop_authority),
+        )
         .route("/api/v1/computer/exec", post(computer_exec_action))
         .route(
             "/api/v1/computer/approvals/{id}",
@@ -1703,11 +1707,28 @@ async fn set_computer_safety_authority(
     Path(id): Path<String>,
     Json(body): Json<ComputerSafetyAuthority>,
 ) -> ApiResult<StatusCode> {
+    if body.active && !crate::computer_exec::safety_overlay_is_ready(&state.data_dir) {
+        return Err(ApiError::bad_request(
+            "desktop safety authority requires the always-visible overlay and Esc emergency stop to be READY",
+        ));
+    }
     state
         .computer_broker
         .set_desktop_authority(&id, body.active)
         .await
         .map_err(ApiError::bad_request)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn revoke_all_desktop_authority(
+    State(state): State<AppState>,
+) -> ApiResult<StatusCode> {
+    crate::computer_exec::clear_safety_overlay_marker(&state.data_dir);
+    state
+        .computer_broker
+        .revoke_all_desktop_authority()
+        .await
+        .map_err(ApiError::internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

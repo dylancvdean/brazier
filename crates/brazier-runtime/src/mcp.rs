@@ -22,6 +22,62 @@ use crate::{toolchain_hints::resolve_command, tools::ToolInvocation};
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const TOOL_PREFIX: &str = "mcp/";
 
+/// Substrings that mark an environment variable as credential-bearing.
+const SECRET_ENV_PATTERNS: &[&str] = &[
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "APIKEY",
+    "API_KEY",
+    "ACCESS_KEY",
+    "PRIVATE_KEY",
+    "SESSION_KEY",
+    "AUTH",
+    "COOKIE",
+    "LICENSE_KEY",
+];
+
+const DENIED_ENV_NAMES: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GPG_AGENT_INFO",
+    "NETRC",
+    "npm_config_registry",
+    "PIP_INDEX_URL",
+];
+
+fn is_secret_env(name: &str) -> bool {
+    if DENIED_ENV_NAMES.iter().any(|denied| denied == &name) {
+        return true;
+    }
+    let upper = name.to_ascii_uppercase();
+    SECRET_ENV_PATTERNS
+        .iter()
+        .any(|pattern| upper.contains(pattern))
+}
+
+/// Environment inherited by an MCP child: host vars minus secrets and daemon
+/// config, then the server's explicit `env` map (which may re-add granted
+/// credentials).
+fn mcp_child_env(extra: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for (key, value) in std::env::vars() {
+        if is_secret_env(&key) || key.starts_with("BRAZIER_") {
+            continue;
+        }
+        env.insert(key, value);
+    }
+    for (key, value) in extra {
+        env.insert(key.clone(), value.clone());
+    }
+    env
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpToolEntry {
     pub name: String,
@@ -170,7 +226,8 @@ impl JsonRpcClient {
         let mut command = Command::new(executable);
         command
             .args(&config.args)
-            .envs(&config.env)
+            .env_clear()
+            .envs(mcp_child_env(&config.env))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

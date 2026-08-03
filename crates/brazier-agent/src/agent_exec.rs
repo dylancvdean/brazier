@@ -784,11 +784,50 @@ async fn fs_list(
         .and_then(Value::as_u64)
         .unwrap_or(1)
         .min(4) as usize;
-    let lines = list_directory(&path, workspace, depth).await?;
+    let boundary = walk_boundary(&path, workspace);
+    let lines = list_directory(&path, workspace, depth, boundary.as_deref()).await?;
     if lines.is_empty() {
         return Ok(ToolOutcome::text("(empty directory)"));
     }
     Ok(ToolOutcome::text(lines.join("\n")))
+}
+
+/// When the walk root sits inside the workspace, keep every followed symlink
+/// inside that workspace too. Host-approved roots outside the workspace keep
+/// normal follow semantics.
+fn walk_boundary(root: &Path, workspace: Option<&Path>) -> Option<PathBuf> {
+    let workspace = workspace?;
+    let workspace_real = agent_policy::canonical_ancestor(workspace);
+    let root_real = agent_policy::canonical_ancestor(root);
+    if is_inside(&root_real, &workspace_real) {
+        Some(workspace_real)
+    } else {
+        None
+    }
+}
+
+/// Resolve an entry for walking. Symlinks are followed only when their target
+/// remains inside `boundary` (when set); escapes are skipped.
+fn walk_entry_target(path: &Path, boundary: Option<&Path>) -> Option<(PathBuf, std::fs::Metadata)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() {
+        let real = agent_policy::canonical_ancestor(path);
+        if let Some(root) = boundary
+            && !is_inside(&real, root)
+        {
+            return None;
+        }
+        let followed = std::fs::metadata(path).ok()?;
+        Some((real, followed))
+    } else {
+        let real = agent_policy::canonical_ancestor(path);
+        if let Some(root) = boundary
+            && !is_inside(&real, root)
+        {
+            return None;
+        }
+        Some((real, meta))
+    }
 }
 
 /// Depth-first listing, walked iteratively so the recursion stays off the async
@@ -797,6 +836,7 @@ async fn list_directory(
     root: &Path,
     workspace: Option<&Path>,
     depth: usize,
+    boundary: Option<&Path>,
 ) -> anyhow::Result<Vec<String>> {
     let mut lines = Vec::new();
     let mut stack = vec![(root.to_path_buf(), 0usize)];
@@ -821,9 +861,24 @@ async fn list_directory(
         let mut children = Vec::new();
         for entry in entries {
             let name = entry.file_name().to_string_lossy().to_string();
-            let metadata = entry.metadata().await?;
             let entry_path = entry.path();
             let indent = "  ".repeat(level);
+            let Some((_real, metadata)) = walk_entry_target(&entry_path, boundary) else {
+                // Symlink (or mount) that leaves the workspace: name it without
+                // following so the model can see it exists without reading out.
+                if entry
+                    .file_type()
+                    .await
+                    .map(|kind| kind.is_symlink())
+                    .unwrap_or(false)
+                {
+                    lines.push(format!(
+                        "{indent}{} (symlink outside workspace)",
+                        relative_display(workspace, &entry_path)
+                    ));
+                }
+                continue;
+            };
             if metadata.is_dir() {
                 lines.push(format!(
                     "{indent}{}/",
@@ -1061,6 +1116,7 @@ async fn fs_search(
         query.to_lowercase()
     };
 
+    let boundary = walk_boundary(&root, workspace);
     let mut matches = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(directory) = stack.pop() {
@@ -1070,7 +1126,8 @@ async fn fs_search(
         while let Ok(Some(entry)) = dir.next_entry().await {
             let entry_path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            let Ok(metadata) = entry.metadata().await else {
+            let Some((_real, metadata)) = walk_entry_target(&entry_path, boundary.as_deref())
+            else {
                 continue;
             };
             if metadata.is_dir() {
@@ -1368,6 +1425,7 @@ async fn build_command(
         workspace: workspace_root,
         scratch: &scratch,
         cwd: &cwd,
+        data_dir: Some(context.data_dir),
     };
     let (shell, flag) = shell_program();
     let args = vec![flag.to_owned(), command_line.to_owned()];
@@ -1968,6 +2026,96 @@ mod tests {
             "the target outside the workspace is named in the request"
         );
         let _ = link;
+    }
+
+    #[tokio::test]
+    async fn fs_search_does_not_follow_symlinks_out_of_the_workspace() {
+        let harness = Harness::new(AgentPermissionMode::SandboxOnly).await;
+        let outside = TempDir::new().expect("outside dir");
+        let secret = outside.path().join("secret.txt");
+        tokio::fs::write(&secret, "classified-search-marker")
+            .await
+            .expect("write");
+        let link = harness.workspace.path().join("escape.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, &link).expect("symlink");
+        #[cfg(not(unix))]
+        return;
+
+        let response = harness
+            .call(
+                "fs_search",
+                json!({ "query": "classified-search-marker" }),
+            )
+            .await;
+        assert_eq!(response.status, ToolExecStatus::Completed, "{}", response.output);
+        assert!(
+            response.output.starts_with("No matches for"),
+            "fs_search must not read through an escaping symlink: {}",
+            response.output
+        );
+        assert!(
+            !response.output.contains("escape.txt"),
+            "fs_search must not report a hit via an escaping symlink: {}",
+            response.output
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_list_names_but_does_not_descend_escaping_symlinks() {
+        let harness = Harness::new(AgentPermissionMode::SandboxOnly).await;
+        let outside = TempDir::new().expect("outside dir");
+        let nested = outside.path().join("nested");
+        tokio::fs::create_dir_all(&nested).await.expect("mkdir");
+        tokio::fs::write(nested.join("secret.txt"), "listed-escape-marker")
+            .await
+            .expect("write");
+        let link = harness.workspace.path().join("out");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&nested, &link).expect("symlink");
+        #[cfg(not(unix))]
+        return;
+
+        let response = harness
+            .call("fs_list", json!({ "path": ".", "depth": 3 }))
+            .await;
+        assert_eq!(response.status, ToolExecStatus::Completed, "{}", response.output);
+        assert!(
+            response.output.contains("symlink outside workspace"),
+            "escaping symlink should be named without following: {}",
+            response.output
+        );
+        assert!(
+            !response.output.contains("secret.txt")
+                && !response.output.contains("listed-escape-marker"),
+            "fs_list must not descend an escaping directory symlink: {}",
+            response.output
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_search_follows_symlinks_that_stay_in_the_workspace() {
+        let harness = Harness::new(AgentPermissionMode::SandboxOnly).await;
+        let target_dir = harness.workspace.path().join("real");
+        tokio::fs::create_dir_all(&target_dir).await.expect("mkdir");
+        tokio::fs::write(target_dir.join("inside.txt"), "workspace-link-marker")
+            .await
+            .expect("write");
+        let link = harness.workspace.path().join("alias");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target_dir, &link).expect("symlink");
+        #[cfg(not(unix))]
+        return;
+
+        let response = harness
+            .call("fs_search", json!({ "query": "workspace-link-marker" }))
+            .await;
+        assert_eq!(response.status, ToolExecStatus::Completed, "{}", response.output);
+        assert!(
+            response.output.contains("workspace-link-marker"),
+            "in-workspace symlinks should still be searchable: {}",
+            response.output
+        );
     }
 
     #[tokio::test]

@@ -376,6 +376,12 @@ fn scope_key(
     paths: &[RequestedPath],
     wants_network: bool,
 ) -> String {
+    // stdin injection is scoped to the specific background process that was
+    // approved, not to every process in the session.
+    if tool == "shell_input" {
+        let process = argument_str(arguments, "process_id").unwrap_or("unknown");
+        return format!("shell-input:{process}");
+    }
     if spec.executes {
         let program = argument_str(arguments, "command")
             .and_then(|command| command.split_whitespace().next())

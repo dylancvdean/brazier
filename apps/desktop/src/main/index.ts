@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync, type WriteStream } from 'node:fs'
+import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, type WriteStream } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -282,6 +282,51 @@ function stopNativeComputerSafety(): void {
   if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')
 }
 
+function safetyOverlayMarkerPath(): string {
+  return join(dataDirectory(), 'computer-safety-overlay.ready')
+}
+
+function writeSafetyOverlayMarker(): void {
+  const directory = dataDirectory()
+  mkdirSync(directory, { recursive: true })
+  writeFileSync(safetyOverlayMarkerPath(), 'ready\n', { mode: 0o600 })
+}
+
+function clearSafetyOverlayMarker(): void {
+  try {
+    rmSync(safetyOverlayMarkerPath(), { force: true })
+  } catch {
+    // Best-effort; authority revoke below is the hard stop.
+  }
+}
+
+/** Revoke every session's desktop authority even if the renderer is wedged. */
+async function revokeAllDesktopAuthority(): Promise<void> {
+  clearSafetyOverlayMarker()
+  try {
+    const ready = await connection
+    const headers = new Headers({ 'content-type': 'application/json' })
+    if (ready.api_key) headers.set('authorization', `Bearer ${ready.api_key}`)
+    const response = await fetch(`${ready.address}/api/v1/computer/desktop-authority/revoke-all`, {
+      method: 'POST',
+      headers,
+      body: '{}',
+      signal: AbortSignal.timeout(5_000)
+    })
+    if (!response.ok) {
+      report(
+        `[computer-safety] daemon revoke-all failed with status ${response.status}`,
+        'warn'
+      )
+    }
+  } catch (error) {
+    report(
+      `[computer-safety] daemon revoke-all failed: ${error instanceof Error ? error.message : String(error)}`,
+      'warn'
+    )
+  }
+}
+
 function broadcastComputerEscape(reason?: string): void {
   if (!computerUseActive && !computerSafetyStarting) return
   if (reason) report(`[computer-safety] ${reason}`, 'warn')
@@ -292,6 +337,9 @@ function broadcastComputerEscape(reason?: string): void {
   stopComputerOverlayWatchdog()
   computerSafetyOverlay?.hide()
   globalShortcut.unregister('Escape')
+  // Main clears daemon authority directly. The renderer stop path is best-effort
+  // UX; a crashed renderer must not leave desktop injection live for API clients.
+  void revokeAllDesktopAuthority()
   for (const candidate of BrowserWindow.getAllWindows()) {
     if (candidate !== computerSafetyOverlay && !candidate.isDestroyed()) {
       candidate.webContents.send('brazier:computer:escape')
@@ -405,6 +453,7 @@ async function setComputerUseActive(active: boolean): Promise<void> {
     stopComputerOverlayWatchdog()
     computerSafetyOverlay?.hide()
     globalShortcut.unregister('Escape')
+    await revokeAllDesktopAuthority()
     return
   }
   if (computerUseActive) return
@@ -419,6 +468,7 @@ async function setComputerUseActive(active: boolean): Promise<void> {
         throw new Error('Computer Use safety startup was cancelled.')
       }
       nativeComputerSafety = child
+      writeSafetyOverlayMarker()
       computerUseActive = true
     })()
     try {
@@ -463,6 +513,7 @@ async function setComputerUseActive(active: boolean): Promise<void> {
     computerSafetyOverlay.showInactive()
     computerSafetyOverlay.moveTop()
   }, 250)
+  writeSafetyOverlayMarker()
   computerUseActive = true
 }
 
@@ -1065,6 +1116,7 @@ app.on('before-quit', () => {
   stopNativeComputerSafety()
   stopComputerOverlayWatchdog()
   globalShortcut.unregister('Escape')
+  clearSafetyOverlayMarker()
   void agent.shutdown()
   daemon?.kill()
 })

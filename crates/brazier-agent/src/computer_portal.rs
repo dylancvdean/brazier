@@ -56,6 +56,14 @@ fn save_restore_token(token: &str) {
     }
 }
 
+/// Drop the persisted RemoteDesktop restore token so the next session must
+/// obtain fresh compositor consent. Called from Esc / stop paths.
+pub fn clear_restore_token() {
+    if let Some(path) = restore_token_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 async fn proxy<'a>(
     connection: &'a Connection,
     path: &'a str,
@@ -436,4 +444,7 @@ pub async fn close_session() {
     {
         let _: Result<(), _> = portal_session.call("Close", &()).await;
     }
+    // Esc/stop closes the live session; keep the restore token until an
+    // explicit clear so Settings "Request access" can reconnect without a
+    // second prompt. Emergency stop paths call [`clear_restore_token`].
 }

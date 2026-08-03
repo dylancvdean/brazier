@@ -4,7 +4,13 @@
 //! not provide a synthetic fallback: reporting an unavailable browser is safer
 //! than telling a model that a click or a screenshot happened when it did not.
 
-use std::{collections::HashMap, net::TcpListener, path::PathBuf, process::Stdio, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, TcpListener},
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, bail};
 use brazier_protocol::computer_types::{
@@ -124,12 +130,7 @@ impl CdpBrowserSession {
         let message = match action {
             ComputerAction::Screenshot => "Captured browser viewport.".to_owned(),
             ComputerAction::VisitUrl { url } => {
-                if !(url.starts_with("http://")
-                    || url.starts_with("https://")
-                    || url == "about:blank")
-                {
-                    bail!("Only http(s) URLs are allowed; no navigation was performed.");
-                }
+                ensure_public_navigation_url(url).await?;
                 cdp(
                     &mut socket,
                     &mut next_id,
@@ -593,6 +594,91 @@ fn find_chromium(configured: Option<&str>) -> Option<String> {
         })
 }
 
+/// Block browser computer-use from navigating to private/link-local targets.
+/// `about:blank` remains allowed as the isolated profile's initial page.
+async fn ensure_public_navigation_url(url: &str) -> Result<()> {
+    if url == "about:blank" {
+        return Ok(());
+    }
+    let parsed = reqwest::Url::parse(url).context("invalid navigation URL")?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "Only http(s) URLs are allowed; no navigation was performed."
+    );
+    let host = parsed.host_str().context("navigation URL has no host")?;
+    // Some Url serializers keep brackets around IPv6 literals; strip so parse works.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        #[cfg(test)]
+        if ip.is_loopback() {
+            // Integration tests drive an ephemeral loopback fixture page.
+            return Ok(());
+        }
+        anyhow::ensure!(
+            navigation_ip_is_public(ip),
+            "Refusing to navigate to non-public address {ip}."
+        );
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    anyhow::ensure!(
+        !host.eq_ignore_ascii_case("localhost") && !host.ends_with(".local"),
+        "Refusing to navigate to local hostname {host}."
+    );
+    #[cfg(test)]
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        !host.ends_with(".local"),
+        "Refusing to navigate to local hostname {host}."
+    );
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let mut saw_address = false;
+    for address in tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("resolve navigation host {host}"))?
+    {
+        saw_address = true;
+        anyhow::ensure!(
+            navigation_ip_is_public(address.ip()),
+            "Refusing to navigate to {host}; it resolves to non-public address {}.",
+            address.ip()
+        );
+    }
+    anyhow::ensure!(
+        saw_address,
+        "Refusing to navigate to {host}; DNS returned no addresses."
+    );
+    Ok(())
+}
+
+fn navigation_ip_is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return navigation_ip_is_public(IpAddr::V4(v4));
+            }
+            let segments = v6.segments();
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] == 0x2001 && segments[1] == 0xdb8))
+        }
+    }
+}
+
 fn urlencoding_lite(value: &str) -> String {
     value.bytes().fold(String::new(), |mut out, byte| {
         match byte {
@@ -737,6 +823,33 @@ mod tests {
             }
         );
     }
+    #[tokio::test]
+    async fn visit_url_refuses_private_and_link_local_targets() {
+        for url in [
+            "http://10.0.0.1/",
+            "http://169.254.169.254/latest",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://something.local/",
+        ] {
+            let error = ensure_public_navigation_url(url)
+                .await
+                .expect_err(url)
+                .to_string();
+            assert!(
+                error.contains("Refusing") || error.contains("non-public") || error.contains("local"),
+                "{url} => {error}"
+            );
+        }
+        // Literal public address avoids a DNS dependency in unit tests.
+        ensure_public_navigation_url("https://93.184.216.34/")
+            .await
+            .expect("public host");
+        ensure_public_navigation_url("about:blank")
+            .await
+            .expect("blank");
+    }
+
     #[tokio::test]
     #[ignore = "requires a working Chromium and local TCP loopback"]
     async fn a_wait_in_one_session_does_not_block_another() {
