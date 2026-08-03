@@ -1,7 +1,7 @@
-import { Activity, Cpu, FastForward, ListTodo, Zap } from 'lucide-react'
+import { Activity, Cpu, FastForward, ListTodo, LoaderCircle, Zap } from 'lucide-react'
 
 import type { OmpTodoPhase } from '../../../agent/omp/rpcTypes'
-import type { OmpRecentFrame, OmpSessionInfo } from '../ompSidecar'
+import type { OmpRecentFrame, OmpSessionInfo, OmpSubagentView } from '../ompSidecar'
 
 /**
  * Live Oh My Pi session state, surfaced from the sidecar's `get_state` stream:
@@ -47,8 +47,61 @@ function TodoList({ phases }: { phases: OmpTodoPhase[] | undefined }): React.JSX
   )
 }
 
+function SubagentList({
+  subagents
+}: {
+  subagents: OmpSubagentView[]
+}): React.JSX.Element | null {
+  if (subagents.length === 0) return null
+  const ordered = [...subagents].sort((a, b) => a.index - b.index)
+  return (
+    <div className="omp-session-subagents">
+      <strong>Subagents</strong>
+      {ordered.map((subagent) => {
+        const running = subagent.status === 'running' || subagent.status === 'pending'
+        const output = subagent.recentOutput.at(-1)
+        return (
+          <div className={`omp-subagent ${subagent.status}`} key={subagent.id}>
+            <div className="omp-subagent-head">
+              <span className="omp-subagent-status">
+                {running ? <LoaderCircle className="spin" size={12} /> : <span className="omp-subagent-dot" />}
+              </span>
+              <strong>{subagent.agent}</strong>
+              {subagent.resolvedModel && <span className="omp-subagent-model">{subagent.resolvedModel}</span>}
+            </div>
+            <div className="omp-subagent-task">
+              {subagent.task
+                ? subagent.task.length > 120
+                  ? `${subagent.task.slice(0, 120)}…`
+                  : subagent.task
+                : subagent.assignment
+                  ? subagent.assignment
+                  : subagent.description ?? 'Task subagent'}
+            </div>
+            {running && subagent.currentTool && (
+              <span className="omp-subagent-tool">
+                {subagent.currentTool}
+                {subagent.currentToolArgs ? ` · ${subagent.currentToolArgs.slice(0, 60)}` : ''}
+              </span>
+            )}
+            {output && <span className="omp-subagent-output">{output.slice(0, 120)}</span>}
+            {(subagent.toolCount != null || subagent.tokens != null || subagent.cost != null) && (
+              <span className="omp-subagent-meta">
+                {subagent.toolCount != null && `${subagent.toolCount} tool${subagent.toolCount === 1 ? '' : 's'}`}
+                {subagent.tokens != null && `${subagent.tokens >= 1000 ? `${(subagent.tokens / 1000).toFixed(1)}k` : subagent.tokens} tok`}
+                {subagent.cost != null && subagent.cost > 0 && `· $${subagent.cost.toFixed(4)}`}
+              </span>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 type OmpSessionPanelProps = {
   info: OmpSessionInfo | null
+  subagents: OmpSubagentView[]
   recentFrames: OmpRecentFrame[]
   busy: boolean
   onSetFastMode: (enabled: boolean) => void
@@ -58,6 +111,7 @@ type OmpSessionPanelProps = {
 
 export function OmpSessionPanel({
   info,
+  subagents,
   recentFrames,
   busy,
   onSetFastMode,
@@ -66,6 +120,9 @@ export function OmpSessionPanel({
 }: OmpSessionPanelProps): React.JSX.Element {
   const percent = contextPercent(info)
   const todos = todoCount(info?.todoPhases)
+  const runningSubagents = subagents.filter(
+    (subagent) => subagent.status === 'running' || subagent.status === 'pending'
+  ).length
   return (
     <details className="omp-session" title="Live Oh My Pi session state">
       <summary>
@@ -84,6 +141,12 @@ export function OmpSessionPanel({
             <Cpu size={13} />
             <span>OMP session</span>
           </>
+        )}
+        {runningSubagents > 0 && (
+          <span className="omp-session-summary-todos" title={`${runningSubagents} subagent${runningSubagents === 1 ? '' : 's'} active`}>
+            <LoaderCircle className="spin" size={12} />
+            {runningSubagents}
+          </span>
         )}
         {todos > 0 && (
           <span className="omp-session-summary-todos" title={`${todos} todo${todos === 1 ? '' : 's'}`}>
@@ -178,6 +241,8 @@ export function OmpSessionPanel({
         </section>
 
         <TodoList phases={info?.todoPhases} />
+
+        <SubagentList subagents={subagents} />
 
         {recentFrames.length > 0 && (
           <section className="omp-session-section omp-session-events">

@@ -1742,6 +1742,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         {ompRuntime && (
           <OmpSessionPanel
             info={ompSidecar.session}
+            subagents={ompSidecar.subagents}
             recentFrames={ompSidecar.recentFrames}
             busy={running}
             onSetFastMode={(enabled) => void ompCommand({ type: 'set_fast_mode', enabled })}

@@ -413,6 +413,7 @@ class OmpAgentSession implements AgentSession {
       const session = new OmpAgentSession(broker, options, client, sidecar)
       await session.configureModel(options.model)
       await session.configureHostTools()
+      await session.enableSubagentSubscription()
       await session.refreshCommandSuggestions()
       return session
     } catch (cause) {
@@ -513,6 +514,7 @@ class OmpAgentSession implements AgentSession {
     try {
       await this.configureModel(this.model)
       await this.configureHostTools()
+      await this.enableSubagentSubscription()
       this.permissionMode = mode
       await this.broker.updateSession(this.id, { permission_mode: mode })
       // Changing OMP's startup-only approval mode creates a fresh sidecar.
@@ -893,6 +895,20 @@ class OmpAgentSession implements AgentSession {
         parameters: tool.inputSchema
       }))
     })
+  }
+
+  /**
+   * Subscribe the GUI to subagent lifecycle/progress frames. Best-effort: an
+   * OMP build without a subagent event bus leaves the panel empty rather than
+   * failing the session. Re-applied after every fresh sidecar (open, permission
+   * change) because the subscription does not survive a restart.
+   */
+  private async enableSubagentSubscription(): Promise<void> {
+    try {
+      await this.requireClient().setSubagentSubscription('progress')
+    } catch {
+      // Recoverable: subagent frames simply do not flow.
+    }
   }
 
   private async handleHostToolCall(

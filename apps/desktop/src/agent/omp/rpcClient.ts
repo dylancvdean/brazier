@@ -352,6 +352,14 @@ export class OmpRpcClient {
     )
   }
 
+  getSubagentMessages(input: {
+    subagentId?: string
+    sessionFile?: string
+    fromByte?: number
+  }): Promise<{ sessionFile: string; fromByte: number; nextByte: number; reset: boolean; messages: unknown[] }> {
+    return this.call({ type: 'get_subagent_messages', ...input })
+  }
+
   // --- Session ---------------------------------------------------------------
 
   getSessionStats(): Promise<unknown> {

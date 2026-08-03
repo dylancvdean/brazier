@@ -153,8 +153,8 @@ export type OmpSubagentSnapshot = {
   sessionFile?: string
   lastUpdate?: number
   parentToolCallId?: string
+  progress?: OmpAgentProgress
 }
-
 // --- Session events (stdout) -----------------------------------------------
 
 export type OmpSessionEvent =
@@ -228,10 +228,72 @@ export type OmpHostUriCancel = { type: 'host_uri_cancel'; id: string; targetId: 
 
 // --- Subagents --------------------------------------------------------------
 
+export type OmpAgentSource = 'bundled' | 'user' | 'project'
+export type OmpSubagentStatus = 'pending' | 'running' | 'completed' | 'failed' | 'aborted'
+
+/** Live progress of one subagent, mirrored from OMP's `AgentProgress`. */
+export type OmpAgentProgress = {
+  index: number
+  id: string
+  agent: string
+  agentSource: OmpAgentSource
+  status: OmpSubagentStatus
+  task: string
+  assignment?: string
+  description?: string
+  lastIntent?: string
+  currentTool?: string
+  currentToolArgs?: string
+  currentToolStartMs?: number
+  recentTools?: Array<{ tool: string; args: string; endMs: number }>
+  recentOutput?: string[]
+  toolCount?: number
+  requests?: number
+  tokens?: number
+  contextTokens?: number
+  contextWindow?: number
+  cost?: number
+  durationMs?: number
+  resolvedModel?: string
+  resolvedModelIsFallback?: boolean
+  retryState?: { attempt: number; maxAttempts: number; delayMs: number; errorMessage: string; startedAtMs: number }
+  retryFailure?: { attempt: number; errorMessage: string }
+}
+
+export type OmpSubagentLifecyclePayload = {
+  id: string
+  agent: string
+  agentSource: OmpAgentSource
+  description?: string
+  status: 'started' | 'completed' | 'failed' | 'aborted'
+  sessionFile?: string
+  parentToolCallId?: string
+  index: number
+  detached?: boolean
+}
+
+export type OmpSubagentProgressPayload = {
+  index: number
+  agent: string
+  agentSource: OmpAgentSource
+  task: string
+  parentToolCallId?: string
+  assignment?: string
+  progress: OmpAgentProgress
+  sessionFile?: string
+  detached?: boolean
+}
+
+export type OmpSubagentEventPayload = {
+  id: string
+  /** One session event from inside the subagent's own run. */
+  event: Record<string, unknown>
+}
+
 export type OmpSubagentFrame =
-  | { type: 'subagent_lifecycle' } & OmpRpcFrame
-  | { type: 'subagent_progress' } & OmpRpcFrame
-  | { type: 'subagent_event' } & OmpRpcFrame
+  | { type: 'subagent_lifecycle'; payload: OmpSubagentLifecyclePayload }
+  | { type: 'subagent_progress'; payload: OmpSubagentProgressPayload }
+  | { type: 'subagent_event'; payload: OmpSubagentEventPayload }
 
 // --- Response ---------------------------------------------------------------
 

@@ -4950,9 +4950,7 @@ label.span-2 {
   display: flex;
   flex-direction: column;
   gap: 6px;
-}
-
-.omp-todo-phase {
+}.omp-todo-phase {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -5003,6 +5001,103 @@ label.span-2 {
 
 .omp-todo-item.cancelled {
   color: var(--muted);
+}
+
+.omp-session-subagents {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.omp-session-subagents > strong {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.omp-subagent {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.omp-subagent-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.omp-subagent-head strong {
+  font-size: 12px;
+  color: var(--soft);
+}
+
+.omp-subagent-status {
+  display: inline-flex;
+  width: 12px;
+  flex: none;
+  justify-content: center;
+  color: #e4c58a;
+}
+
+.omp-subagent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.omp-subagent.completed .omp-subagent-dot {
+  background: #4caf50;
+}
+
+.omp-subagent.failed .omp-subagent-dot,
+.omp-subagent.aborted .omp-subagent-dot {
+  background: #e0534d;
+}
+
+.omp-subagent.running .omp-subagent-dot,
+.omp-subagent.pending .omp-subagent-dot {
+  background: #ff8a3d;
+}
+
+.omp-subagent-model {
+  margin-left: auto;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.omp-subagent-task {
+  font-size: 11px;
+  color: var(--soft);
+  line-height: 1.35;
+}
+
+.omp-subagent-tool,
+.omp-subagent-output {
+  font-size: 10px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.omp-subagent-output {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.omp-subagent-meta {
+  font-size: 10px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .omp-session-events-list {

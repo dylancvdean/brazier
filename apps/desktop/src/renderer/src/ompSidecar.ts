@@ -13,9 +13,13 @@
  */
 
 import type {
+  OmpAgentProgress,
   OmpAvailableCommand,
   OmpRpcFrame,
   OmpSessionState,
+  OmpSubagentLifecyclePayload,
+  OmpSubagentProgressPayload,
+  OmpSubagentSnapshot,
   OmpTodoItem,
   OmpTodoPhase
 } from '../../agent/omp/rpcTypes'
@@ -57,6 +61,31 @@ export type OmpSessionInfo = {
   todoPhases?: OmpTodoPhase[]
 }
 
+/** One live/finished task subagent, reduced from OMP's subagent frames. */
+export type OmpSubagentView = {
+  id: string
+  index: number
+  agent: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'aborted'
+  description?: string
+  task?: string
+  assignment?: string
+  parentToolCallId?: string
+  sessionFile?: string
+  detached?: boolean
+  currentTool?: string
+  currentToolArgs?: string
+  recentOutput: string[]
+  toolCount?: number
+  tokens?: number
+  cost?: number
+  resolvedModel?: string
+  contextTokens?: number
+  contextWindow?: number
+  lastIntent?: string
+  lastUpdate?: number
+}
+
 export type OmpSidecarState = {
   /** Live slash-command list from `available_commands_update` frames. */
   commands: OmpCommandSuggestion[]
@@ -64,6 +93,8 @@ export type OmpSidecarState = {
   commandOutputs: OmpCommandOutput[]
   /** Latest session metadata from `get_state` / session/config updates. */
   session: OmpSessionInfo | null
+  /** Task subagents, indexed by id, newest activity last. */
+  subagents: OmpSubagentView[]
   /** Bounded record of frames the GUI does not render richly yet. */
   recentFrames: OmpRecentFrame[]
 }
@@ -72,10 +103,12 @@ export const EMPTY_OMP_SIDECAR: OmpSidecarState = {
   commands: [],
   commandOutputs: [],
   session: null,
+  subagents: [],
   recentFrames: []
 }
 
 const MAX_COMMAND_OUTPUTS = 12
+const MAX_SUBAGENTS = 12
 const MAX_RECENT_FRAMES = 30
 
 /** Frames that the shared transcript/timeline path already shows or that are
@@ -130,6 +163,7 @@ function asNumber(value: unknown): number | undefined {
 }
 
 /** Fold a `get_state` snapshot into the session metadata without losing fields. */
+/** Fold a `get_state` snapshot into the session metadata without losing fields. */
 function sessionInfoFromState(prev: OmpSessionInfo | null, data: OmpSessionState): OmpSessionInfo {
   const next: OmpSessionInfo = { ...(prev ?? {}) }
   const model = data.model && typeof data.model === 'object' ? data.model : undefined
@@ -171,6 +205,85 @@ function mergeTodosIntoPhases(phases: OmpTodoPhase[] | undefined, todos: OmpTodo
     ...phase,
     tasks: phase.tasks.map((task) => byId.get(task.id) ?? task)
   }))
+}
+
+function upsertSubagent(
+  subagents: OmpSubagentView[],
+  patch: Partial<OmpSubagentView> & { id: string; index: number }
+): OmpSubagentView[] {
+  const existing = subagents.find((entry) => entry.id === patch.id)
+  const next: OmpSubagentView = existing
+    ? { ...existing, ...patch }
+    : { agent: 'task', status: 'running', recentOutput: [], ...patch }
+  const without = subagents.filter((entry) => entry.id !== patch.id)
+  return [...without, next].slice(-MAX_SUBAGENTS)
+}
+
+function subagentFromProgress(payload: OmpSubagentProgressPayload): OmpSubagentView {
+  const progress = payload.progress
+  return {
+    id: progress.id,
+    index: payload.index,
+    agent: progress.agent,
+    status: progress.status,
+    task: payload.task,
+    assignment: payload.assignment,
+    parentToolCallId: payload.parentToolCallId,
+    sessionFile: payload.sessionFile,
+    detached: payload.detached,
+    description: progress.description,
+    lastIntent: progress.lastIntent,
+    currentTool: progress.currentTool,
+    currentToolArgs: progress.currentToolArgs,
+    recentOutput: Array.isArray(progress.recentOutput) ? progress.recentOutput : [],
+    toolCount: progress.toolCount,
+    tokens: progress.tokens,
+    cost: progress.cost,
+    resolvedModel: progress.resolvedModel,
+    contextTokens: progress.contextTokens,
+    contextWindow: progress.contextWindow,
+    lastUpdate: Date.now()
+  }
+}
+
+function subagentFromLifecycle(payload: OmpSubagentLifecyclePayload): OmpSubagentView {
+  return {
+    id: payload.id,
+    index: payload.index,
+    agent: payload.agent,
+    status: payload.status === 'started' ? 'running' : payload.status,
+    description: payload.description,
+    parentToolCallId: payload.parentToolCallId,
+    sessionFile: payload.sessionFile,
+    detached: payload.detached,
+    recentOutput: [],
+    lastUpdate: Date.now()
+  }
+}
+
+function subagentFromSnapshot(snapshot: OmpSubagentSnapshot): OmpSubagentView {
+  const progress = snapshot.progress as OmpAgentProgress | undefined
+  return {
+    id: snapshot.id,
+    index: snapshot.index,
+    agent: snapshot.agent ?? 'task',
+    status: (snapshot.status as OmpSubagentView['status']) ?? 'pending',
+    description: snapshot.description,
+    task: snapshot.task,
+    assignment: snapshot.assignment,
+    sessionFile: snapshot.sessionFile,
+    parentToolCallId: snapshot.parentToolCallId,
+    currentTool: progress?.currentTool,
+    recentOutput: Array.isArray(progress?.recentOutput) ? progress.recentOutput : [],
+    toolCount: progress?.toolCount,
+    tokens: progress?.tokens,
+    cost: progress?.cost,
+    resolvedModel: progress?.resolvedModel,
+    contextTokens: progress?.contextTokens,
+    contextWindow: progress?.contextWindow,
+    lastIntent: progress?.lastIntent,
+    lastUpdate: snapshot.lastUpdate
+  }
 }
 
 /** Short human-readable summary of a frame for the generic events record. */
@@ -316,9 +429,37 @@ export function ompSidecarReducer(
           if (!level) return state
           return { ...state, session: { ...(state.session ?? {}), thinkingLevel: level } }
         }
+        case 'get_subagents': {
+          const snapshots = (frame.data as Record<string, unknown> | undefined)?.subagents
+          if (!Array.isArray(snapshots)) return state
+          const views = snapshots
+            .filter((entry): entry is OmpSubagentSnapshot => Boolean(entry && typeof entry === 'object'))
+            .map(subagentFromSnapshot)
+            .sort((a, b) => a.index - b.index)
+            .slice(-MAX_SUBAGENTS)
+          return { ...state, subagents: views }
+        }
         default:
           return state
       }
+    }
+    case 'subagent_lifecycle': {
+      const payload = frame.payload
+      if (!payload || typeof payload !== 'object') return state
+      const view = subagentFromLifecycle(payload as OmpSubagentLifecyclePayload)
+      return { ...state, subagents: upsertSubagent(state.subagents, view) }
+    }
+    case 'subagent_progress': {
+      const payload = frame.payload
+      if (!payload || typeof payload !== 'object') return state
+      const progress = (payload as OmpSubagentProgressPayload).progress
+      if (!progress || typeof progress !== 'object' || !asString(progress.id)) return state
+      const view = subagentFromProgress(payload as OmpSubagentProgressPayload)
+      return { ...state, subagents: upsertSubagent(state.subagents, view) }
+    }
+    case 'subagent_event': {
+      // The full event stream is heavy; the panel reads lifecycle + progress.
+      return state
     }
     case 'thinking_level_changed': {
       const level = asString(frame.thinkingLevel)

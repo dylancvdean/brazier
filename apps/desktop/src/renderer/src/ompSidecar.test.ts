@@ -222,6 +222,97 @@ describe('ompSidecarReducer', () => {
     const cleared = ompSidecarReducer(seeded, { type: 'frame', frame: { type: 'todo_auto_clear' } })
     expect(cleared.session?.todoPhases).toEqual([])
   })
+
+  it('tracks subagent lifecycle from started to a terminal state', () => {
+    let state = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: {
+        type: 'subagent_lifecycle',
+        payload: { id: 'sub-1', agent: 'scout', agentSource: 'bundled', index: 0, status: 'started' }
+      }
+    })
+    expect(state.subagents).toHaveLength(1)
+    expect(state.subagents[0]).toMatchObject({ id: 'sub-1', agent: 'scout', status: 'running' })
+
+    state = ompSidecarReducer(state, {
+      type: 'frame',
+      frame: {
+        type: 'subagent_lifecycle',
+        payload: { id: 'sub-1', agent: 'scout', agentSource: 'bundled', index: 0, status: 'completed' }
+      }
+    })
+    expect(state.subagents[0]).toMatchObject({ id: 'sub-1', status: 'completed' })
+  })
+
+  it('merges subagent progress into the matching subagent', () => {
+    let state = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: {
+        type: 'subagent_progress',
+        payload: {
+          index: 0,
+          agent: 'task',
+          agentSource: 'bundled',
+          task: 'Refactor auth',
+          progress: {
+            index: 0,
+            id: 'sub-1',
+            agent: 'task',
+            agentSource: 'bundled',
+            status: 'running',
+            task: 'Refactor auth',
+            currentTool: 'edit',
+            toolCount: 3,
+            tokens: 1500,
+            cost: 0.0012,
+            recentOutput: ['wrote auth.ts']
+          }
+        }
+      }
+    })
+    expect(state.subagents[0]).toMatchObject({
+      id: 'sub-1',
+      task: 'Refactor auth',
+      currentTool: 'edit',
+      toolCount: 3,
+      tokens: 1500,
+      cost: 0.0012,
+      recentOutput: ['wrote auth.ts']
+    })
+  })
+
+  it('replaces the subagent list from a get_subagents snapshot', () => {
+    const state = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: {
+        type: 'response',
+        command: 'get_subagents',
+        success: true,
+        data: {
+          subagents: [
+            {
+              id: 'sub-9',
+              index: 0,
+              agent: 'task',
+              status: 'completed',
+              task: 'Write tests',
+              progress: { id: 'sub-9', agent: 'task', status: 'completed', task: 'Write tests' }
+            }
+          ]
+        }
+      }
+    })
+    expect(state.subagents).toHaveLength(1)
+    expect(state.subagents[0]).toMatchObject({ id: 'sub-9', status: 'completed', task: 'Write tests' })
+  })
+
+  it('ignores subagent_event frames without cluttering the events record', () => {
+    const state = ompSidecarReducer(EMPTY_OMP_SIDECAR, {
+      type: 'frame',
+      frame: { type: 'subagent_event', payload: { id: 'sub-1', event: { type: 'message_end' } } }
+    })
+    expect(state.recentFrames).toHaveLength(0)
+  })
 })
 
 describe('frameDetail', () => {
