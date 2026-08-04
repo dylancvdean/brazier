@@ -5089,10 +5089,11 @@ function AgentSection(props: SectionProps): React.JSX.Element {
         fetchAgentPreference(),
         fetchAgentTools()
       ])
+      const catalog = tools.filter((tool) => tool.power_tool === true)
       setRuntimes(capabilities.runtimes)
       setSelected(preference.default_runtime_id || capabilities.default_runtime_id || 'simple')
-      setPowerTools(preference.power_tools ?? [])
-      setPowerToolsCatalog(tools.filter((tool) => tool.power_tool === true))
+      setPowerTools(preference.power_tools ?? catalog.map((tool) => tool.name))
+      setPowerToolsCatalog(catalog)
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -5186,8 +5187,8 @@ function AgentSection(props: SectionProps): React.JSX.Element {
                       <strong>{runtime.name}</strong>
                       <small>
                         {runtime.id === 'simple'
-                          ? 'The standard tool set: files, shell, git, and subagents. Everything a coding task needs day to day.'
-                          : 'Adds the power tools you enable below (web search, web fetch, LSP diagnostics, …).'}
+                          ? 'A low bloat harness for lightweight work or low-context models'
+                          : 'A feature-rich harness for more in depth work'}
                       </small>
                       {unavailable && runtime.unavailable_reason && (
                         <small>{runtime.unavailable_reason}</small>
@@ -5203,7 +5204,7 @@ function AgentSection(props: SectionProps): React.JSX.Element {
           <div className="settings-group">
             <div className="section-label">Powerful mode tools</div>
             <p className="model-help">
-              These extra tools are only exposed to Powerful mode sessions. They default to off;
+              These extra tools are only exposed to Powerful mode sessions. They default to on;
               toggle the ones you want new Powerful tasks to start with. Each task can still trim
               its own set in the Agent header&apos;s Tools menu.
             </p>

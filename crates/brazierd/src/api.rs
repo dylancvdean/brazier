@@ -1536,13 +1536,20 @@ async fn load_enabled_power_tools(state: &AppState) -> ApiResult<Vec<String>> {
         .application_preference(AGENT_PREFERENCE_KEY)
         .await
         .map_err(ApiError::internal)?;
-    let names = stored
-        .as_ref()
-        .and_then(|value| value["power_tools"].as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.as_str().map(str::to_owned))
-        .collect();
+    // Nothing configured yet: Powerful mode starts with every power tool on.
+    // An explicit list (even an empty one) is respected as-is.
+    let names = match stored {
+        None => crate::agent_tools::power_tool_names(),
+        Some(value) => match value.get("power_tools") {
+            Some(array) => array
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.as_str().map(str::to_owned))
+                .collect(),
+            None => crate::agent_tools::power_tool_names(),
+        },
+    };
     Ok(names)
 }
 
@@ -1562,11 +1569,7 @@ async fn agent_preference(State(state): State<AppState>) -> ApiResult<Json<Value
                 .any(|entry| entry["id"].as_str() == Some(runtime_id.as_str()))
         })
         .unwrap_or_else(|| crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned());
-    let power_tools = stored
-        .as_ref()
-        .and_then(|value| value["power_tools"].as_array())
-        .cloned()
-        .unwrap_or_default();
+    let power_tools = load_enabled_power_tools(&state).await?;
     Ok(Json(json!({
         "default_runtime_id": default_runtime_id,
         "power_tools": power_tools,
@@ -7772,7 +7775,12 @@ mod tests {
         let (status, initial) = get_request(&app, "/api/v1/preferences/agent").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(initial["default_runtime_id"], "simple");
-        assert_eq!(initial["power_tools"], json!([]));
+        // Nothing configured yet: Powerful mode defaults to every power tool on.
+        let all_power_tools: Vec<String> = crate::agent_tools::power_tool_names();
+        assert_eq!(
+            initial["power_tools"],
+            serde_json::to_value(all_power_tools).unwrap()
+        );
 
         let (status, migrated) = json_request(
             &app,
