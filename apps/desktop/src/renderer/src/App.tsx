@@ -346,7 +346,10 @@ function ToolChips({
     (record.media ?? []).map((blob) => ({
       sha256: blob.sha256,
       mime_type: blob.mime_type,
-      original_name: blob.name
+      // Streaming tool events carry `name`; chatDisplay re-attached blobs carry
+      // `original_name`. Either way, never fall back to showing the MIME type
+      // as the file's title.
+      original_name: blob.original_name ?? blob.name
     }))
   )
   return (
@@ -1544,6 +1547,10 @@ export function App(): React.JSX.Element {
         ...new Map(
           toolRecords
             .flatMap((record) => record.media ?? [])
+            // Fetched PDFs are attachments, not generated media: the engine
+            // already attached them to a user turn via the generated-media
+            // context, so re-attaching them here shows the file twice.
+            .filter((media) => media.mime_type !== 'application/pdf')
             .map((media) => [`${media.sha256}:${media.mime_type}`, media])
         ).values()
       ]

@@ -139,16 +139,13 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fetch_url",
-                "description": "Fetch a public http(s) URL and return text content. A PDF must be fetched here, never passed to doc_read: fetching a PDF stores it and returns a document id for doc_read to page through. PDF links returned by MCP web tools use the same path. Set render_pages for scans/layout when using a vision model. Private and local addresses are blocked. Long pages are truncated with a character count; pass start to fetch the next chunk.",
+                "description": "Fetch a public http(s) URL and return text content. A PDF must be fetched here, never passed to doc_read: fetching a PDF stores it and returns a document id plus its page count for doc_read to page through — its contents are not included in this result. PDF links returned by MCP web tools use the same path. Private and local addresses are blocked. Long pages are truncated with a character count; pass start to fetch the next chunk.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": { "type": "string", "description": "Absolute http:// or https:// URL." },
                         "start": { "type": "integer", "minimum": 0, "description": "Character offset to start from; use the count in the previous result to page through long pages. Default 0." },
-                        "max_chars": { "type": "integer", "minimum": 500, "maximum": 50000, "description": "Maximum characters to return. Default 8000." },
-                        "start_page": { "type": "integer", "minimum": 1, "description": "First PDF page, 1-based; default 1." },
-                        "end_page": { "type": "integer", "minimum": 1, "description": "Last PDF page, inclusive; default first three pages." },
-                        "render_pages": { "type": "boolean", "description": "Render PDF pages as images for scans or layout-sensitive reading." }
+                        "max_chars": { "type": "integer", "minimum": 500, "maximum": 50000, "description": "Maximum characters to return. Default 8000." }
                     },
                     "required": ["url"]
                 }
@@ -158,7 +155,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Search the web for up-to-date information and return a ranked list of results with titles, URLs, and short snippets. Use it for facts that changed recently or are outside your knowledge. DuckDuckGo is the default backend (no key); a Brave API key can be configured in Manage → Engine → Web search for a higher rate limit.",
+                "description": "Search the web for up-to-date information and return a ranked list of results with titles, URLs, and short snippets. Use it for facts that changed recently or are outside your knowledge. DuckDuckGo (no key, with a Mojeek fallback), Mojeek (no key), or Brave (API key) can be chosen in Manage → Web search.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -350,7 +347,7 @@ fn catalog_for_config(js_config: &crate::js_sandbox::JsSandboxConfig) -> Value {
             {
                 "name": "web_search",
                 "title": "Web search",
-                "description": "Ranked web search results (DuckDuckGo by default, Brave with an API key). Rate-limited to stay under the engine's block threshold.",
+                "description": "Ranked web search results (DuckDuckGo or Mojeek keyless with an optional cross-fallback, Brave with an API key). Rate-limited to stay under the engine's block threshold.",
                 "network": true,
                 "source": "builtin"
             },
@@ -1159,27 +1156,43 @@ pub(crate) async fn ingest_pdf_bytes(
     data_dir: &std::path::Path,
     bytes: &[u8],
     name: &str,
-    args: &Value,
+    _args: &Value,
 ) -> anyhow::Result<ToolOutput> {
     anyhow::ensure!(bytes.starts_with(b"%PDF-"), "resource is not a PDF");
     let blob =
         crate::blob_store::store_bytes(data_dir, bytes, "application/pdf", Some(name)).await?;
-    let document = crate::tool_registry::ConversationDocument {
-        sha256: blob.sha256.clone(),
-        mime_type: "application/pdf".to_owned(),
-        name: name.to_owned(),
+    // Deliberately do not read the PDF here. The point of fetching a PDF is to
+    // store it and hand the model a document id plus its page count, so it can
+    // choose a page range with doc_read instead of dumping the first pages into
+    // context. Reading happens only when the model asks for it.
+    let path = crate::blob_store::blob_path(data_dir, &blob.sha256)?;
+    let pages = if crate::documents::missing_poppler_tools().is_empty() {
+        crate::documents::page_count(&path).await.unwrap_or(None)
+    } else {
+        None
     };
-    let mut read_args = args.clone();
-    read_args["document"] = Value::String(blob.sha256.clone());
-    let mut read = doc_read_tool(data_dir, &read_args, &[document]).await?;
-    read.media.push(ToolMedia {
-        sha256: blob.sha256,
-        mime_type: "application/pdf".into(),
-        name: Some(name.to_owned()),
-    });
+    let document_id = crate::documents::short_document_id(&blob.sha256);
+    let mut text = format!("Fetched and attached PDF {name}.");
+    if let Some(count) = pages {
+        text.push_str(&format!(" It is {count} pages long."));
+    }
+    text.push_str(&format!(
+        " Its contents are not included here. Use the doc_read tool with document \
+         \"{document_id}\" to read it, choosing a page range{}. If it is a scan with no text \
+         layer, set render_pages to receive page images.",
+        if pages.is_some() {
+            " from the page count"
+        } else {
+            " (page count could not be determined)"
+        }
+    ));
     Ok(ToolOutput {
-        text: format!("Fetched and attached PDF {name}.\n\n{}", read.text),
-        media: read.media,
+        text,
+        media: vec![ToolMedia {
+            sha256: blob.sha256,
+            mime_type: "application/pdf".into(),
+            name: Some(name.to_owned()),
+        }],
     })
 }
 

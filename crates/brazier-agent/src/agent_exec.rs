@@ -2588,17 +2588,11 @@ async fn code_symbols(
 // Power tools (Powerful mode): web search, web fetch, and LSP diagnostics.
 // ---------------------------------------------------------------------------
 
-/// Browser-like user agent so search engines and sites do not treat the daemon
-/// as a bot.
-/// Browser-like user agent so search engines and sites do not treat the daemon
-/// as a bot.
-const WEB_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-                              (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const WEB_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn web_http_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
-        .user_agent(WEB_USER_AGENT)
+        .user_agent(brazier_runtime::web::WEB_USER_AGENT)
         .redirect(reqwest::redirect::Policy::limited(5))
         .timeout(WEB_REQUEST_TIMEOUT)
         .build()
@@ -2672,9 +2666,10 @@ async fn web_fetch(
     ))
 }
 
-/// Store a fetched PDF as a blob, read its first pages, and hand the model a
-/// `doc_read` document id for paging — the same attach-and-read flow as the
-/// chat `fetch_url` tool.
+/// Store a fetched PDF as a blob and hand the model a `doc_read` document id
+/// plus its page count for paging — the same attach-and-read flow as the chat
+/// `fetch_url` tool. The contents are deliberately not dumped here; the model
+/// chooses a page range with `doc_read`.
 async fn web_fetch_pdf(
     context: &BrokerContext<'_>,
     download: brazier_runtime::web::DownloadedUrl,
@@ -2694,21 +2689,27 @@ async fn web_fetch_pdf(
     .await
     .context("store fetched PDF")?;
     let path = brazier_runtime::blob_store::blob_path(context.data_dir, &blob.sha256)?;
-    let extraction = brazier_runtime::documents::extract_text(
-        &path,
-        brazier_runtime::documents::DocumentKind::Pdf,
-        Some((1, brazier_runtime::documents::DEFAULT_PAGE_COUNT)),
-        None,
-        brazier_runtime::documents::MAX_EXTRACTION_CHARS,
-    )
-    .await
-    .context("read fetched PDF")?;
-    Ok(ToolOutcome::text(format!(
-        "Fetched PDF {name}. It was stored; page further with doc_read using document \
-         `brazier_blob:{}`.\n\n{}",
-        blob.sha256,
-        extraction.describe()
-    )))
+    let pages = if brazier_runtime::documents::missing_poppler_tools().is_empty() {
+        brazier_runtime::documents::page_count(&path).await.unwrap_or(None)
+    } else {
+        None
+    };
+    let document_id = format!("brazier_blob:{}", blob.sha256);
+    let mut text = format!("Fetched PDF {name}. It was stored for doc_read.");
+    if let Some(count) = pages {
+        text.push_str(&format!(" It is {count} pages long."));
+    }
+    text.push_str(&format!(
+        " Its contents are not included here. Use the doc_read tool with document \
+         `{document_id}` to read it, choosing a page range{}. If it is a scan with no text \
+         layer, set render_pages to receive page images.",
+        if pages.is_some() {
+            " from the page count"
+        } else {
+            " (page count could not be determined)"
+        }
+    ));
+    Ok(ToolOutcome::text(text))
 }
 
 const LSP_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(12);

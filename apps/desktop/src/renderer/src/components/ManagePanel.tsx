@@ -375,6 +375,7 @@ export type ManageSection =
   | 'recommended'
   | 'discover'
   | 'runtimes'
+  | 'websearch'
   | 'engine'
   | 'server'
   | 'mcp'
@@ -414,6 +415,7 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'recommended', label: 'Recommended models', icon: <Sparkles size={15} /> },
   { id: 'discover', label: 'Download models', icon: <Download size={15} /> },
   { id: 'runtimes', label: 'Runtimes', icon: <Cpu size={15} /> },
+  { id: 'websearch', label: 'Web search', icon: <Search size={15} /> },
   { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
   { id: 'agent', label: 'Agent', icon: <Bot size={15} /> },
   { id: 'computer', label: 'Computer use', icon: <LayoutDashboard size={15} /> },
@@ -662,6 +664,7 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
             )}
             {props.section === 'discover' && <DiscoverSection {...props} onError={setError} />}
             {props.section === 'runtimes' && <RuntimesSection {...props} onError={setError} />}
+            {props.section === 'websearch' && <WebSearchSection {...props} onError={setError} />}
             {props.section === 'mcp' && <McpSection {...props} onError={setError} />}
             {props.section === 'agent' && <AgentSection {...props} onError={setError} />}
             {props.section === 'computer' && (
@@ -4671,12 +4674,70 @@ function EngineSection(props: SectionProps): React.JSX.Element {
           </label>
         ))}
       </div>
+      <div className="runtime-actions">
+        <button className="primary-action" disabled={saving || !dirty} onClick={() => void apply()}>
+          {saving ? <LoaderCircle className="spin" size={15} /> : 'Apply & restart'}
+        </button>
+      </div>
+    </section>
+  )
+}
+
+/** Pick the web search backend and how keyless searches behave when blocked. */
+function WebSearchSection(props: SectionProps): React.JSX.Element {
+  const [draft, setDraft] = useState<RuntimeSettings | null>(props.settings)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => setDraft(props.settings), [props.settings])
+
+  const dirty =
+    draft != null &&
+    props.settings != null &&
+    JSON.stringify(draft) !== JSON.stringify(props.settings)
+
+  async function apply(): Promise<void> {
+    if (!draft) return
+    setSaving(true)
+    props.onError(null)
+    try {
+      const saved = await saveRuntimeSettings(draft)
+      props.onSettingsSaved(saved)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!draft) {
+    return (
+      <section>
+        <header className="manage-heading">
+          <h2>Web search</h2>
+        </header>
+        <div className="manage-placeholder">
+          <LoaderCircle className="spin" size={16} />
+          Waiting for the daemon…
+        </div>
+      </section>
+    )
+  }
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>Web search</h2>
+        <p>
+          Choose the search engine behind the <code>web_search</code> tool. Both chat and agent
+          search use it. Brave needs a paid API key; the other two are keyless.
+        </p>
+      </header>
       <div className="settings-group">
-        <div className="section-label">Web search</div>
+        <div className="section-label">Backend</div>
         <p className="model-help">
-          Web search runs keyless on DuckDuckGo, rate-limited so the engine does not block the
-          machine. A Brave Search API key (1000 free searches/month, then $5 per extra 1000) raises
-          the ceiling: pick Brave and paste the key below. Both chat and agent search use this.
+          DuckDuckGo is best quality but frequently answers headless clients with a bot-check
+          challenge. Mojeek serves static HTML without one and is the reliable keyless choice on
+          machines DDG flags. Brave (1000 free searches/month, then $5 per extra 1000) is the
+          highest-limit option.
         </p>
         <div className="settings-grid">
           <label>
@@ -4686,11 +4747,12 @@ function EngineSection(props: SectionProps): React.JSX.Element {
               onChange={(event) =>
                 setDraft({
                   ...draft,
-                  web_search_provider: event.target.value as 'duckduckgo' | 'brave'
+                  web_search_provider: event.target.value as 'duckduckgo' | 'mojeek' | 'brave'
                 })
               }
             >
               <option value="duckduckgo">DuckDuckGo (no key)</option>
+              <option value="mojeek">Mojeek (no key)</option>
               <option value="brave">Brave Search API</option>
             </select>
           </label>
@@ -4742,6 +4804,28 @@ function EngineSection(props: SectionProps): React.JSX.Element {
           </p>
         )}
       </div>
+      {(draft.web_search_provider === 'duckduckgo' || draft.web_search_provider === 'mojeek') && (
+        <div className="settings-group">
+          <div className="section-label">Resilience</div>
+          <p className="model-help">
+            When the selected provider is blocked, fails, or returns no results, fall back to the
+            other keyless engine instead of failing. Off means a failed provider surfaces its error.
+          </p>
+          <label className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={draft.web_search_auto_fallback ?? true}
+              onChange={(event) =>
+                setDraft({ ...draft, web_search_auto_fallback: event.target.checked })
+              }
+            />
+            <span>
+              Fall back to the other keyless engine
+              <small>DuckDuckGo ↔ Mojeek. Brave never falls back to a keyless engine.</small>
+            </span>
+          </label>
+        </div>
+      )}
       <div className="runtime-actions">
         <button className="primary-action" disabled={saving || !dirty} onClick={() => void apply()}>
           {saving ? <LoaderCircle className="spin" size={15} /> : 'Apply & restart'}

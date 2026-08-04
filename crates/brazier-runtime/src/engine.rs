@@ -2351,7 +2351,7 @@ impl Engine for Runtime {
         let mut invocations = Vec::new();
         let mut transcript = Vec::new();
         let model_caps = self.model_capabilities(&request.model).await;
-        let ctx = ToolContext {
+        let mut ctx = ToolContext {
             data_dir: &self.data_dir,
             http: &self.http,
             images,
@@ -2359,6 +2359,20 @@ impl Engine for Runtime {
         };
         let mut audio_fallback_attempted = false;
         for round in 0..MAX_TOOL_ROUNDS {
+            // A prior round may have fetched a PDF and attached it to the
+            // conversation via its generated-media message. Merge those into
+            // the document list (the user's original attachments were already
+            // rewritten into notices by prepare_messages, so keep them) so
+            // doc_read can resolve ids that were not among the originals.
+            for document in tool_registry::conversation_documents(&request) {
+                if !ctx
+                    .documents
+                    .iter()
+                    .any(|existing| existing.sha256 == document.sha256)
+                {
+                    ctx.documents.push(document);
+                }
+            }
             let last_round = round + 1 == MAX_TOOL_ROUNDS;
             let mut body = llama::translate_chat_request(
                 &request,
@@ -2608,6 +2622,18 @@ async fn generated_media_context_messages(
     if !vision && !from_document {
         return None;
     }
+    // What actually happened, so the notice says the right thing: doc_read and
+    // fetch_url-with-render_pages produced page images (generated-image media
+    // is not a document render); a plain fetch_url only attached a stored PDF.
+    let rendered_pages = from_document
+        && invocation
+            .media
+            .iter()
+            .any(|media| media.mime_type.starts_with("image/"));
+    let attached_pdf = invocation
+        .media
+        .iter()
+        .any(|media| media.mime_type == "application/pdf");
     let mut persisted_parts = Vec::new();
     let mut live_parts = Vec::new();
     for media in &invocation.media {
@@ -2639,11 +2665,19 @@ async fn generated_media_context_messages(
             }
         }));
         if media.mime_type == "application/pdf" {
+            // Tell the model how long the document is alongside its id, so it
+            // can pick a page range instead of guessing.
+            let pages = match crate::blob_store::blob_path(data_dir, &media.sha256) {
+                Ok(path) if path.is_file() => {
+                    crate::documents::page_count(&path).await.unwrap_or(None)
+                }
+                _ => None,
+            };
             live_parts.push(crate::documents::attachment_notice(
                 name,
                 &media.mime_type,
                 &media.sha256,
-                None,
+                pages,
             ));
         } else if vision
             && let Ok(parts) =
@@ -2655,8 +2689,10 @@ async fn generated_media_context_messages(
     if persisted_parts.is_empty() {
         return None;
     }
-    let status_text = if from_document {
+    let status_text = if rendered_pages {
         "The requested document pages were rendered as images and are included below. Read them, then call doc_read again with another range if you need more."
+    } else if attached_pdf {
+        "The requested PDF was fetched and stored. Its contents are not included here — use the doc_read tool with the document id below to read it, choosing a page range from the page count."
     } else {
         "The requested media was generated successfully and has already been displayed to the user. It is included here so you can see the completed result. Do not call a media-generation tool again unless the user explicitly asks for another version or requests a change. Briefly confirm completion."
     };
@@ -2699,7 +2735,7 @@ async fn stream_tool_rounds(
     tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
 ) -> anyhow::Result<()> {
     let model_caps = runtime.model_capabilities(&request.model).await;
-    let ctx = ToolContext {
+    let mut ctx = ToolContext {
         data_dir: &runtime.data_dir,
         http: &runtime.http,
         images,
@@ -2718,6 +2754,20 @@ async fn stream_tool_rounds(
             .unwrap_or(settings.context_size),
     );
     for round in 0..MAX_TOOL_ROUNDS {
+        // A prior round may have fetched a PDF and attached it to the
+        // conversation via its generated-media message. Merge those into the
+        // document list (the user's original attachments were already rewritten
+        // into notices by prepare_messages, so keep them) so doc_read can
+        // resolve ids that were not among the originals.
+        for document in tool_registry::conversation_documents(&request) {
+            if !ctx
+                .documents
+                .iter()
+                .any(|existing| existing.sha256 == document.sha256)
+            {
+                ctx.documents.push(document);
+            }
+        }
         let last_round = round + 1 == MAX_TOOL_ROUNDS;
         let mut body = llama::translate_chat_request(
             &request,
@@ -3109,6 +3159,52 @@ mod tests {
                 .content
                 .pointer("/1/brazier_blob/name"),
             Some(&json!("report.pdf"))
+        );
+        // A plain fetch_url attaches a stored PDF for doc_read to page through;
+        // it must not claim pages were rendered as images.
+        let pdf_status = pdf_context
+            .live
+            .content
+            .pointer("/0/text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            pdf_status.contains("fetched and stored"),
+            "fetch_url status should say the PDF was stored, not rendered: {pdf_status}"
+        );
+        let notice = pdf_context
+            .live
+            .content
+            .pointer("/1/text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(notice.contains("doc_read"), "{notice}");
+
+        let render_invocation = tools::ToolInvocation {
+            call_id: "call-render".into(),
+            name: "doc_read".into(),
+            arguments: r#"{"document":"abc","render_pages":true}"#.into(),
+            output: "Rendered pages.".into(),
+            is_error: false,
+            media: vec![tools::ToolMedia {
+                sha256: "page-1".into(),
+                mime_type: "image/png".into(),
+                name: Some("report-page-1.png".into()),
+            }],
+        };
+        let render_context =
+            generated_media_context_messages(dir.path(), &caps, &settings, &render_invocation)
+                .await
+                .expect("render context");
+        let render_status = render_context
+            .live
+            .content
+            .pointer("/0/text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            render_status.contains("rendered as images"),
+            "doc_read renders should keep the rendered-as-images status: {render_status}"
         );
 
         caps.input_modalities.push("image".into());

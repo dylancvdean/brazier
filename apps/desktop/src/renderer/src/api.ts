@@ -386,10 +386,12 @@ export type RuntimeSettings = {
   reload_llm_after_generation: boolean
   /** Chat `run_javascript` sandbox profile and optional limit overrides. */
   javascript_sandbox?: JavascriptSandboxSettings
-  /** Web search backend: `duckduckgo` (keyless, rate-limited) or `brave` (paid API). */
-  web_search_provider?: 'duckduckgo' | 'brave'
+  /** Web search backend: `duckduckgo` or `mojeek` (both keyless), or `brave` (paid API). */
+  web_search_provider?: 'duckduckgo' | 'mojeek' | 'brave'
   /** Brave Search API key. Required when web_search_provider is `brave`. */
   brave_api_key?: string | null
+  /** When the primary keyless engine is blocked, fails, or returns no results, fall back to the other one. Default on. */
+  web_search_auto_fallback?: boolean
   /** SafeSearch level: `moderate`, `strict`, or `off`. */
   web_safesearch?: 'moderate' | 'strict' | 'off'
   /** Default region/locale for web search, e.g. `us-en`, `wt-wt`. */
@@ -928,7 +930,13 @@ export type ToolCallRecord = {
   output: string
   is_error: boolean
   /** Media produced by this tool, available immediately while it is running. */
-  media?: Array<{ sha256: string; mime_type: string; name?: string | null }>
+  media?: Array<{
+    sha256: string
+    mime_type: string
+    name?: string | null
+    /** Attachments re-hung on a record by chatDisplay use this shape. */
+    original_name?: string | null
+  }>
 }
 
 export type RuntimeForkHint = {
