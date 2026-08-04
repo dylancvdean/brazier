@@ -27,7 +27,13 @@ pub fn definitions() -> Value {
                 "risk": spec.risk.as_str(),
                 "executes": spec.executes,
                 "needs_workspace": spec.needs_workspace,
-                "default_environment": "sandbox",
+                // Power tools need real egress or user toolchain access, so the
+                // policy runs them as host actions (see `agent_policy`).
+                "default_environment": if POWER_TOOLS.contains(&name) {
+                    "host"
+                } else {
+                    "sandbox"
+                },
                 // Power tools are the optional "Powerful" mode surface. Simple
                 // mode never exposes them; the Manage → Agent page toggles them.
                 "power_tool": POWER_TOOLS.contains(&name),
@@ -381,9 +387,8 @@ fn raw_definitions() -> Vec<RawDefinition> {
                 vec![],
             ),
         ),
-        // Power tools (Powerful mode). Metadata only for now: the executors are
-        // still being built, so a call fails with a clear "not implemented"
-        // message until they ship.
+        // Power tools (Powerful mode). They run as host actions under the
+        // policy broker, so each call is approval-gated.
         (
             "web_search",
             "Search the web for up-to-date information and return a ranked list of results \

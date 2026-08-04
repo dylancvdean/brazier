@@ -15,9 +15,13 @@ use std::{
 };
 
 use anyhow::Context;
+use regex::Regex;
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{
+        AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+        BufReader,
+    },
     process::{Child, Command},
     sync::{Mutex, Notify, mpsc},
 };
@@ -649,10 +653,9 @@ async fn run_tool(
         "spawn_subagent" => anyhow::bail!(
             "`spawn_subagent` runs in the agent worker, not through the daemon exec path"
         ),
-        "web_search" | "web_fetch" | "lsp_diagnostics" => anyhow::bail!(
-            "`{}` is not implemented yet. This Powerful-mode tool ships in a later build.",
-            request.tool
-        ),
+        "web_search" => web_search(context, workspace, arguments).await,
+        "web_fetch" => web_fetch(context, workspace, arguments).await,
+        "lsp_diagnostics" => lsp_diagnostics(context, plan, workspace, arguments).await,
         other if agent_policy::is_mcp_tool_name(other) => {
             mcp_tool(context, plan, other, arguments).await
         }
@@ -1832,6 +1835,616 @@ fn shell_quote(argument: &str) -> String {
     format!("'{}'", argument.replace('\'', "'\\''"))
 }
 
+// ---------------------------------------------------------------------------
+// Power tools (Powerful mode): web search, web fetch, and LSP diagnostics.
+// ---------------------------------------------------------------------------
+
+/// Browser-like user agent so search engines and sites do not treat the daemon
+/// as a bot.
+const WEB_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                              (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const WEB_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn web_http_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(WEB_USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .timeout(WEB_REQUEST_TIMEOUT)
+        .build()
+        .context("build HTTP client")
+}
+
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                match u8::from_str_radix(&input[index + 1..index + 3], 16) {
+                    Ok(value) => {
+                        out.push(value);
+                        index += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[index]);
+                        index += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Decode the handful of HTML entities search results actually use.
+fn decode_html_entities(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let Some(end) = tail.find(';') else {
+            out.push_str(tail);
+            return out;
+        };
+        let entity = &tail[..=end];
+        let replacement = match entity {
+            "&amp;" => "&",
+            "&lt;" => "<",
+            "&gt;" => ">",
+            "&quot;" => "\"",
+            "&#39;" | "&apos;" => "'",
+            "&nbsp;" => " ",
+            _ => {
+                if let Some(code) = entity
+                    .strip_prefix("&#")
+                    .and_then(|rest| rest.strip_suffix(';'))
+                    && let Ok(code) = code.parse::<u32>()
+                    && let Some(character) = char::from_u32(code)
+                {
+                    out.push(character);
+                    rest = &tail[entity.len()..];
+                    continue;
+                }
+                entity
+            }
+        };
+        out.push_str(replacement);
+        rest = &tail[entity.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn strip_inline(fragment: &str) -> String {
+    let tags = Regex::new(r"(?is)<[^>]+>").expect("valid regex");
+    let text = decode_html_entities(&tags.replace_all(fragment, ""));
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Turn a page of HTML into readable text: drop script/style blocks and tags,
+/// collapse whitespace, and limit blank runs.
+fn strip_html_tags(html: &str) -> String {
+    // The regex crate has no backreferences, so each block type is matched
+    // explicitly rather than via `</\1>`.
+    let blocks = Regex::new(
+        r"(?is)<script[^>]*>.*?</script\s*>|<style[^>]*>.*?</style\s*>|\
+         <noscript[^>]*>.*?</noscript\s*>|<svg[^>]*>.*?</svg\s*>|<head[^>]*>.*?</head\s*>",
+    )
+    .expect("valid regex");
+    let without_blocks = blocks.replace_all(html, " ");
+    let tags = Regex::new(r"(?is)<[^>]+>").expect("valid regex");
+    let without_tags = tags.replace_all(&without_blocks, " ");
+    let whitespace = Regex::new(r"[ \t\r\f]+").expect("valid regex");
+    let spaced = whitespace.replace_all(&without_tags, " ");
+    let mut out = String::new();
+    let mut blanks = 0usize;
+    for line in spaced.lines() {
+        let line = decode_html_entities(line.trim());
+        if line.is_empty() {
+            blanks += 1;
+            if blanks > 1 {
+                continue;
+            }
+            out.push('\n');
+        } else {
+            blanks = 0;
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out.trim().to_owned()
+}
+
+/// DuckDuckGo wraps real URLs in `//duckduckgo.com/l/?uddg=<encoded>&rut=…`.
+fn redirect_url(href: &str) -> Option<String> {
+    let query = href.split('?').nth(1)?;
+    let uddg = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("uddg="))?;
+    Some(percent_decode(uddg))
+}
+
+/// Parse DuckDuckGo's HTML result page into `(title, url, snippet)` tuples.
+fn parse_search_results(html: &str, max: usize) -> Vec<(String, String, String)> {
+    let title_re = Regex::new(r#"(?is)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
+        .expect("valid regex");
+    let snippet_re =
+        Regex::new(r#"(?is)<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#).expect("valid regex");
+    let titles: Vec<(String, String)> = title_re
+        .captures_iter(html)
+        .map(|captures| {
+            let href = decode_html_entities(&captures[1]);
+            let url = redirect_url(&href).unwrap_or(href);
+            let title = strip_inline(&captures[2]);
+            (url, title)
+        })
+        .collect();
+    let snippets: Vec<String> = snippet_re
+        .captures_iter(html)
+        .map(|captures| strip_inline(&captures[1]))
+        .collect();
+    titles
+        .into_iter()
+        .zip(snippets.into_iter().chain(std::iter::repeat_with(String::new)))
+        .take(max)
+        .map(|((url, title), snippet)| (title, url, snippet))
+        .collect()
+}
+
+async fn web_search(
+    _context: &BrokerContext<'_>,
+    _workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let query = arguments
+        .get("query")
+        .and_then(Value::as_str)
+        .context("`query` is required")?
+        .trim();
+    anyhow::ensure!(!query.is_empty(), "`query` must not be empty");
+    let max_results = arguments
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(5)
+        .clamp(1, 10) as usize;
+    let url = format!(
+        "https://html.duckduckgo.com/html/?q={}",
+        percent_encode(query)
+    );
+    let response = web_http_client()?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("web search request failed for `{query}`"))?;
+    let status = response.status();
+    let body = response.text().await.context("read web search response")?;
+    let results = parse_search_results(&body, max_results);
+    if results.is_empty() {
+        return Ok(ToolOutcome {
+            output: format!(
+                "DuckDuckGo returned no results for `{query}` (HTTP {status}). The search engine \
+                 may be rate-limiting or blocking this machine. Try again later or rephrase the \
+                 query."
+            ),
+            is_error: true,
+            exit_code: None,
+            changed_paths: Vec::new(),
+            images: Vec::new(),
+        });
+    }
+    let mut output = String::new();
+    for (index, (title, url, snippet)) in results.iter().enumerate() {
+        output.push_str(&format!("{}. {title}\n   {url}\n   {snippet}\n\n", index + 1));
+    }
+    Ok(ToolOutcome::text(output))
+}
+
+/// Turn a fetched body into text based on its content type. Binary payloads are
+/// described, not dumped.
+fn content_from_bytes(bytes: &[u8], content_type: &str) -> String {
+    let media = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if media == "text/html" || media == "application/xhtml+xml" {
+        return strip_html_tags(&String::from_utf8_lossy(bytes));
+    }
+    if media == "application/json" || media.ends_with("+json") {
+        return serde_json::from_slice::<Value>(bytes)
+            .ok()
+            .and_then(|value| serde_json::to_string_pretty(&value).ok())
+            .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned());
+    }
+    if media.starts_with("text/") {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    format!(
+        "[Binary content: {media}, {} bytes. Not shown; this response is not text.]",
+        bytes.len()
+    )
+}
+
+async fn web_fetch(
+    _context: &BrokerContext<'_>,
+    _workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let raw_url = arguments
+        .get("url")
+        .and_then(Value::as_str)
+        .context("`url` is required")?
+        .trim();
+    let url = reqwest::Url::parse(raw_url).context("`url` is not a valid URL")?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "only http(s) URLs can be fetched"
+    );
+    let max_chars = arguments
+        .get("max_chars")
+        .and_then(Value::as_u64)
+        .unwrap_or(12_000)
+        .clamp(500, 50_000) as usize;
+    let response = web_http_client()?
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("request to `{raw_url}` failed"))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let bytes = response.bytes().await.context("read response body")?;
+    let mut text = content_from_bytes(&bytes, &content_type);
+    if text.is_empty() {
+        text = "(empty body)".to_owned();
+    }
+    let total_chars = text.chars().count();
+    let mut output = format!("{raw_url}\nHTTP {status} · {content_type}\n\n");
+    if total_chars > max_chars {
+        let shown: String = text.chars().take(max_chars).collect();
+        output.push_str(&shown);
+        output.push_str(&format!(
+            "\n\n[... {} of {total_chars} characters shown. Fetch again with a larger max_chars to \
+             see more.]",
+            shown.chars().count()
+        ));
+    } else {
+        output.push_str(&text);
+    }
+    Ok(ToolOutcome::text(output))
+}
+
+const LSP_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(12);
+const LSP_MAX_DIAGNOSTICS: usize = 200;
+
+/// Which language server to run for a file extension:
+/// `(binary, extra args, languageId)`.
+fn lsp_server_for(extension: &str) -> Option<(&'static str, &'static [&'static str], &'static str)> {
+    match extension {
+        "ts" | "tsx" => Some(("typescript-language-server", &["--stdio"][..], "typescript")),
+        "js" | "jsx" | "mjs" | "cjs" => {
+            Some(("typescript-language-server", &["--stdio"][..], "javascript"))
+        }
+        "py" => Some(("pylsp", &[][..], "python")),
+        "rs" => Some(("rust-analyzer", &[][..], "rust")),
+        "c" | "h" => Some(("clangd", &[][..], "c")),
+        "cpp" | "hpp" | "cc" | "cxx" => Some(("clangd", &[][..], "cpp")),
+        "go" => Some(("gopls", &[][..], "go")),
+        "json" => Some(("vscode-json-languageserver", &["--stdio"][..], "json")),
+        "yaml" | "yml" => Some(("yaml-language-server", &["--stdio"][..], "yaml")),
+        _ => None,
+    }
+}
+
+fn find_on_path(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+}
+
+fn path_uri(root: &Path, path: &Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let normalized = absolute.to_string_lossy().replace('\\', "/");
+    if normalized.starts_with('/') {
+        format!("file://{normalized}")
+    } else {
+        format!("file:///{normalized}")
+    }
+}
+
+async fn lsp_send_frame<W>(writer: &mut W, message: &Value) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let body = serde_json::to_vec(message)?;
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    writer.write_all(header.as_bytes()).await?;
+    writer.write_all(&body).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+async fn lsp_read_frame<R>(reader: &mut R) -> anyhow::Result<Option<Value>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut line = String::new();
+        match tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await {
+            Ok(Ok(0)) => return Ok(None),
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => return Err(error.into()),
+            // A quiet server is not a failure; the caller's overall deadline
+            // decides how long to keep waiting.
+            Err(_) => return Ok(None),
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+            content_length = value.trim().parse::<usize>().ok();
+        }
+    }
+    let length = content_length.context("language server frame had no Content-Length")?;
+    let mut body = vec![0u8; length];
+    tokio::time::timeout(Duration::from_secs(5), reader.read_exact(&mut body))
+        .await
+        .context("language server timed out sending a frame")??;
+    Ok(serde_json::from_slice(&body).ok())
+}
+
+/// Run the workspace's language server over stdio and report diagnostics for a
+/// file. The server runs on the host (see [`agent_policy::is_host_tool`]), so it
+/// can reach user toolchain installs; the call itself is approval-gated.
+async fn lsp_diagnostics(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let checked = checked_path(context, plan, workspace, arguments, "path", false)?;
+    let workspace_root = workspace.context("this session has no workspace")?;
+    let label = relative_display(workspace, &checked);
+    let text = tokio::fs::read_to_string(&checked)
+        .await
+        .with_context(|| format!("cannot read `{label}`"))?;
+    let extension = checked
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let Some((binary, args, language_id)) = lsp_server_for(&extension) else {
+        return Ok(ToolOutcome::text(format!(
+            "No language server is configured for `.{extension}` files. Supported extensions: \
+             ts, tsx, js, jsx, mjs, cjs, py, rs, c, h, cpp, hpp, cc, go, json, yaml, yml."
+        )));
+    };
+    let Some(binary_path) = find_on_path(binary) else {
+        return Ok(ToolOutcome::text(format!(
+            "The `{binary}` language server is not installed, so `{label}` cannot be analyzed. \
+             Install it and try again."
+        )));
+    };
+    let include_warnings = arguments
+        .get("include_warnings")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let mut command_line = shell_quote(&binary_path.display().to_string());
+    for argument in args {
+        command_line.push(' ');
+        command_line.push_str(&shell_quote(argument));
+    }
+    let (mut command, _) = build_command(context, plan, workspace, arguments, &command_line)
+        .await
+        .with_context(|| format!("cannot prepare `{binary}`"))?;
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("cannot start `{binary}`"))?;
+    let mut stdin = child.stdin.take().context("language server stdin")?;
+    let stdout = child.stdout.take().context("language server stdout")?;
+    let mut reader = BufReader::new(stdout);
+
+    let uri = path_uri(workspace_root, &checked);
+    let root_uri = path_uri(workspace_root, workspace_root);
+    let collected = lsp_collect(&mut stdin, &mut reader, &uri, &root_uri, language_id, &text).await;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+
+    let diagnostics = match collected {
+        Ok(items) => items,
+        Err(error) => {
+            return Ok(ToolOutcome::text(format!("`{binary}` reported: {error:#}")));
+        }
+    };
+    if diagnostics.is_empty() {
+        return Ok(ToolOutcome::text(format!(
+            "`{binary}` reported no diagnostics for `{label}`."
+        )));
+    }
+    let mut output = String::new();
+    let mut shown = 0usize;
+    let mut total = 0usize;
+    for item in diagnostics.iter() {
+        total += 1;
+        if total > LSP_MAX_DIAGNOSTICS {
+            break;
+        }
+        let message = item.get("message").and_then(Value::as_str).unwrap_or("");
+        let message = message.trim();
+        if message.is_empty() {
+            continue;
+        }
+        let severity = item.get("severity").and_then(Value::as_u64).unwrap_or(0);
+        // 1=error, 2=warning, 3=info, 4=hint.
+        if !include_warnings && severity >= 2 {
+            continue;
+        }
+        if severity >= 3 {
+            continue;
+        }
+        let level = if severity == 1 { "error" } else { "warning" };
+        let location = item
+            .get("range")
+            .and_then(|range| range.get("start"))
+            .map(|start| {
+                let line = start.get("line").and_then(Value::as_u64).unwrap_or(0) + 1;
+                let column = start.get("character").and_then(Value::as_u64).unwrap_or(0) + 1;
+                format!("{label}:{line}:{column}")
+            })
+            .unwrap_or_else(|| label.clone());
+        let code = item
+            .get("code")
+            .and_then(Value::as_str)
+            .map(|code| format!(" [{code}]"))
+            .unwrap_or_default();
+        output.push_str(&format!("{level}: {location}{code}: {message}\n"));
+        shown += 1;
+    }
+    if shown == 0 {
+        return Ok(ToolOutcome::text(format!(
+            "`{binary}` reported no {}-level diagnostics for `{label}`.",
+            if include_warnings { "error or warning" } else { "error" }
+        )));
+    }
+    output.push_str(&format!("\n{shown} diagnostic(s) for `{label}`."));
+    Ok(ToolOutcome::text(output))
+}
+
+
+/// Drive a language server over stdio: initialize, open the file, collect
+/// `textDocument/publishDiagnostics` until the first batch for `uri` or the
+/// timeout, then shut the server down. Reused by the tool and by tests.
+async fn lsp_collect<W, R>(
+    stdin: &mut W,
+    reader: &mut R,
+    uri: &str,
+    root_uri: &str,
+    language_id: &str,
+    text: &str,
+) -> anyhow::Result<Vec<Value>>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncBufRead + Unpin,
+{
+    lsp_send_frame(
+        stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": root_uri,
+                "workspaceFolders": [{ "uri": root_uri, "name": "workspace" }],
+                "capabilities": {}
+            }
+        }),
+    )
+    .await?;
+    let mut initialized = false;
+    let mut diagnostics: Vec<Value> = Vec::new();
+    let deadline = tokio::time::Instant::now() + LSP_DIAGNOSTIC_TIMEOUT;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let remaining = deadline - tokio::time::Instant::now();
+        let frame = tokio::time::timeout(remaining, lsp_read_frame(reader))
+            .await
+            .context("language server did not answer in time")??;
+        let Some(frame) = frame else { break };
+        let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
+        if method == "textDocument/publishDiagnostics" {
+            let params = frame.get("params");
+            if params
+                .and_then(|params| params.get("uri"))
+                .and_then(Value::as_str)
+                .is_some_and(|frame_uri| frame_uri == uri)
+                && let Some(items) = params
+                    .and_then(|params| params.get("diagnostics"))
+                    .and_then(Value::as_array)
+            {
+                diagnostics.extend(items.iter().cloned());
+            }
+            if !diagnostics.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if !initialized && frame.get("id").and_then(Value::as_u64) == Some(1) {
+            lsp_send_frame(
+                stdin,
+                &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+            )
+            .await?;
+            lsp_send_frame(
+                stdin,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": language_id,
+                            "version": 1,
+                            "text": text
+                        }
+                    }
+                }),
+            )
+            .await?;
+            initialized = true;
+        }
+    }
+    let _ = lsp_send_frame(
+        stdin,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null }),
+    )
+    .await;
+    let _ = lsp_send_frame(
+        stdin,
+        &json!({ "jsonrpc": "2.0", "method": "exit", "params": null }),
+    )
+    .await;
+    Ok(diagnostics)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1853,6 +2466,16 @@ mod tests {
 
     impl Harness {
         async fn new(mode: AgentPermissionMode) -> Self {
+            Self::new_with(mode, false).await
+        }
+
+        /// A session that auto-approves host actions, so host-routed tools
+        /// (the Powerful mode tools) run end to end in tests.
+        async fn new_host(mode: AgentPermissionMode) -> Self {
+            Self::new_with(mode, true).await
+        }
+
+        async fn new_with(mode: AgentPermissionMode, auto_approve_host_actions: bool) -> Self {
             let data = TempDir::new().expect("data dir");
             let workspace = TempDir::new().expect("workspace");
             let db = Database::open(&data.path().join("brazier.sqlite"))
@@ -1867,7 +2490,7 @@ mod tests {
                     permission_mode: Some(mode),
                     permission_settings: Some(AgentPermissionSettings {
                         auto_approve_sandboxed_actions: true,
-                        auto_approve_host_actions: false,
+                        auto_approve_host_actions,
                     }),
                     enabled_tools: None,
                     confine_to_worktree: false,
@@ -2532,5 +3155,205 @@ mod tests {
     fn shell_quoting_survives_embedded_quotes() {
         assert_eq!(shell_quote("simple"), "'simple'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    // -----------------------------------------------------------------------
+    // Power tools: web search, web fetch, LSP diagnostics.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn percent_encoding_round_trips() {
+        let encoded = percent_encode("what is brazier? 100% done");
+        assert_eq!(encoded, "what+is+brazier%3F+100%25+done");
+        assert_eq!(percent_decode(&encoded), "what is brazier? 100% done");
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+    }
+
+    #[test]
+    fn html_entities_and_tags_are_cleaned() {
+        assert_eq!(
+            decode_html_entities("a &amp; b &#39;c&#39; &lt;d&gt; &nbsp;"),
+            "a & b 'c' <d>  "
+        );
+        assert_eq!(
+            strip_inline("<b>Rust</b> &amp; <i>WebAssembly</i>"),
+            "Rust & WebAssembly"
+        );
+        let page = "<html><head><style>p{color:red}</style><script>alert(1)</script></head>\
+                    <body><h1>Hello</h1><p>First line.</p><p></p><p>Second line.</p></body></html>";
+        let text = strip_html_tags(page);
+        assert!(text.contains("Hello"));
+        assert!(text.contains("First line."));
+        assert!(!text.contains("<style>"));
+        assert!(!text.contains("alert"));
+        assert!(!text.contains("<h1>"));
+    }
+
+    #[test]
+    fn content_from_bytes_picks_the_right_representation() {
+        assert_eq!(
+            content_from_bytes(b"<html><body>Hi <b>there</b></body></html>", "text/html; charset=utf-8"),
+            "Hi there"
+        );
+        let json = content_from_bytes(br#"{"a":[1,2]}"#, "application/json");
+        assert!(json.contains("\"a\""));
+        assert!(content_from_bytes(b"plain text", "text/plain").starts_with("plain text"));
+        let binary = content_from_bytes(&[0x89, 0x50, 0x4e, 0x47], "image/png");
+        assert!(binary.contains("image/png"));
+        assert!(binary.contains("Binary content"));
+    }
+
+    #[test]
+    fn search_results_parse_duckduckgo_html() {
+        let html = r#"<div class="result">
+          <h2 class="result__title">
+            <a rel="nofollow" class="result__a"
+               href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs&amp;rut=abc">
+               Rust <b>docs</b> &amp; guides
+            </a>
+          </h2>
+          <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs">
+            Learn Rust with <em>examples</em>.
+          </a>
+        </div>
+        <div class="result">
+          <a rel="nofollow" class="result__a" href="https://crates.io">crates.io</a>
+        </div>"#;
+        let results = parse_search_results(html, 10);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "Rust docs & guides");
+        assert_eq!(results[0].1, "https://example.com/docs");
+        assert!(results[0].2.contains("Learn Rust"));
+        assert_eq!(results[1].0, "crates.io");
+        assert_eq!(results[1].1, "https://crates.io");
+        // max_results is honored.
+        assert_eq!(parse_search_results(html, 1).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn web_fetch_rejects_non_http_schemes() {
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        let response = harness
+            .call("web_fetch", json!({ "url": "file:///etc/passwd" }))
+            .await;
+        assert!(response.is_error, "{}", response.output);
+        assert!(
+            response.output.contains("only http(s)"),
+            "{}",
+            response.output
+        );
+    }
+
+    #[test]
+    fn lsp_server_for_maps_extensions() {
+        assert_eq!(lsp_server_for("ts").map(|entry| entry.0), Some("typescript-language-server"));
+        assert_eq!(lsp_server_for("py").map(|entry| entry.0), Some("pylsp"));
+        assert_eq!(lsp_server_for("rs").map(|entry| entry.0), Some("rust-analyzer"));
+        assert_eq!(lsp_server_for("c").map(|entry| entry.0), Some("clangd"));
+        assert_eq!(lsp_server_for("cpp").map(|entry| entry.0), Some("clangd"));
+        assert_eq!(lsp_server_for("go").map(|entry| entry.0), Some("gopls"));
+        assert_eq!(lsp_server_for("rb"), None);
+    }
+
+    #[tokio::test]
+    async fn lsp_framing_round_trips_over_an_in_memory_duplex() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let message = json!({ "jsonrpc": "2.0", "method": "x", "params": { "n": 1 } });
+        let send = lsp_send_frame(&mut client, &message);
+        let read = async {
+            let mut reader = BufReader::new(&mut server);
+            lsp_read_frame(&mut reader).await
+        };
+        let (send_result, read_result) = tokio::join!(send, read);
+        send_result.expect("write frame");
+        let received = read_result.expect("read frame").expect("a frame arrived");
+        assert_eq!(received, message);
+    }
+
+    #[tokio::test]
+    async fn lsp_diagnostics_refuses_unknown_extensions() {
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        std::fs::write(harness.workspace.path().join("script.rb"), "puts 1\n")
+            .expect("write file");
+        let response = harness
+            .call("lsp_diagnostics", json!({ "path": "script.rb" }))
+            .await;
+        assert!(
+            response.output.contains("No language server is configured"),
+            "{}",
+            response.output
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_diagnostics_reports_errors_from_clangd_when_installed() {
+        // clangd is system-installed on this machine; elsewhere the test skips.
+        if find_on_path("clangd").is_none() {
+            return;
+        }
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        std::fs::write(
+            harness.workspace.path().join("broken.c"),
+            "int main() { return nonexistent_thing; }\n",
+        )
+        .expect("write file");
+        let response = harness
+            .call("lsp_diagnostics", json!({ "path": "broken.c" }))
+            .await;
+        assert!(
+            response.output.contains("diagnostic") && !response.is_error,
+            "expected diagnostics from clangd, got: {}",
+            response.output
+        );
+    }
+
+    #[test]
+    fn power_tools_are_host_routed_and_refused_in_sandbox_only() {
+        let backend = SandboxBackend::detect();
+        let permissions = AgentPermissionSettings::default();
+        fn request<'a>(
+            tool: &'a str,
+            arguments: &'a Value,
+            mode: AgentPermissionMode,
+            permissions: AgentPermissionSettings,
+            backend: &'a SandboxBackend,
+        ) -> agent_policy::PolicyRequest<'a> {
+            agent_policy::PolicyRequest {
+                tool,
+                arguments,
+                requested_environment: AgentEnvironment::Sandbox,
+                permission_mode: mode,
+                permission_settings: permissions,
+                workspace: Some(std::path::Path::new("/ws")),
+                backend,
+                session_grants: &[],
+                reason: None,
+                data_dir: std::path::Path::new("/tmp"),
+            }
+        }
+        for (tool, arguments) in [
+            ("web_search", json!({ "query": "rust" })),
+            ("web_fetch", json!({ "url": "https://example.com" })),
+            ("lsp_diagnostics", json!({ "path": "main.rs" })),
+        ] {
+            let decision = agent_policy::decide(&request(tool, &arguments, AgentPermissionMode::Ask, permissions, &backend));
+            match decision {
+                agent_policy::PolicyDecision::RequireApproval { environment, .. } => {
+                    assert_eq!(environment, AgentEnvironment::Host, "{tool} must run as a host action");
+                }
+                other => panic!("{tool} should require host approval in ask mode, got {other:?}"),
+            }
+            let denied = agent_policy::decide(&request(
+                tool,
+                &arguments,
+                AgentPermissionMode::SandboxOnly,
+                permissions,
+                &backend,
+            ));
+            assert!(
+                matches!(denied, agent_policy::PolicyDecision::Deny { .. }),
+                "{tool} must be refused in sandbox-only mode"
+            );
+        }
     }
 }

@@ -49,8 +49,8 @@ pub const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { name: "git_diff", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
     ToolSpec { name: "request_permission", risk: ToolRiskLevel::Safe, executes: false, needs_workspace: false },
     ToolSpec { name: "spawn_subagent", risk: ToolRiskLevel::Execute, executes: false, needs_workspace: false },
-    // Power tools: the optional "Powerful" mode surface. Executors land in a
-    // later build; calls currently fail with a clear "not implemented" error.
+    // Power tools: the optional "Powerful" mode surface. They run as host
+    // actions (see `is_host_tool`), so approvals gate them.
     ToolSpec { name: "web_search", risk: ToolRiskLevel::Execute, executes: true, needs_workspace: false },
     ToolSpec { name: "web_fetch", risk: ToolRiskLevel::Execute, executes: true, needs_workspace: false },
     ToolSpec { name: "lsp_diagnostics", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
@@ -71,6 +71,19 @@ pub fn is_mcp_tool_name(name: &str) -> bool {
     };
     rest.split_once('/')
         .is_some_and(|(server, tool)| !server.is_empty() && !tool.is_empty())
+}
+
+/// The optional "Powerful" mode tools that reach the network.
+pub fn is_network_tool(name: &str) -> bool {
+    matches!(name, "web_search" | "web_fetch")
+}
+
+/// The optional "Powerful" mode tools that run as host actions: web tools need
+/// real egress, and the language server must see the user's toolchain installs
+/// (Bubblewrap hides `$HOME`, so a sandboxed run cannot reach them). Approvals
+/// gate each call and sandbox-only mode refuses them.
+pub fn is_host_tool(name: &str) -> bool {
+    matches!(name, "web_search" | "web_fetch" | "lsp_diagnostics")
 }
 
 pub fn tool_spec(name: &str) -> Option<&'static ToolSpec> {
@@ -157,7 +170,9 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
     // connections. Treat that capability as requested even if a particular
     // tool schema has no `network` argument.
     let mcp_tool = is_mcp_tool_name(request.tool);
-    let wants_network = mcp_tool || argument_bool(request.arguments, "network");
+    let wants_network = mcp_tool
+        || is_network_tool(request.tool)
+        || argument_bool(request.arguments, "network");
     let paths = requested_paths(
         request.tool,
         request.arguments,
@@ -177,7 +192,7 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
 
     let escapes_workspace = paths.iter().any(|path| !path.inside_workspace);
     let mut environment = request.requested_environment;
-    if mcp_tool {
+    if mcp_tool || is_host_tool(request.tool) {
         environment = AgentEnvironment::Host;
     }
     // Touching anything outside the workspace is host access by definition.
@@ -517,6 +532,18 @@ fn summarize(
             };
             format!("Spawn subagent(s) {where_}: {preview}")
         }
+        "web_search" => format!(
+            "Search the web for `{}`",
+            argument_str(arguments, "query").unwrap_or("(no query)")
+        ),
+        "web_fetch" => format!(
+            "Fetch `{}`",
+            argument_str(arguments, "url").unwrap_or("(no url)")
+        ),
+        "lsp_diagnostics" => format!(
+            "Run language-server diagnostics on `{}`",
+            argument_str(arguments, "path").unwrap_or("(no path)")
+        ),
         other => format!("Run `{other}` {where_}"),
     };
     let outside: Vec<String> = paths
