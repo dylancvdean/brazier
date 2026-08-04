@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { type ReactNode, useState } from 'react'
 
 const PREVIEW_CHARS = 160
 
@@ -33,6 +33,46 @@ export function ReasoningDisclosure({
         ) : null}
       </summary>
       <pre>{trimmed}</pre>
+    </details>
+  )
+}
+
+/**
+ * A multi-step assistant turn's working trace: the thinking text, tool calls
+ * (as pills), media, and any intermediate prose, shown in execution order
+ * inside one disclosure. The final response text is rendered separately, not
+ * here. Defaults to open when the turn actually used tools, so tool activity
+ * stays visible without being scattered across the message body.
+ */
+export function TurnTrace({
+  reasoning,
+  defaultOpen = false,
+  children
+}: {
+  reasoning: string
+  defaultOpen?: boolean
+  children: ReactNode
+}): React.JSX.Element | null {
+  const trimmed = reasoning.trim()
+  const [open, setOpen] = useState(defaultOpen)
+  const preview =
+    trimmed.length > PREVIEW_CHARS
+      ? trimmed.replace(/\s+/g, ' ').slice(0, PREVIEW_CHARS).trimEnd() + '…'
+      : trimmed
+
+  return (
+    <details
+      className="reasoning-disclosure"
+      open={open}
+      onToggle={(event) => setOpen((event.target as HTMLDetailsElement).open)}
+    >
+      <summary>
+        <span className="reasoning-disclosure-label">Reasoning & tool calls</span>
+        {!open && preview ? (
+          <span className="reasoning-disclosure-preview">{preview}</span>
+        ) : null}
+      </summary>
+      <div className="reasoning-trace">{children}</div>
     </details>
   )
 }

@@ -155,7 +155,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Search the web for up-to-date information and return a ranked list of results with titles, URLs, and short snippets. Use it for facts that changed recently or are outside your knowledge. DuckDuckGo (no key, with a Mojeek fallback), Mojeek (no key), or Brave (API key) can be chosen in Manage → Web search.",
+                "description": "Search the web for up-to-date information and return a ranked list of results with titles, URLs, and short snippets. Use it for facts that changed recently or are outside your knowledge. DuckDuckGo (no key) or Brave (API key) can be chosen in Manage → Web search; if DuckDuckGo rate-limits this machine, the user can add a Brave key there.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -347,7 +347,7 @@ fn catalog_for_config(js_config: &crate::js_sandbox::JsSandboxConfig) -> Value {
             {
                 "name": "web_search",
                 "title": "Web search",
-                "description": "Ranked web search results (DuckDuckGo or Mojeek keyless with an optional cross-fallback, Brave with an API key). Rate-limited to stay under the engine's block threshold.",
+                "description": "Ranked web search results (DuckDuckGo keyless, Brave with an API key). Rate-limited to stay under the engine's block threshold.",
                 "network": true,
                 "source": "builtin"
             },

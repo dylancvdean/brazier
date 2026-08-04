@@ -6,10 +6,10 @@
 //! and a single search engine's rate limit is not burned from several callers
 //! at once.
 //!
-//! Search runs keyless against DuckDuckGo by default, with Mojeek as an
-//! automatic fallback when DDG is blocked, fails, or returns nothing. Setting a
-//! Brave Search API key (Manage → Web search) and switching the provider to
-//! `brave` raises the search ceiling to Brave's paid API instead.
+//! Search runs keyless against DuckDuckGo by default. DuckDuckGo sometimes
+//! serves a bot-check challenge to honest clients; the error message points the
+//! user at the Brave Search API (Manage → Web search), which is the reliable
+//! higher-limit path.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -37,9 +37,9 @@ pub const FETCH_MAX_BYTES: usize = 256 * 1024;
 pub const FETCH_MAX_OUTPUT_CHARS: usize = 8_000;
 
 /// Keyless search budget, applied per outbound provider request rather than
-/// per logical search: one `web_search` that tries DuckDuckGo's HTML page,
-/// its lite page, and the Mojeek fallback consumes three budget slots. Brave's
-/// paid API is the higher-limit path and is never gated here.
+/// per logical search: one `web_search` that tries DuckDuckGo's HTML page and
+/// then its lite page consumes two budget slots. Brave's paid API is the
+/// higher-limit path and is never gated here.
 const SEARCH_RATE_LIMIT: usize = 30;
 const SEARCH_RATE_WINDOW: Duration = Duration::from_secs(60);
 
@@ -52,12 +52,9 @@ const FETCH_RATE_WINDOW: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchProvider {
     /// Keyless, rate-limited scraping of DuckDuckGo. The default. DDG serves a
-    /// bot-check challenge to many headless clients, so when auto-fallback is
-    /// on it gives way to Mojeek before failing.
+    /// bot-check challenge to many headless clients, so when it blocks, the
+    /// error points the user at Brave's paid API.
     DuckDuckGo,
-    /// Keyless scraping of Mojeek, which serves static HTML without a
-    /// challenge. A reliable alternative for machines DDG flags.
-    Mojeek,
     /// Brave's paid Search API. Requires `brave_api_key`.
     Brave,
 }
@@ -65,7 +62,6 @@ pub enum SearchProvider {
 impl SearchProvider {
     pub fn from_settings(settings: &RuntimeSettings) -> Self {
         match settings.web_search_provider.as_str() {
-            "mojeek" => Self::Mojeek,
             "brave" => Self::Brave,
             _ => Self::DuckDuckGo,
         }
@@ -74,7 +70,6 @@ impl SearchProvider {
     pub fn name(self) -> &'static str {
         match self {
             Self::DuckDuckGo => "duckduckgo",
-            Self::Mojeek => "mojeek",
             Self::Brave => "brave",
         }
     }
@@ -153,11 +148,10 @@ async fn gate(
 /// DuckDuckGo region code such as `us-en`, `de-de`, or `wt-wt` (Brave ignores
 /// it).
 ///
-/// The keyless engines are rate-gated per outbound request inside the provider
-/// functions, so each HTTP request a search makes counts against the shared
-/// budget; the paid Brave API is never gated. When auto-fallback is on and the
-/// chosen keyless provider is blocked, failed, or returns no results, the other
-/// keyless engine is tried before reporting an error.
+/// DuckDuckGo is rate-gated per outbound request inside the provider function,
+/// so each HTTP request it makes counts against the shared budget; the paid
+/// Brave API is never gated. When DuckDuckGo blocks the machine, the error
+/// recommends configuring Brave instead.
 pub async fn search(
     client: &reqwest::Client,
     query: &str,
@@ -175,51 +169,12 @@ pub async fn search(
     let safesearch = safesearch.unwrap_or(settings.web_safesearch.as_str());
     match SearchProvider::from_settings(settings) {
         SearchProvider::DuckDuckGo => {
-            // Keyless DDG scrapes are fragile: it answers non-browser clients
-            // with a bot-check challenge. Mojeek serves plain HTML without one,
-            // so a blocked, failed, or empty DDG query falls back instead of
-            // dead-ending the search when auto-fallback is on.
-            let ddg = ddg_search(client, query, max_results, region, safesearch).await;
-            if !settings.web_search_auto_fallback {
-                return ddg;
-            }
-            match ddg {
-                Ok(results) if !results.is_empty() => Ok(results),
-                Ok(_) => mojeek_search(client, query, max_results).await,
-                Err(ddg_error) => match mojeek_search(client, query, max_results).await {
-                    Ok(results) if !results.is_empty() => Ok(results),
-                    Ok(_) => Err(ddg_error),
-                    Err(mojeek_error) => Err(anyhow::anyhow!(
-                        "web search failed for `{query}` (duckduckgo: {ddg_error:#}; \
-                         mojeek: {mojeek_error:#})"
-                    )),
-                },
-            }
-        }
-        SearchProvider::Mojeek => {
-            let mojeek = mojeek_search(client, query, max_results).await;
-            if !settings.web_search_auto_fallback {
-                return mojeek;
-            }
-            match mojeek {
-                Ok(results) if !results.is_empty() => Ok(results),
-                Ok(_) => ddg_search(client, query, max_results, region, safesearch).await,
-                Err(mojeek_error) => {
-                    match ddg_search(client, query, max_results, region, safesearch).await {
-                        Ok(results) if !results.is_empty() => Ok(results),
-                        Ok(_) => Err(mojeek_error),
-                        Err(ddg_error) => Err(anyhow::anyhow!(
-                            "web search failed for `{query}` (mojeek: {mojeek_error:#}; \
-                             duckduckgo: {ddg_error:#})"
-                        )),
-                    }
-                }
-            }
+            ddg_search(client, query, max_results, region, safesearch).await
         }
         SearchProvider::Brave => {
             let api_key = settings.brave_api_key.as_deref().context(
                 "web search provider is set to Brave but no Brave API key is configured. Add one \
-                 in Manage → Web search, or switch back to a keyless provider.",
+                 in Manage → Web search, or switch back to DuckDuckGo.",
             )?;
             brave_search(client, api_key, query, max_results, safesearch).await
         }
@@ -289,8 +244,8 @@ async fn ddg_html(
 fn blocked_error(query: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "DuckDuckGo is serving a bot-check challenge for `{query}` (rate limit or anti-bot \
-         detection). Try again later, rephrase the query, or set a Brave API key in \
-         Manage → Engine → Web search."
+         detection). Try again later, rephrase the query, or set a Brave Search API key in \
+         Manage → Web search to lift the keyless ceiling."
     )
 }
 
@@ -446,75 +401,6 @@ async fn brave_search(
         }
     }
     Ok(results)
-}
-
-/// Keyless alternative to DuckDuckGo: Mojeek serves static HTML result pages
-/// without a bot-check challenge, so it is the reliable fallback on machines
-/// DDG blocks. Shares the keyless rate budget, one slot per request.
-async fn mojeek_search(
-    client: &reqwest::Client,
-    query: &str,
-    max_results: usize,
-) -> anyhow::Result<Vec<WebResult>> {
-    gate(&SEARCH_GATE, SEARCH_RATE_LIMIT, SEARCH_RATE_WINDOW).await?;
-    let url = reqwest::Url::parse_with_params(
-        "https://www.mojeek.com/search",
-        &[("q", query.to_owned())],
-    )
-    .context("build Mojeek search URL")?;
-    let response = client
-        .get(url)
-        .header("user-agent", WEB_USER_AGENT)
-        .header("accept", "text/html,application/xhtml+xml")
-        .header("accept-language", "en-US,en;q=0.9")
-        .timeout(FETCH_TIMEOUT)
-        .send()
-        .await
-        .with_context(|| format!("Mojeek search request failed for `{query}`"))?;
-    let status = response.status();
-    let body = response.text().await.context("read Mojeek response")?;
-    anyhow::ensure!(status.is_success(), "Mojeek search returned HTTP {status}");
-    Ok(parse_mojeek_results(&body, max_results))
-}
-
-/// Parse Mojeek's result page into `(title, url, snippet)` tuples.
-///
-/// Each hit is an `<li class="r1">…</li>` block holding an
-/// `<h2><a class="title" href="URL">Title</a></h2>` and a `<p class="s">`
-/// snippet. Cluster rows (`r4 clu-result`) share the same shape, so they are
-/// parsed the same way.
-pub fn parse_mojeek_results(html: &str, max: usize) -> Vec<WebResult> {
-    let result_re =
-        Regex::new(r#"(?is)<li[^>]*class="r\d+[^"]*"[^>]*>(.*?)</li>"#).expect("valid regex");
-    let title_re = Regex::new(r#"(?is)<a[^>]*class="title"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
-        .expect("valid regex");
-    let snippet_re = Regex::new(r#"(?is)<p[^>]*class="s"[^>]*>(.*?)</p>"#).expect("valid regex");
-    let mut results = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for captures in result_re.captures_iter(html) {
-        let block = &captures[1];
-        let Some(title) = title_re.captures(block) else {
-            continue;
-        };
-        let url = decode_html_entities(&title[1]).trim().to_owned();
-        let title = strip_inline(&title[2]);
-        if url.is_empty() || title.is_empty() || !seen.insert(url.clone()) {
-            continue;
-        }
-        let snippet = snippet_re
-            .captures(block)
-            .map(|captures| strip_inline(&captures[1]))
-            .unwrap_or_default();
-        results.push(WebResult {
-            title,
-            url,
-            snippet,
-        });
-        if results.len() >= max {
-            break;
-        }
-    }
-    results
 }
 
 /// Keep an error response readable without dumping the whole body.
@@ -1087,39 +973,6 @@ mod tests {
             redirect_url(href).as_deref(),
             Some("https://example.com/a+b?x=1+2")
         );
-    }
-
-    #[test]
-    fn mojeek_results_parse_titles_urls_and_snippets() {
-        let html = r#"
-<ul class="results-standard">
-<li class="r1"><a title="https://rust-lang.org/" href="https://rust-lang.org/" class="ob"><p class="i"><span class="url">https://rust-lang.org/</span></p></a><h2><a class="title" title="https://rust-lang.org/" href="https://rust-lang.org/">Rust Programming Language</a></h2><p class="s">A <strong>memory-safe</strong> systems language.</p></li>
-<li class="r2 clu-result"><a title="https://www.rust-lang.org/learn" href="https://www.rust-lang.org/learn" class="ob"><p class="i"><span class="url">https://www.rust-lang.org<span> &rsaquo; learn</span></span></p></a><h2><a class="title" title="https://www.rust-lang.org/learn" href="https://www.rust-lang.org/learn">Learn Rust</a></h2><p class="s">Book, exercises, and more.</p></li>
-<li class="r3"><a title="https://duckduckgo.com" href="https://duckduckgo.com" class="ob"><p class="i"><span class="url">https://duckduckgo.com</span></p></a><h2><a class="title" title="https://duckduckgo.com" href="https://duckduckgo.com">DuckDuckGo</a></h2><p class="s">Search engine.</p></li>
-</ul>"#;
-        let results = parse_mojeek_results(html, 10);
-        assert_eq!(results.len(), 3);
-        assert_eq!(results[0].title, "Rust Programming Language");
-        assert_eq!(results[0].url, "https://rust-lang.org/");
-        assert!(results[0].snippet.contains("memory-safe"));
-        assert_eq!(results[1].title, "Learn Rust");
-        assert_eq!(results[2].url, "https://duckduckgo.com");
-    }
-
-    #[test]
-    fn mojeek_parser_skips_blocks_without_a_title_and_respects_max() {
-        let html = r#"
-<ul class="results-standard">
-<li class="r1"><h2><a class="title" title="https://a.example/" href="https://a.example/">One</a></h2><p class="s">Snippet A.</p></li>
-<li class="r2"><p class="s">No title here.</p></li>
-<li class="r3"><h2><a class="title" title="https://b.example/" href="https://b.example/">Two</a></h2><p class="s">Snippet B.</p></li>
-</ul>"#;
-        let results = parse_mojeek_results(html, 1);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "One");
-
-        let deduped = parse_mojeek_results(html, 10);
-        assert_eq!(deduped.len(), 2);
     }
 
     #[test]

@@ -2359,20 +2359,6 @@ impl Engine for Runtime {
         };
         let mut audio_fallback_attempted = false;
         for round in 0..MAX_TOOL_ROUNDS {
-            // A prior round may have fetched a PDF and attached it to the
-            // conversation via its generated-media message. Merge those into
-            // the document list (the user's original attachments were already
-            // rewritten into notices by prepare_messages, so keep them) so
-            // doc_read can resolve ids that were not among the originals.
-            for document in tool_registry::conversation_documents(&request) {
-                if !ctx
-                    .documents
-                    .iter()
-                    .any(|existing| existing.sha256 == document.sha256)
-                {
-                    ctx.documents.push(document);
-                }
-            }
             let last_round = round + 1 == MAX_TOOL_ROUNDS;
             let mut body = llama::translate_chat_request(
                 &request,
@@ -2442,7 +2428,7 @@ impl Engine for Runtime {
                 round_text,
                 round_reasoning,
                 calls: &calls,
-                context: &ctx,
+                context: &mut ctx,
                 model_caps: &model_caps,
                 settings: &settings,
                 invocations: &mut invocations,
@@ -2487,12 +2473,12 @@ enum AppendRoundOutcome {
     ChannelClosed,
 }
 
-struct ToolRound<'a> {
+struct ToolRound<'a, 'ctx> {
     messages: &'a mut Vec<OpenAiMessage>,
     round_text: String,
     round_reasoning: Option<String>,
     calls: &'a [llama::AccumulatedToolCall],
-    context: &'a ToolContext<'a>,
+    context: &'a mut ToolContext<'ctx>,
     model_caps: &'a crate::types::ModelCapabilities,
     settings: &'a RuntimeSettings,
     invocations: &'a mut Vec<tools::ToolInvocation>,
@@ -2500,7 +2486,7 @@ struct ToolRound<'a> {
     events: Option<&'a tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>>,
 }
 
-async fn append_tool_round(round: ToolRound<'_>) -> AppendRoundOutcome {
+async fn append_tool_round(round: ToolRound<'_, '_>) -> AppendRoundOutcome {
     let ToolRound {
         messages,
         round_text,
@@ -2537,6 +2523,12 @@ async fn append_tool_round(round: ToolRound<'_>) -> AppendRoundOutcome {
             continue;
         }
         let invocation = tool_registry::execute(ctx, &call.id, &call.name, &call.arguments).await;
+        // A fetch_url that ingested a PDF produces document media. Register it
+        // in the conversation's document list right away so a later round's
+        // doc_read can resolve it: the persisted message that carries the blob
+        // only reaches the transcript and the next request, never the
+        // in-flight `request.messages`, so scanning messages here would miss it.
+        register_invocation_documents(ctx, &invocation);
         let tool_message = OpenAiMessage {
             role: "tool".to_owned(),
             content: serde_json::Value::String(invocation.output.clone()),
@@ -2584,6 +2576,27 @@ async fn append_tool_round(round: ToolRound<'_>) -> AppendRoundOutcome {
         };
     }
     AppendRoundOutcome::Continue
+}
+
+/// Add documents a tool invocation produced (a PDF `fetch_url` just ingested)
+/// to the conversation's document list so `doc_read` can resolve them in later
+/// rounds of the same generation.
+fn register_invocation_documents(ctx: &mut ToolContext<'_>, invocation: &tools::ToolInvocation) {
+    for media in &invocation.media {
+        let name = media.name.as_deref().unwrap_or("document");
+        if crate::documents::is_supported_document(&media.mime_type, name)
+            && !ctx
+                .documents
+                .iter()
+                .any(|existing| existing.sha256 == media.sha256)
+        {
+            ctx.documents.push(crate::tool_registry::ConversationDocument {
+                sha256: media.sha256.clone(),
+                mime_type: media.mime_type.clone(),
+                name: name.to_owned(),
+            });
+        }
+    }
 }
 
 struct GeneratedMediaContext {
@@ -2634,6 +2647,13 @@ async fn generated_media_context_messages(
         .media
         .iter()
         .any(|media| media.mime_type == "application/pdf");
+    // A fetch_url that only stored a PDF has nothing for the model to see: the
+    // document id and page count are already in the tool result, and the file
+    // belongs on the tool call pill, not as a user turn. Skip the generated
+    // context so the transcript does not show a spurious user attachment.
+    if invocation.name == "fetch_url" && attached_pdf && !rendered_pages {
+        return None;
+    }
     let mut persisted_parts = Vec::new();
     let mut live_parts = Vec::new();
     for media in &invocation.media {
@@ -2656,14 +2676,6 @@ async fn generated_media_context_messages(
         } else {
             "generated-image"
         });
-        persisted_parts.push(serde_json::json!({
-            "type": "brazier_blob",
-            "brazier_blob": {
-                "sha256": media.sha256.clone(),
-                "mime_type": media.mime_type.clone(),
-                "name": name
-            }
-        }));
         if media.mime_type == "application/pdf" {
             // Tell the model how long the document is alongside its id, so it
             // can pick a page range instead of guessing.
@@ -2673,13 +2685,29 @@ async fn generated_media_context_messages(
                 }
                 _ => None,
             };
-            live_parts.push(crate::documents::attachment_notice(
+            // The notice carries the short document id and page count. It must
+            // survive into the transcript, not only the immediate live message,
+            // or neither the user nor the model on a later turn ever sees the
+            // id — the blob alone renders as a bare attachment.
+            let notice = crate::documents::attachment_notice(
                 name,
                 &media.mime_type,
                 &media.sha256,
                 pages,
-            ));
-        } else if vision
+            );
+            live_parts.push(notice.clone());
+            persisted_parts.push(notice);
+        }
+        persisted_parts.push(serde_json::json!({
+            "type": "brazier_blob",
+            "brazier_blob": {
+                "sha256": media.sha256.clone(),
+                "mime_type": media.mime_type.clone(),
+                "name": name
+            }
+        }));
+        if media.mime_type != "application/pdf"
+            && vision
             && let Ok(parts) =
                 media::generated_media_parts(data_dir, &media.sha256, &media.mime_type).await
         {
@@ -2754,20 +2782,6 @@ async fn stream_tool_rounds(
             .unwrap_or(settings.context_size),
     );
     for round in 0..MAX_TOOL_ROUNDS {
-        // A prior round may have fetched a PDF and attached it to the
-        // conversation via its generated-media message. Merge those into the
-        // document list (the user's original attachments were already rewritten
-        // into notices by prepare_messages, so keep them) so doc_read can
-        // resolve ids that were not among the originals.
-        for document in tool_registry::conversation_documents(&request) {
-            if !ctx
-                .documents
-                .iter()
-                .any(|existing| existing.sha256 == document.sha256)
-            {
-                ctx.documents.push(document);
-            }
-        }
         let last_round = round + 1 == MAX_TOOL_ROUNDS;
         let mut body = llama::translate_chat_request(
             &request,
@@ -2959,7 +2973,7 @@ async fn stream_tool_rounds(
             round_text,
             round_reasoning: reasoning,
             calls: &calls,
-            context: &ctx,
+            context: &mut ctx,
             model_caps: &model_caps,
             settings: &settings,
             invocations: &mut invocations,
@@ -3036,6 +3050,58 @@ mod tests {
         assert_eq!(crate::model_settings::llama_parallel_slots(Some(&chat)), 1);
         assert_eq!(crate::model_settings::llama_parallel_slots(Some(&agent)), 3);
         assert_eq!(configured.parallel_subagents, Some(true));
+    }
+
+    #[test]
+    fn fetched_pdf_documents_are_registered_for_later_doc_read() {
+        let dir = tempdir().unwrap();
+        let http = reqwest::Client::new();
+        let mut ctx = crate::tool_registry::ToolContext {
+            data_dir: dir.path(),
+            http: &http,
+            images: Vec::new(),
+            documents: Vec::new(),
+        };
+        let sha256 =
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned();
+        let invocation = tools::ToolInvocation {
+            call_id: "call-fetch".into(),
+            name: "fetch_url".into(),
+            arguments: r#"{"url":"https://example.com/a.pdf"}"#.into(),
+            output: "Fetched PDF a.pdf.".into(),
+            is_error: false,
+            media: vec![tools::ToolMedia {
+                sha256: sha256.clone(),
+                mime_type: "application/pdf".into(),
+                name: Some("a.pdf".into()),
+            }],
+        };
+        register_invocation_documents(&mut ctx, &invocation);
+        assert_eq!(ctx.documents.len(), 1);
+        assert_eq!(ctx.documents[0].sha256, sha256);
+        // The short id the notice shows must be a prefix of the registered blob.
+        let short = crate::documents::short_document_id(&sha256);
+        assert!(ctx.documents[0].sha256.starts_with(short));
+
+        // Re-registering the same blob is idempotent.
+        register_invocation_documents(&mut ctx, &invocation);
+        assert_eq!(ctx.documents.len(), 1);
+
+        // Non-document media (a generated image) is not registered.
+        let image = tools::ToolInvocation {
+            call_id: "call-img".into(),
+            name: "generate_image".into(),
+            arguments: "{}".into(),
+            output: "Generated.".into(),
+            is_error: false,
+            media: vec![tools::ToolMedia {
+                sha256: "deadbeef".into(),
+                mime_type: "image/png".into(),
+                name: Some("x.png".into()),
+            }],
+        };
+        register_invocation_documents(&mut ctx, &image);
+        assert_eq!(ctx.documents.len(), 1);
     }
 
     #[tokio::test]
@@ -3148,37 +3214,15 @@ mod tests {
                 name: Some("report.pdf".into()),
             }],
         };
-        let pdf_context =
+        // A plain fetch_url that only stored a PDF produces no generated-context
+        // user message: the file belongs on the tool call pill, and the model
+        // already has the document id in the tool result.
+        assert!(
             generated_media_context_messages(dir.path(), &caps, &settings, &pdf_invocation)
                 .await
-                .expect("PDF context");
-        assert_eq!(pdf_context.live.role, "user");
-        assert_eq!(
-            pdf_context
-                .persisted
-                .content
-                .pointer("/1/brazier_blob/name"),
-            Some(&json!("report.pdf"))
+                .is_none(),
+            "a stored-only fetch_url PDF should not inject a user message"
         );
-        // A plain fetch_url attaches a stored PDF for doc_read to page through;
-        // it must not claim pages were rendered as images.
-        let pdf_status = pdf_context
-            .live
-            .content
-            .pointer("/0/text")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        assert!(
-            pdf_status.contains("fetched and stored"),
-            "fetch_url status should say the PDF was stored, not rendered: {pdf_status}"
-        );
-        let notice = pdf_context
-            .live
-            .content
-            .pointer("/1/text")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        assert!(notice.contains("doc_read"), "{notice}");
 
         let render_invocation = tools::ToolInvocation {
             call_id: "call-render".into(),

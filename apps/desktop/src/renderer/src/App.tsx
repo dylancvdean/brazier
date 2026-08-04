@@ -88,7 +88,7 @@ import {
 } from './components/GenerateHistorySidebar'
 import { MessageMedia } from './components/MessageMedia'
 import { Markdown } from './components/Markdown'
-import { ReasoningDisclosure } from './components/ReasoningDisclosure'
+import { ReasoningDisclosure, TurnTrace } from './components/ReasoningDisclosure'
 import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
@@ -233,11 +233,12 @@ function BranchNavigator({
 }
 
 function contentText(message: Message): string {
-  if (typeof message.content === 'string') return message.content
+  if (typeof message.content === 'string') return message.content.trim()
   return message.content
     .filter((part): part is Extract<ContentPart, { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
     .join('\n')
+    .trim()
 }
 
 function contentMedia(message: Message): Array<'image' | 'audio' | 'video'> {
@@ -432,7 +433,7 @@ function RunHistory({
             {expanded && (
               <div className="run-entry-body">
                 {run.error && <p className="run-error-text">{run.error}</p>}
-                {run.response_text && <p>{run.response_text.slice(0, 400)}</p>}
+                {run.response_text && <p>{run.response_text.trim().slice(0, 400)}</p>}
                 {run.tool_calls && run.tool_calls.length > 0 && (
                   <ToolChips records={run.tool_calls} />
                 )}
@@ -1546,11 +1547,9 @@ export function App(): React.JSX.Element {
       const generatedMedia = [
         ...new Map(
           toolRecords
-            .flatMap((record) => record.media ?? [])
-            // Fetched PDFs are attachments, not generated media: the engine
-            // already attached them to a user turn via the generated-media
-            // context, so re-attaching them here shows the file twice.
-            .filter((media) => media.mime_type !== 'application/pdf')
+            .flatMap((record) =>
+              (record.media ?? []).map((media) => ({ ...media, call_id: record.call_id }))
+            )
             .map((media) => [`${media.sha256}:${media.mime_type}`, media])
         ).values()
       ]
@@ -1569,7 +1568,8 @@ export function App(): React.JSX.Element {
                   ? `document-${index + 1}.pdf`
                   : media.mime_type.startsWith('video/')
                     ? `generated-video-${index + 1}.mp4`
-                    : `generated-image-${index + 1}.png`)
+                    : `generated-image-${index + 1}.png`),
+              call_id: media.call_id
             }
           })),
           model: selectedModel,
@@ -2065,30 +2065,49 @@ export function App(): React.JSX.Element {
                             <span className={`turn-badge ${status}`}>{status}</span>
                           ) : null}
                         </div>
-                        <ReasoningDisclosure text={item.reasoning} />
-                        {item.segments.map((segment) => {
-                          if (segment.kind === 'tool') {
-                            return (
-                              <ToolChips
-                                key={segment.key}
-                                records={segment.records}
-                                onError={setError}
-                              />
-                            )
-                          }
-                          if (segment.kind === 'media') {
-                            return (
-                              <MessageMedia
-                                key={segment.key}
-                                blobs={segment.blobs}
-                                onError={setError}
-                              />
-                            )
-                          }
-                          return (
-                            <Markdown key={segment.key}>{segment.text}</Markdown>
-                          )
-                        })}
+                        {item.trace.length > 0 && (
+                          <TurnTrace
+                            reasoning={item.reasoning}
+                            defaultOpen={item.trace.some(
+                              (segment) => segment.kind === 'tool' || segment.kind === 'media'
+                            )}
+                          >
+                            {item.trace.map((segment) => {
+                              if (segment.kind === 'reasoning') {
+                                return (
+                                  <div
+                                    key={segment.key}
+                                    className="reasoning-chunk"
+                                  >
+                                    {segment.text}
+                                  </div>
+                                )
+                              }
+                              if (segment.kind === 'tool') {
+                                return (
+                                  <ToolChips
+                                    key={segment.key}
+                                    records={segment.records}
+                                    onError={setError}
+                                  />
+                                )
+                              }
+                              if (segment.kind === 'media') {
+                                return (
+                                  <MessageMedia
+                                    key={segment.key}
+                                    blobs={segment.blobs}
+                                    onError={setError}
+                                  />
+                                )
+                              }
+                              return (
+                                <Markdown key={segment.key}>{segment.text}</Markdown>
+                              )
+                            })}
+                          </TurnTrace>
+                        )}
+                        {item.answer && <Markdown>{item.answer}</Markdown>}
                         <BranchNavigator
                           messages={messages}
                           messageId={item.branchId}

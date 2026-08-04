@@ -16,7 +16,13 @@ export type ContentPart =
   | { type: 'text'; text: string }
   | {
       type: 'brazier_blob'
-      brazier_blob: { sha256: string; mime_type: string; name: string }
+      brazier_blob: {
+        sha256: string
+        mime_type: string
+        name: string
+        /** Tool call id that produced this blob, when the message records it. */
+        call_id?: string
+      }
     }
   | { type: 'image_url'; image_url: { url: string } }
   | { type: 'input_audio'; input_audio: { data: string; format: string } }

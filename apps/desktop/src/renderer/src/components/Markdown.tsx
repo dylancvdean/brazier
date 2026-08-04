@@ -22,7 +22,10 @@ export function Markdown({
   children: string
   className?: string
 }): React.JSX.Element {
-  const source = normalizeMathDelimiters(children)
+  // Model output frequently ends with newlines. Trimming trailing whitespace
+  // keeps them out of the DOM, so selecting and copying a message does not
+  // pick up invisible trailing newlines.
+  const source = normalizeMathDelimiters(children).trimEnd()
 
   return (
     <div className={`markdown-body ${className}`.trim()}>

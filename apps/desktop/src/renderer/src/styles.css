@@ -5308,6 +5308,33 @@ label.span-2 {
   overflow: hidden;
 }
 
+/* Interleaved reasoning + tool-call trace inside a disclosure. */
+.reasoning-trace {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.reasoning-trace .reasoning-chunk {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.reasoning-trace .tool-chip-row {
+  margin-top: 0;
+}
+
+.reasoning-trace > .markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.reasoning-trace > .markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
 .agent-timeline {
   display: flex;
   flex-direction: column;

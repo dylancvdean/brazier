@@ -4728,16 +4728,16 @@ function WebSearchSection(props: SectionProps): React.JSX.Element {
         <h2>Web search</h2>
         <p>
           Choose the search engine behind the <code>web_search</code> tool. Both chat and agent
-          search use it. Brave needs a paid API key; the other two are keyless.
+          search use it. DuckDuckGo needs no key; Brave needs a paid API key and is the reliable
+          option when DuckDuckGo rate-limits this machine.
         </p>
       </header>
       <div className="settings-group">
         <div className="section-label">Backend</div>
         <p className="model-help">
-          DuckDuckGo is best quality but frequently answers headless clients with a bot-check
-          challenge. Mojeek serves static HTML without one and is the reliable keyless choice on
-          machines DDG flags. Brave (1000 free searches/month, then $5 per extra 1000) is the
-          highest-limit option.
+          DuckDuckGo is keyless and works for most queries, but it sometimes serves a bot-check
+          challenge to honest clients. Brave (1000 free searches/month, then $5 per extra 1000)
+          has no such limit — if DuckDuckGo starts failing, add a Brave key and switch.
         </p>
         <div className="settings-grid">
           <label>
@@ -4747,12 +4747,11 @@ function WebSearchSection(props: SectionProps): React.JSX.Element {
               onChange={(event) =>
                 setDraft({
                   ...draft,
-                  web_search_provider: event.target.value as 'duckduckgo' | 'mojeek' | 'brave'
+                  web_search_provider: event.target.value as 'duckduckgo' | 'brave'
                 })
               }
             >
               <option value="duckduckgo">DuckDuckGo (no key)</option>
-              <option value="mojeek">Mojeek (no key)</option>
               <option value="brave">Brave Search API</option>
             </select>
           </label>
@@ -4804,28 +4803,6 @@ function WebSearchSection(props: SectionProps): React.JSX.Element {
           </p>
         )}
       </div>
-      {(draft.web_search_provider === 'duckduckgo' || draft.web_search_provider === 'mojeek') && (
-        <div className="settings-group">
-          <div className="section-label">Resilience</div>
-          <p className="model-help">
-            When the selected provider is blocked, fails, or returns no results, fall back to the
-            other keyless engine instead of failing. Off means a failed provider surfaces its error.
-          </p>
-          <label className="settings-toggle">
-            <input
-              type="checkbox"
-              checked={draft.web_search_auto_fallback ?? true}
-              onChange={(event) =>
-                setDraft({ ...draft, web_search_auto_fallback: event.target.checked })
-              }
-            />
-            <span>
-              Fall back to the other keyless engine
-              <small>DuckDuckGo ↔ Mojeek. Brave never falls back to a keyless engine.</small>
-            </span>
-          </label>
-        </div>
-      )}
       <div className="runtime-actions">
         <button className="primary-action" disabled={saving || !dirty} onClick={() => void apply()}>
           {saving ? <LoaderCircle className="spin" size={15} /> : 'Apply & restart'}

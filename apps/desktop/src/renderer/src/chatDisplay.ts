@@ -5,9 +5,12 @@ export type DisplayBlob = {
   sha256: string
   mime_type: string
   original_name?: string | null
+  /** The tool call that produced this blob, when the message records it. */
+  call_id?: string
 }
 
 export type AssistantSegment =
+  | { kind: 'reasoning'; text: string; key: string }
   | { kind: 'text'; text: string; key: string }
   | { kind: 'tool'; records: ToolCallRecord[]; key: string }
   | { kind: 'media'; blobs: DisplayBlob[]; key: string }
@@ -18,8 +21,12 @@ export type AssistantTurn = {
   branchId: string
   source?: string | null
   status?: string | null
+  /** Merged thinking text, for the collapsed trace preview. */
   reasoning: string
-  segments: AssistantSegment[]
+  /** Ordered trace: thinking, tool calls, media, and intermediate text. */
+  trace: AssistantSegment[]
+  /** The final response text, shown outside the trace. */
+  answer: string
 }
 
 export type ChatDisplayItem = { kind: 'message'; message: Message } | AssistantTurn
@@ -48,7 +55,8 @@ function messageBlobs(message: Message): DisplayBlob[] {
           {
             sha256: part.brazier_blob.sha256,
             mime_type: part.brazier_blob.mime_type,
-            original_name: part.brazier_blob.name
+            original_name: part.brazier_blob.name,
+            call_id: part.brazier_blob.call_id
           }
         ]
       : []
@@ -96,8 +104,10 @@ function isGeneratedMediaDisplay(message: Message): boolean {
 
 /**
  * Compose protocol-level assistant/tool/system records into the assistant turn
- * a person experienced. Segment order remains faithful to execution, while all
- * reasoning is shown once before the first visible action.
+ * a person experienced. Reasoning, tool calls, media, and any intermediate
+ * text are kept in execution order as the turn's trace; the final response text
+ * is separated out as the visible answer. All reasoning is shown once inside
+ * the trace rather than repeated in a collapsed header.
  */
 export function buildChatDisplayItems(messages: Message[]): ChatDisplayItem[] {
   const items: ChatDisplayItem[] = []
@@ -107,7 +117,18 @@ export function buildChatDisplayItems(messages: Message[]): ChatDisplayItem[] {
   const seenMedia = new Set<string>()
 
   const flush = (): void => {
-    if (turn && (turn.reasoning || turn.segments.length > 0)) items.push(turn)
+    if (!turn) return
+    // The final text the model produced is the answer; anything earlier is
+    // part of the working trace inside the disclosure.
+    for (let index = turn.trace.length - 1; index >= 0; index -= 1) {
+      const segment = turn.trace[index]
+      if (segment.kind === 'text') {
+        turn.answer = segment.text
+        turn.trace.splice(index, 1)
+        break
+      }
+    }
+    if (turn.reasoning || turn.trace.length > 0 || turn.answer) items.push(turn)
     turn = null
     lastToolRecord = null
     segmentIndex = 0
@@ -123,7 +144,8 @@ export function buildChatDisplayItems(messages: Message[]): ChatDisplayItem[] {
         source: message.source,
         status: message.status,
         reasoning: '',
-        segments: []
+        trace: [],
+        answer: ''
       }
     }
     return turn
@@ -138,13 +160,31 @@ export function buildChatDisplayItems(messages: Message[]): ChatDisplayItem[] {
     })
     if (fresh.length === 0) return
     const current = ensureTurn(message)
+    // Attach each blob to the tool call that produced it when the blob records
+    // its call_id (the generated-media display message does); otherwise fall
+    // back to the most recent tool record.
+    const byCallId = new Map<string, ToolCallRecord>()
+    for (const segment of current.trace) {
+      if (segment.kind !== 'tool') continue
+      for (const record of segment.records) byCallId.set(record.call_id, record)
+    }
+    const unattached: DisplayBlob[] = []
+    for (const blob of fresh) {
+      const record = blob.call_id ? byCallId.get(blob.call_id) : undefined
+      if (record) {
+        record.media = [...(record.media ?? []), blob]
+      } else {
+        unattached.push(blob)
+      }
+    }
+    if (unattached.length === 0) return
     if (lastToolRecord) {
-      lastToolRecord.media = [...(lastToolRecord.media ?? []), ...fresh]
+      lastToolRecord.media = [...(lastToolRecord.media ?? []), ...unattached]
       return
     }
-    current.segments.push({
+    current.trace.push({
       kind: 'media',
-      blobs: fresh,
+      blobs: unattached,
       key: `media-${segmentIndex++}`
     })
   }
@@ -163,9 +203,18 @@ export function buildChatDisplayItems(messages: Message[]): ChatDisplayItem[] {
       current.status = message.status ?? current.status
       current.reasoning = mergeReasoning(current.reasoning, messageReasoning(message))
 
+      const reasoning = messageReasoning(message)
+      if (reasoning) {
+        current.trace.push({
+          kind: 'reasoning',
+          text: reasoning,
+          key: `reasoning-${segmentIndex++}`
+        })
+      }
+
       const text = messageText(message).trim()
       if (text && !isGeneratedMediaDisplay(message)) {
-        current.segments.push({
+        current.trace.push({
           kind: 'text',
           text,
           key: `text-${segmentIndex++}`
@@ -174,7 +223,7 @@ export function buildChatDisplayItems(messages: Message[]): ChatDisplayItem[] {
 
       const calls = callsFromMessage(message)
       if (calls.length > 0) {
-        current.segments.push({
+        current.trace.push({
           kind: 'tool',
           records: calls,
           key: `tool-${segmentIndex++}`
@@ -191,7 +240,7 @@ export function buildChatDisplayItems(messages: Message[]): ChatDisplayItem[] {
       const current = ensureTurn(message)
       const callId = message.tool_call_id ?? `tool-${message.id}`
       let record: ToolCallRecord | undefined
-      for (const segment of current.segments) {
+      for (const segment of current.trace) {
         if (segment.kind !== 'tool') continue
         record = segment.records.find((candidate) => candidate.call_id === callId)
         if (record) break
@@ -204,7 +253,7 @@ export function buildChatDisplayItems(messages: Message[]): ChatDisplayItem[] {
           output: '',
           is_error: false
         }
-        current.segments.push({
+        current.trace.push({
           kind: 'tool',
           records: [record],
           key: `tool-${segmentIndex++}`

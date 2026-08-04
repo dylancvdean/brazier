@@ -150,19 +150,16 @@ pub struct RuntimeSettings {
     /// Chat `run_javascript` sandbox profile and optional limit overrides.
     #[serde(default)]
     pub javascript_sandbox: crate::js_sandbox::JavascriptSandboxSettings,
-    /// Which backend answers `web_search`: `duckduckgo` (keyless, rate-limited),
-    /// `mojeek` (keyless, no challenge), or `brave` (paid API, needs
-    /// `brave_api_key`).
+    /// Which backend answers `web_search`: `duckduckgo` (keyless, rate-limited)
+    /// or `brave` (paid API, needs `brave_api_key`). Keyless search is
+    /// intentionally limited to DuckDuckGo — it is the only keyless engine we
+    /// are comfortable querying — so machines it blocks should switch to Brave.
     #[serde(default = "default_web_search_provider")]
     pub web_search_provider: String,
     /// Brave Search API key. Setting one and choosing `brave` as the provider
-    /// raises the search rate limit well above the keyless budgets.
+    /// raises the search rate limit well above the keyless budget.
     #[serde(default)]
     pub brave_api_key: Option<String>,
-    /// When the primary keyless engine (`duckduckgo` or `mojeek`) is blocked,
-    /// fails, or returns no results, transparently fall back to the other one.
-    #[serde(default = "default_true")]
-    pub web_search_auto_fallback: bool,
     /// SafeSearch level for web search: `moderate` (default), `strict`, `off`.
     #[serde(default = "default_web_safesearch")]
     pub web_safesearch: String,
@@ -271,7 +268,6 @@ impl Default for RuntimeSettings {
             javascript_sandbox: crate::js_sandbox::JavascriptSandboxSettings::default(),
             web_search_provider: default_web_search_provider(),
             brave_api_key: None,
-            web_search_auto_fallback: true,
             web_safesearch: default_web_safesearch(),
             web_search_region: None,
         }
@@ -346,11 +342,8 @@ impl RuntimeSettings {
             );
         }
         anyhow::ensure!(
-            matches!(
-                self.web_search_provider.as_str(),
-                "duckduckgo" | "mojeek" | "brave"
-            ),
-            "web_search_provider must be `duckduckgo`, `mojeek`, or `brave`"
+            matches!(self.web_search_provider.as_str(), "duckduckgo" | "brave"),
+            "web_search_provider must be `duckduckgo` or `brave`"
         );
         anyhow::ensure!(
             matches!(self.web_safesearch.as_str(), "moderate" | "strict" | "off"),
@@ -439,14 +432,6 @@ mod tests {
         }
         .validate()
         .unwrap(); // a missing key is a runtime error, not a config failure
-
-        let mojeek = RuntimeSettings {
-            web_search_provider: "mojeek".into(),
-            web_search_auto_fallback: false,
-            ..RuntimeSettings::default()
-        };
-        mojeek.validate().unwrap();
-        assert!(!mojeek.web_search_auto_fallback);
 
         let bogus = RuntimeSettings {
             web_search_provider: "startpage".into(),
