@@ -627,6 +627,9 @@ async fn run_tool(
         "doc_read" => doc_read(context, plan, workspace, arguments).await,
         "fs_stat" => fs_stat(context, plan, workspace, arguments).await,
         "fs_search" => fs_search(context, plan, workspace, arguments).await,
+        "fs_find" => fs_find(context, plan, workspace, arguments).await,
+        "fs_read_many" => fs_read_many(context, plan, workspace, arguments).await,
+        "fs_tree" => fs_tree(context, plan, workspace, arguments).await,
         "fs_write" => fs_write(context, plan, workspace, arguments).await,
         "fs_patch" => fs_patch(context, plan, workspace, arguments).await,
         "fs_mkdir" => fs_mkdir(context, plan, workspace, arguments).await,
@@ -649,6 +652,30 @@ async fn run_tool(
             .await
         }
         "git_diff" => git_diff(context, plan, workspace, arguments).await,
+        "git_log" => git_log(context, plan, workspace, arguments).await,
+        "git_show" => git_show(context, plan, workspace, arguments).await,
+        "git_blame" => git_blame(context, plan, workspace, arguments).await,
+        "git_grep" => git_grep(context, plan, workspace, arguments).await,
+        "git_branch" => git(context, plan, workspace, arguments, &[
+            "--no-pager", "branch", "--all", "--verbose", "--no-color",
+        ])
+        .await,
+        "git_tags" => git_tags(context, plan, workspace, arguments).await,
+        "git_worktree" => git(
+            context,
+            plan,
+            workspace,
+            arguments,
+            &["--no-pager", "worktree", "list", "--porcelain"],
+        )
+        .await,
+        "git_diff_check" => git_diff_check(context, plan, workspace, arguments).await,
+        "git_remote" => git_remote(context, plan, workspace, arguments).await,
+        "project_test" | "project_build" | "project_lint" | "project_typecheck"
+        | "project_format" => project_check(context, plan, workspace, request.tool.as_str(), arguments).await,
+        "env_info" => env_info(context, plan, workspace, arguments).await,
+        "process_list" => process_list(context, plan, arguments).await,
+        "code_symbols" => code_symbols(context, plan, workspace, arguments).await,
         "request_permission" => request_permission(context).await,
         "spawn_subagent" => anyhow::bail!(
             "`spawn_subagent` runs in the agent worker, not through the daemon exec path"
@@ -1185,6 +1212,166 @@ async fn fs_search(
         return Ok(ToolOutcome::text(format!("No matches for `{query}`.")));
     }
     Ok(ToolOutcome::text(matches.join("\n")))
+}
+
+/// Find files and directories by a small, predictable glob language. Unlike a
+/// shell find, this never executes a predicate and never follows a symlink
+/// outside the workspace.
+async fn fs_find(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let pattern = arguments
+        .get("pattern")
+        .and_then(Value::as_str)
+        .context("pattern is required")?
+        .trim();
+    anyhow::ensure!(!pattern.is_empty(), "pattern must not be empty");
+    let root = if arguments.get("path").is_some() {
+        checked_path(context, plan, workspace, arguments, "path", false)?
+    } else {
+        workspace
+            .context("this session has no workspace")?
+            .to_path_buf()
+    };
+    let kind = arguments
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("any");
+    anyhow::ensure!(
+        matches!(kind, "any" | "file" | "directory"),
+        "kind must be any, file, or directory"
+    );
+    let max_results = arguments
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(200)
+        .clamp(1, 500) as usize;
+    let boundary = walk_boundary(&root, workspace);
+    let mut results = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(directory) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&directory).await else {
+            continue;
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some((_real, metadata)) = walk_entry_target(&entry_path, boundary.as_deref())
+            else {
+                continue;
+            };
+            let is_directory = metadata.is_dir();
+            let relative = entry_path
+                .strip_prefix(workspace.unwrap_or(&root))
+                .unwrap_or(&entry_path)
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            let matches_kind = kind == "any"
+                || (kind == "directory" && is_directory)
+                || (kind == "file" && !is_directory);
+            if matches_kind && (glob_match(pattern, &relative) || glob_match(pattern, &name)) {
+                results.push(if is_directory {
+                    format!("{relative}/")
+                } else {
+                    relative
+                });
+                if results.len() >= max_results {
+                    results.push(format!("[... stopped at {max_results} results ...]"));
+                    return Ok(ToolOutcome::text(results.join("\n")));
+                }
+            }
+            if is_directory && !SKIPPED_DIRECTORIES.contains(&name.as_str()) {
+                stack.push(entry_path);
+            }
+        }
+    }
+    results.sort();
+    if results.is_empty() {
+        return Ok(ToolOutcome::text(format!("No paths matched {pattern}.")));
+    }
+    Ok(ToolOutcome::text(results.join("\n")))
+}
+
+async fn fs_read_many(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let paths = arguments
+        .get("paths")
+        .and_then(Value::as_array)
+        .context("paths is required")?;
+    anyhow::ensure!(!paths.is_empty(), "paths must not be empty");
+    anyhow::ensure!(paths.len() <= 16, "paths is limited to 16 files");
+    let max_bytes = arguments
+        .get("max_bytes_each")
+        .and_then(Value::as_u64)
+        .unwrap_or(128 * 1024)
+        .clamp(1024, 512 * 1024) as usize;
+    let mut output = String::new();
+    for value in paths {
+        let raw = value
+            .as_str()
+            .context("every entry in paths must be a string")?;
+        let path_arguments = json!({ "path": raw });
+        let path = checked_path(context, plan, workspace, &path_arguments, "path", false)?;
+        let bytes = tokio::fs::read(&path)
+            .await
+            .with_context(|| format!("cannot read {raw}"))?;
+        output.push_str(&format!("--- {} ---\n", relative_display(workspace, &path)));
+        if bytes.len() > max_bytes {
+            output.push_str(&format!(
+                "[skipped: {} bytes exceeds max_bytes_each={max_bytes}]\n\n",
+                bytes.len()
+            ));
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        for (index, line) in text.lines().enumerate() {
+            output.push_str(&format!("{:>6}\t{line}\n", index + 1));
+        }
+        output.push('\n');
+    }
+    Ok(ToolOutcome::text(output))
+}
+
+async fn fs_tree(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let path = if arguments.get("path").is_some() {
+        checked_path(context, plan, workspace, arguments, "path", false)?
+    } else {
+        workspace
+            .context("this session has no workspace")?
+            .to_path_buf()
+    };
+    let depth = arguments
+        .get("depth")
+        .and_then(Value::as_u64)
+        .unwrap_or(3)
+        .clamp(1, 6) as usize;
+    let max_entries = arguments
+        .get("max_entries")
+        .and_then(Value::as_u64)
+        .unwrap_or(500)
+        .clamp(1, 2_000) as usize;
+    let boundary = walk_boundary(&path, workspace);
+    let mut lines = list_directory(&path, workspace, depth, boundary.as_deref()).await?;
+    if lines.len() > max_entries {
+        lines.truncate(max_entries);
+        lines.push(format!("[... truncated at {max_entries} entries ...]"));
+    }
+    if lines.is_empty() {
+        lines.push("(empty directory)".to_owned());
+    }
+    Ok(ToolOutcome::text(lines.join("\n")))
 }
 
 /// Minimal glob: `*` matches any run of characters, `?` one character.
@@ -1829,10 +2016,541 @@ async fn git_diff(
     git(context, plan, workspace, arguments, &git_args).await
 }
 
+async fn git_owned(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+    git_args: &[String],
+) -> anyhow::Result<ToolOutcome> {
+    let command_line = std::iter::once("git".to_owned())
+        .chain(git_args.iter().map(|argument| shell_quote(argument)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut merged = arguments.clone();
+    if let Value::Object(map) = &mut merged {
+        map.insert("command".to_owned(), Value::String(command_line));
+    }
+    shell_run(context, plan, workspace, &merged, None).await
+}
+
+async fn git_log(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let max_count = arguments
+        .get("max_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .clamp(1, 100);
+    let mut args = vec![
+        "--no-pager".to_owned(),
+        "log".to_owned(),
+        format!("-{max_count}"),
+        "--decorate".to_owned(),
+        "--date=short".to_owned(),
+        "--format=%h %ad %an %d %s".to_owned(),
+    ];
+    if arguments.get("path").is_some() {
+        let checked = checked_path(context, plan, workspace, arguments, "path", false)?;
+        anyhow::ensure!(checked.is_file(), "git_log path must be a file");
+        args.push("--".to_owned());
+        args.push(relative_display(workspace, &checked));
+    }
+    git_owned(context, plan, workspace, arguments, &args).await
+}
+
+async fn git_show(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let revision = arguments
+        .get("revision")
+        .and_then(Value::as_str)
+        .context("revision is required")?
+        .trim();
+    anyhow::ensure!(!revision.is_empty(), "revision must not be empty");
+    anyhow::ensure!(
+        !revision.starts_with('-'),
+        "revision must not start with a dash"
+    );
+    let mut args = vec![
+        "--no-pager".to_owned(),
+        "show".to_owned(),
+        "--no-ext-diff".to_owned(),
+        "--no-color".to_owned(),
+        revision.to_owned(),
+    ];
+    if arguments
+        .get("stat_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        args.push("--stat".to_owned());
+        args.push("--oneline".to_owned());
+    }
+    if arguments.get("path").is_some() {
+        let checked = checked_path(context, plan, workspace, arguments, "path", false)?;
+        args.push("--".to_owned());
+        args.push(relative_display(workspace, &checked));
+    }
+    git_owned(context, plan, workspace, arguments, &args).await
+}
+
+async fn git_blame(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let checked = checked_path(context, plan, workspace, arguments, "path", false)?;
+    anyhow::ensure!(checked.is_file(), "git_blame path must be a file");
+    let mut args = vec![
+        "--no-pager".to_owned(),
+        "blame".to_owned(),
+        "--line-porcelain".to_owned(),
+    ];
+    if let Some(start) = arguments.get("start_line").and_then(Value::as_u64) {
+        let end = arguments
+            .get("end_line")
+            .and_then(Value::as_u64)
+            .unwrap_or(start)
+            .max(start);
+        args.push("-L".to_owned());
+        args.push(format!("{start},{end}"));
+    }
+    args.push("--".to_owned());
+    args.push(relative_display(workspace, &checked));
+    git_owned(context, plan, workspace, arguments, &args).await
+}
+
+async fn git_grep(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let query = arguments
+        .get("query")
+        .and_then(Value::as_str)
+        .context("query is required")?;
+    anyhow::ensure!(!query.is_empty(), "query must not be empty");
+    let max_count = arguments
+        .get("max_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .clamp(1, 100);
+    let mut args = vec![
+        "--no-pager".to_owned(),
+        "grep".to_owned(),
+        "-n".to_owned(),
+        "-I".to_owned(),
+        format!("-m{max_count}"),
+        "-e".to_owned(),
+        query.to_owned(),
+        "--".to_owned(),
+    ];
+    if arguments.get("path").is_some() {
+        let checked = checked_path(context, plan, workspace, arguments, "path", false)?;
+        args.push(relative_display(workspace, &checked));
+    } else {
+        args.push(".".to_owned());
+    }
+    git_owned(context, plan, workspace, arguments, &args).await
+}
+
+async fn git_tags(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let max_count = arguments
+        .get("max_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(50)
+        .clamp(1, 200);
+    let args = vec![
+        "--no-pager".to_owned(),
+        "for-each-ref".to_owned(),
+        format!("--count={max_count}"),
+        "--sort=-creatordate".to_owned(),
+        "--format=%(refname:short) %(objectname:short) %(creatordate:short) %(subject)".to_owned(),
+        "refs/tags".to_owned(),
+    ];
+    git_owned(context, plan, workspace, arguments, &args).await
+}
+
+async fn git_diff_check(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let mut args = vec![
+        "--no-pager".to_owned(),
+        "diff".to_owned(),
+        "--check".to_owned(),
+    ];
+    if arguments
+        .get("staged")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        args.push("--cached".to_owned());
+    }
+    git_owned(context, plan, workspace, arguments, &args).await
+}
+
+async fn git_remote(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let mut outcome = git(
+        context,
+        plan,
+        workspace,
+        arguments,
+        &["--no-pager", "remote", "-v"],
+    )
+    .await?;
+    let output = std::mem::take(&mut outcome.output);
+    outcome.output = output
+        .lines()
+        .map(|line| redact_remote_credentials(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(outcome)
+}
+
+fn redact_remote_credentials(line: &str) -> String {
+    let mut redacted = line.to_owned();
+    let mut cursor = 0;
+    while let Some(relative_scheme) = redacted[cursor..].find("://") {
+        let authority_start = cursor + relative_scheme + 3;
+        let Some(relative_at) = redacted[authority_start..].find('@') else {
+            break;
+        };
+        let at = authority_start + relative_at;
+        redacted.replace_range(authority_start..=at, "***@");
+        cursor = authority_start + 4;
+    }
+    redacted
+}
+
 /// Single-quote an argument for `sh -c`. Used only for arguments the daemon
 /// itself supplies to git.
 fn shell_quote(argument: &str) -> String {
     format!("'{}'", argument.replace('\'', "'\\''"))
+}
+
+async fn project_check(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    tool: &str,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let cwd = command_cwd(context, plan, workspace, arguments)?;
+    let command = project_command(&cwd, tool).await?;
+    let mut merged = arguments.clone();
+    if let Value::Object(map) = &mut merged {
+        map.insert("command".to_owned(), Value::String(command.clone()));
+    }
+    shell_run(context, plan, workspace, &merged, None)
+        .await
+        .with_context(|| format!("run {tool} command {command}"))
+}
+
+async fn project_command(cwd: &Path, tool: &str) -> anyhow::Result<String> {
+    let has = |name: &str| cwd.join(name).is_file();
+    if has("Cargo.toml") {
+        return Ok(match tool {
+            "project_test" => "cargo test --all-targets".to_owned(),
+            "project_build" | "project_typecheck" => "cargo check --all-targets".to_owned(),
+            "project_lint" => "cargo clippy --all-targets --all-features".to_owned(),
+            "project_format" => "cargo fmt --all -- --check".to_owned(),
+            _ => unreachable!("unknown project check"),
+        });
+    }
+    if has("go.mod") {
+        return Ok(match tool {
+            "project_test" => "go test ./...".to_owned(),
+            "project_build" | "project_typecheck" => "go build ./...".to_owned(),
+            "project_lint" => "go vet ./...".to_owned(),
+            "project_format" => "test -z \"$(gofmt -l .)\"".to_owned(),
+            _ => unreachable!("unknown project check"),
+        });
+    }
+    if has("package.json") {
+        let contents = tokio::fs::read_to_string(cwd.join("package.json"))
+            .await
+            .context("read package.json")?;
+        let package: Value =
+            serde_json::from_str(&contents).context("parse package.json")?;
+        let scripts = package.get("scripts").and_then(Value::as_object);
+        let script = match tool {
+            "project_format" if scripts.is_some_and(|s| s.contains_key("format:check")) => {
+                Some("format:check")
+            }
+            "project_format" => None,
+            "project_typecheck" => scripts
+                .and_then(|s| s.contains_key("typecheck").then_some("typecheck")),
+            "project_lint" => scripts
+                .and_then(|s| s.contains_key("lint").then_some("lint")),
+            "project_build" => scripts
+                .and_then(|s| s.contains_key("build").then_some("build")),
+            "project_test" => scripts
+                .and_then(|s| s.contains_key("test").then_some("test")),
+            _ => None,
+        };
+        let Some(script) = script else {
+            anyhow::bail!(
+                "package.json has no conventional script for {tool}; refusing to invent an install or build command"
+            );
+        };
+        let runner = if has("pnpm-lock.yaml") {
+            "pnpm"
+        } else if has("yarn.lock") {
+            "yarn"
+        } else if has("bun.lockb") || has("bun.lock") {
+            "bun"
+        } else {
+            "npm"
+        };
+        return Ok(if runner == "npm" {
+            format!("npm run {script}")
+        } else {
+            format!("{runner} run {script}")
+        });
+    }
+    if has("pyproject.toml") || has("pytest.ini") || has("setup.cfg") {
+        return Ok(match tool {
+            "project_test" => "python -m pytest".to_owned(),
+            "project_build" => "python -m compileall -q .".to_owned(),
+            "project_typecheck" => "pyright".to_owned(),
+            "project_lint" => "ruff check .".to_owned(),
+            "project_format" => "ruff format --check .".to_owned(),
+            _ => unreachable!("unknown project check"),
+        });
+    }
+    anyhow::bail!(
+        "could not detect a Cargo, Go, Node, or Python project in {}",
+        cwd.display()
+    )
+}
+
+async fn env_info(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let cwd = command_cwd(context, plan, workspace, arguments)?;
+    let mut manifests = Vec::new();
+    for name in [
+        "Cargo.toml",
+        "package.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "go.mod",
+        "pyproject.toml",
+        "requirements.txt",
+    ] {
+        if cwd.join(name).is_file() {
+            manifests.push(name);
+        }
+    }
+    let mut command_arguments = arguments.clone();
+    if let Value::Object(map) = &mut command_arguments {
+        map.insert(
+            "command".to_owned(),
+            Value::String(
+                "printf 'platform: '; uname -srm; printf 'shell: '; printf '%s\\n' \"$SHELL\"; \
+                 git --version 2>/dev/null || true; cargo --version 2>/dev/null || true; \
+                 node --version 2>/dev/null || true; python --version 2>/dev/null || true; \
+                 go version 2>/dev/null || true"
+                    .to_owned(),
+            ),
+        );
+    }
+    let versions = shell_run(context, plan, workspace, &command_arguments, None).await?;
+    Ok(ToolOutcome::text(format!(
+        "Workspace: {}\nManifests: {}\n\n{}",
+        cwd.display(),
+        if manifests.is_empty() {
+            "(none)".to_owned()
+        } else {
+            manifests.join(", ")
+        },
+        versions.output
+    )))
+}
+
+async fn process_list(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let mut command_arguments = arguments.clone();
+    if let Value::Object(map) = &mut command_arguments {
+        map.insert(
+            "command".to_owned(),
+            Value::String("ps -eo pid=,ppid=,pcpu=,pmem=,comm=,args=".to_owned()),
+        );
+        map.insert("timeout_ms".to_owned(), json!(10_000));
+        map.insert(
+            "cwd".to_owned(),
+            Value::String(
+                context
+                    .session
+                    .workspace_path
+                    .clone()
+                    .context("this session has no workspace")?,
+            ),
+        );
+    }
+    let output = shell_run(
+        context,
+        plan,
+        context.session.workspace_path.as_deref().map(Path::new),
+        &command_arguments,
+        None,
+    )
+    .await?;
+    let filter = arguments
+        .get("match")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    if let Some(filter) = filter {
+        let filtered = output
+            .output
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().contains(&filter))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(ToolOutcome::text(if filtered.is_empty() {
+            "(no matching processes)".to_owned()
+        } else {
+            filtered
+        }));
+    }
+    Ok(output)
+}
+
+async fn code_symbols(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    arguments: &Value,
+) -> anyhow::Result<ToolOutcome> {
+    let root = if arguments.get("path").is_some() {
+        checked_path(context, plan, workspace, arguments, "path", false)?
+    } else {
+        workspace
+            .context("this session has no workspace")?
+            .to_path_buf()
+    };
+    let max_symbols = arguments
+        .get("max_symbols")
+        .and_then(Value::as_u64)
+        .unwrap_or(500)
+        .clamp(1, 1_000) as usize;
+    let name_glob = arguments.get("name_glob").and_then(Value::as_str);
+    let mut files = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(path) = stack.pop() {
+        let metadata = tokio::fs::symlink_metadata(&path).await?;
+        if metadata.is_dir() {
+            let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+            if SKIPPED_DIRECTORIES.contains(&name) {
+                continue;
+            }
+            let mut entries = tokio::fs::read_dir(&path).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                stack.push(entry.path());
+            }
+        } else if metadata.is_file() {
+            let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+            if name_glob
+                .map(|pattern| glob_match(pattern, name))
+                .unwrap_or(true)
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let mut symbols = Vec::new();
+    for path in files {
+        let bytes = tokio::fs::read(&path).await?;
+        if bytes.len() > 2 * 1024 * 1024 || bytes.contains(&0) {
+            continue;
+        }
+        let extension = path.extension().and_then(|v| v.to_str()).unwrap_or("");
+        if !matches!(
+            extension,
+            "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "c" | "cpp" | "h"
+        ) {
+            continue;
+        }
+        for (line_number, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
+            let trimmed = line.trim_start();
+            let declaration = trimmed
+                .strip_prefix("pub ")
+                .or_else(|| trimmed.strip_prefix("export "))
+                .or_else(|| trimmed.strip_prefix("async "))
+                .unwrap_or(trimmed);
+            let kind = [
+                ("fn ", "function"),
+                ("function ", "function"),
+                ("def ", "function"),
+                ("func ", "function"),
+                ("class ", "class"),
+                ("struct ", "struct"),
+                ("enum ", "enum"),
+                ("trait ", "trait"),
+                ("interface ", "interface"),
+                ("type ", "type"),
+                ("const ", "constant"),
+                ("mod ", "module"),
+            ]
+            .iter()
+            .find_map(|(prefix, kind)| declaration.strip_prefix(prefix).map(|rest| (*kind, rest)));
+            let Some((kind, rest)) = kind else {
+                continue;
+            };
+            let name = rest
+                .split(|character: char| {
+                    matches!(character, '(' | '<' | ':' | '=' | '{' | ' ' | '\t')
+                })
+                .next()
+                .unwrap_or("")
+                .trim();
+            if name.is_empty() {
+                continue;
+            }
+            symbols.push(format!(
+                "{}:{}: {kind} {name}",
+                relative_display(workspace, &path),
+                line_number + 1
+            ));
+            if symbols.len() >= max_symbols {
+                symbols.push(format!("[... stopped at {max_symbols} symbols ...]"));
+                return Ok(ToolOutcome::text(symbols.join("\n")));
+            }
+        }
+    }
+    if symbols.is_empty() {
+        return Ok(ToolOutcome::text("(no symbols found)"));
+    }
+    Ok(ToolOutcome::text(symbols.join("\n")))
 }
 
 // ---------------------------------------------------------------------------
@@ -3158,8 +3876,20 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Power tools: web search, web fetch, LSP diagnostics.
+    // Power tools: advanced workspace, project, web, and language-server tools.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn remote_credentials_are_redacted() {
+        assert_eq!(
+            redact_remote_credentials("origin https://alice:secret@example.com/repo.git (fetch)"),
+            "origin https://***@example.com/repo.git (fetch)"
+        );
+        assert_eq!(
+            redact_remote_credentials("origin git@example.com:repo.git (push)"),
+            "origin git@example.com:repo.git (push)"
+        );
+    }
 
     #[test]
     fn percent_encoding_round_trips() {
@@ -3331,15 +4061,22 @@ mod tests {
                 data_dir: std::path::Path::new("/tmp"),
             }
         }
-        for (tool, arguments) in [
-            ("web_search", json!({ "query": "rust" })),
-            ("web_fetch", json!({ "url": "https://example.com" })),
-            ("lsp_diagnostics", json!({ "path": "main.rs" })),
-        ] {
-            let decision = agent_policy::decide(&request(tool, &arguments, AgentPermissionMode::Ask, permissions, &backend));
+        for tool in crate::agent_tools::POWER_TOOLS {
+            let arguments = json!({});
+            let decision = agent_policy::decide(&request(
+                tool,
+                &arguments,
+                AgentPermissionMode::Ask,
+                permissions,
+                &backend,
+            ));
             match decision {
                 agent_policy::PolicyDecision::RequireApproval { environment, .. } => {
-                    assert_eq!(environment, AgentEnvironment::Host, "{tool} must run as a host action");
+                    assert_eq!(
+                        environment,
+                        AgentEnvironment::Host,
+                        "{tool} must run as a host action"
+                    );
                 }
                 other => panic!("{tool} should require host approval in ask mode, got {other:?}"),
             }

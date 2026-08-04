@@ -34,6 +34,9 @@ pub const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { name: "doc_read", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
     ToolSpec { name: "fs_stat", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
     ToolSpec { name: "fs_search", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
+    ToolSpec { name: "fs_find", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
+    ToolSpec { name: "fs_read_many", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
+    ToolSpec { name: "fs_tree", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
     ToolSpec { name: "fs_write", risk: ToolRiskLevel::Write, executes: false, needs_workspace: true },
     ToolSpec { name: "fs_patch", risk: ToolRiskLevel::Write, executes: false, needs_workspace: true },
     ToolSpec { name: "fs_mkdir", risk: ToolRiskLevel::Write, executes: false, needs_workspace: true },
@@ -47,6 +50,23 @@ pub const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { name: "shell_terminate", risk: ToolRiskLevel::Safe, executes: false, needs_workspace: true },
     ToolSpec { name: "git_status", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
     ToolSpec { name: "git_diff", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "git_log", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "git_show", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "git_blame", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "git_grep", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "git_branch", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "git_tags", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "git_worktree", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "git_diff_check", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "git_remote", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "project_test", risk: ToolRiskLevel::Execute, executes: true, needs_workspace: true },
+    ToolSpec { name: "project_build", risk: ToolRiskLevel::Execute, executes: true, needs_workspace: true },
+    ToolSpec { name: "project_lint", risk: ToolRiskLevel::Execute, executes: true, needs_workspace: true },
+    ToolSpec { name: "project_typecheck", risk: ToolRiskLevel::Execute, executes: true, needs_workspace: true },
+    ToolSpec { name: "project_format", risk: ToolRiskLevel::Execute, executes: true, needs_workspace: true },
+    ToolSpec { name: "env_info", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
+    ToolSpec { name: "process_list", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
+    ToolSpec { name: "code_symbols", risk: ToolRiskLevel::Read, executes: false, needs_workspace: true },
     ToolSpec { name: "request_permission", risk: ToolRiskLevel::Safe, executes: false, needs_workspace: false },
     ToolSpec { name: "spawn_subagent", risk: ToolRiskLevel::Execute, executes: false, needs_workspace: false },
     // Power tools: the optional "Powerful" mode surface. They run as host
@@ -83,7 +103,32 @@ pub fn is_network_tool(name: &str) -> bool {
 /// (Bubblewrap hides `$HOME`, so a sandboxed run cannot reach them). Approvals
 /// gate each call and sandbox-only mode refuses them.
 pub fn is_host_tool(name: &str) -> bool {
-    matches!(name, "web_search" | "web_fetch" | "lsp_diagnostics")
+    matches!(
+        name,
+        "fs_find"
+            | "fs_read_many"
+            | "fs_tree"
+            | "git_log"
+            | "git_show"
+            | "git_blame"
+            | "git_grep"
+            | "git_branch"
+            | "git_tags"
+            | "git_worktree"
+            | "git_diff_check"
+            | "git_remote"
+            | "project_test"
+            | "project_build"
+            | "project_lint"
+            | "project_typecheck"
+            | "project_format"
+            | "env_info"
+            | "process_list"
+            | "code_symbols"
+            | "web_search"
+            | "web_fetch"
+            | "lsp_diagnostics"
+    )
 }
 
 pub fn tool_spec(name: &str) -> Option<&'static ToolSpec> {
@@ -568,12 +613,12 @@ pub fn requested_paths(
     data_dir: &Path,
 ) -> Vec<RequestedPath> {
     let fields: &[(&str, bool)] = match tool {
-        "fs_read" | "doc_read" | "fs_list" | "fs_stat" | "fs_search" => &[("path", false)],
+        "fs_read" | "doc_read" | "fs_list" | "fs_stat" | "fs_search" | "fs_find" | "fs_tree" | "code_symbols" => &[("path", false)],
         "fs_write" | "fs_patch" | "fs_mkdir" => &[("path", true)],
         "fs_delete" => &[("path", true)],
         "fs_move" => &[("from", true), ("to", true)],
         "fs_copy" => &[("from", false), ("to", true)],
-        "shell_run" | "shell_start" | "git_status" | "git_diff" => &[("cwd", false)],
+        "shell_run" | "shell_start" | "git_status" | "git_diff" | "git_log" | "git_show" | "git_blame" | "git_grep" | "git_branch" | "git_tags" | "git_worktree" | "git_diff_check" | "git_remote" | "project_test" | "project_build" | "project_lint" | "project_typecheck" | "project_format" | "env_info" => &[("cwd", false)],
         _ => &[],
     };
     let secrets = secret_paths(Some(data_dir));
@@ -615,6 +660,36 @@ pub fn requested_paths(
                     inside_workspace,
                     secret,
                 })
+            })
+            .collect();
+    }
+
+    if tool == "fs_read_many" {
+        return arguments
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|raw| !raw.trim().is_empty())
+            .map(|raw| {
+                let resolved = resolve_path(workspace, raw);
+                let real = canonical_ancestor(&resolved);
+                let inside_workspace = workspace_real
+                    .as_deref()
+                    .map(|root| is_inside(&real, root))
+                    .unwrap_or(false);
+                let secret = secrets
+                    .iter()
+                    .any(|secret| is_inside(&real, secret) || is_inside(&resolved, secret));
+                RequestedPath {
+                    raw: raw.to_owned(),
+                    resolved,
+                    real,
+                    write: false,
+                    inside_workspace,
+                    secret,
+                }
             })
             .collect();
     }

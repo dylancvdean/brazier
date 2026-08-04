@@ -52,6 +52,9 @@ fn label(name: &str) -> &'static str {
         "doc_read" => "Read document",
         "fs_stat" => "Stat",
         "fs_search" => "Search",
+        "fs_find" => "Find paths",
+        "fs_read_many" => "Read files",
+        "fs_tree" => "Tree",
         "fs_write" => "Write",
         "fs_patch" => "Edit",
         "fs_mkdir" => "Make directory",
@@ -65,6 +68,23 @@ fn label(name: &str) -> &'static str {
         "shell_terminate" => "Stop process",
         "git_status" => "Git status",
         "git_diff" => "Git diff",
+        "git_log" => "Git log",
+        "git_show" => "Git show",
+        "git_blame" => "Git blame",
+        "git_grep" => "Git grep",
+        "git_branch" => "Git branches",
+        "git_tags" => "Git tags",
+        "git_worktree" => "Git worktrees",
+        "git_diff_check" => "Git diff check",
+        "git_remote" => "Git remotes",
+        "project_test" => "Run tests",
+        "project_build" => "Build project",
+        "project_lint" => "Lint project",
+        "project_typecheck" => "Type-check project",
+        "project_format" => "Format check",
+        "env_info" => "Environment",
+        "process_list" => "Processes",
+        "code_symbols" => "Symbols",
         "request_permission" => "Request access",
         "spawn_subagent" => "Spawn subagent",
         "web_search" => "Search web",
@@ -181,6 +201,47 @@ fn raw_definitions() -> Vec<RawDefinition> {
                     "case_sensitive": { "type": "boolean", "description": "Default false." }
                 }),
                 vec!["query"],
+            ),
+        ),
+        (
+            "fs_find",
+            "Find files and directories by a glob pattern. Results are workspace-relative, \
+             symlinks that leave the workspace are skipped, and common generated directories \
+             are ignored. Prefer this over shelling out to find.",
+            object(
+                json!({
+                    "pattern": { "type": "string", "description": "Glob such as `src/**/*.rs`, `*.toml`, or `tests` ." },
+                    "path": path_property("Directory to search. Defaults to the workspace root."),
+                    "kind": { "type": "string", "enum": ["any", "file", "directory"], "description": "Filter result type. Default any." },
+                    "max_results": { "type": "integer", "description": "Maximum results. Default 200.", "minimum": 1, "maximum": 500 }
+                }),
+                vec!["pattern"],
+            ),
+        ),
+        (
+            "fs_read_many",
+            "Read several small text files in one call. Each file is labeled and line-numbered; \
+             use fs_read for a large file or a precise range.",
+            object(
+                json!({
+                    "paths": { "type": "array", "description": "Workspace-relative files, up to 16.", "items": path_property("File to read."), "minItems": 1, "maxItems": 16 },
+                    "max_bytes_each": { "type": "integer", "description": "Per-file byte limit. Default 131072.", "minimum": 1024, "maximum": 524288 }
+                }),
+                vec!["paths"],
+            ),
+        ),
+        (
+            "fs_tree",
+            "Render a compact directory tree with files, directories, and sizes. Generated and \
+             vendored directories are skipped; use fs_list when you need a single directory's \
+             detailed listing.",
+            object(
+                json!({
+                    "path": path_property("Directory to render. Defaults to the workspace root."),
+                    "depth": { "type": "integer", "description": "Levels to descend, 1-6. Default 3.", "minimum": 1, "maximum": 6 },
+                    "max_entries": { "type": "integer", "description": "Maximum entries. Default 500.", "minimum": 1, "maximum": 2000 }
+                }),
+                vec![],
             ),
         ),
         (
@@ -333,6 +394,143 @@ fn raw_definitions() -> Vec<RawDefinition> {
             ),
         ),
         (
+            "git_log",
+            "Show concise commit history, optionally limited to a path. This is read-only and \
+             includes commit ids, decorations, authors, dates, and subjects.",
+            object(
+                json!({
+                    "max_count": { "type": "integer", "description": "Number of commits. Default 20.", "minimum": 1, "maximum": 100 },
+                    "path": path_property("Limit history to one path."),
+                    "cwd": path_property("Repository directory. Defaults to the workspace root.")
+                }),
+                vec![],
+            ),
+        ),
+        (
+            "git_show",
+            "Show a commit, tag, or object with a bounded patch. Use this to inspect history \
+             without constructing an arbitrary shell command.",
+            object(
+                json!({
+                    "revision": { "type": "string", "description": "Commit, tag, or object name, e.g. `HEAD~2`." },
+                    "path": path_property("Limit the object diff to one path."),
+                    "stat_only": { "type": "boolean", "description": "Show only the change summary. Default false." },
+                    "cwd": path_property("Repository directory. Defaults to the workspace root.")
+                }),
+                vec!["revision"],
+            ),
+        ),
+        (
+            "git_blame",
+            "Show line-by-line commit attribution for a file, optionally narrowed to a line \
+             range.",
+            object(
+                json!({
+                    "path": path_property("File to attribute."),
+                    "start_line": { "type": "integer", "minimum": 1 },
+                    "end_line": { "type": "integer", "minimum": 1 },
+                    "cwd": path_property("Repository directory. Defaults to the workspace root.")
+                }),
+                vec!["path"],
+            ),
+        ),
+        (
+            "git_grep",
+            "Search tracked files with Git's text-aware grep and return matching lines with \
+             paths and line numbers.",
+            object(
+                json!({
+                    "query": { "type": "string", "description": "Literal or regular-expression pattern accepted by git grep." },
+                    "path": path_property("Limit the search to one path."),
+                    "max_count": { "type": "integer", "description": "Maximum matches per file. Default 20.", "minimum": 1, "maximum": 100 },
+                    "cwd": path_property("Repository directory. Defaults to the workspace root.")
+                }),
+                vec!["query"],
+            ),
+        ),
+        (
+            "git_branch",
+            "List local and remote branches with their upstream and latest commit.",
+            object(json!({ "cwd": path_property("Repository directory. Defaults to the workspace root.") }), vec![]),
+        ),
+        (
+            "git_tags",
+            "List tags sorted by creation date, with the referenced object and subject.",
+            object(json!({ "max_count": { "type": "integer", "minimum": 1, "maximum": 200 }, "cwd": path_property("Repository directory. Defaults to the workspace root.") }), vec![]),
+        ),
+        (
+            "git_worktree",
+            "List worktrees and their branch or detached commit state.",
+            object(json!({ "cwd": path_property("Repository directory. Defaults to the workspace root.") }), vec![]),
+        ),
+        (
+            "git_diff_check",
+            "Check the working tree or index for whitespace errors and malformed patches.",
+            object(json!({ "staged": { "type": "boolean", "description": "Check the index instead of the working tree." }, "cwd": path_property("Repository directory. Defaults to the workspace root.") }), vec![]),
+        ),
+        (
+            "git_remote",
+            "List configured Git remotes and their fetch/push URLs without exposing credentials \
+             embedded in URLs.",
+            object(json!({ "cwd": path_property("Repository directory. Defaults to the workspace root.") }), vec![]),
+        ),
+        (
+            "project_test",
+            "Run the repository's conventional test command, detected from Cargo, Node, Python, \
+             or Go project files. This never installs dependencies.",
+            object_with_reason(json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }), vec![]),
+        ),
+        (
+            "project_build",
+            "Run the repository's conventional build or compile check, detected from Cargo, \
+             Node, Python, or Go project files. This never installs dependencies.",
+            object_with_reason(json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }), vec![]),
+        ),
+        (
+            "project_lint",
+            "Run the repository's configured lint command when it can be detected from Cargo, \
+             Node, Python, or Go project files. Missing linters are reported clearly.",
+            object_with_reason(json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }), vec![]),
+        ),
+        (
+            "project_typecheck",
+            "Run a non-mutating type-check or compiler check detected from the project files.",
+            object_with_reason(json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }), vec![]),
+        ),
+        (
+            "project_format",
+            "Check formatting without changing files, using the repository's conventional \
+             formatter for Rust, Node, Python, or Go.",
+            object_with_reason(json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }), vec![]),
+        ),
+        (
+            "env_info",
+            "Report non-secret host and workspace facts useful for choosing a build command: \
+             platform, architecture, shell, tool versions, and detected project manifests. \
+             Credential values are never returned.",
+            object(json!({ "cwd": path_property("Project directory. Defaults to the workspace root.") }), vec![]),
+        ),
+        (
+            "process_list",
+            "List processes owned by the current user with pid, parent pid, CPU, memory, and \
+             command. Use this to diagnose a stuck build or server.",
+            object_with_reason(json!({ "match": { "type": "string", "description": "Optional case-insensitive substring filter." } }), vec![]),
+        ),
+        (
+            "code_symbols",
+            "Extract a compact symbol index from source files using common declaration forms. \
+             This is a fast fallback when no language server is available; it is not a semantic \
+             cross-reference engine.",
+            object(
+                json!({
+                    "path": path_property("File or directory to index. Defaults to the workspace root."),
+                    "name_glob": { "type": "string", "description": "Optional filename filter, e.g. `*.rs`." },
+                    "max_symbols": { "type": "integer", "minimum": 1, "maximum": 1000 }
+                }),
+                vec![],
+            ),
+        ),
+        (
             "request_permission",
             "Ask the user for access you do not have yet: a path outside the workspace, network \
              access, or host execution. Explain why in reason. Prefer this over guessing when a \
@@ -449,7 +647,31 @@ fn raw_definitions() -> Vec<RawDefinition> {
 }
 
 /// Names of the optional "Powerful" mode tools. Simple mode never exposes them.
-pub const POWER_TOOLS: &[&str] = &["web_search", "web_fetch", "lsp_diagnostics"];
+pub const POWER_TOOLS: &[&str] = &[
+    "fs_find",
+    "fs_read_many",
+    "fs_tree",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "git_grep",
+    "git_branch",
+    "git_tags",
+    "git_worktree",
+    "git_diff_check",
+    "git_remote",
+    "project_test",
+    "project_build",
+    "project_lint",
+    "project_typecheck",
+    "project_format",
+    "env_info",
+    "process_list",
+    "code_symbols",
+    "web_search",
+    "web_fetch",
+    "lsp_diagnostics",
+];
 
 /// Names of every power tool, for the daemon's mode-aware defaults.
 pub fn power_tool_names() -> Vec<String> {
@@ -663,6 +885,20 @@ mod tests {
             assert!(schema["required"].is_array(), "{}", entry["name"]);
             // Weak models invent arguments; refusing extras keeps repair honest.
             assert_eq!(schema["additionalProperties"], false, "{}", entry["name"]);
+        }
+    }
+
+    #[test]
+    fn powerful_tools_are_cataloged_as_host_actions() {
+        let catalog = definitions();
+        let entries = catalog["data"].as_array().expect("array");
+        for name in POWER_TOOLS {
+            let entry = entries
+                .iter()
+                .find(|entry| entry["name"] == *name)
+                .unwrap_or_else(|| panic!("missing power tool {name}"));
+            assert_eq!(entry["power_tool"], true, "{name}");
+            assert_eq!(entry["default_environment"], "host", "{name}");
         }
     }
 
