@@ -649,6 +649,10 @@ async fn run_tool(
         "spawn_subagent" => anyhow::bail!(
             "`spawn_subagent` runs in the agent worker, not through the daemon exec path"
         ),
+        "web_search" | "web_fetch" | "lsp_diagnostics" => anyhow::bail!(
+            "`{}` is not implemented yet. This Powerful-mode tool ships in a later build.",
+            request.tool
+        ),
         other if agent_policy::is_mcp_tool_name(other) => {
             mcp_tool(context, plan, other, arguments).await
         }
@@ -1859,7 +1863,7 @@ mod tests {
                     title: Some("test".to_owned()),
                     workspace_path: Some(workspace.path().display().to_string()),
                     model: "gguf:test".to_owned(),
-                    runtime_id: Some("pi".to_owned()),
+                    runtime_id: Some("simple".to_owned()),
                     permission_mode: Some(mode),
                     permission_settings: Some(AgentPermissionSettings {
                         auto_approve_sandboxed_actions: true,

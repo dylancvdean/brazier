@@ -84,6 +84,8 @@ export type AgentCapabilitiesResponse = {
 
 export type AgentPreferenceResponse = {
   default_runtime_id: string
+  /** Power tools enabled for Powerful mode, by name. */
+  power_tools?: string[]
 }
 
 /** A chat model the daemon serves, as advertised by the OpenAI-compatible list. */
@@ -202,6 +204,7 @@ export class BrokerClient {
         executes: boolean
         needs_workspace: boolean
         default_environment: AgentEnvironment
+        power_tool?: boolean
       }>
     }>('/api/v1/agent/tools')
     return payload.data.map((entry) => ({
@@ -212,7 +215,8 @@ export class BrokerClient {
       risk: entry.risk,
       executes: entry.executes,
       needsWorkspace: entry.needs_workspace,
-      defaultEnvironment: entry.default_environment
+      defaultEnvironment: entry.default_environment,
+      powerTool: entry.power_tool ?? false
     }))
   }
 

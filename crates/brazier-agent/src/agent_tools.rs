@@ -28,6 +28,9 @@ pub fn definitions() -> Value {
                 "executes": spec.executes,
                 "needs_workspace": spec.needs_workspace,
                 "default_environment": "sandbox",
+                // Power tools are the optional "Powerful" mode surface. Simple
+                // mode never exposes them; the Manage → Agent page toggles them.
+                "power_tool": POWER_TOOLS.contains(&name),
             })
         })
         .collect();
@@ -58,6 +61,9 @@ fn label(name: &str) -> &'static str {
         "git_diff" => "Git diff",
         "request_permission" => "Request access",
         "spawn_subagent" => "Spawn subagent",
+        "web_search" => "Search web",
+        "web_fetch" => "Fetch URL",
+        "lsp_diagnostics" => "LSP diagnostics",
         _ => "Tool",
     }
 }
@@ -375,7 +381,74 @@ fn raw_definitions() -> Vec<RawDefinition> {
                 vec![],
             ),
         ),
+        // Power tools (Powerful mode). Metadata only for now: the executors are
+        // still being built, so a call fails with a clear "not implemented"
+        // message until they ship.
+        (
+            "web_search",
+            "Search the web for up-to-date information and return a ranked list of results \
+             with titles, URLs, and short snippets. Use it for facts that changed recently or \
+             are outside the workspace.",
+            object(
+                json!({
+                    "query": {
+                        "type": "string",
+                        "description": "The search query, phrased like you would type into a search engine."
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum results to return. Default 5.",
+                        "minimum": 1,
+                        "maximum": 10
+                    }
+                }),
+                vec!["query"],
+            ),
+        ),
+        (
+            "web_fetch",
+            "Fetch a URL and return its text content. Useful for reading a page the model \
+             cannot reach directly, such as documentation or an API reference.",
+            object(
+                json!({
+                    "url": {
+                        "type": "string",
+                        "description": "Absolute http(s) URL to fetch."
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters to return. Default 12000.",
+                        "minimum": 500,
+                        "maximum": 50000
+                    }
+                }),
+                vec!["url"],
+            ),
+        ),
+        (
+            "lsp_diagnostics",
+            "Run the language server for a file in the workspace and return its diagnostics \
+             (errors and warnings) with severity, source line, and message.",
+            object(
+                json!({
+                    "path": path_property("File to analyze, relative to the workspace root."),
+                    "include_warnings": {
+                        "type": "boolean",
+                        "description": "Include warnings, not just errors. Default true."
+                    }
+                }),
+                vec!["path"],
+            ),
+        ),
     ]
+}
+
+/// Names of the optional "Powerful" mode tools. Simple mode never exposes them.
+pub const POWER_TOOLS: &[&str] = &["web_search", "web_fetch", "lsp_diagnostics"];
+
+/// Names of every power tool, for the daemon's mode-aware defaults.
+pub fn power_tool_names() -> Vec<String> {
+    POWER_TOOLS.iter().map(|name| (*name).to_owned()).collect()
 }
 
 /// The editable application default. Each shortcut is expanded from live
@@ -541,7 +614,7 @@ mod tests {
             title: "task".to_owned(),
             workspace_path: Some("/ws".to_owned()),
             model: "gguf:test".to_owned(),
-            runtime_id: "pi".to_owned(),
+            runtime_id: brazier_protocol::agent_types::AGENT_RUNTIME_SIMPLE.to_owned(),
             permission_mode: mode,
             permission_settings: AgentPermissionSettings::default(),
             enabled_tools: None,

@@ -4829,6 +4829,43 @@ label.span-2 {
   margin-top: 3px;
 }
 
+.power-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.power-tools-list label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 12px;
+  align-items: start;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  cursor: pointer;
+}
+
+.power-tools-list label.active {
+  border-color: var(--accent, #7aa2c8);
+}
+
+.power-tools-list input {
+  margin-top: 3px;
+}
+
+.power-tool-label strong {
+  display: block;
+}
+
+.power-tool-label small {
+  display: block;
+  color: var(--muted);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
 .agent-sandbox-badge.unsandboxed {
   border-color: #67393c;
   color: #e8adb1;

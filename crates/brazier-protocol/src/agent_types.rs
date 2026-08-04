@@ -345,8 +345,8 @@ pub struct CreateAgentSession {
     #[serde(default)]
     pub workspace_path: Option<String>,
     pub model: String,
-    /// Agent framework adapter id (`pi`). When omitted, the daemon resolves
-    /// the saved default preference, then falls back to `pi`.
+    /// Agent framework adapter id (`simple` or `powerful`). When omitted, the
+    /// daemon resolves the saved default preference, then falls back to `simple`.
     #[serde(default)]
     pub runtime_id: Option<String>,
     #[serde(default)]
@@ -367,8 +367,14 @@ pub struct CreateAgentSession {
 }
 
 /// Stock agent framework adapters the daemon advertises.
+///
+/// `simple` exposes the standard broker-sandboxed tool set. `powerful` adds the
+/// optional power-tool surface the operator enables in Manage → Agent. `pi` is
+/// kept as a legacy alias so sessions created before modes existed still open.
+pub const AGENT_RUNTIME_SIMPLE: &str = "simple";
+pub const AGENT_RUNTIME_POWERFUL: &str = "powerful";
 pub const AGENT_RUNTIME_PI: &str = "pi";
-pub const DEFAULT_AGENT_RUNTIME_ID: &str = AGENT_RUNTIME_PI;
+pub const DEFAULT_AGENT_RUNTIME_ID: &str = AGENT_RUNTIME_SIMPLE;
 
 /// Partial session update. Absent fields keep their stored value.
 #[derive(Debug, Clone, Default, Deserialize)]

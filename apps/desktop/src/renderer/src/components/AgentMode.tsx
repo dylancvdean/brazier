@@ -651,7 +651,7 @@ function shortModelLabel(modelId: string): string {
 export function AgentMode(props: Props): React.JSX.Element {
   const { onError, onSessionBound } = props
   const [capabilities, setCapabilities] = useState<AgentCapabilities | null>(null)
-  const [defaultRuntimeId, setDefaultRuntimeId] = useState('pi')
+  const [defaultRuntimeId, setDefaultRuntimeId] = useState('simple')
   const [tools, setTools] = useState<AgentToolCatalogEntry[]>([])
   const [sessions, setSessions] = useState<AgentSessionSummary[]>([])
   const [session, setSession] = useState<AgentSessionSummary | null>(null)
@@ -696,7 +696,13 @@ export function AgentMode(props: Props): React.JSX.Element {
   const permissionMode: AgentPermissionMode =
     session?.permission_mode ?? pendingPermissionMode
   const activeRuntimeId = session?.runtime_id ?? defaultRuntimeId
-  const availableToolNames = useMemo(() => tools.map((tool) => tool.name), [tools])
+  const powerfulMode = activeRuntimeId === 'powerful'
+  /** Tools this mode exposes: power tools are hidden from Simple sessions. */
+  const visibleTools = useMemo(
+    () => (powerfulMode ? tools : tools.filter((tool) => tool.power_tool !== true)),
+    [tools, powerfulMode]
+  )
+  const availableToolNames = useMemo(() => visibleTools.map((tool) => tool.name), [visibleTools])
   const enabledToolNames = useMemo(() => {
     const selected = session?.enabled_tools ?? pendingEnabledTools ?? availableToolNames
     const available = new Set(availableToolNames)
@@ -719,7 +725,7 @@ export function AgentMode(props: Props): React.JSX.Element {
       })
       .catch((cause: unknown) => onError(errorText(cause)))
     void fetchAgentPreference()
-      .then((preference) => setDefaultRuntimeId(preference.default_runtime_id || 'pi'))
+      .then((preference) => setDefaultRuntimeId(preference.default_runtime_id || 'simple'))
       .catch(() => undefined)
     void fetchAgentTools().then(setTools).catch(() => setTools([]))
     void listAgentSessions()
@@ -1474,7 +1480,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   }
 
   const sandbox = capabilities?.sandbox
-  const executeTools = tools.filter((tool) => tool.executes).length
+  const executeTools = visibleTools.filter((tool) => tool.executes).length
 
   // Keep the shared composer in step with what the agent can currently do.
   const { onComposerChange, onSidebarChange } = props
@@ -1594,7 +1600,7 @@ export function AgentMode(props: Props): React.JSX.Element {
           className="chip-button subtle"
           type="button"
           disabled={!workspaceSettingsPath || running}
-          title="Edit the system prompt shared by Pi agent tasks in this workspace."
+          title="Edit the system prompt shared by agent tasks in this workspace."
           onClick={() => void openPromptEditor()}
         >
           <Layers size={13} />
@@ -1605,18 +1611,18 @@ export function AgentMode(props: Props): React.JSX.Element {
             className={enabledToolNames.length > 0 ? 'chip-button subtle tools-on' : 'chip-button subtle'}
             type="button"
             disabled={running || toolsSaving}
-            title={`${enabledToolNames.length} of ${tools.length} tools exposed to the agent`}
+            title={`${enabledToolNames.length} of ${visibleTools.length} tools exposed to the agent`}
             onClick={() => (toolsMenuOpen ? void closeToolsMenu() : openToolsMenu())}
           >
             {toolsSaving ? <LoaderCircle className="spin" size={13} /> : <Wrench size={13} />}
             Tools
             <span className="agent-tool-count">
-              {enabledToolNames.length}/{tools.length}
+              {enabledToolNames.length}/{visibleTools.length}
             </span>
           </button>
           {toolsMenuOpen && (
             <ToolsMenu
-              tools={tools}
+              tools={visibleTools}
               enabled={toolDraft}
               disabled={toolsSaving}
               placement="below"
@@ -1640,10 +1646,10 @@ export function AgentMode(props: Props): React.JSX.Element {
         </div>
         <span
           className="agent-runtime-badge"
-          title="Pi orchestration with Brazier broker tools and OS sandbox. Change the default under Manage → Agent."
+          title="Brazier agent with broker tools and OS sandbox. Change the mode under Manage → Agent."
         >
           <Bot size={13} />
-          Pi
+          {activeRuntimeId === 'powerful' ? 'Powerful' : 'Simple'}
         </span>
         {sandbox && <SandboxBadge sandbox={sandbox} />}
         <div className="agent-mode-select">
@@ -1726,7 +1732,7 @@ export function AgentMode(props: Props): React.JSX.Element {
             </div>
             <h2>Give the agent a task</h2>
             <p>
-              {`It reads and edits files in the workspace and runs commands there. Everything runs through Brazier's own policy layer: ${executeTools} of ${tools.length} tools can execute programs, and each needs your approval unless you change the mode above.`}
+              {`It reads and edits files in the workspace and runs commands there. Everything runs through Brazier's own policy layer: ${executeTools} of ${visibleTools.length} tools can execute programs, and each needs your approval unless you change the mode above.`}
             </p>
             <div className="agent-suggestions">
               <button type="button" onClick={() => props.onSuggestPrompt?.('Summarize this repository: layout, build commands, and test entry points.')}>

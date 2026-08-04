@@ -196,7 +196,11 @@ export class AgentWorkerCore {
     const enabled = remote.session.enabled_tools ?? undefined
     const tools = enabled
       ? this.tools.filter((tool) => enabled.includes(tool.name))
-      : this.tools
+      : // Legacy sessions predate mode-aware defaults: keep power tools out of
+        // Simple sessions so they never leak into the model's catalog.
+        this.tools.filter(
+          (tool) => tool.powerTool !== true || remote.session.runtime_id === 'powerful'
+        )
     const [profile, defaults] = await Promise.all([
       broker.textProfile(remote.session.model),
       broker.runtimeInferenceSettings()

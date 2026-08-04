@@ -76,6 +76,8 @@ export type AgentCapabilities = {
 
 export type AgentPreference = {
   default_runtime_id: string
+  /** Power tools enabled for Powerful mode, by name. */
+  power_tools?: string[]
 }
 
 export type AgentSessionSummary = {
@@ -142,6 +144,8 @@ export type AgentToolCatalogEntry = {
   risk: string
   executes: boolean
   needs_workspace: boolean
+  /** Optional "Powerful" mode surface. Simple mode never exposes these. */
+  power_tool?: boolean
 }
 
 export async function fetchAgentCapabilities(): Promise<AgentCapabilities> {

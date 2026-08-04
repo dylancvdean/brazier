@@ -110,8 +110,10 @@ import {
 import {
   fetchAgentCapabilities,
   fetchAgentPreference,
+  fetchAgentTools,
   saveAgentPreference,
-  type AgentRuntimeInfo
+  type AgentRuntimeInfo,
+  type AgentToolCatalogEntry
 } from '../agentApi'
 import { RecommendedModels } from './RecommendedModels'
 import { CapabilityIcons, capabilityFlags, hubCapabilityFlags } from './CapabilityIcons'
@@ -5064,7 +5066,9 @@ function ToolchainChecklist({ tools }: { tools: ToolchainTool[] }): React.JSX.El
 
 function AgentSection(props: SectionProps): React.JSX.Element {
   const [runtimes, setRuntimes] = useState<AgentRuntimeInfo[]>([])
-  const [selected, setSelected] = useState('pi')
+  const [selected, setSelected] = useState('simple')
+  const [powerToolsCatalog, setPowerToolsCatalog] = useState<AgentToolCatalogEntry[]>([])
+  const [powerTools, setPowerTools] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [savedNotice, setSavedNotice] = useState<string | null>(null)
@@ -5073,12 +5077,15 @@ function AgentSection(props: SectionProps): React.JSX.Element {
     setLoading(true)
     props.onError(null)
     try {
-      const [capabilities, preference] = await Promise.all([
+      const [capabilities, preference, tools] = await Promise.all([
         fetchAgentCapabilities(),
-        fetchAgentPreference()
+        fetchAgentPreference(),
+        fetchAgentTools()
       ])
       setRuntimes(capabilities.runtimes)
-      setSelected(preference.default_runtime_id || capabilities.default_runtime_id || 'pi')
+      setSelected(preference.default_runtime_id || capabilities.default_runtime_id || 'simple')
+      setPowerTools(preference.power_tools ?? [])
+      setPowerToolsCatalog(tools.filter((tool) => tool.power_tool === true))
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -5090,16 +5097,22 @@ function AgentSection(props: SectionProps): React.JSX.Element {
     void reload()
   }, [])
 
-  async function chooseRuntime(runtimeId: string): Promise<void> {
-    const entry = runtimes.find((runtime) => runtime.id === runtimeId)
-    if (!entry || entry.available === false) return
+  async function persist(defaultRuntimeId: string, nextPowerTools: string[]): Promise<void> {
     setSaving(true)
     props.onError(null)
     setSavedNotice(null)
     try {
-      const saved = await saveAgentPreference({ default_runtime_id: runtimeId })
+      const saved = await saveAgentPreference({
+        default_runtime_id: defaultRuntimeId,
+        power_tools: nextPowerTools
+      })
       setSelected(saved.default_runtime_id)
-      setSavedNotice('New agent tasks will use Pi (default).')
+      setPowerTools(saved.power_tools ?? [])
+      setSavedNotice(
+        saved.default_runtime_id === 'powerful'
+          ? 'New agent tasks will use Powerful mode.'
+          : 'New agent tasks will use Simple mode.'
+      )
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -5107,14 +5120,28 @@ function AgentSection(props: SectionProps): React.JSX.Element {
     }
   }
 
+  async function chooseRuntime(runtimeId: string): Promise<void> {
+    const entry = runtimes.find((runtime) => runtime.id === runtimeId)
+    if (!entry || entry.available === false) return
+    await persist(runtimeId, powerTools)
+  }
+
+  function togglePowerTool(name: string, on: boolean): void {
+    const next = on
+      ? [...powerTools.filter((entry) => entry !== name), name]
+      : powerTools.filter((entry) => entry !== name)
+    setPowerTools(next)
+    void persist(selected, next)
+  }
+
   return (
     <section>
       <header className="manage-heading">
         <h2>Agent</h2>
         <p>
-          Agent tasks run through Brazier&apos;s Pi framework: the daemon mediates every machine
-          effect behind the policy broker, so approvals, sandboxing, and execution all stay under
-          one trust boundary.
+          Agent tasks run through two modes. Simple exposes the standard broker-sandboxed tool set.
+          Powerful adds the extra tools you enable below; both keep approvals, sandboxing, and
+          execution under one trust boundary.
         </p>
       </header>
 
@@ -5126,7 +5153,7 @@ function AgentSection(props: SectionProps): React.JSX.Element {
       ) : (
         <>
           <div className="settings-group">
-            <div className="section-label">Default framework</div>
+            <div className="section-label">Agent mode</div>
             <div className="agent-runtime-choice">
               {runtimes.map((runtime) => {
                 const unavailable = runtime.available === false
@@ -5149,20 +5176,14 @@ function AgentSection(props: SectionProps): React.JSX.Element {
                       onChange={() => void chooseRuntime(runtime.id)}
                     />
                     <span>
-                      <strong>
-                        {runtime.name}
-                        {runtime.id === 'pi' ? ' (default)' : ''}
-                      </strong>
+                      <strong>{runtime.name}</strong>
                       <small>
-                        {runtime.id === 'pi'
-                          ? 'Orchestration loop only. Tools, sandbox, approvals, and exec stay in brazierd.'
-                          : runtime.unavailable_reason ?? 'Agent framework adapter.'}
+                        {runtime.id === 'simple'
+                          ? 'The standard tool set: files, shell, git, and subagents. Everything a coding task needs day to day.'
+                          : 'Adds the power tools you enable below (web search, web fetch, LSP diagnostics, …).'}
                       </small>
                       {unavailable && runtime.unavailable_reason && (
                         <small>{runtime.unavailable_reason}</small>
-                      )}
-                      {!unavailable && runtime.binary_path && (
-                        <small>Binary: {runtime.binary_path}</small>
                       )}
                     </span>
                   </label>
@@ -5170,6 +5191,46 @@ function AgentSection(props: SectionProps): React.JSX.Element {
               })}
             </div>
             {savedNotice && <p className="model-help">{savedNotice}</p>}
+          </div>
+
+          <div className="settings-group">
+            <div className="section-label">Powerful mode tools</div>
+            <p className="model-help">
+              These extra tools are only exposed to Powerful mode sessions. They default to off;
+              toggle the ones you want new Powerful tasks to start with. Each task can still trim
+              its own set in the Agent header&apos;s Tools menu.
+            </p>
+            {selected !== 'powerful' && (
+              <p className="model-help">
+                Powerful mode is not the default yet. Switch the mode above to use these tools.
+              </p>
+            )}
+            {powerToolsCatalog.length === 0 ? (
+              <p className="model-help">No power tools yet — they land in a later build.</p>
+            ) : (
+              <div className="power-tools-list">
+                {powerToolsCatalog.map((tool) => {
+                  const on = powerTools.includes(tool.name)
+                  return (
+                    <label
+                      key={tool.name}
+                      className={`power-tool${on ? ' active' : ''}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        disabled={saving}
+                        onChange={(event) => togglePowerTool(tool.name, event.target.checked)}
+                      />
+                      <span className="power-tool-label">
+                        <strong>{tool.label}</strong>
+                        <small>{tool.description}</small>
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+            )}
           </div>
 
           <div className="settings-group">

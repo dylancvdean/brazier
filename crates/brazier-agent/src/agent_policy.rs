@@ -49,6 +49,11 @@ pub const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec { name: "git_diff", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
     ToolSpec { name: "request_permission", risk: ToolRiskLevel::Safe, executes: false, needs_workspace: false },
     ToolSpec { name: "spawn_subagent", risk: ToolRiskLevel::Execute, executes: false, needs_workspace: false },
+    // Power tools: the optional "Powerful" mode surface. Executors land in a
+    // later build; calls currently fail with a clear "not implemented" error.
+    ToolSpec { name: "web_search", risk: ToolRiskLevel::Execute, executes: true, needs_workspace: false },
+    ToolSpec { name: "web_fetch", risk: ToolRiskLevel::Execute, executes: true, needs_workspace: false },
+    ToolSpec { name: "lsp_diagnostics", risk: ToolRiskLevel::Read, executes: true, needs_workspace: true },
 ];
 
 const MCP_TOOL_SPEC: ToolSpec = ToolSpec {

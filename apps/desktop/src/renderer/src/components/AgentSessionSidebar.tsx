@@ -91,7 +91,7 @@ export function AgentSessionSidebar({ controls }: Props): React.JSX.Element {
                   <button type="button" onClick={() => controls.select(entry.id)}>
                     <strong>{entry.title}</strong>
                     <span>
-                      Pi ·{' '}
+                      {entry.runtime_id === 'powerful' ? 'Powerful · ' : 'Simple · '}
                       {worktree
                         ? `Worktree · ${worktree.branch} · ${entry.last_run_status}`
                         : entry.last_run_status}

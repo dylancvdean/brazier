@@ -80,6 +80,7 @@ remote-code models, network tools, and code execution require explicit trust.
 
 Agent mode runs model-chosen commands on your machine. It runs on the Pi
 runtime (broker + OS sandbox when available) and asks before anything writes,
-executes, or leaves the workspace. On Windows there is no OS sandbox yet.
-`skip-permissions` mode exists and still refuses credential paths, but it
-removes the prompts.
+executes, or leaves the workspace. Two modes pick the tool surface: Simple
+exposes the standard set, and Powerful adds the extra tools you enable under
+Manage → Agent. On Windows there is no OS sandbox yet. `skip-permissions` mode
+exists and still refuses credential paths, but it removes the prompts.

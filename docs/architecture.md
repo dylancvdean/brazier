@@ -287,15 +287,27 @@ renderer (sandboxed)  →  main  →  agent worker (utilityProcess)
                               policy / sandbox / models
 ```
 
-Agent frameworks are pluggable runtimes selected by `runtime_id` (default `pi`).
-Stock options:
+Agent frameworks are pluggable runtimes selected by `runtime_id`. Two modes
+share the Pi adapter today (`default simple`):
 
-- **Pi** (`@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, MIT) — orchestration
-  loop only: tool-call parsing, streaming, context tracking, cancellation, and
-  completion detection. Reached exclusively through `apps/desktop/src/agent/pi/`.
-  Everything else — tool definitions, permission policy, sandboxing, execution,
-  persistence, and the event stream — is Brazier's under
-  `apps/desktop/src/agent/core/`.
+- **Simple** (`simple`) — the standard broker-sandboxed tool set: files, shell,
+  git, subagents. This is the everyday surface.
+- **Powerful** (`powerful`) — the same base plus the operator-enabled power tools
+  (web search, web fetch, LSP diagnostics, …) toggled under Manage → Agent.
+  Power tools are metadata in the catalog now; executors land in a later build.
+
+- **Pi** (`@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, MIT) — the
+  orchestration loop both modes run: tool-call parsing, streaming, context
+  tracking, cancellation, and completion detection. Reached exclusively through
+  `apps/desktop/src/agent/pi/`. Everything else — tool definitions, permission
+  policy, sandboxing, execution, persistence, and the event stream — is Brazier's
+  under `apps/desktop/src/agent/core/`. `pi` remains a legacy alias so sessions
+  created before modes existed still open.
+
+The daemon decides each session's tool set at creation from its mode: `simple`
+gets the base catalog, `powerful` adds the power tools the operator enabled. An
+explicit per-session tool list wins but must respect the mode — `simple`
+sessions refuse power tools.
 
 A boundary test fails the build if framework imports escape their adapter
 directories. The worker selects an adapter per session from

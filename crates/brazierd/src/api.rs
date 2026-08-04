@@ -1354,6 +1354,8 @@ const AGENT_PREFERENCE_KEY: &str = "agent";
 #[derive(Debug, Deserialize)]
 struct UpdateAgentPreference {
     default_runtime_id: String,
+    #[serde(default)]
+    power_tools: Vec<String>,
 }
 
 async fn load_default_agent_runtime_id(state: &AppState) -> ApiResult<String> {
@@ -1367,6 +1369,22 @@ async fn load_default_agent_runtime_id(state: &AppState) -> ApiResult<String> {
     Ok(stored)
 }
 
+async fn load_enabled_power_tools(state: &AppState) -> ApiResult<Vec<String>> {
+    let stored = state
+        .db
+        .application_preference(AGENT_PREFERENCE_KEY)
+        .await
+        .map_err(ApiError::internal)?;
+    let names = stored
+        .as_ref()
+        .and_then(|value| value["power_tools"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.as_str().map(str::to_owned))
+        .collect();
+    Ok(names)
+}
+
 async fn agent_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let stored = state
         .db
@@ -1377,8 +1395,14 @@ async fn agent_preference(State(state): State<AppState>) -> ApiResult<Json<Value
         .as_ref()
         .and_then(|value| value["default_runtime_id"].as_str())
         .unwrap_or(crate::agent_types::DEFAULT_AGENT_RUNTIME_ID);
+    let power_tools = stored
+        .as_ref()
+        .and_then(|value| value["power_tools"].as_array())
+        .cloned()
+        .unwrap_or_default();
     Ok(Json(json!({
         "default_runtime_id": default_runtime_id,
+        "power_tools": power_tools,
     })))
 }
 
@@ -1409,34 +1433,62 @@ async fn update_agent_preference(
             "cannot default to agent runtime `{runtime_id}`: {reason}"
         )));
     }
+    let known_power: std::collections::HashSet<String> =
+        crate::agent_tools::power_tool_names().into_iter().collect();
+    let mut power_tools: Vec<String> = preference
+        .power_tools
+        .into_iter()
+        .filter(|name| known_power.contains(name))
+        .collect();
+    power_tools.sort();
+    power_tools.dedup();
     state
         .db
         .set_application_preference(
             AGENT_PREFERENCE_KEY,
             &json!({
                 "default_runtime_id": runtime_id,
+                "power_tools": power_tools,
             }),
         )
         .await
         .map_err(ApiError::internal)?;
-    Ok(Json(json!({ "default_runtime_id": runtime_id })))
+    Ok(Json(
+        json!({ "default_runtime_id": runtime_id, "power_tools": power_tools }),
+    ))
 }
 
 fn agent_runtime_catalog() -> Vec<Value> {
-    vec![json!({
-        "id": crate::agent_types::AGENT_RUNTIME_PI,
-        "name": "Pi",
-        "adapter_api_version": 1,
-        "available": true,
-        "trust": "broker",
-        "capabilities": {
-            "streaming": true,
-            "tool_calls": true,
-            "compaction": true,
-            "cancellation": true,
-            "session_restore": true,
-        }
-    })]
+    vec![
+        json!({
+            "id": crate::agent_types::AGENT_RUNTIME_SIMPLE,
+            "name": "Simple",
+            "adapter_api_version": 1,
+            "available": true,
+            "trust": "broker",
+            "capabilities": {
+                "streaming": true,
+                "tool_calls": true,
+                "compaction": true,
+                "cancellation": true,
+                "session_restore": true,
+            }
+        }),
+        json!({
+            "id": crate::agent_types::AGENT_RUNTIME_POWERFUL,
+            "name": "Powerful",
+            "adapter_api_version": 1,
+            "available": true,
+            "trust": "broker",
+            "capabilities": {
+                "streaming": true,
+                "tool_calls": true,
+                "compaction": true,
+                "cancellation": true,
+                "session_restore": true,
+            }
+        }),
+    ]
 }
 
 fn resolve_agent_runtime_id(requested: Option<String>, default_id: &str) -> String {
@@ -1453,7 +1505,7 @@ fn validate_agent_runtime_id(runtime_id: &str) -> ApiResult<Value> {
         .find(|entry| entry["id"].as_str() == Some(runtime_id))
         .ok_or_else(|| {
             ApiError::bad_request(format!(
-                "unknown agent runtime `{runtime_id}`. Available: pi"
+                "unknown agent runtime `{runtime_id}`. Available: simple, powerful"
             ))
         })?;
     if entry["available"].as_bool() == Some(false) {
@@ -5680,6 +5732,60 @@ fn validate_agent_enabled_tools(data_dir: &std::path::Path, enabled: &[String]) 
     }
 }
 
+/// The tool names a session gets by default for a given mode: the base set
+/// (everything but power tools) for `simple`, plus the operator-enabled power
+/// tools for `powerful`.
+fn default_enabled_tools(
+    runtime_id: &str,
+    enabled_power_tools: &[String],
+    data_dir: &std::path::Path,
+) -> Vec<String> {
+    let power: std::collections::HashSet<String> =
+        crate::agent_tools::power_tool_names().into_iter().collect();
+    let base: Vec<String> = agent_tool_names(data_dir)
+        .into_iter()
+        .filter(|name| !power.contains(name))
+        .collect();
+    if runtime_id != crate::agent_types::AGENT_RUNTIME_POWERFUL {
+        return base;
+    }
+    let mut tools = base;
+    for name in enabled_power_tools {
+        if power.contains(name) && !tools.contains(name) {
+            tools.push(name.clone());
+        }
+    }
+    tools
+}
+
+/// `simple` mode never exposes power tools, even through an explicit per-session
+/// tool list. `powerful` accepts any known power tool.
+fn validate_agent_tools_for_runtime(
+    runtime_id: &str,
+    enabled: &[String],
+    data_dir: &std::path::Path,
+) -> ApiResult<()> {
+    validate_agent_enabled_tools(data_dir, enabled)?;
+    if runtime_id == crate::agent_types::AGENT_RUNTIME_POWERFUL {
+        return Ok(());
+    }
+    let power: std::collections::HashSet<String> =
+        crate::agent_tools::power_tool_names().into_iter().collect();
+    let power_in_simple: Vec<&str> = enabled
+        .iter()
+        .map(String::as_str)
+        .filter(|name| power.contains(*name))
+        .collect();
+    if power_in_simple.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(format!(
+            "`simple` mode does not expose power tools ({}). Switch to Powerful mode to use them.",
+            power_in_simple.join(", ")
+        )))
+    }
+}
+
 async fn agent_tool_catalog(State(state): State<AppState>) -> Json<Value> {
     Json(agent_tool_definitions(&state.data_dir))
 }
@@ -5724,6 +5830,17 @@ async fn create_agent_session(
         request.confirm_elevated_permissions,
         client_is_loopback(&client),
     )?;
+    // The mode decides the default tool set: `simple` gets the base tools,
+    // `powerful` adds the power tools the operator enabled in Manage → Agent.
+    // An explicit per-session list still wins, but must respect the mode.
+    let enabled_power_tools = load_enabled_power_tools(&state).await?;
+    match request.enabled_tools.as_deref() {
+        Some(enabled) => validate_agent_tools_for_runtime(&runtime_id, enabled, &state.data_dir)?,
+        None => {
+            request.enabled_tools =
+                Some(default_enabled_tools(&runtime_id, &enabled_power_tools, &state.data_dir));
+        }
+    }
     request.runtime_id = Some(runtime_id);
     let mut session = state
         .db
@@ -5839,6 +5956,9 @@ async fn patch_agent_session(
         .agent_session(&id)
         .await
         .map_err(|error| ApiError::not_found(error.to_string()))?;
+    if let Some(enabled) = update.enabled_tools.as_deref() {
+        validate_agent_tools_for_runtime(&existing.runtime_id, enabled, &state.data_dir)?;
+    }
     let elevating_mode = matches!(
         update.permission_mode,
         Some(crate::agent_types::AgentPermissionMode::SkipPermissions)
@@ -6073,10 +6193,20 @@ async fn agent_system_prompt(
         .agent_session(&id)
         .await
         .map_err(|error| ApiError::not_found(error.to_string()))?;
-    let names = session
-        .enabled_tools
-        .clone()
-        .unwrap_or_else(|| agent_tool_names(&state.data_dir));
+    let names = match session.enabled_tools.clone() {
+        Some(tools) => tools,
+        // Legacy sessions predate mode-aware defaults: derive the mode's set
+        // from the stored runtime id so power tools never leak into Simple.
+        None => {
+            let enabled_power_tools = match session.runtime_id.as_str() {
+                crate::agent_types::AGENT_RUNTIME_POWERFUL => {
+                    load_enabled_power_tools(&state).await.unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            default_enabled_tools(&session.runtime_id, &enabled_power_tools, &state.data_dir)
+        }
+    };
     let workspace_key = agent_session_workspace_key(&state, &session)?;
     let custom = match workspace_key {
         Some(ref key) => state
@@ -6142,7 +6272,7 @@ fn workspace_prompt_preview_session(
         title: "Prompt preview".to_owned(),
         workspace_path: Some(workspace_path),
         model: "preview".to_owned(),
-        runtime_id: "pi".to_owned(),
+        runtime_id: crate::agent_types::AGENT_RUNTIME_SIMPLE.to_owned(),
         permission_mode: crate::agent_types::AgentPermissionMode::Ask,
         permission_settings: crate::agent_types::AgentPermissionSettings::default(),
         enabled_tools: None,
@@ -7407,11 +7537,12 @@ mod tests {
                 .contains(&json!("skip-permissions"))
         );
         let runtimes = capabilities["runtimes"].as_array().unwrap();
-        assert!(runtimes.iter().any(|entry| entry["id"] == "pi"));
-        assert_eq!(capabilities["default_runtime_id"], "pi");
-        let pi = runtimes.iter().find(|entry| entry["id"] == "pi").unwrap();
-        assert_eq!(pi["available"], true);
-        assert_eq!(pi["trust"], "broker");
+        assert!(runtimes.iter().any(|entry| entry["id"] == "simple"));
+        assert!(runtimes.iter().any(|entry| entry["id"] == "powerful"));
+        assert_eq!(capabilities["default_runtime_id"], "simple");
+        let simple = runtimes.iter().find(|entry| entry["id"] == "simple").unwrap();
+        assert_eq!(simple["available"], true);
+        assert_eq!(simple["trust"], "broker");
     }
 
     #[tokio::test]
@@ -7420,17 +7551,20 @@ mod tests {
         let app = router(test_state(dir.path()).await);
         let (status, initial) = get_request(&app, "/api/v1/preferences/agent").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(initial["default_runtime_id"], "pi");
+        assert_eq!(initial["default_runtime_id"], "simple");
+        assert_eq!(initial["power_tools"], json!([]));
 
         let (status, body) = json_request(
             &app,
             "PUT",
             "/api/v1/preferences/agent",
-            json!({ "default_runtime_id": "pi" }),
+            json!({ "default_runtime_id": "powerful", "power_tools": ["web_search", "nope"] }),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["default_runtime_id"], "pi");
+        assert_eq!(body["default_runtime_id"], "powerful");
+        // Unknown power tools are dropped, known ones survive.
+        assert_eq!(body["power_tools"], json!(["web_search"]));
 
         let (status, rejected) = json_request(
             &app,
@@ -7440,6 +7574,75 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    }
+
+    #[tokio::test]
+    async fn power_tools_default_on_for_powerful_sessions_only() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        json_request(
+            &app,
+            "PUT",
+            "/api/v1/preferences/agent",
+            json!({ "default_runtime_id": "powerful", "power_tools": ["web_search"] }),
+        )
+        .await;
+
+        let (_, simple_session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test",
+                "runtime_id": "simple"
+            }),
+        )
+        .await;
+        let simple_tools = simple_session["enabled_tools"]
+            .as_array()
+            .expect("stored tool list");
+        assert!(simple_tools.iter().any(|entry| entry == "shell_run"));
+        assert!(
+            !simple_tools.iter().any(|entry| entry == "web_search"),
+            "simple mode must not expose power tools"
+        );
+
+        let (_, powerful_session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test",
+                "runtime_id": "powerful"
+            }),
+        )
+        .await;
+        let powerful_tools = powerful_session["enabled_tools"]
+            .as_array()
+            .expect("stored tool list");
+        assert!(powerful_tools.iter().any(|entry| entry == "web_search"));
+        assert!(
+            !powerful_tools.iter().any(|entry| entry == "web_fetch"),
+            "only the enabled power tools are on by default"
+        );
+
+        // Explicitly asking for a power tool on a simple session is refused.
+        let (status, body) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test",
+                "runtime_id": "simple",
+                "enabled_tools": ["shell_run", "web_search"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
     #[tokio::test]

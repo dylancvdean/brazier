@@ -78,6 +78,8 @@ export type AgentToolDefinition = {
   executes: boolean
   needsWorkspace: boolean
   defaultEnvironment: AgentEnvironment
+  /** Optional "Powerful" mode surface. Simple mode never exposes these. */
+  powerTool?: boolean
 }
 
 export type AgentModelReference = {
