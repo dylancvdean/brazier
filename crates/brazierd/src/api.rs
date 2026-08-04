@@ -1,9 +1,4 @@
-use std::{
-    convert::Infallible,
-    net::SocketAddr,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{convert::Infallible, net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::Context as _;
 use async_stream::stream;
@@ -364,7 +359,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         )
         .route("/api/v1/computer/parse-fara", post(parse_fara_output))
         .route("/api/v1/hardware", get(hardware))
-        .route("/api/v1/toolchain", get(toolchain_status))
+        .route(
+            "/api/v1/toolchain",
+            get(toolchain_status).post(setup_toolchain),
+        )
         .route("/api/v1/engines/llama.cpp/ensure", post(ensure_llama))
         .route(
             "/api/v1/engines/llama.cpp/managed-status",
@@ -1308,8 +1306,152 @@ async fn hardware() -> Json<Value> {
     Json(json!(crate::hardware::detect()))
 }
 
-async fn toolchain_status() -> Json<Value> {
-    Json(toolchain_hints::toolchain_status())
+#[derive(Debug, Deserialize, Default)]
+struct ToolchainNeedsQuery {
+    custom_runtimes: Option<bool>,
+    voice: Option<bool>,
+    computer_use: Option<bool>,
+    video: Option<bool>,
+}
+
+impl ToolchainNeedsQuery {
+    fn into_needs(self) -> Option<toolchain_hints::ToolchainNeeds> {
+        if self.custom_runtimes.is_none()
+            && self.voice.is_none()
+            && self.computer_use.is_none()
+            && self.video.is_none()
+        {
+            return None;
+        }
+        Some(toolchain_hints::ToolchainNeeds {
+            custom_runtimes: self.custom_runtimes.unwrap_or(false),
+            voice: self.voice.unwrap_or(false),
+            computer_use: self.computer_use.unwrap_or(false),
+            video: self.video.unwrap_or(false),
+        })
+    }
+}
+
+async fn toolchain_status(Query(needs): Query<ToolchainNeedsQuery>) -> Json<Value> {
+    Json(toolchain_hints::toolchain_status_for(needs.into_needs()))
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolchainSetupRequest {
+    #[serde(default)]
+    custom_runtimes: bool,
+    #[serde(default)]
+    voice: bool,
+    #[serde(default)]
+    computer_use: bool,
+    #[serde(default)]
+    video: bool,
+}
+
+/// Install the fixed, intent-selected Homebrew prerequisites on macOS.
+///
+/// This deliberately does not accept arbitrary commands or formulas. The
+/// action is exposed behind an explicit first-run button and is macOS-only;
+/// other platforms continue to receive distro-specific install hints.
+async fn setup_toolchain(Json(request): Json<ToolchainSetupRequest>) -> ApiResult<Json<Value>> {
+    let os = toolchain_hints::detect_os();
+    if !matches!(os.family, toolchain_hints::OsFamily::Macos) {
+        return Err(ApiError::bad_request(
+            "automatic host setup is currently available on macOS only",
+        ));
+    }
+
+    let needs = toolchain_hints::ToolchainNeeds {
+        custom_runtimes: request.custom_runtimes,
+        voice: request.voice,
+        computer_use: request.computer_use,
+        video: request.video,
+    };
+    let required = toolchain_hints::required_tool_ids(needs);
+    let mut output = Vec::new();
+    let mut brew = toolchain_hints::resolve_command("brew");
+
+    if brew.is_none() {
+        let install = tokio::process::Command::new("/bin/bash")
+            .args([
+                "-c",
+                "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"",
+            ])
+            .output()
+            .await
+            .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+        output.push(String::from_utf8_lossy(&install.stdout).into_owned());
+        output.push(String::from_utf8_lossy(&install.stderr).into_owned());
+        if !install.status.success() {
+            return Err(ApiError::bad_request(format!(
+                "Homebrew installation failed: {}",
+                output.join("\n").trim()
+            )));
+        }
+        brew = toolchain_hints::resolve_command("brew");
+    }
+
+    let Some(brew) = brew else {
+        return Err(ApiError::bad_request(
+            "Homebrew finished installing but Brazier could not find `brew`; restart Brazier and try again",
+        ));
+    };
+
+    let initial_status = toolchain_hints::toolchain_status_for(Some(needs));
+    let formulas: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|id| matches!(*id, "git" | "cmake" | "uv" | "ffmpeg"))
+        .filter(|id| {
+            initial_status["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|tool| tool["id"].as_str() == Some(id) && tool["available"] == false)
+        })
+        .collect();
+
+    if !formulas.is_empty() {
+        let install = tokio::process::Command::new(&brew)
+            .arg("install")
+            .args(&formulas)
+            .output()
+            .await
+            .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+        output.push(String::from_utf8_lossy(&install.stdout).into_owned());
+        output.push(String::from_utf8_lossy(&install.stderr).into_owned());
+        if !install.status.success() {
+            return Err(ApiError::bad_request(format!(
+                "Homebrew dependency setup failed: {}",
+                output.join("\n").trim()
+            )));
+        }
+    }
+
+    // Apple ships the C/C++ compiler and headers through Command Line Tools,
+    // not Homebrew. Opening Apple's installer completes this one non-formula
+    // prerequisite when a source build was requested.
+    if needs.custom_runtimes {
+        let missing_cpp = initial_status["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|tool| tool["id"].as_str() == Some("cpp") && tool["available"] == false);
+        if missing_cpp {
+            let command = tokio::process::Command::new("/usr/bin/xcode-select")
+                .arg("--install")
+                .output()
+                .await
+                .map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+            output.push(String::from_utf8_lossy(&command.stdout).into_owned());
+            output.push(String::from_utf8_lossy(&command.stderr).into_owned());
+        }
+    }
+
+    Ok(Json(json!({
+        "status": toolchain_hints::toolchain_status_for(Some(needs)),
+        "output": output.join("\n").trim(),
+    })))
 }
 
 async fn runtime_settings(State(state): State<AppState>) -> Json<Value> {
@@ -1663,10 +1805,7 @@ where
 }
 
 fn client_is_loopback(client: &ClientAddr) -> bool {
-    client
-        .0
-        .map(|addr| addr.ip().is_loopback())
-        .unwrap_or(true)
+    client.0.map(|addr| addr.ip().is_loopback()).unwrap_or(true)
 }
 
 fn require_elevated_permission_step_up(
@@ -1788,9 +1927,7 @@ async fn set_computer_safety_authority(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn revoke_all_desktop_authority(
-    State(state): State<AppState>,
-) -> ApiResult<StatusCode> {
+async fn revoke_all_desktop_authority(State(state): State<AppState>) -> ApiResult<StatusCode> {
     crate::computer_exec::clear_safety_overlay_marker(&state.data_dir);
     state
         .computer_broker
@@ -5837,8 +5974,11 @@ async fn create_agent_session(
     match request.enabled_tools.as_deref() {
         Some(enabled) => validate_agent_tools_for_runtime(&runtime_id, enabled, &state.data_dir)?,
         None => {
-            request.enabled_tools =
-                Some(default_enabled_tools(&runtime_id, &enabled_power_tools, &state.data_dir));
+            request.enabled_tools = Some(default_enabled_tools(
+                &runtime_id,
+                &enabled_power_tools,
+                &state.data_dir,
+            ));
         }
     }
     request.runtime_id = Some(runtime_id);
@@ -5967,7 +6107,8 @@ async fn patch_agent_session(
         crate::agent_types::AgentPermissionMode::SkipPermissions
     );
     let elevating_host = update.permission_settings.is_some_and(|settings| {
-        settings.auto_approve_host_actions && !existing.permission_settings.auto_approve_host_actions
+        settings.auto_approve_host_actions
+            && !existing.permission_settings.auto_approve_host_actions
     });
     require_elevated_permission_step_up(
         elevating_mode || elevating_host,
@@ -7540,7 +7681,10 @@ mod tests {
         assert!(runtimes.iter().any(|entry| entry["id"] == "simple"));
         assert!(runtimes.iter().any(|entry| entry["id"] == "powerful"));
         assert_eq!(capabilities["default_runtime_id"], "simple");
-        let simple = runtimes.iter().find(|entry| entry["id"] == "simple").unwrap();
+        let simple = runtimes
+            .iter()
+            .find(|entry| entry["id"] == "simple")
+            .unwrap();
         assert_eq!(simple["available"], true);
         assert_eq!(simple["trust"], "broker");
     }

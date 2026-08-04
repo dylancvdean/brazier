@@ -14,9 +14,11 @@ import {
   fetchRecommendations,
   fetchToolchainStatus,
   hardwareInfo,
+  setupToolchain,
   type HardwareInfo,
   type RecommendationCategory,
   type Recommendations,
+  type ToolchainNeeds,
   type ToolchainStatus,
   type ToolchainTool
 } from '../api'
@@ -40,7 +42,10 @@ const FEATURE_BLURBS: Record<RecommendationCategory, string> = {
   voice: 'Talk to a model and be answered out loud, in real time.'
 }
 
-function platformLines(hardware: HardwareInfo | null, toolchain: ToolchainStatus | null): string[] {
+function platformLines(
+  hardware: HardwareInfo | null,
+  toolchain: ToolchainStatus | null
+): string[] {
   const lines: string[] = []
   const mlx = toolchain?.platforms.mlx ?? false
   const streaming = toolchain?.platforms.streaming_asr ?? true
@@ -55,7 +60,7 @@ function platformLines(hardware: HardwareInfo | null, toolchain: ToolchainStatus
   } else {
     lines.push('Local engines: llama.cpp and whisper.cpp everywhere; MLX on Apple Silicon; streaming ASR on macOS/Linux.')
   }
-  if (streaming && !mlx) {
+  if (streaming && !mlx && toolchain?.tools.some((tool) => tool.id === 'uv')) {
     lines.push('Python engines need uv on your PATH before you build them under Runtimes.')
   }
   return lines
@@ -84,21 +89,31 @@ function ToolRow({ tool }: { tool: ToolchainTool }) {
 /**
  * The first-launch walkthrough.
  *
- * Three stages: check this machine has the tools each engine needs, ask what
- * you actually want to do with it, then show one recommended model per thing
- * you chose. The middle stage is the point — someone who has never run a local
- * model does not know that image generation and chat are different downloads,
- * or that voice needs two of them.
+ * Three stages: ask what someone actually wants to do, check only the host
+ * tools that choice needs, then show one recommended model per chosen feature.
+ * Someone who has never run a local model should not need to know that image
+ * generation, chat, voice, and source builds have different prerequisites.
  */
 export function WelcomeScreen(props: WelcomeScreenProps) {
   const [toolchain, setToolchain] = useState<ToolchainStatus | null>(null)
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [stage, setStage] = useState<'checklist' | 'features' | 'models'>('checklist')
+  const [stage, setStage] = useState<'features' | 'checklist' | 'models'>('features')
   const [wanted, setWanted] = useState<RecommendationCategory[]>(['text'])
+  const [wantsComputerUse, setWantsComputerUse] = useState(false)
+  const [customRuntimes, setCustomRuntimes] = useState(false)
   const [recommendations, setRecommendations] = useState<Recommendations | null>(null)
   const [loadingRecommendations, setLoadingRecommendations] = useState(false)
+  const [settingUp, setSettingUp] = useState(false)
+  const [setupOutput, setSetupOutput] = useState<string | null>(null)
+
+  const needs: ToolchainNeeds = {
+    customRuntimes,
+    voice: wanted.includes('voice'),
+    computerUse: wantsComputerUse,
+    video: wanted.includes('video')
+  }
 
   // Fetched when the model stage is reached rather than on mount: it costs a
   // round trip to Hugging Face per recommended model, to size the download.
@@ -121,12 +136,12 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
     )
   }
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (selectedNeeds: ToolchainNeeds) => {
     setLoading(true)
     setError(null)
     try {
       const [nextToolchain, nextHardware] = await Promise.all([
-        fetchToolchainStatus(),
+        fetchToolchainStatus(selectedNeeds),
         hardwareInfo().catch(() => null)
       ])
       setToolchain(nextToolchain)
@@ -139,8 +154,8 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
   }, [])
 
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    if (stage === 'checklist') void refresh(needs)
+  }, [refresh, stage, customRuntimes, wantsComputerUse, wanted])
 
   const missing = toolchain?.tools.filter((tool) => !tool.available) ?? []
   const readyCount = toolchain?.tools.filter((tool) => tool.available).length ?? 0
@@ -152,12 +167,12 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         <div className="first-run-card">
           <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
           <p className="first-run-eyebrow">
-            <Sparkles size={13} /> Step 2 of 3
+            <Sparkles size={13} /> Step 1 of 3
           </p>
           <h1>What do you want to do?</h1>
           <p className="first-run-lede">
-            Each has different model or runtime requirements, so Brazier only downloads what you
-            will use. Chat and Agent can share a model when the same one is the best fit.
+            Tell Brazier what you want first. We’ll choose the right model and only check for the
+            host tools those choices actually need.
           </p>
 
           <div className="welcome-feature-list" role="group" aria-label="Features to set up">
@@ -180,27 +195,47 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
                 </button>
               )
             })}
+            <button
+              type="button"
+              role="checkbox"
+              aria-checked={wantsComputerUse}
+              className={wantsComputerUse ? 'welcome-feature active' : 'welcome-feature'}
+              onClick={() => setWantsComputerUse((current) => !current)}
+            >
+              <span className="welcome-feature-check">{wantsComputerUse ? <Check size={13} /> : null}</span>
+              <span>
+                <strong>Computer use</strong>
+                <small>Let a model use a browser or desktop to complete tasks.</small>
+              </span>
+            </button>
+            <button
+              type="button"
+              role="checkbox"
+              aria-checked={customRuntimes}
+              className={customRuntimes ? 'welcome-feature active' : 'welcome-feature'}
+              onClick={() => setCustomRuntimes((current) => !current)}
+            >
+              <span className="welcome-feature-check">{customRuntimes ? <Check size={13} /> : null}</span>
+              <span>
+                <strong>Build custom runtimes (advanced)</strong>
+                <small>Build engines such as llama.cpp, MLX, whisper.cpp, or vLLM from source.</small>
+              </span>
+            </button>
           </div>
 
           <div className="first-run-actions">
             <button
               type="button"
-              className="chip-button subtle"
-              onClick={() => setStage('checklist')}
-            >
-              <ArrowLeft size={15} /> Back
-            </button>
-            <button
-              type="button"
               className="primary-button"
               disabled={wanted.length === 0}
-              onClick={() => setStage('models')}
+              onClick={() => setStage('checklist')}
             >
-              See what fits this machine <ArrowRight size={15} />
+              Check this machine <ArrowRight size={15} />
             </button>
           </div>
           <p className="first-run-footnote">
-            Choosing nothing is allowed — skip ahead and pick models yourself from Discover.
+            You can change these choices later. Advanced builds are optional; managed runtimes are
+            the easiest place to start.
           </p>
         </div>
       </div>
@@ -242,7 +277,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
             <button
               type="button"
               className="chip-button subtle"
-              onClick={() => setStage('features')}
+              onClick={() => setStage('checklist')}
             >
               <ArrowLeft size={15} /> Back
             </button>
@@ -263,12 +298,12 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
       <div className="first-run-card">
         <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
         <p className="first-run-eyebrow">
-          <Sparkles size={13} /> Step 1 of 3
+          <Sparkles size={13} /> Step 2 of 3
         </p>
         <h1>Welcome to Brazier</h1>
         <p className="first-run-lede">
-          A private workbench for local models. You can start with a managed runtime and a model;
-          these optional tools only matter when you choose a feature that needs them.
+          A private workbench for local models. This check is based on what you selected, so a
+          managed-runtime setup won’t ask you to install source-build tools you do not need.
         </p>
 
         <div className="first-run-platform">
@@ -286,12 +321,12 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
 
         <div className="first-run-section-head">
           <h2>
-            <Wrench size={15} /> Optional build tools
+            <Wrench size={15} /> Tools this setup needs
           </h2>
           <button
             type="button"
             className="chip-button subtle"
-            onClick={() => void refresh()}
+            onClick={() => void refresh(needs)}
             disabled={loading}
           >
             {loading ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}
@@ -309,25 +344,59 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         ) : (
           <>
             <p className="first-run-score">
-              {readyCount}/{total} available
-              {missing.length > 0
-                ? ` · ${missing.length} unlock additional source builds or media features`
-                : ' · every optional integration is available'}
+              {total === 0
+                ? 'No extra host tools are needed for these choices'
+                : `${readyCount}/${total} needed tools available${
+                    missing.length > 0 ? ` · ${missing.length} still needed` : ' · ready to go'
+                  }`}
             </p>
-            <ul className="welcome-checklist">
-              {(toolchain?.tools ?? []).map((tool) => (
-                <ToolRow key={tool.id} tool={tool} />
-              ))}
-            </ul>
+            {(toolchain?.tools ?? []).length > 0 ? (
+              <ul className="welcome-checklist">
+                {(toolchain?.tools ?? []).map((tool) => (
+                  <ToolRow key={tool.id} tool={tool} />
+                ))}
+              </ul>
+            ) : (
+              <div className="first-run-platform">Managed runtimes are ready to handle the rest.</div>
+            )}
           </>
         )}
 
+        {setupOutput && <div className="runtime-notice">{setupOutput}</div>}
+
         <div className="first-run-actions">
+          <button type="button" className="chip-button subtle" onClick={() => setStage('features')}>
+            <ArrowLeft size={15} /> Back
+          </button>
+          {toolchain?.os.family === 'macos' && missing.length > 0 && (
+            <button
+              type="button"
+              className="chip-button"
+              disabled={settingUp || loading}
+              onClick={() => {
+                setSettingUp(true)
+                setError(null)
+                setSetupOutput(null)
+                void setupToolchain(needs)
+                  .then((result) => {
+                    setToolchain(result.status)
+                    setSetupOutput(result.output || 'Homebrew setup finished. Recheck if macOS is still installing Command Line Tools.')
+                  })
+                  .catch((cause: unknown) =>
+                    setError(cause instanceof Error ? cause.message : String(cause))
+                  )
+                  .finally(() => setSettingUp(false))
+              }}
+            >
+              {settingUp ? <LoaderCircle className="spin" size={13} /> : <Wrench size={13} />}
+              {settingUp ? 'Setting up…' : 'Set up for me'}
+            </button>
+          )}
           <button type="button" className="chip-button" onClick={props.onOpenRuntimes}>
             Open Runtimes
           </button>
-          <button type="button" className="primary-button" onClick={() => setStage('features')}>
-            Choose what to set up <ArrowRight size={15} />
+          <button type="button" className="primary-button" onClick={() => setStage('models')}>
+            Choose models <ArrowRight size={15} />
           </button>
         </div>
         <p className="first-run-footnote">

@@ -51,8 +51,9 @@ would normally provide: `Cmd/Ctrl+R` reloads the renderer and
 `Cmd/Ctrl+Alt+I` toggles developer tools.
 
 
-The first launch shows a welcome checklist for host tools (git, cmake, a C++
-toolchain, uv, ffmpeg). To reopen it during development:
+The first launch asks what you want to use Brazier for, then checks only the
+host tools that choice needs (and can set up Homebrew-based dependencies for
+you on macOS). To reopen it during development:
 
 ```sh
 pnpm dev:welcome

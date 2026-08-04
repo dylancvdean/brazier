@@ -509,8 +509,39 @@ export type ToolchainStatus = {
   }
 }
 
-export function fetchToolchainStatus(): Promise<ToolchainStatus> {
-  return request('/api/v1/toolchain')
+export type ToolchainNeeds = {
+  customRuntimes: boolean
+  voice: boolean
+  computerUse: boolean
+  video: boolean
+}
+
+function toolchainQuery(needs: ToolchainNeeds): string {
+  const params = new URLSearchParams({
+    custom_runtimes: String(needs.customRuntimes),
+    voice: String(needs.voice),
+    computer_use: String(needs.computerUse),
+    video: String(needs.video)
+  })
+  return `?${params.toString()}`
+}
+
+export function fetchToolchainStatus(needs?: ToolchainNeeds): Promise<ToolchainStatus> {
+  return request(`/api/v1/toolchain${needs ? toolchainQuery(needs) : ''}`)
+}
+
+export function setupToolchain(
+  needs: ToolchainNeeds
+): Promise<{ status: ToolchainStatus; output: string }> {
+  return request('/api/v1/toolchain', {
+    method: 'POST',
+    body: JSON.stringify({
+      custom_runtimes: needs.customRuntimes,
+      voice: needs.voice,
+      computer_use: needs.computerUse,
+      video: needs.video
+    })
+  })
 }
 
 export function engineStatus(options?: { probe?: boolean }): Promise<EngineStatus> {

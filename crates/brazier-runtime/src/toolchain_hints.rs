@@ -45,6 +45,42 @@ pub enum ToolchainPackage {
     Ffmpeg,
 }
 
+/// The small set of host capabilities that can make an optional tool useful.
+///
+/// Managed runtimes do not need the source-build toolchain. Keeping this
+/// decision explicit lets the welcome screen ask what the person wants before
+/// reporting scary-looking prerequisites that do not apply to them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolchainNeeds {
+    pub custom_runtimes: bool,
+    pub voice: bool,
+    pub computer_use: bool,
+    pub video: bool,
+}
+
+pub fn required_tool_ids(needs: ToolchainNeeds) -> Vec<&'static str> {
+    let mut ids = Vec::new();
+    let os = detect_os();
+
+    // uv is shipped/used by the Python engines. On macOS it is part of the
+    // supported baseline; elsewhere it is only needed when the chosen flow
+    // actually asks for a Python runtime.
+    if matches!(os.family, OsFamily::Macos)
+        || needs.custom_runtimes
+        || needs.voice
+        || needs.computer_use
+    {
+        ids.push("uv");
+    }
+    if needs.custom_runtimes {
+        ids.extend(["git", "cmake", "cpp"]);
+    }
+    if needs.video {
+        ids.push("ffmpeg");
+    }
+    ids
+}
+
 pub fn detect_os() -> OsInfo {
     if cfg!(target_os = "windows") {
         return OsInfo {
@@ -387,6 +423,13 @@ fn generic_fallback(package: ToolchainPackage, family: OsFamily) -> String {
 
 /// Snapshot of host toolchain tools used by the welcome / setup screen.
 pub fn toolchain_status() -> serde_json::Value {
+    toolchain_status_for(None)
+}
+
+/// Return the host-tool snapshot, optionally narrowed to tools relevant to a
+/// first-run intent. `None` preserves the complete diagnostic view used by
+/// Manage and support bundles.
+pub fn toolchain_status_for(needs: Option<ToolchainNeeds>) -> serde_json::Value {
     let os = detect_os();
     let tool =
         |id: &str, label: &str, available: bool, package: ToolchainPackage, summary: &str| {
@@ -406,6 +449,52 @@ pub fn toolchain_status() -> serde_json::Value {
             })
         };
     let ffmpeg = command_on_path("ffmpeg") && command_on_path("ffprobe");
+    let mut tools = vec![
+        tool(
+            "git",
+            "Git",
+            command_on_path("git"),
+            ToolchainPackage::Git,
+            "Cloning engine sources for llama.cpp, whisper.cpp, and MLX builds",
+        ),
+        tool(
+            "cmake",
+            "CMake",
+            command_on_path("cmake"),
+            ToolchainPackage::Cmake,
+            "Configuring llama.cpp and whisper.cpp source builds",
+        ),
+        tool(
+            "cpp",
+            "C/C++ toolchain",
+            cpp_compiler_available(),
+            ToolchainPackage::CppBuild,
+            "Compiling llama.cpp and whisper.cpp from source",
+        ),
+        tool(
+            "uv",
+            "uv",
+            command_on_path("uv"),
+            ToolchainPackage::Uv,
+            "Creating Python environments for MLX, streaming ASR, PersonaPlex, and computer use",
+        ),
+        tool(
+            "ffmpeg",
+            "ffmpeg",
+            ffmpeg,
+            ToolchainPackage::Ffmpeg,
+            "Video frame sampling and converting audio for transcription",
+        ),
+    ];
+    if let Some(needs) = needs {
+        let required = required_tool_ids(needs);
+        tools.retain(|entry| {
+            entry["id"]
+                .as_str()
+                .is_some_and(|id| required.contains(&id))
+        });
+    }
+
     serde_json::json!({
         "os": {
             "family": match os.family {
@@ -416,43 +505,7 @@ pub fn toolchain_status() -> serde_json::Value {
             "id": os.id,
             "pretty_name": os.pretty_name,
         },
-        "tools": [
-            tool(
-                "git",
-                "Git",
-                command_on_path("git"),
-                ToolchainPackage::Git,
-                "Cloning engine sources for llama.cpp, whisper.cpp, and MLX builds"
-            ),
-            tool(
-                "cmake",
-                "CMake",
-                command_on_path("cmake"),
-                ToolchainPackage::Cmake,
-                "Configuring llama.cpp and whisper.cpp source builds"
-            ),
-            tool(
-                "cpp",
-                "C/C++ toolchain",
-                cpp_compiler_available(),
-                ToolchainPackage::CppBuild,
-                "Compiling llama.cpp and whisper.cpp from source"
-            ),
-            tool(
-                "uv",
-                "uv",
-                command_on_path("uv"),
-                ToolchainPackage::Uv,
-                "Creating Python environments for MLX and streaming ASR"
-            ),
-            tool(
-                "ffmpeg",
-                "ffmpeg",
-                ffmpeg,
-                ToolchainPackage::Ffmpeg,
-                "Video frame sampling and converting audio for transcription"
-            ),
-        ],
+        "tools": tools,
         "platforms": {
             "mlx": matches!(os.family, OsFamily::Macos) && cfg!(target_arch = "aarch64"),
             "streaming_asr": !matches!(os.family, OsFamily::Windows),
@@ -801,6 +854,32 @@ mod tests {
         assert!(ids.contains(&"uv"));
         assert!(ids.contains(&"ffmpeg"));
         assert!(status["platforms"]["llama_cpp"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn intent_selects_only_the_tools_that_can_be_needed() {
+        let managed = required_tool_ids(ToolchainNeeds::default());
+        assert!(!managed.contains(&"cmake"));
+        assert!(!managed.contains(&"git"));
+        assert!(!managed.contains(&"cpp"));
+
+        let custom = required_tool_ids(ToolchainNeeds {
+            custom_runtimes: true,
+            ..ToolchainNeeds::default()
+        });
+        assert!(custom.contains(&"cmake"));
+        assert!(custom.contains(&"git"));
+        assert!(custom.contains(&"cpp"));
+        assert!(custom.contains(&"uv"));
+
+        let python = required_tool_ids(ToolchainNeeds {
+            voice: true,
+            computer_use: true,
+            ..ToolchainNeeds::default()
+        });
+        assert!(python.contains(&"uv"));
+        assert!(!python.contains(&"cmake"));
+        assert!(!python.contains(&"git"));
     }
 
     #[test]
