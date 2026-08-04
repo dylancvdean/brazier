@@ -2252,7 +2252,7 @@ export function App(): React.JSX.Element {
               const suggestions = composerCompletionsFor(draft, shellComposer.suggestions)
               if (suggestions.length === 0 || suggestions[0]?.value === query) return null
               return (
-                <div className="composer-suggestions" role="listbox" aria-label="OMP prompt suggestions">
+                <div className="composer-suggestions" role="listbox" aria-label="Prompt suggestions">
                   {suggestions.map((entry) => (
                     <button
                       type="button"

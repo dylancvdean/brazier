@@ -1354,8 +1354,6 @@ const AGENT_PREFERENCE_KEY: &str = "agent";
 #[derive(Debug, Deserialize)]
 struct UpdateAgentPreference {
     default_runtime_id: String,
-    #[serde(default)]
-    omp_profile: Option<Value>,
 }
 
 async fn load_default_agent_runtime_id(state: &AppState) -> ApiResult<String> {
@@ -1381,7 +1379,6 @@ async fn agent_preference(State(state): State<AppState>) -> ApiResult<Json<Value
         .unwrap_or(crate::agent_types::DEFAULT_AGENT_RUNTIME_ID);
     Ok(Json(json!({
         "default_runtime_id": default_runtime_id,
-        "omp_profile": stored.and_then(|value| value.get("omp_profile").cloned()).unwrap_or(Value::Null),
     })))
 }
 
@@ -1418,88 +1415,28 @@ async fn update_agent_preference(
             AGENT_PREFERENCE_KEY,
             &json!({
                 "default_runtime_id": runtime_id,
-                "omp_profile": preference.omp_profile,
             }),
         )
         .await
         .map_err(ApiError::internal)?;
-    Ok(Json(
-        json!({ "default_runtime_id": runtime_id, "omp_profile": preference.omp_profile }),
-    ))
-}
-
-/// Locate a system `omp` binary for the fuller Oh My Pi stock runtime.
-fn detect_omp_binary() -> Option<PathBuf> {
-    let override_path =
-        std::env::var_os("BRAZIER_OMP_PATH").or_else(|| std::env::var_os("OMP_PATH"));
-    if let Some(path) = override_path {
-        let candidate = PathBuf::from(path);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|value| std::env::split_paths(&value).collect())
-        .unwrap_or_default();
-    // Desktop-launched GUI sessions (systemd, .desktop files) often omit
-    // user-local bin dirs from PATH even though interactive shells include
-    // them, so `omp` installed under `~/.local/bin` would otherwise go unseen.
-    if cfg!(unix) {
-        if let Some(home) = std::env::var_os("HOME") {
-            directories.push(PathBuf::from(&home).join(".local").join("bin"));
-            directories.push(PathBuf::from(&home).join("bin"));
-        }
-    }
-    for directory in directories {
-        for name in ["omp", "omp.exe"] {
-            let candidate = directory.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    Ok(Json(json!({ "default_runtime_id": runtime_id })))
 }
 
 fn agent_runtime_catalog() -> Vec<Value> {
-    let omp_path = detect_omp_binary();
-    let omp_available = omp_path.is_some();
-    vec![
-        json!({
-            "id": crate::agent_types::AGENT_RUNTIME_PI,
-            "name": "Pi",
-            "adapter_api_version": 1,
-            "available": true,
-            "trust": "broker",
-            "capabilities": {
-                "streaming": true,
-                "tool_calls": true,
-                "compaction": true,
-                "cancellation": true,
-                "session_restore": true,
-            }
-        }),
-        json!({
-            "id": crate::agent_types::AGENT_RUNTIME_OMP,
-            "name": "Oh My Pi",
-            "adapter_api_version": 1,
-            "available": omp_available,
-            "trust": "privileged_harness",
-            "binary_path": omp_path.map(|path| path.display().to_string()),
-            "unavailable_reason": if omp_available {
-                Value::Null
-            } else {
-                json!("Install Oh My Pi (`omp`) on PATH, or set BRAZIER_OMP_PATH. See https://omp.sh/")
-            },
-            "capabilities": {
-                "streaming": true,
-                "tool_calls": true,
-                "compaction": true,
-                "cancellation": true,
-                "session_restore": true,
-            }
-        }),
-    ]
+    vec![json!({
+        "id": crate::agent_types::AGENT_RUNTIME_PI,
+        "name": "Pi",
+        "adapter_api_version": 1,
+        "available": true,
+        "trust": "broker",
+        "capabilities": {
+            "streaming": true,
+            "tool_calls": true,
+            "compaction": true,
+            "cancellation": true,
+            "session_restore": true,
+        }
+    })]
 }
 
 fn resolve_agent_runtime_id(requested: Option<String>, default_id: &str) -> String {
@@ -1516,7 +1453,7 @@ fn validate_agent_runtime_id(runtime_id: &str) -> ApiResult<Value> {
         .find(|entry| entry["id"].as_str() == Some(runtime_id))
         .ok_or_else(|| {
             ApiError::bad_request(format!(
-                "unknown agent runtime `{runtime_id}`. Available: pi, omp"
+                "unknown agent runtime `{runtime_id}`. Available: pi"
             ))
         })?;
     if entry["available"].as_bool() == Some(false) {
@@ -5776,16 +5713,6 @@ async fn create_agent_session(
     let default_runtime_id = load_default_agent_runtime_id(&state).await?;
     let runtime_id = resolve_agent_runtime_id(request.runtime_id.take(), &default_runtime_id);
     validate_agent_runtime_id(&runtime_id)?;
-    if runtime_id == crate::agent_types::AGENT_RUNTIME_OMP
-        && matches!(
-            request.permission_mode,
-            Some(crate::agent_types::AgentPermissionMode::SandboxOnly)
-        )
-    {
-        return Err(ApiError::bad_request(
-            "Oh My Pi does not use Brazier's OS sandbox. Choose Ask or Skip permissions, or use the Pi runtime.",
-        ));
-    }
     let elevated = matches!(
         request.permission_mode,
         Some(crate::agent_types::AgentPermissionMode::SkipPermissions)
@@ -7481,7 +7408,6 @@ mod tests {
         );
         let runtimes = capabilities["runtimes"].as_array().unwrap();
         assert!(runtimes.iter().any(|entry| entry["id"] == "pi"));
-        assert!(runtimes.iter().any(|entry| entry["id"] == "omp"));
         assert_eq!(capabilities["default_runtime_id"], "pi");
         let pi = runtimes.iter().find(|entry| entry["id"] == "pi").unwrap();
         assert_eq!(pi["available"], true);
@@ -7496,28 +7422,15 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(initial["default_runtime_id"], "pi");
 
-        // OMP may be unavailable in CI; selecting an unavailable runtime must fail.
         let (status, body) = json_request(
             &app,
             "PUT",
             "/api/v1/preferences/agent",
-            json!({ "default_runtime_id": "omp" }),
+            json!({ "default_runtime_id": "pi" }),
         )
         .await;
-        let omp_available = get_request(&app, "/api/v1/agent/capabilities").await.1["runtimes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entry| entry["id"] == "omp")
-            .unwrap()["available"]
-            .as_bool()
-            .unwrap();
-        if omp_available {
-            assert_eq!(status, StatusCode::OK, "{body}");
-            assert_eq!(body["default_runtime_id"], "omp");
-        } else {
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        }
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["default_runtime_id"], "pi");
 
         let (status, rejected) = json_request(
             &app,

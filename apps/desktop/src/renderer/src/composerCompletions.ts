@@ -2,7 +2,7 @@
  * Composer completions for shell modes (Agent/Computer).
  *
  * Suggestions are matched against the trailing word of the draft. A leading
- * slash is part of the query so OMP's `/`-prefixed commands populate and filter
+ * slash is part of the query so slash-prefixed commands populate and filter
  * as the user types. An empty trailing word never surfaces the popup, so a
  * focused-but-empty composer does not sit an overlay over the transcript.
  */

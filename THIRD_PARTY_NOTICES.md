@@ -56,15 +56,6 @@ Pi depends on provider SDKs (`openai`, `@anthropic-ai/sdk`,
 Apache-2.0 or MIT. Brazier's Agent mode uses only the OpenAI-compatible path
 against the local daemon; the other providers are never invoked.
 
-**Oh My Pi (OMP)** — optional external runtime (`omp` CLI)
-Source: https://omp.sh/ / https://github.com/can1357/oh-my-pi
-
-OMP is not a packaged dependency of Brazier. When the operator installs `omp`
-(or sets `BRAZIER_OMP_PATH`), Agent mode can select it as a second stock
-runtime via Manage → Agent. Brazier drives it over `omp --mode rpc` from the
-adapter in `apps/desktop/src/agent/omp/` and does not vendor `@oh-my-pi/*`
-packages. OMP's own license and native components apply to that install.
-
 ## Application shell
 
 **Electron** — MIT (Electron), with bundled Chromium (BSD-3-Clause and others)

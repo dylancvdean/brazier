@@ -2,10 +2,9 @@
  * Command handling for the agent worker, independent of Electron so it can be
  * exercised directly in tests.
  *
- * The worker holds sessions, forwards their events, and does nothing else for
- * the Pi stock runtime: every tool call goes to the daemon, which decides.
- * The OMP stock runtime owns its own tool surface in a sidecar process; the
- * worker still selects that adapter by `session.runtime_id`.
+ * The worker holds sessions and forwards their events. Every tool call goes to
+ * the daemon, which decides; the worker selects the Pi runtime adapter by
+ * `session.runtime_id`.
  */
 
 import { BrokerClient } from './core/brokerClient'
@@ -23,8 +22,6 @@ export class AgentWorkerCore {
   private readonly runtimes = new Map<string, AgentRuntime>()
   private tools?: AgentToolDefinition[]
   private readonly sessions = new Map<string, AgentSession>()
-  /** Runtime-frame subscriptions per open session, so a mode switch cannot stack listeners. */
-  private readonly frameSubscriptions = new Map<string, () => void>()
   /** Runs in flight, so a cancel can reach the right session. */
   private readonly running = new Set<string>()
 
@@ -114,43 +111,15 @@ export class AgentWorkerCore {
         await session.setEnabledTools(command.tools)
         return session.getState()
       }
-      case 'composer-suggestions': {
-        const session = await this.openSession(command.sessionId, { rehydrate: false })
-        return (await session.composerSuggestions?.()) ?? []
-      }
       case 'set-permission-mode': {
         const session = await this.openSession(command.sessionId, { rehydrate: false })
         await session.setPermissionMode(command.mode)
         this.post({ type: 'session-state', sessionId: session.id, state: session.getState() })
         return session.getState()
       }
-      case 'runtime-command': {
-        const session = await this.openSession(command.sessionId, { rehydrate: false })
-        if (!session.sendRuntimeCommand) {
-          throw new Error(
-            `Runtime \`${session.getState().runtimeId}\` does not accept direct commands.`
-          )
-        }
-        if (command.runtimeId && command.runtimeId !== session.getState().runtimeId) {
-          throw new Error(
-            `Runtime \`${command.runtimeId}\` does not match session \`${session.id}\`.`
-          )
-        }
-        return await session.sendRuntimeCommand(command.command)
-      }
-      case 'resolve-extension-ui': {
-        const session = await this.openSession(command.sessionId, { rehydrate: false })
-        if (!session.resolveExtensionUi) {
-          throw new Error(
-            `Runtime \`${session.getState().runtimeId}\` has no extension-UI dialogs.`
-          )
-        }
-        return await session.resolveExtensionUi(command.response)
-      }
       case 'close-session': {
         const session = this.sessions.get(command.sessionId)
         if (session) {
-          this.unsubscribeFrames(session.id)
           await session.dispose()
           this.sessions.delete(command.sessionId)
         }
@@ -160,14 +129,6 @@ export class AgentWorkerCore {
         for (const session of this.sessions.values()) {
           await session.dispose()
         }
-        for (const unsubscribe of this.frameSubscriptions.values()) {
-          try {
-            unsubscribe()
-          } catch {
-            // A session may have already torn down its frame stream.
-          }
-        }
-        this.frameSubscriptions.clear()
         this.sessions.clear()
         for (const runtime of this.runtimes.values()) {
           await runtime.dispose()
@@ -187,32 +148,6 @@ export class AgentWorkerCore {
     return this.broker
   }
 
-  private unsubscribeFrames(sessionId: string): void {
-    const unsubscribe = this.frameSubscriptions.get(sessionId)
-    if (!unsubscribe) return
-    this.frameSubscriptions.delete(sessionId)
-    try {
-      unsubscribe()
-    } catch {
-      // The session may have already closed its frame stream.
-    }
-  }
-
-  /**
-   * Mirror a runtime's own event stream to the renderer. Only runtimes that
-   * expose one (OMP) participate; Pi stays silent. Frames are forwarded
-   * losslessly so the GUI can render runtime-specific state without the worker
-   * needing to understand it, and so an unknown future frame is never dropped
-   * before the renderer can decide what to do with it.
-   */
-  private subscribeFrames(session: AgentSession, runtimeId: string): void {
-    if (!session.subscribeRuntimeFrames || this.frameSubscriptions.has(session.id)) return
-    const unsubscribe = session.subscribeRuntimeFrames((payload) => {
-      this.post({ type: 'runtime-frame', sessionId: session.id, runtimeId, payload })
-    })
-    this.frameSubscriptions.set(session.id, unsubscribe)
-  }
-
   private runtimeFor(runtimeId: string): AgentRuntime {
     const broker = this.requireBroker()
     const id = runtimeId.trim() || DEFAULT_RUNTIME_ID
@@ -227,8 +162,7 @@ export class AgentWorkerCore {
   /**
    * Load a session, building its runtime state from what the daemon stored. The
    * system prompt and tool catalog come from the daemon so the model always
-   * sees the live sandbox and permission state (Pi). OMP sessions still receive
-   * the prompt for Brazier UI continuity; their tool surface is OMP-owned.
+   * sees the live sandbox and permission state.
    *
    * When `rehydrate` is true (explicit open/resume), refresh transcript + prompt
    * from the daemon even if the session is cached — otherwise switching modes
@@ -254,10 +188,7 @@ export class AgentWorkerCore {
     const broker = this.requireBroker()
     const remote = await broker.session(sessionId)
     const runtime = this.runtimeFor(remote.session.runtime_id || DEFAULT_RUNTIME_ID)
-    // OMP owns its native harness prompt and project-instruction discovery.
-    // Brazier's editable workspace template is a Pi-runtime concern only.
-    const prompt =
-      runtime.descriptor.id === 'omp' ? { system_prompt: '' } : await broker.systemPrompt(sessionId)
+    const prompt = await broker.systemPrompt(sessionId)
     // MCP configuration can change while the utility process remains alive.
     // Refresh when opening a session so newly enabled server tools do not
     // require restarting the desktop application.
@@ -274,7 +205,6 @@ export class AgentWorkerCore {
     if (existing) {
       existing.rehydrate(messages, prompt.system_prompt)
       await existing.refreshInferencePrefs()
-      this.subscribeFrames(existing, runtime.descriptor.id)
       return existing
     }
     const session = await runtime.createSession({
@@ -315,7 +245,6 @@ export class AgentWorkerCore {
     })
     await session.refreshInferencePrefs()
     this.sessions.set(sessionId, session)
-    this.subscribeFrames(session, runtime.descriptor.id)
     return session
   }
 }

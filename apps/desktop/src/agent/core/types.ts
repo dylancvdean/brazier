@@ -363,8 +363,6 @@ export type AgentUserInput = {
   images?: string[]
 }
 
-export type AgentComposerSuggestion = { value: string; description: string }
-
 export type AgentRuntimeCapabilities = {
   streaming: boolean
   toolCalls: boolean
@@ -430,28 +428,6 @@ export interface AgentSession {
   /** Apply a permission-mode change to an already-open runtime session. */
   setPermissionMode(mode: AgentPermissionMode): Promise<void>
   getState(): AgentSessionState
-  composerSuggestions?(): Promise<AgentComposerSuggestion[]>
-  /**
-   * Subscribe to a runtime's own event frames (e.g. the OMP RPC stdout stream)
-   * outside the run stream, so the GUI can render runtime-specific state that
-   * the shared event model does not carry. Implemented only by runtimes that
-   * have such a stream (Pi has none). Returns an unsubscribe function.
-   */
-  subscribeRuntimeFrames?(listener: (payload: Record<string, unknown>) => void): () => void
-  /**
-   * Answer an extension-UI dialog the runtime is holding open for the user.
-   * Implemented only by runtimes with a native dialog surface (OMP); Pi has no
-   * equivalent. The `response` is the raw `extension_ui_response` frame to
-   * forward to the runtime's own host.
-   */
-  resolveExtensionUi?(response: Record<string, unknown>): Promise<Record<string, unknown>>
-  /**
-   * Send an arbitrary runtime command and resolve its raw response frame.
-   * Implemented only by runtimes with a native command surface (OMP); Pi has
-   * no equivalent. Optional so the worker protocol can stay open-ended while
-   * every runtime keeps its own vocabulary.
-   */
-  sendRuntimeCommand?(command: Record<string, unknown>): Promise<Record<string, unknown>>
   /**
    * Replace the in-memory transcript (and optional system prompt) with what the
    * daemon stored. Required when reopening a session so model context matches

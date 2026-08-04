@@ -1,22 +1,19 @@
 /**
  * Runtime registry.
  *
- * Agent runtimes are selected the way model providers are: by id. Stock options
- * are bare Pi (broker-sandboxed) and Oh My Pi (fuller privileged harness).
- * Adding another means adding a factory here and an adapter beside `pi/` /
- * `omp/` — no change to persistence.
+ * Agent runtimes are selected the way model providers are: by id. The stock
+ * option is Pi (broker-sandboxed). Adding another means adding a factory here
+ * and an adapter beside `pi/` — no change to persistence.
  */
 
 import type { BrokerClient } from './core/brokerClient'
 import type { AgentRuntime, AgentRuntimeDescriptor } from './core/types'
-import { OmpAgentRuntime } from './omp/ompRuntime'
 import { PiAgentRuntime } from './pi/piRuntime'
 
 export type AgentRuntimeFactory = (broker: BrokerClient) => AgentRuntime
 
 const FACTORIES = new Map<string, AgentRuntimeFactory>([
-  ['pi', (broker) => new PiAgentRuntime(broker)],
-  ['omp', (broker) => new OmpAgentRuntime(broker)]
+  ['pi', (broker) => new PiAgentRuntime(broker)]
 ])
 
 export const DEFAULT_RUNTIME_ID = 'pi'

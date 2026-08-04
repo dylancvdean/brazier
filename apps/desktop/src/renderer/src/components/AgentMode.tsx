@@ -14,7 +14,7 @@ import {
   Wrench,
   X
 } from 'lucide-react'
-import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type {
   AgentApproval,
@@ -25,7 +25,6 @@ import type {
   SandboxDescription,
   ToolExecutionRecord
 } from '../../../agent/core/types'
-import type { OmpExtensionUiResponse } from '../../../agent/omp/rpcTypes'
 import type { WorkerMessage } from '../../../agent/core/protocol'
 import {
   applyAgentWorktree,
@@ -50,13 +49,9 @@ import {
   type AgentToolCatalogEntry,
   type AgentWorktreeStatus
 } from '../agentApi'
-import { showsBrazierSandboxStatus } from '../agentRuntimeDisplay'
 import { prefillProgressLabel, type LocalModel, type PrefillProgress } from '../api'
 import { modelDisplayName } from '../model-utils'
-import { EMPTY_OMP_SIDECAR, ompSidecarReducer } from '../ompSidecar'
 import { Markdown } from './Markdown'
-import { OmpDialog } from './OmpDialog'
-import { OmpSessionPanel } from './OmpSessionPanel'
 import { ReasoningDisclosure } from './ReasoningDisclosure'
 import { ToolsMenu } from './ToolsMenu'
 
@@ -159,11 +154,6 @@ const PERMISSION_LABELS: Record<AgentPermissionMode, { title: string; detail: st
     title: 'Skip permissions',
     detail: 'No prompts for sandboxed work. Host actions still need the separate opt-in.'
   }
-}
-
-function runtimeLabel(runtimeId: string | undefined | null): string {
-  if (runtimeId === 'omp') return 'Oh My Pi'
-  return 'Pi'
 }
 
 function errorText(cause: unknown): string {
@@ -696,9 +686,6 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [deciding, setDeciding] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [artifact, setArtifact] = useState<{ id: string; text: string } | null>(null)
-  const [ompSuggestions, setOmpSuggestions] = useState<Array<{ value: string; description: string }>>([])
-  /** Live OMP sidecar stream (command output, slash commands, session events). */
-  const [ompSidecar, dispatchOmpSidecar] = useReducer(ompSidecarReducer, EMPTY_OMP_SIDECAR)
   const scrollAnchor = useRef<HTMLDivElement>(null)
   const sessionIdRef = useRef<string | null>(null)
 
@@ -709,14 +696,6 @@ export function AgentMode(props: Props): React.JSX.Element {
   const permissionMode: AgentPermissionMode =
     session?.permission_mode ?? pendingPermissionMode
   const activeRuntimeId = session?.runtime_id ?? defaultRuntimeId
-  const ompRuntime = activeRuntimeId === 'omp'
-  useEffect(() => {
-    if (!session || !ompRuntime) {
-      setOmpSuggestions([])
-      return
-    }
-    void window.brazier.agent.composerSuggestions(session.id).then(setOmpSuggestions).catch(() => setOmpSuggestions([]))
-  }, [session?.id, ompRuntime])
   const availableToolNames = useMemo(() => tools.map((tool) => tool.name), [tools])
   const enabledToolNames = useMemo(() => {
     const selected = session?.enabled_tools ?? pendingEnabledTools ?? availableToolNames
@@ -731,33 +710,6 @@ export function AgentMode(props: Props): React.JSX.Element {
   useEffect(() => {
     sessionIdRef.current = session?.id ?? null
   }, [session?.id])
-
-  // The OMP sidecar stream belongs to one task. Drop it when the task changes.
-  useEffect(() => {
-    dispatchOmpSidecar({ type: 'reset' })
-  }, [session?.id])
-
-  // Poll the sidecar's session state so the OMP session panel stays live
-  // between events. Responses arrive as runtime frames and fold into the
-  // reducer; the request itself is fire-and-forget. A wedged sidecar must not
-  // stack overlapping polls, so a new request is skipped while one is in flight.
-  useEffect(() => {
-    if (!session || !ompRuntime) return
-    let inFlight = false
-    const refresh = (): void => {
-      if (inFlight) return
-      inFlight = true
-      void window.brazier.agent
-        .runtimeCommand(session.id, 'omp', { type: 'get_state' })
-        .catch(() => undefined)
-        .finally(() => {
-          inFlight = false
-        })
-    }
-    refresh()
-    const timer = window.setInterval(refresh, 2000)
-    return () => window.clearInterval(timer)
-  }, [session?.id, ompRuntime])
 
   useEffect(() => {
     void fetchAgentCapabilities()
@@ -1044,14 +996,6 @@ export function AgentMode(props: Props): React.JSX.Element {
         applyEvent(message.event)
         return
       }
-      if (message.type === 'runtime-frame') {
-        // The worker mirrors the OMP sidecar's stdout stream. Surface whatever
-        // it emits; unknown frame types land in the generic events record.
-        if (message.sessionId !== sessionIdRef.current) return
-        if (message.runtimeId !== 'omp') return
-        dispatchOmpSidecar({ type: 'frame', frame: message.payload })
-        return
-      }
       if (message.type === 'log' && message.level === 'error') {
         onError(`Agent worker: ${message.message}`)
       }
@@ -1196,12 +1140,6 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   async function changePermissionMode(mode: AgentPermissionMode): Promise<void> {
     setModeMenuOpen(false)
-    if (mode === 'sandbox-only' && ompRuntime) {
-      onError(
-        'Sandbox-only mode is unavailable for Oh My Pi. That runtime uses a privileged harness, not Brazier\'s OS sandbox.'
-      )
-      return
-    }
     if (mode === 'sandbox-only' && !capabilities?.sandbox.sandboxed_execution) {
       onError('Sandbox-only mode is unavailable because this host has no OS sandbox for agent commands.')
       return
@@ -1351,31 +1289,7 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }
 
-  /** Drive a small OMP RPC command; responses refresh the session panel. */
-  async function ompCommand(command: Record<string, unknown>): Promise<void> {
-    if (!session) return
-    try {
-      await window.brazier.agent.runtimeCommand(session.id, 'omp', command)
-    } catch (cause) {
-      onError(errorText(cause))
-    }
-  }
-
-  /** Answer an extension-UI dialog; the runtime forwards the response to OMP. */
-  function resolveOmpDialog(response: OmpExtensionUiResponse): void {
-    if (!session) return
-    dispatchOmpSidecar({ type: 'dialog-resolved' })
-    void window.brazier.agent
-      .resolveExtensionUi(session.id, response)
-      .catch((cause: unknown) => onError(errorText(cause)))
-  }
-
   async function openPromptEditor(): Promise<void> {
-    if (ompRuntime) {
-      setPromptLoading(false)
-      setPromptEditorOpen(true)
-      return
-    }
     if (!workspaceSettingsPath) return
     setPromptEditorOpen(true)
     setPromptLoading(true)
@@ -1569,23 +1483,6 @@ export function AgentMode(props: Props): React.JSX.Element {
     : !workspace
       ? 'Choose a workspace folder…'
       : ''
-  /**
-   * Composer completions for OMP: magic words plus the live slash-command list.
-   * Live `available_commands_update` frames win over the snapshot fetched at
-   * session open, and duplicates collapse on the command value.
-   */
-  const ompCompletions = useMemo(() => {
-    if (activeRuntimeId !== 'omp') return undefined
-    const merged = new Map<string, { value: string; description: string }>([
-      ['ultrathink', { value: 'ultrathink', description: 'Use the highest supported reasoning effort for this turn.' }],
-      ['orchestrate', { value: 'orchestrate', description: 'Plan, delegate independent work, and verify the result.' }],
-      ['workflowz', { value: 'workflowz', description: 'Build a deterministic multi-subagent workflow when task tools are available.' }]
-    ])
-    for (const entry of [...ompSuggestions, ...ompSidecar.commands]) {
-      merged.set(entry.value, entry)
-    }
-    return [...merged.values()]
-  }, [activeRuntimeId, ompSuggestions, ompSidecar.commands])
   // The parent keeps these controls between child renders. Route actions
   // through a ref so a UI-only state change (notably the pre-session worktree
   // toggle) can never leave the shared composer holding an older `send`.
@@ -1601,11 +1498,10 @@ export function AgentMode(props: Props): React.JSX.Element {
         ? blockedReason
         : running
           ? 'The agent is working. Stop it to send something else…'
-          : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`,
-      suggestions: ompCompletions
+          : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`
     })
     return () => onComposerChange?.(null)
-  }, [onComposerChange, running, blockedReason, modelLabel, workspace, ompCompletions])
+  }, [onComposerChange, running, blockedReason, modelLabel, workspace])
 
   // Same pattern for the app sidebar: Agent mode replaces conversations with
   // directory-grouped tasks, so the list and its actions live up there.
@@ -1697,16 +1593,12 @@ export function AgentMode(props: Props): React.JSX.Element {
         <button
           className="chip-button subtle"
           type="button"
-          disabled={(!ompRuntime && !workspaceSettingsPath) || running}
-          title={
-            ompRuntime
-              ? 'Inspect how Oh My Pi owns its native system prompt and project instructions.'
-              : 'Edit the system prompt shared by Pi agent tasks in this workspace.'
-          }
+          disabled={!workspaceSettingsPath || running}
+          title="Edit the system prompt shared by Pi agent tasks in this workspace."
           onClick={() => void openPromptEditor()}
         >
           <Layers size={13} />
-          {ompRuntime ? 'OMP prompt' : 'System prompt'}
+          System prompt
         </button>
         <div className="tool-menu-anchor agent-tool-menu-anchor">
           <button
@@ -1747,30 +1639,13 @@ export function AgentMode(props: Props): React.JSX.Element {
           )}
         </div>
         <span
-          className={ompRuntime ? 'agent-runtime-badge omp' : 'agent-runtime-badge'}
-          title={
-            ompRuntime
-              ? 'Oh My Pi owns its tool surface in a privileged sidecar. Change the default under Manage → Agent.'
-              : 'Pi orchestration with Brazier broker tools and OS sandbox. Change the default under Manage → Agent.'
-          }
+          className="agent-runtime-badge"
+          title="Pi orchestration with Brazier broker tools and OS sandbox. Change the default under Manage → Agent."
         >
           <Bot size={13} />
-          {runtimeLabel(activeRuntimeId)}
+          Pi
         </span>
-        {ompRuntime && (
-          <OmpSessionPanel
-            info={ompSidecar.session}
-            subagents={ompSidecar.subagents}
-            recentFrames={ompSidecar.recentFrames}
-            busy={running}
-            onSetFastMode={(enabled) => void ompCommand({ type: 'set_fast_mode', enabled })}
-            onSetAutoCompaction={(enabled) => void ompCommand({ type: 'set_auto_compaction', enabled })}
-            onCycleThinking={() => void ompCommand({ type: 'cycle_thinking_level' })}
-          />
-        )}
-        {sandbox && showsBrazierSandboxStatus(activeRuntimeId) && (
-          <SandboxBadge sandbox={sandbox} />
-        )}
+        {sandbox && <SandboxBadge sandbox={sandbox} />}
         <div className="agent-mode-select">
           <button
             type="button"
@@ -1789,8 +1664,7 @@ export function AgentMode(props: Props): React.JSX.Element {
             <div className="agent-mode-menu">
               {(Object.keys(PERMISSION_LABELS) as AgentPermissionMode[]).map((mode) => {
                 const sandboxUnavailable =
-                  mode === 'sandbox-only' &&
-                  (ompRuntime || !sandbox?.sandboxed_execution)
+                  mode === 'sandbox-only' && !sandbox?.sandboxed_execution
                 return (
                 <button
                   key={mode}
@@ -1798,19 +1672,15 @@ export function AgentMode(props: Props): React.JSX.Element {
                   className={mode === permissionMode ? 'active' : ''}
                   disabled={sandboxUnavailable}
                   title={
-                    mode === 'sandbox-only' && ompRuntime
-                      ? 'Unavailable for Oh My Pi: that runtime is a privileged harness.'
-                      : mode === 'sandbox-only' && !sandbox?.sandboxed_execution
-                      ? 'Unavailable: this host has no OS sandbox for agent commands.'
-                      : undefined
+                    mode === 'sandbox-only' && !sandbox?.sandboxed_execution
+                    ? 'Unavailable: this host has no OS sandbox for agent commands.'
+                    : undefined
                   }
                   onClick={() => void changePermissionMode(mode)}
                 >
                   <strong>{PERMISSION_LABELS[mode].title}</strong>
                   <span>
-                    {mode === 'sandbox-only' && ompRuntime
-                      ? 'Unavailable for Oh My Pi. Use Ask first, or switch the default runtime to Pi in Manage → Agent.'
-                      : mode === 'sandbox-only' && !sandbox?.sandboxed_execution
+                    {mode === 'sandbox-only' && !sandbox?.sandboxed_execution
                       ? 'Unavailable on this host: agent commands would have full user privileges.'
                       : PERMISSION_LABELS[mode].detail}
                   </span>
@@ -1837,26 +1707,15 @@ export function AgentMode(props: Props): React.JSX.Element {
         </button>
       </header>
 
-      {ompRuntime ? (
+      {sandbox &&
+      !sandbox.isolated && (
         <div className="agent-warning">
           <AlertTriangle size={15} />
           <span>
-            Oh My Pi runs as a privileged harness. Built-in tools execute in the omp sidecar with
-            your user privileges — not through Brazier&apos;s OS sandbox. Change the default under
-            Manage → Agent.
+            No sandbox on this host: {sandbox.detail} Commands would run with your full privileges,
+            so each one is held for approval and refused in sandbox-only mode.
           </span>
         </div>
-      ) : (
-        sandbox &&
-        !sandbox.isolated && (
-          <div className="agent-warning">
-            <AlertTriangle size={15} />
-            <span>
-              No sandbox on this host: {sandbox.detail} Commands would run with your full privileges,
-              so each one is held for approval and refused in sandbox-only mode.
-            </span>
-          </div>
-        )
       )}
 
       <div className="agent-transcript">
@@ -1867,9 +1726,7 @@ export function AgentMode(props: Props): React.JSX.Element {
             </div>
             <h2>Give the agent a task</h2>
             <p>
-              {ompRuntime
-                ? 'Oh My Pi owns a fuller coding tool surface (edit, shell, LSP/DAP, subagents) in a privileged sidecar. New tasks use the default framework from Manage → Agent.'
-                : `It reads and edits files in the workspace and runs commands there. Everything runs through Brazier's own policy layer: ${executeTools} of ${tools.length} tools can execute programs, and each needs your approval unless you change the mode above.`}
+              {`It reads and edits files in the workspace and runs commands there. Everything runs through Brazier's own policy layer: ${executeTools} of ${tools.length} tools can execute programs, and each needs your approval unless you change the mode above.`}
             </p>
             <div className="agent-suggestions">
               <button type="button" onClick={() => props.onSuggestPrompt?.('Summarize this repository: layout, build commands, and test entry points.')}>
@@ -1928,19 +1785,6 @@ export function AgentMode(props: Props): React.JSX.Element {
             </article>
           )
         })}
-
-        {ompRuntime &&
-          ompSidecar.commandOutputs.map((output) => (
-            <article className="agent-message omp-command" key={output.id}>
-              <div className="avatar">
-                <Terminal size={16} />
-              </div>
-              <div className="agent-message-body">
-                <strong>OMP command output</strong>
-                <pre>{output.text}</pre>
-              </div>
-            </article>
-          ))}
 
         {approvals.map((approval) => (
           <ApprovalCard key={approval.id} approval={approval} onDecide={(...args) => void decide(...args)} busy={deciding} />
@@ -2004,10 +1848,6 @@ export function AgentMode(props: Props): React.JSX.Element {
 
       {/* No composer here: the window has one, at the bottom, for every mode. */}
 
-      {ompRuntime && ompSidecar.pendingDialog && (
-        <OmpDialog dialog={ompSidecar.pendingDialog} onResolve={resolveOmpDialog} />
-      )}
-
       {artifact && (
         <div className="agent-artifact-overlay" role="dialog">
           <div className="agent-artifact">
@@ -2027,8 +1867,8 @@ export function AgentMode(props: Props): React.JSX.Element {
           <div className="agent-artifact agent-prompt-editor">
             <header>
               <div>
-                <strong>{ompRuntime ? 'Oh My Pi system prompt' : 'Workspace system prompt'}</strong>
-                <small>{ompRuntime ? 'Managed by the OMP runtime' : workspaceSettingsPath}</small>
+                <strong>Workspace system prompt</strong>
+                <small>{workspaceSettingsPath}</small>
               </div>
               <button
                 type="button"
@@ -2038,19 +1878,7 @@ export function AgentMode(props: Props): React.JSX.Element {
                 <X size={15} />
               </button>
             </header>
-            {ompRuntime ? (
-              <div className="agent-prompt-loading">
-                <p>
-                  Oh My Pi owns this task&apos;s native coding-harness system prompt. Brazier does
-                  not prepend the Pi workspace template or rewrite OMP&apos;s instructions.
-                </p>
-                <p>
-                  OMP also discovers project instruction sources such as <code>AGENTS.md</code> and
-                  <code>.omp</code> configuration from the selected workspace. Edit those files to
-                  customize OMP behavior; the editable Brazier workspace prompt applies only to Pi.
-                </p>
-              </div>
-            ) : promptLoading ? (
+            {promptLoading ? (
               <div className="agent-prompt-loading">
                 <LoaderCircle className="spin" size={16} />
                 Loading prompt…

@@ -101,17 +101,10 @@ declare global {
           model: { id: string; name?: string; contextWindow?: number; maxTokens?: number }
         ): Promise<unknown>
         setTools(sessionId: string, tools: string[]): Promise<unknown>
-        composerSuggestions(sessionId: string): Promise<Array<{ value: string; description: string }>>
         setPermissionMode(
           sessionId: string,
           mode: import('../../agent/core/types').AgentPermissionMode
         ): Promise<unknown>
-        runtimeCommand(
-          sessionId: string,
-          runtimeId: string | undefined,
-          command: Record<string, unknown>
-        ): Promise<unknown>
-        resolveExtensionUi(sessionId: string, response: Record<string, unknown>): Promise<unknown>
         closeSession(sessionId: string): Promise<unknown>
         status(): Promise<{ running: boolean; crashes: number }>
         onMessage(listener: (message: import('../../agent/core/protocol').WorkerMessage) => void): () => void

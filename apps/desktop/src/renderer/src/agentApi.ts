@@ -58,7 +58,7 @@ export type AgentRuntimeInfo = {
   /** Version of the adapter contract, not of the runtime package. */
   adapter_api_version: number
   available?: boolean
-  /** `broker` for Pi; `privileged_harness` for Oh My Pi. */
+  /** `broker` for Pi. */
   trust?: 'broker' | 'privileged_harness' | string
   binary_path?: string | null
   unavailable_reason?: string | null
@@ -76,14 +76,6 @@ export type AgentCapabilities = {
 
 export type AgentPreference = {
   default_runtime_id: string
-  omp_profile?: {
-    binary_path?: string
-    config_yaml?: string
-    /** OMP role → Brazier model id (`smol`, `plan`, `advisor`, `vision`, …). */
-    model_roles?: Record<string, string>
-    /** Structured OMP config.yml overrides, keyed by dotted path. */
-    settings?: Record<string, string | number | boolean>
-  } | null
 }
 
 export type AgentSessionSummary = {
@@ -181,7 +173,7 @@ export async function createAgentSession(input: {
   title?: string
   workspace_path?: string | null
   model: string
-  /** Agent framework adapter (`pi` or `omp`). Defaults to the saved preference. */
+  /** Agent framework adapter (`pi`). Defaults to the saved preference. */
   runtime_id?: string
   permission_mode?: AgentPermissionMode
   permission_settings?: AgentPermissionSettings

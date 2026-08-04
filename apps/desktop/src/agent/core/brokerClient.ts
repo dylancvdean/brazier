@@ -84,12 +84,6 @@ export type AgentCapabilitiesResponse = {
 
 export type AgentPreferenceResponse = {
   default_runtime_id: string
-  omp_profile?: {
-    binary_path?: string
-    config_yaml?: string
-    model_roles?: Record<string, string>
-    settings?: Record<string, string | number | boolean>
-  } | null
 }
 
 /** A chat model the daemon serves, as advertised by the OpenAI-compatible list. */
@@ -186,7 +180,7 @@ export class BrokerClient {
     return this.request('/api/v1/agent/capabilities')
   }
 
-  /** Chat models the daemon serves, so OMP can route roles across them. */
+  /** Chat models the daemon serves. */
   async models(): Promise<BrokerModelInfo[]> {
     const payload = await this.request<{ data: BrokerModelInfo[] }>('/v1/models')
     return payload.data

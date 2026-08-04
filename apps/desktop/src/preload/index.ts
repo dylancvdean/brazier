@@ -49,24 +49,8 @@ const agent = {
     invokeAgent({ type: 'set-model', sessionId, model }),
   setTools: (sessionId: string, tools: string[]): Promise<unknown> =>
     invokeAgent({ type: 'set-tools', sessionId, tools }),
-  composerSuggestions: (sessionId: string): Promise<Array<{ value: string; description: string }>> =>
-    invokeAgent({ type: 'composer-suggestions', sessionId }) as Promise<Array<{ value: string; description: string }>>,
   setPermissionMode: (sessionId: string, mode: AgentPermissionMode): Promise<unknown> =>
     invokeAgent({ type: 'set-permission-mode', sessionId, mode }),
-  /**
-   * Drive an arbitrary runtime command (OMP RPC) and resolve its response
-   * frame. Optional `runtimeId` guards against routing to the wrong session.
-   */
-  runtimeCommand: (
-    sessionId: string,
-    runtimeId: string | undefined,
-    command: Record<string, unknown>
-  ): Promise<unknown> => invokeAgent({ type: 'runtime-command', sessionId, runtimeId, command }),
-  /** Answer an extension-UI dialog the runtime is holding open for the user. */
-  resolveExtensionUi: (
-    sessionId: string,
-    response: Record<string, unknown>
-  ): Promise<unknown> => invokeAgent({ type: 'resolve-extension-ui', sessionId, response }),
   closeSession: (sessionId: string): Promise<unknown> =>
     invokeAgent({ type: 'close-session', sessionId }),
   status: (): Promise<{ running: boolean; crashes: number }> =>

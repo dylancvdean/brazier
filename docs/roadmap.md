@@ -78,12 +78,9 @@
   (default `pi`). Pi (`@earendil-works/pi-*`, MIT) is the broker-sandboxed
   default: orchestration only, with Brazier owning 19 filesystem/shell/workspace
   tools, the policy broker (`ask` / `sandbox-only` / `skip-permissions`),
-  argument-hash approvals, Seatbelt/Bubblewrap, and persistence. Oh My Pi (OMP)
-  is an optional second stock runtime driven via `omp --mode rpc` for a fuller
-  coding surface; Manage → Agent documents the privileged-harness trust
-  difference. Adapters live under `apps/desktop/src/agent/{pi,omp}/` with a
-  boundary test. The worker runs in its own `utilityProcess` and selects the
-  adapter per session.
+  argument-hash approvals, Seatbelt/Bubblewrap, and persistence. Adapters live
+  under `apps/desktop/src/agent/pi/` with a boundary test. The worker runs in its
+  own `utilityProcess` and selects the adapter per session.
 
 ## Alpha
 

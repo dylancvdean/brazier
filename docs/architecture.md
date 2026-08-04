@@ -278,12 +278,10 @@ API. Four processes are involved:
 ```text
 renderer (sandboxed)  →  main  →  agent worker (utilityProcess)
                                       │
-                         ┌────────────┴────────────┐
-                         │                         │
-                    Pi adapter                 OMP adapter
-                 (broker tools)            (omp --mode rpc)
-                         │                         │
-                         └────────────┬────────────┘
+                                      ▼
+                                 Pi adapter
+                              (broker tools)
+                                      │
                                       ▼
                                    brazierd
                               policy / sandbox / models
@@ -298,26 +296,18 @@ Stock options:
   Everything else — tool definitions, permission policy, sandboxing, execution,
   persistence, and the event stream — is Brazier's under
   `apps/desktop/src/agent/core/`.
-- **Oh My Pi (OMP)** — optional fuller coding harness driven as
-  `omp --mode rpc`. Reached exclusively through `apps/desktop/src/agent/omp/`.
-  OMP owns hashline edits, LSP/DAP, embedded shell, and task subagents. It is a
-  privileged sidecar: built-in tool effects are not mediated by brazierd's
-  broker. Manage → Agent explains that trust difference and lets the operator
-  pick the default. Brazier does not ship OMP's native package closure; the
-  daemon advertises OMP only when an `omp` binary is on PATH (or
-  `BRAZIER_OMP_PATH`).
 
 A boundary test fails the build if framework imports escape their adapter
 directories. The worker selects an adapter per session from
 `session.runtime_id`.
 
-For Pi sessions the worker holds no host privileges: its only route to the
-machine is `POST /api/v1/agent/exec` on the daemon, and the daemon decides.
+The worker holds no host privileges: its only route to the machine is
+`POST /api/v1/agent/exec` on the daemon, and the daemon decides.
 Tool schemas and the agent system prompt are served by the daemon too
 (`/api/v1/agent/tools`, `/api/v1/agent/sessions/{id}/prompt`), so the contract a
-Pi model sees always matches the executor and the policy behind it. OMP sessions
-still persist transcripts through the daemon for UI continuity and may register
-Brazier-only MCP tools as RPC host tools.
+Pi model sees always matches the executor and the policy behind it. Sessions
+persist transcripts through the daemon for UI continuity and may register
+Brazier-only MCP tools as broker tools.
 
 Agent system prompts are workspace-scoped settings in the daemon database, so
 all tasks grouped under the same workspace share one override. Agent mode's

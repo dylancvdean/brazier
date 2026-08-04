@@ -36,22 +36,7 @@ export type WorkerCommand =
       model: AgentModelReference
     }
   | { type: 'set-tools'; requestId: string; sessionId: string; tools: string[] }
-  | { type: 'composer-suggestions'; requestId: string; sessionId: string }
   | { type: 'set-permission-mode'; requestId: string; sessionId: string; mode: AgentPermissionMode }
-  | {
-      type: 'runtime-command'
-      requestId: string
-      sessionId: string
-      runtimeId?: string
-      command: Record<string, unknown>
-    }
-  | {
-      type: 'resolve-extension-ui'
-      requestId: string
-      sessionId: string
-      /** `extension_ui_response` frame for a dialog the runtime is holding. */
-      response: Record<string, unknown>
-    }
   | { type: 'close-session'; requestId: string; sessionId: string }
   | { type: 'shutdown'; requestId: string }
 
@@ -72,13 +57,6 @@ export type WorkerMessage =
   | { type: 'result'; requestId: string; ok: false; error: string }
   | { type: 'event'; sessionId: string; event: AgentEvent }
   | { type: 'session-state'; sessionId: string; state: AgentSessionState }
-  | {
-      type: 'runtime-frame'
-      sessionId: string
-      runtimeId: string
-      /** One frame from the runtime's own stream (e.g. an OMP RPC stdout frame). */
-      payload: Record<string, unknown>
-    }
   | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string }
 
 /** IPC channel names the renderer sees through the preload bridge. */
