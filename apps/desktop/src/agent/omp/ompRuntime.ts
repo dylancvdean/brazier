@@ -150,6 +150,22 @@ export function assistantContentFromOmpMessage(
   return textFromContent(record.content)
 }
 
+/**
+ * Append a streamed delta to the running message text.
+ *
+ * OMP's `message.content` snapshots can run ahead of the `text_delta` stream,
+ * so the first token(s) sometimes arrive once via the snapshot diff and again
+ * when the delta stream restarts from the beginning. A delta that is a prefix
+ * of everything accumulated so far is a restart, not new text; dropping it
+ * keeps the first token from appearing twice.
+ */
+export function appendStreamedDelta(current: string, delta: string): string {
+  if (delta.length > 0 && current.length >= delta.length && current.startsWith(delta)) {
+    return current
+  }
+  return current + delta
+}
+
 function isMcpTool(tool: AgentToolDefinition): boolean {
   return tool.name.includes('__') || tool.name.startsWith('mcp_')
 }
@@ -721,23 +737,47 @@ class OmpAgentSession implements AgentSession {
           | undefined
         const inner = frame.assistantMessageEvent as Record<string, unknown> | undefined
         if (inner?.type === 'text_delta' && typeof inner.delta === 'string') {
-          assistantText += inner.delta
-          push(event({ type: 'text-delta', delta: inner.delta, channel: 'text' }))
+          const next = appendStreamedDelta(assistantText, inner.delta)
+          if (next !== assistantText) {
+            assistantText = next
+            push(event({ type: 'text-delta', delta: inner.delta, channel: 'text' }))
+          }
         } else if (inner?.type === 'thinking_delta' && typeof inner.delta === 'string') {
-          assistantReasoning += inner.delta
-          push(event({ type: 'text-delta', delta: inner.delta, channel: 'reasoning' }))
+          const next = appendStreamedDelta(assistantReasoning, inner.delta)
+          if (next !== assistantReasoning) {
+            assistantReasoning = next
+            push(event({ type: 'text-delta', delta: inner.delta, channel: 'reasoning' }))
+          }
         } else if (assistantMessage) {
           const parsed = assistantContentFromOmpMessage(assistantMessage)
           if (!parsed) return
-          if (parsed.text && parsed.text.length > assistantText.length) {
+          // The snapshot must be a strict extension of the deltas already
+          // streamed, never a replayed prefix, so the tail pushed here cannot
+          // duplicate text the delta stream already delivered. When the delta
+          // stream diverged from the snapshot, still adopt the snapshot as the
+          // authoritative committed text — OMP's message content is what the
+          // sidecar actually produced.
+          if (
+            parsed.text &&
+            parsed.text.length > assistantText.length &&
+            parsed.text.startsWith(assistantText)
+          ) {
             const delta = parsed.text.slice(assistantText.length)
-            assistantText = parsed.text
             if (delta) push(event({ type: 'text-delta', delta, channel: 'text' }))
           }
-          if (parsed.reasoning && parsed.reasoning.length > assistantReasoning.length) {
+          if (parsed.text && parsed.text.length > assistantText.length) {
+            assistantText = parsed.text
+          }
+          if (
+            parsed.reasoning &&
+            parsed.reasoning.length > assistantReasoning.length &&
+            parsed.reasoning.startsWith(assistantReasoning)
+          ) {
             const delta = parsed.reasoning.slice(assistantReasoning.length)
-            assistantReasoning = parsed.reasoning
             if (delta) push(event({ type: 'text-delta', delta, channel: 'reasoning' }))
+          }
+          if (parsed.reasoning && parsed.reasoning.length > assistantReasoning.length) {
+            assistantReasoning = parsed.reasoning
           }
           for (const call of parsed.toolCalls) {
             if (!assistantToolCalls.some((entry) => entry.id === call.id)) {

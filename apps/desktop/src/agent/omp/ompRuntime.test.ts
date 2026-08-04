@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  appendStreamedDelta,
   assistantContentFromOmpMessage,
   buildBrazierModelCatalog,
   configYamlWithModelRoles,
@@ -170,5 +171,18 @@ describe('OMP adapter protocol helpers', () => {
     expect(isCurrentOmpRun(undefined, 'run-a', false)).toBe(false)
     expect(isCurrentOmpRun('run-b', 'run-a', false)).toBe(false)
     expect(isCurrentOmpRun('run-a', 'run-a', true)).toBe(false)
+  })
+
+  it('appends incremental deltas without duplicating a restarted first token', () => {
+    // Normal incremental stream.
+    expect(appendStreamedDelta('', 'The')).toBe('The')
+    expect(appendStreamedDelta('The', ' quick')).toBe('The quick')
+    // The delta stream restarts from the first token after a snapshot diff
+    // already delivered it: the replay is dropped, not re-counted.
+    expect(appendStreamedDelta('The', 'The')).toBe('The')
+    expect(appendStreamedDelta('The quick', 'The')).toBe('The quick')
+    expect(appendStreamedDelta('The quick', 'The q')).toBe('The quick')
+    // Empty deltas never count.
+    expect(appendStreamedDelta('The quick', '')).toBe('The quick')
   })
 })

@@ -114,6 +114,7 @@ import {
 } from './model-utils'
 import { branchSiblings, messageChain } from './graph'
 import { buildChatDisplayItems } from './chatDisplay'
+import { composerCompletionsFor, replaceTrailingCommand, trailingCommand } from './composerCompletions'
 import {
   readCachedConversations,
   readCachedModels,
@@ -2247,19 +2248,16 @@ export function App(): React.JSX.Element {
               }}
             />
             {shellComposerMode && shellComposer?.suggestions && (() => {
-              const match = draft.match(/(?:^|\s)([a-z]*)$/)
-              const query = match?.[1] ?? ''
-              const suggestions = shellComposer.suggestions.filter((entry) =>
-                entry.value.startsWith(query.toLowerCase())
-              )
-              if (suggestions.length === 0 || (query && suggestions[0]?.value === query)) return null
+              const query = trailingCommand(draft)
+              const suggestions = composerCompletionsFor(draft, shellComposer.suggestions)
+              if (suggestions.length === 0 || suggestions[0]?.value === query) return null
               return (
                 <div className="composer-suggestions" role="listbox" aria-label="OMP prompt suggestions">
                   {suggestions.map((entry) => (
                     <button
                       type="button"
                       key={entry.value}
-                      onClick={() => setDraft((current) => current.replace(/(?:^|\s)[a-z]*$/, (word) => `${word.startsWith(' ') ? ' ' : ''}${entry.value} `))}
+                      onClick={() => setDraft((current) => replaceTrailingCommand(current, entry.value))}
                     >
                       <strong>{entry.value}</strong><span>{entry.description}</span>
                     </button>
