@@ -139,7 +139,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fetch_url",
-                "description": "Fetch a public http(s) URL and return text content. Public PDFs are saved as conversation attachments and read by page; PDF links returned by MCP web tools use the same path. Set render_pages for scans/layout when using a vision model. Private and local addresses are blocked. Long pages are truncated with a character count; pass start to fetch the next chunk.",
+                "description": "Fetch a public http(s) URL and return text content. A PDF must be fetched here, never passed to doc_read: fetching a PDF stores it and returns a document id for doc_read to page through. PDF links returned by MCP web tools use the same path. Set render_pages for scans/layout when using a vision model. Private and local addresses are blocked. Long pages are truncated with a character count; pass start to fetch the next chunk.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -207,7 +207,7 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "doc_read",
-                "description": "Read a PDF, RTF, DOC, or DOCX the user attached. Pass the short document id from the attachment notice (about 12 hex characters). For PDFs, choose a page range (default: first 3 pages) or set render_pages to true to receive page images — use that for scanned PDFs with no text layer, or when layout matters. For RTF/DOC/DOCX, choose a line range instead. Output is truncated when too long; narrow the range and call again.",
+                "description": "Read a PDF, RTF, DOC, or DOCX the user attached. Pass the short document id from the attachment notice (about 12 hex characters). It does not accept URLs — to read a PDF from the web, call fetch_url first and use the document id it returns. For PDFs, choose a page range (default: first 3 pages) or set render_pages to true to receive page images — use that for scanned PDFs with no text layer, or when layout matters. For RTF/DOC/DOCX, choose a line range instead. Output is truncated when too long; narrow the range and call again.",
                 "parameters": {
                     "type": "object",
                     "properties": {

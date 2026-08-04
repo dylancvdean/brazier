@@ -165,10 +165,11 @@ fn raw_definitions() -> Vec<RawDefinition> {
         ),
         (
             "doc_read",
-            "Read a PDF, RTF, DOC, or DOCX in the workspace. For PDFs, pass start_page/end_page \
-             (default: first 3 pages) or set render_pages to true to get page images for scanned \
-             documents or layout-sensitive reading. For RTF/DOC/DOCX, pass start_line/end_line. \
-             Prefer this over shelling out to pdftotext.",
+            "Read a PDF, RTF, DOC, or DOCX in the workspace — it does not accept URLs; for a \
+             PDF link use web_fetch first, then pass the document id it returns. For PDFs, pass \
+             start_page/end_page (default: first 3 pages) or set render_pages to true to get \
+             page images for scanned documents or layout-sensitive reading. For RTF/DOC/DOCX, \
+             pass start_line/end_line. Prefer this over shelling out to pdftotext.",
             object(
                 json!({
                     "path": path_property(workspace_relative),
@@ -622,8 +623,9 @@ fn raw_definitions() -> Vec<RawDefinition> {
         (
             "web_fetch",
             "Fetch a URL and return its text content. Useful for reading a page the model \
-             cannot reach directly, such as documentation or an API reference. Public PDFs are \
-             stored and read by page with doc_read.",
+             cannot reach directly, such as documentation or an API reference. A PDF URL must \
+             go through web_fetch, not doc_read: fetching a PDF stores it and returns a document \
+             id you then pass to doc_read to read by page.",
             object(
                 json!({
                     "url": {
@@ -782,7 +784,9 @@ pub fn system_prompt_components(
             format!(
                 "How to work:\n\
                  - Investigate before changing anything. Read the files you are about to edit.\n\
-                 - Use doc_read for PDF/RTF/DOC/DOCX; use fs_read for ordinary text files.\n\
+                 - Use doc_read for PDF/RTF/DOC/DOCX (by path, never a URL — fetch PDF links \
+                    with web_fetch and pass the document id it returns); use fs_read for \
+                    ordinary text files.\n\
                  - Prefer fs_patch over fs_write for existing files, and keep edits minimal.\n\
                  - Run the project's own checks when you change code, and report failures \
                    honestly instead of claiming success.\n\
