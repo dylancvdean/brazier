@@ -151,10 +151,16 @@ pub fn describe_server_startup_failure(
     let trimmed = stderr.trim();
     let excerpt = startup_stderr_excerpt(trimmed);
     if startup_looks_like_oom(trimmed) {
+        let remediation = if server.to_ascii_lowercase().contains("vllm") {
+            "Lower the context/max model length, reduce GPU memory utilization or tensor-parallel settings, use a smaller or quantized model, or close other apps."
+        } else {
+            "Lower context size, turn off Parallel subagents, reduce GPU layers, or close other apps, then try again."
+        };
+        let cause = startup_root_cause(trimmed)
+            .map(|cause| format!("\n\nRoot cause from {server}:\n{cause}"))
+            .unwrap_or_default();
         format!(
-            "{server} ran out of memory while starting ({status}). \
-             Lower context size, turn off Parallel subagents, reduce GPU layers, \
-             or close other apps, then try again.\n\n{excerpt}"
+            "{server} ran out of memory while starting ({status}). {remediation}{cause}\n\n{excerpt}"
         )
     } else if startup_looks_like_invalid_gguf(trimmed) {
         format!(
@@ -165,6 +171,34 @@ pub fn describe_server_startup_failure(
     } else {
         format!("{server} exited during startup with {status}:\n{excerpt}")
     }
+}
+
+/// Pull actionable exception lines out of a long multi-process Python log.
+/// vLLM often ends with a generic `Engine core initialization failed` wrapper;
+/// the useful OOM or configuration exception appears earlier in the traceback.
+fn startup_root_cause(stderr: &str) -> Option<String> {
+    let mut causes = Vec::new();
+    for raw in stderr.lines() {
+        let line = raw.trim();
+        let lower = line.to_ascii_lowercase();
+        let exception_line = lower.contains("error:")
+            || lower.contains("out of memory")
+            || lower.contains("out-of-memory")
+            || lower.contains("not enough memory");
+        if !exception_line
+            || lower.contains("engine core initialization failed")
+            || lower.contains("warning:")
+        {
+            continue;
+        }
+        if !causes.iter().any(|cause| cause == line) {
+            causes.push(line.to_owned());
+        }
+        if causes.len() == 3 {
+            break;
+        }
+    }
+    (!causes.is_empty()).then(|| causes.join("\n"))
 }
 
 /// Keep both the beginning and end of a noisy startup log. Python servers in
@@ -3165,6 +3199,16 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
         );
         assert!(message.contains("ran out of memory"));
         assert!(message.contains("Parallel subagents"));
+    }
+
+    #[test]
+    fn vllm_oom_message_preserves_root_cause_and_uses_vllm_advice() {
+        let stderr = "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB\nRuntimeError: Engine core initialization failed. See root cause above.";
+        let message = describe_server_startup_failure("vLLM server", "exit status: 1", stderr);
+        assert!(message.contains("Root cause from vLLM server"));
+        assert!(message.contains("torch.OutOfMemoryError: HIP out of memory"));
+        assert!(message.contains("context/max model length"));
+        assert!(!message.contains("Parallel subagents"));
     }
 
     #[test]
