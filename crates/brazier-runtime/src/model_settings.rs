@@ -158,6 +158,13 @@ pub struct TextProfile {
     pub mtp: Option<bool>,
     /// Maximum MTP draft tokens per step. Unset uses the conservative default of 2.
     pub mtp_draft_tokens: Option<u8>,
+    /// Explicit speculative draft GGUF. A bare filename is resolved beside
+    /// the main model; an absolute path can point elsewhere.
+    /// `None` auto-detects a same-family dspark, dflash, or draft GGUF.
+    pub speculative_draft_model: Option<String>,
+    /// Optional llama.cpp speculative type override. If unset, the type is
+    /// inferred from the draft filename.
+    pub speculative_draft_type: Option<String>,
 
     // --- sampling, sent per request ---
     pub temperature: Option<f32>,
@@ -538,6 +545,21 @@ fn validate_text(profile: &TextProfile) -> anyhow::Result<()> {
     }
     ensure_range(profile.max_subagents, 1, 8, "max subagents")?;
     ensure_range(profile.mtp_draft_tokens, 1, 6, "MTP draft tokens")?;
+    ensure_one_of(
+        profile.speculative_draft_type.as_ref(),
+        &["draft-simple", "draft-dflash", "draft-dspark"],
+        "speculative draft type",
+    )?;
+    if let Some(path) = &profile.speculative_draft_model {
+        anyhow::ensure!(
+            !path.trim().is_empty(),
+            "speculative draft model must not be empty when set"
+        );
+        anyhow::ensure!(
+            path.len() <= 4096,
+            "speculative draft model path is too long"
+        );
+    }
     validate_loras(&profile.loras)?;
     validate_extra_args(&profile.extra_args)
 }

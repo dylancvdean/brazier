@@ -84,6 +84,16 @@ pub fn launch_key(
     format!("{context}|{prefix_caching}|{extra}")
 }
 
+fn apply_hugging_face_token(command: &mut Command, token: Option<&str>) {
+    if let Some(token) = token.map(str::trim).filter(|token| !token.is_empty()) {
+        // vLLM delegates model/config downloads to Hugging Face libraries,
+        // which read these environment variables rather than Brazier's
+        // reqwest authentication helper.
+        command.env("HF_TOKEN", token);
+        command.env("HUGGING_FACE_HUB_TOKEN", token);
+    }
+}
+
 fn prefix_caching_enabled(settings: &RuntimeSettings, model_ref: &str) -> bool {
     settings
         .vllm_models
@@ -99,6 +109,7 @@ impl Server {
         model_ref: &str,
         settings: &RuntimeSettings,
         profile: Option<&crate::model_settings::TextProfile>,
+        hf_token: Option<&str>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             python.is_file(),
@@ -137,6 +148,7 @@ impl Server {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        apply_hugging_face_token(&mut command, hf_token);
         if prefix_caching_enabled(settings, model_ref) {
             command.arg("--enable-prefix-caching");
         } else {
@@ -269,5 +281,20 @@ mod tests {
         };
         assert!(!prefix_caching_enabled(&settings, "Qwen/Qwen3-8B"));
         assert!(launch_key(&settings, "Qwen/Qwen3-8B", None).contains("false"));
+    }
+
+    #[test]
+    fn applies_saved_hugging_face_token_to_vllm_process() {
+        let mut command = Command::new("python");
+        apply_hugging_face_token(&mut command, Some("hf_test_token"));
+        let envs: Vec<_> = command.as_std().get_envs().collect();
+        assert!(envs.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new("HF_TOKEN")
+                && *value == Some(std::ffi::OsStr::new("hf_test_token"))
+        }));
+        assert!(envs.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new("HUGGING_FACE_HUB_TOKEN")
+                && *value == Some(std::ffi::OsStr::new("hf_test_token"))
+        }));
     }
 }

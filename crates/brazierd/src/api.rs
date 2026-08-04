@@ -2514,6 +2514,57 @@ async fn resolve_repo_recommendation(
         resolved["companion_files"] = json!([companion]);
     }
 
+    // Speculative draft weights are also optional companions, but they are
+    // kept separate from projectors so clients can explain what they add.
+    // Prefer the smallest same-repository draft: publishers commonly expose
+    // both a bf16 reference and a much smaller runtime quant.
+    let mut discovered_drafts: Vec<(&str, Option<u64>)> = listing
+        .iter()
+        .filter(|(path, _)| {
+            path.rsplit('/').next().is_some_and(|name| {
+                let name = name.to_ascii_lowercase();
+                name.ends_with(".gguf")
+                    && !name.contains("mmproj")
+                    && (name.contains("dspark")
+                        || name.contains("dflash")
+                        || name.contains("draft"))
+            })
+        })
+        .map(|(path, size)| (path.as_str(), *size))
+        .collect();
+    discovered_drafts.sort_by(|(left_path, left_size), (right_path, right_size)| {
+        left_size
+            .unwrap_or(u64::MAX)
+            .cmp(&right_size.unwrap_or(u64::MAX))
+            .then_with(|| left_path.cmp(right_path))
+    });
+    if let Some((draft, _)) = discovered_drafts.first() {
+        resolved["draft_files"] = json!([draft]);
+    }
+
+    if !entry.draft_files.is_empty() && discovered_drafts.is_empty() {
+        let published: std::collections::HashSet<&str> =
+            listing.iter().map(|(path, _)| path.as_str()).collect();
+        let mut drafts: Vec<&str> = Vec::new();
+        let mut missing: Vec<&str> = Vec::new();
+        for wanted in &entry.draft_files {
+            if published.contains(wanted.as_str()) {
+                drafts.push(wanted);
+            } else {
+                missing.push(wanted);
+            }
+        }
+        if !drafts.is_empty() {
+            resolved["draft_files"] = json!(drafts);
+        }
+        if !missing.is_empty() {
+            resolved["unresolved_drafts"] = json!(format!(
+                "Draft file(s) {} not published by this repository.",
+                missing.join(", ")
+            ));
+        }
+    }
+
     // Explicit companion files remain supported for catalogue overrides that
     // need a nonstandard projector name.
     if !entry.companion_files.is_empty() && discovered_companions.is_empty() {

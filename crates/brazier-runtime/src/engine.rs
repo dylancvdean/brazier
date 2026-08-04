@@ -1746,7 +1746,11 @@ impl Runtime {
         if let Some(mut server) = state.server.take() {
             let _ = server.stop().await;
         }
-        state.server = Some(vllm::Server::start(&python, model_ref, &settings, profile).await?);
+        let hf_token = crate::hf_auth::load_token(&self.data_dir);
+        state.server = Some(
+            vllm::Server::start(&python, model_ref, &settings, profile, hf_token.as_deref())
+                .await?,
+        );
         state.python = Some(python);
         Ok(())
     }

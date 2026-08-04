@@ -389,6 +389,52 @@ fn is_projector(path: &Path) -> bool {
         .is_some_and(|name| name.to_ascii_lowercase().contains("mmproj"))
 }
 
+/// Return the llama.cpp speculative-decoding mode encoded in a companion
+/// filename. These files are deliberately kept out of the model library;
+/// they are launch-time helpers, like an `mmproj`.
+pub fn speculative_draft_type(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+    if !name.ends_with(".gguf") {
+        return None;
+    }
+    if name.contains("dspark") {
+        Some("draft-dspark")
+    } else if name.contains("dflash") {
+        Some("draft-dflash")
+    } else if name.contains("draft") {
+        Some("draft-simple")
+    } else {
+        None
+    }
+}
+
+pub fn is_speculative_draft_file(path: &Path) -> bool {
+    speculative_draft_type(path).is_some()
+}
+
+fn draft_family_prefix(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?.to_ascii_lowercase();
+    let marker = ["dspark", "dflash", "draft", "mtp"]
+        .iter()
+        .filter_map(|marker| stem.find(marker).map(|position| (position, *marker)))
+        .min_by_key(|(position, _)| *position)?;
+    Some(
+        stem[..marker.0]
+            .trim_end_matches(['-', '_', ' '])
+            .to_owned(),
+    )
+}
+
+fn same_draft_family(model: &Path, draft: &Path) -> bool {
+    let Some(prefix) = draft_family_prefix(draft) else {
+        return false;
+    };
+    let Some(model_stem) = model.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    model_stem.to_ascii_lowercase().starts_with(&prefix)
+}
+
 /// Length of a `-00001-of-00003` shard suffix (llama.cpp split naming).
 const SHARD_SUFFIX_LEN: usize = 15;
 
@@ -511,6 +557,38 @@ pub fn projector_for_model(model_path: &Path) -> Option<PathBuf> {
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
                 && is_projector(path)
         })
+}
+
+/// Find the smallest same-family speculative draft beside a GGUF model.
+///
+/// Repositories commonly publish several draft precisions. The smallest one
+/// is the least surprising automatic choice because it consumes the least
+/// memory; a model profile can override it when a repository publishes more
+/// than one incompatible draft family.
+pub fn draft_model_for_model(model_path: &Path) -> Option<PathBuf> {
+    let directory = model_path.parent()?;
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(directory)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+                && !is_projector(path)
+                && is_speculative_draft_file(path)
+                && same_draft_family(model_path, path)
+        })
+        .collect();
+    candidates.sort_by(|left, right| {
+        let left_size = std::fs::metadata(left)
+            .map(|meta| meta.len())
+            .unwrap_or(u64::MAX);
+        let right_size = std::fs::metadata(right)
+            .map(|meta| meta.len())
+            .unwrap_or(u64::MAX);
+        left_size.cmp(&right_size).then_with(|| left.cmp(right))
+    });
+    candidates.into_iter().next()
 }
 
 fn dir_has_projector(dir: &Path) -> bool {
@@ -1040,7 +1118,7 @@ fn collect_external_library(
         {
             continue;
         }
-        if is_projector(&path) {
+        if is_projector(&path) || is_speculative_draft_file(&path) {
             continue;
         }
         let size = std::fs::metadata(&path)
@@ -1094,7 +1172,7 @@ fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> a
         {
             continue;
         }
-        if is_projector(&path) {
+        if is_projector(&path) || is_speculative_draft_file(&path) {
             continue;
         }
         let size = std::fs::metadata(&path)
@@ -1512,12 +1590,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let model = download_destination(dir.path(), "acme/vision", "model-q4.gguf").unwrap();
         let projector = download_destination(dir.path(), "acme/vision", "mmproj-f16.gguf").unwrap();
+        let draft =
+            download_destination(dir.path(), "acme/vision", "model-dspark-q4.gguf").unwrap();
         std::fs::create_dir_all(model.parent().unwrap()).unwrap();
         std::fs::write(&model, b"model").unwrap();
         std::fs::write(&projector, b"projector").unwrap();
+        std::fs::write(&draft, b"draft").unwrap();
         let models = list_gguf_models(dir.path()).unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(projector_for_model(&model), Some(projector));
+        assert_eq!(draft_model_for_model(&model), Some(draft));
         assert!(
             models[0]
                 .capabilities
@@ -1531,6 +1613,24 @@ mod tests {
                 .contains(&"audio".to_owned())
         );
         assert!(models[0].capabilities.audio_input.is_none());
+    }
+
+    #[test]
+    fn auto_detects_the_smallest_same_family_speculative_draft() {
+        let dir = tempdir().unwrap();
+        let model = dir.path().join("Ternary-Bonsai-27B-Q2_0.gguf");
+        let dspark_bf16 = dir.path().join("Ternary-Bonsai-27B-dspark-bf16.gguf");
+        let dspark_q4 = dir.path().join("Ternary-Bonsai-27B-dspark-Q4_1.gguf");
+        let unrelated = dir.path().join("Other-Model-dflash-Q4.gguf");
+        std::fs::write(&model, b"model").unwrap();
+        std::fs::write(&dspark_bf16, vec![0_u8; 16]).unwrap();
+        std::fs::write(&dspark_q4, vec![0_u8; 4]).unwrap();
+        std::fs::write(&unrelated, vec![0_u8; 1]).unwrap();
+
+        assert_eq!(speculative_draft_type(&dspark_q4), Some("draft-dspark"));
+        assert_eq!(draft_model_for_model(&model), Some(dspark_q4));
+        assert!(is_speculative_draft_file(&dspark_bf16));
+        assert!(!is_speculative_draft_file(&model));
     }
 
     #[test]

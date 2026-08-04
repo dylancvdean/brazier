@@ -3076,7 +3076,13 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                     groups.map((group) => {
                     const basename = quantGroupName(group)
                     const fit = generationFit(group.size, props.hardware)
-                    const isProjector = basename.toLowerCase().includes('mmproj')
+                    const lowerName = basename.toLowerCase()
+                    const isProjector = lowerName.includes('mmproj')
+                    const isDraft =
+                      !isProjector &&
+                      (lowerName.includes('dspark') ||
+                        lowerName.includes('dflash') ||
+                        lowerName.includes('draft'))
                     const isPreferred =
                       preferred != null &&
                       group.files.some(
@@ -3088,9 +3094,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                           <strong>
                             {basename}
                             {isProjector ? ' · multimodal projector' : ''}
+                            {isDraft ? ' · speculative draft' : ''}
                             {isPreferred ? ' · preferred' : ''}
                           </strong>
-                          {!isProjector && (
+                          {!isProjector && !isDraft && (
                             <span className={`generation-fit quant-fit ${fit}`}>
                               {generationFitLabel(fit)}
                             </span>
@@ -3108,7 +3115,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                             onClick={() => void downloadQuant(model.id, group.files.map((file) => file.path))}
                           >
                             <Download size={14} />
-                            {isProjector ? 'Add capability' : 'Download'}
+                            {isProjector || isDraft ? 'Add capability' : 'Download'}
                           </button>
                         </div>
                       </div>

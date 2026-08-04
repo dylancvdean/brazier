@@ -559,6 +559,7 @@ export function App(): React.JSX.Element {
 
   const abortRef = useRef<AbortController | undefined>(undefined)
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
+  const preparingModelRef = useRef('')
   const conversationRefreshRef = useRef(0)
   // Message requests can outlive a cancelled generation or a newly created
   // chat. Keep a generation counter separate from the conversation list so a
@@ -673,6 +674,7 @@ export function App(): React.JSX.Element {
       return
     }
     prepareAbortRef.current?.abort()
+    preparingModelRef.current = modelId
     setSelectedModel(modelId)
     setModelResidency(null)
     setForkHints([])
@@ -695,7 +697,7 @@ export function App(): React.JSX.Element {
       }
     })
       .then((residency) => {
-        if (controller.signal.aborted) return
+        if (controller.signal.aborted || preparingModelRef.current !== modelId) return
         setModelResidency(residency)
         setModelPrepareState('ready')
         setModelLoadStatus(null)
@@ -704,7 +706,19 @@ export function App(): React.JSX.Element {
         void refreshCapabilities()
       })
       .catch((cause: unknown) => {
-        if (controller.signal.aborted || (cause as Error).name === 'AbortError') return
+        if (
+          controller.signal.aborted ||
+          preparingModelRef.current !== modelId ||
+          (cause as Error).name === 'AbortError'
+        ) {
+          return
+        }
+        // Selection happens before the daemon can load the weights. If that
+        // load fails, do not leave a model highlighted in the top bar as if it
+        // were active. Keep the error visible so the user can diagnose it.
+        preparingModelRef.current = ''
+        setSelectedModel('')
+        setModelResidency(null)
         setModelPrepareState('error')
         setModelLoadStatus(null)
         if (cause instanceof GenerationFailure) {

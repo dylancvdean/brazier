@@ -65,7 +65,7 @@ const QUANT_LADDER: [(&str, &[&str]); 6] = [
 /// alongside the Bonsai weights — at ~7 GB the bf16 reference is large enough
 /// to fool the size-based fallback otherwise, and would be picked as "the
 /// model" on a 16 GB machine.
-const COMPANION_MARKERS: [&str; 5] = ["mmproj", "mtp-", "-draft", "projector", "dspark"];
+const COMPANION_MARKERS: [&str; 6] = ["mmproj", "mtp-", "-draft", "projector", "dspark", "dflash"];
 
 // ---------------------------------------------------------------------------
 // Catalogue
@@ -96,6 +96,10 @@ pub struct RepoRecommendation {
     /// reported instead of failing the install.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub companion_files: Vec<String>,
+    /// Optional speculative-decoding draft files to fetch beside the main
+    /// weights, e.g. a nonstandard dspark/dflash filename.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft_files: Vec<String>,
     /// A mainline-compatible recommendation to use when this model requires a
     /// source-built runtime fork whose local toolchain is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]

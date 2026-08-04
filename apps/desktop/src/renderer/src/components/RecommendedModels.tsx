@@ -168,6 +168,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
   const { recommendations, onInstalled, onError } = props
   const [states, setStates] = useState<Record<string, InstallState>>({})
   const [includeCompanions, setIncludeCompanions] = useState<Record<string, boolean>>({})
+  const [includeDrafts, setIncludeDrafts] = useState<Record<string, boolean>>({})
   const [setups, setSetups] = useState<RecommendationSetup[]>([])
   const [hfTokenSource, setHfTokenSource] = useState('none')
   const [hfTokenDraft, setHfTokenDraft] = useState('')
@@ -321,6 +322,8 @@ export function RecommendedModels(props: Props): React.JSX.Element {
     }
     const companions = entry.companion_files ?? []
     const includeCompanion = includeCompanions[key] ?? true
+    const drafts = entry.draft_files ?? []
+    const includeDraft = includeDrafts[key] ?? true
     if (companions.length > 0) {
       notes.push({
         tone: 'plain',
@@ -335,6 +338,15 @@ export function RecommendedModels(props: Props): React.JSX.Element {
     }
     if (entry.unresolved_companions) {
       notes.push({ tone: 'warn', text: entry.unresolved_companions })
+    }
+    if (drafts.length > 0) {
+      notes.push({
+        tone: 'plain',
+        text: 'Optional speculative draft: speeds up generation when this model supports dspark, dflash, or standard draft decoding.'
+      })
+    }
+    if (entry.unresolved_drafts) {
+      notes.push({ tone: 'warn', text: entry.unresolved_drafts })
     }
 
     const meta = entry.bytes
@@ -370,6 +382,19 @@ export function RecommendedModels(props: Props): React.JSX.Element {
                 Add image understanding
               </label>
             ) : null}
+            {drafts.length > 0 ? (
+              <label className="recommendation-companion-choice">
+                <input
+                  type="checkbox"
+                  checked={includeDraft}
+                  disabled={state.busy || state.done}
+                  onChange={(event) =>
+                    setIncludeDrafts((current) => ({ ...current, [key]: event.target.checked }))
+                  }
+                />
+                Add speculative draft
+              </label>
+            ) : null}
             <InstallButton
               state={state}
               label="Install"
@@ -386,7 +411,11 @@ export function RecommendedModels(props: Props): React.JSX.Element {
                       build: entry.runtime_build
                         ? { ...entry.runtime_build, jobs: 0 }
                         : undefined,
-                      works: [...files, ...(includeCompanion ? companions : [])].map((filename) => ({
+                      works: [
+                        ...files,
+                        ...(includeCompanion ? companions : []),
+                        ...(includeDraft ? drafts : [])
+                      ].map((filename) => ({
                         kind: 'gguf' as const,
                         repo_id: entry.repo_id,
                         filename,

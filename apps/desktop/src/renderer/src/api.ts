@@ -1534,8 +1534,12 @@ export type RepoRecommendation = {
   /** Extra files to fetch after the main weights, in order. E.g. a vision
    *  projector that `llama.cpp` auto-attaches when it sits next to the model. */
   companion_files?: string[]
+  /** Automatically associated speculative-decoding draft GGUFs. */
+  draft_files?: string[]
   /** Companion file(s) requested but not published by the repository. */
   unresolved_companions?: string
+  /** Draft file(s) requested but not published by the repository. */
+  unresolved_drafts?: string
   /** A runtime fork that is built and activated with this recommendation. */
   runtime_build?: {
     engine: string
@@ -1749,6 +1753,10 @@ export type TextProfile = {
   mtp?: boolean | null
   /** Maximum MTP draft tokens per step (default 2). */
   mtp_draft_tokens?: number | null
+  /** Draft GGUF filename beside the model, or an absolute path. Null auto-detects. */
+  speculative_draft_model?: string | null
+  /** draft-simple, draft-dflash, or draft-dspark. Null infers from the filename. */
+  speculative_draft_type?: string | null
   temperature?: number | null
   top_p?: number | null
   top_k?: number | null

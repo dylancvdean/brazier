@@ -1041,6 +1041,20 @@ function TextFields(props: SectionProps<TextProfile>): React.JSX.Element {
             value={profile.mtp_draft_tokens}
             onChange={(value) => set('mtp_draft_tokens', value)}
           />
+          <TextField
+            label="Speculative draft model"
+            placeholder="Auto-detect beside this model"
+            hint="Leave blank to find a same-family dspark, dflash, or draft GGUF beside the main model. Enter a filename or an absolute path to choose one manually."
+            value={profile.speculative_draft_model}
+            onChange={(value) => set('speculative_draft_model', value)}
+          />
+          <SelectField
+            label="Speculative draft type"
+            hint="Usually inferred from the draft filename. Override this only when the publisher uses a nonstandard name."
+            options={['draft-simple', 'draft-dflash', 'draft-dspark']}
+            value={profile.speculative_draft_type}
+            onChange={(value) => set('speculative_draft_type', value)}
+          />
           <SelectField
             label="KV cache · keys"
             hint="Quantising the cache buys context length with a little quality."

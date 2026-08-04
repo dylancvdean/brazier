@@ -149,13 +149,7 @@ pub fn describe_server_startup_failure(
     stderr: &str,
 ) -> String {
     let trimmed = stderr.trim();
-    let excerpt = if trimmed.is_empty() {
-        "(no stderr)".to_owned()
-    } else if trimmed.len() <= STARTUP_STDERR_LIMIT {
-        trimmed.to_owned()
-    } else {
-        format!("{}…", &trimmed[..STARTUP_STDERR_LIMIT])
-    };
+    let excerpt = startup_stderr_excerpt(trimmed);
     if startup_looks_like_oom(trimmed) {
         format!(
             "{server} ran out of memory while starting ({status}). \
@@ -171,6 +165,46 @@ pub fn describe_server_startup_failure(
     } else {
         format!("{server} exited during startup with {status}:\n{excerpt}")
     }
+}
+
+/// Keep both the beginning and end of a noisy startup log. Python servers in
+/// particular put the useful exception/cause at the end of a long traceback;
+/// retaining only the prefix makes the UI report an exit status without the
+/// reason it exited.
+fn startup_stderr_excerpt(stderr: &str) -> String {
+    if stderr.is_empty() {
+        return "(no stderr)".to_owned();
+    }
+    if stderr.len() <= STARTUP_STDERR_LIMIT {
+        return stderr.to_owned();
+    }
+    const HEAD: usize = 1_200;
+    let head_end = utf8_boundary_at_or_before(stderr, HEAD);
+    let tail_start = utf8_boundary_at_or_after(
+        stderr,
+        stderr.len().saturating_sub(STARTUP_STDERR_LIMIT - HEAD),
+    );
+    format!(
+        "{}\n… [startup log truncated] …\n{}",
+        &stderr[..head_end],
+        &stderr[tail_start..]
+    )
+}
+
+fn utf8_boundary_at_or_before(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn utf8_boundary_at_or_after(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 /// Whether stderr / status text points at an out-of-memory launch failure.
@@ -1528,6 +1562,8 @@ struct LaunchPlan {
     defrag_threshold: Option<f32>,
     mtp: bool,
     mtp_draft_tokens: u8,
+    speculative_draft_model: Option<PathBuf>,
+    speculative_draft_type: Option<String>,
     /// llama-server `--parallel` slot count.
     parallel: u32,
     loras: Vec<(PathBuf, f32)>,
@@ -1551,6 +1587,7 @@ impl LaunchPlan {
         loras: Vec<(PathBuf, f32)>,
         effective_target: RuntimeTarget,
         mtp: bool,
+        speculative_draft: Option<(PathBuf, String)>,
         model_path: Option<&Path>,
     ) -> Self {
         let field = |get: &dyn Fn(&TextProfile) -> Option<u32>, fallback: u32| {
@@ -1599,6 +1636,8 @@ impl LaunchPlan {
             mtp_draft_tokens: profile
                 .and_then(|profile| profile.mtp_draft_tokens)
                 .unwrap_or(2),
+            speculative_draft_model: speculative_draft.as_ref().map(|(path, _)| path.clone()),
+            speculative_draft_type: speculative_draft.map(|(_, draft_type)| draft_type),
             // MTP works with one generation slot; llama.cpp rejects it with
             // parallel continuous batching.
             parallel: if mtp {
@@ -1633,7 +1672,7 @@ impl LaunchPlan {
             })
             .unwrap_or_default();
         format!(
-            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|mtp={}:{}|{}|jinja|rf={}|tpl={}|{}",
+            "{}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|p={}|mtp={}:{}|draft={:?}:{:?}|{}|jinja|rf={}|tpl={}|{}",
             self.context_size,
             self.batch_size,
             self.ubatch_size,
@@ -1660,6 +1699,8 @@ impl LaunchPlan {
             self.parallel,
             self.mtp,
             self.mtp_draft_tokens,
+            self.speculative_draft_model,
+            self.speculative_draft_type,
             harmony,
             reasoning_format,
             template_fp,
@@ -1737,7 +1778,17 @@ impl LaunchPlan {
         if let Some(value) = self.defrag_threshold {
             command.arg("--defrag-thold").arg(value.to_string());
         }
-        if self.mtp {
+        if let (Some(model), Some(draft_type)) =
+            (&self.speculative_draft_model, &self.speculative_draft_type)
+        {
+            command
+                .arg("--spec-draft-model")
+                .arg(model)
+                .arg("--spec-type")
+                .arg(draft_type)
+                .arg("--spec-draft-n-max")
+                .arg(self.mtp_draft_tokens.to_string());
+        } else if self.mtp {
             command
                 .arg("--spec-type")
                 .arg("draft-mtp")
@@ -1952,6 +2003,7 @@ pub fn launch_key(
     harmony: bool,
     model_path: Option<&Path>,
 ) -> String {
+    let speculative_draft = speculative_draft_for_model(profile, model_path);
     let effective_target = if settings.target == RuntimeTarget::Auto {
         crate::hardware::detect().recommended_target
     } else {
@@ -1962,7 +2014,8 @@ pub fn launch_key(
         profile,
         loras,
         effective_target,
-        mtp_enabled(profile, model_path),
+        mtp_enabled(profile, model_path) && speculative_draft.is_none(),
+        speculative_draft,
         model_path,
     )
     .key(harmony)
@@ -1976,6 +2029,33 @@ fn mtp_enabled(profile: Option<&TextProfile>, model_path: Option<&Path>) -> bool
                 .is_some_and(|name| name.to_ascii_lowercase().contains("mtp"))
         })
     })
+}
+
+fn speculative_draft_for_model(
+    profile: Option<&TextProfile>,
+    model_path: Option<&Path>,
+) -> Option<(PathBuf, String)> {
+    let configured = profile
+        .and_then(|profile| profile.speculative_draft_model.as_deref())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else if let Some(parent) = model_path.and_then(Path::parent) {
+                parent.join(path)
+            } else {
+                path
+            }
+        });
+    let draft =
+        configured.or_else(|| model_path.and_then(crate::models_store::draft_model_for_model))?;
+    let draft_type = profile
+        .and_then(|profile| profile.speculative_draft_type.clone())
+        .or_else(|| crate::models_store::speculative_draft_type(&draft).map(str::to_owned))
+        .unwrap_or_else(|| "draft-simple".to_owned());
+    Some((draft, draft_type))
 }
 
 impl LlamaServer {
@@ -2026,7 +2106,15 @@ impl LlamaServer {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mtp = mtp_enabled(profile, Some(model_path));
+        let speculative_draft = speculative_draft_for_model(profile, Some(model_path));
+        if let Some((draft, _)) = &speculative_draft {
+            anyhow::ensure!(
+                draft.is_file(),
+                "speculative draft model missing: {}",
+                draft.display()
+            );
+        }
+        let mtp = mtp_enabled(profile, Some(model_path)) && speculative_draft.is_none();
         let projector_path = crate::models_store::projector_for_model(model_path);
         if let Some(projector) = &projector_path
             && !mtp
@@ -2044,6 +2132,7 @@ impl LlamaServer {
             loras,
             effective_target,
             mtp,
+            speculative_draft,
             Some(model_path),
         );
         let launch_key = plan.key(harmony);
@@ -2851,6 +2940,7 @@ mod tests {
             RuntimeTarget::Cpu,
             false,
             None,
+            None,
         );
         assert_eq!(plan.parallel, 3);
         assert_eq!(plan.aggregate_context_size(), 393_216);
@@ -2867,6 +2957,7 @@ mod tests {
             Vec::new(),
             RuntimeTarget::Cpu,
             false,
+            None,
             None,
         );
         assert_eq!(
@@ -2888,8 +2979,38 @@ mod tests {
             RuntimeTarget::Cpu,
             false,
             None,
+            None,
         );
         assert_eq!(legacy_child_context.aggregate_context_size(), 393_216);
+    }
+
+    #[test]
+    fn launch_plan_passes_an_explicit_speculative_draft() {
+        let draft = PathBuf::from("/models/Bonsai-dspark-Q4_1.gguf");
+        let plan = LaunchPlan::resolve(
+            &RuntimeSettings::default(),
+            None,
+            Vec::new(),
+            RuntimeTarget::Cpu,
+            false,
+            Some((draft.clone(), "draft-dspark".to_owned())),
+            None,
+        );
+        let mut command = Command::new("llama-server");
+        plan.apply(&mut command, false);
+        let args: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--spec-draft-model" && pair[1] == draft.display().to_string()
+        }));
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--spec-type" && pair[1] == "draft-dspark" })
+        );
+        assert!(!plan.mtp);
     }
 
     #[test]
@@ -2904,6 +3025,7 @@ mod tests {
             Vec::new(),
             RuntimeTarget::Metal,
             false,
+            None,
             Some(Path::new("/models/Laguna-S-2.1-UD-Q4_K_M.gguf")),
         );
         assert_eq!(plan.rope_scaling.as_deref(), Some("yarn"));
@@ -3053,6 +3175,17 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
         assert!(message.contains("tensor data is inconsistent"));
         assert!(message.contains("fresh copy"));
         assert!(!startup_looks_like_invalid_gguf("model file not found"));
+    }
+
+    #[test]
+    fn startup_log_excerpt_keeps_the_python_traceback_cause() {
+        let stderr = format!(
+            "{}\nRuntimeError: the actual vLLM initialization failure",
+            "early traceback details ".repeat(300)
+        );
+        let message = describe_server_startup_failure("vLLM server", "exit status: 1", &stderr);
+        assert!(message.contains("[startup log truncated]"));
+        assert!(message.contains("actual vLLM initialization failure"));
     }
 
     #[test]
