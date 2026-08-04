@@ -17,6 +17,7 @@ brazier-storage = { path = "../brazier-storage" }
 flate2 = "1.1"
 futures.workspace = true
 hex.workspace = true
+regex.workspace = true
 reqwest.workspace = true
 rquickjs = "0.12"
 serde.workspace = true

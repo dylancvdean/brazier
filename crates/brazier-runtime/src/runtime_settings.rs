@@ -150,6 +150,28 @@ pub struct RuntimeSettings {
     /// Chat `run_javascript` sandbox profile and optional limit overrides.
     #[serde(default)]
     pub javascript_sandbox: crate::js_sandbox::JavascriptSandboxSettings,
+    /// Which backend answers `web_search`: `duckduckgo` (keyless, rate-limited)
+    /// or `brave` (paid API, needs `brave_api_key`).
+    #[serde(default = "default_web_search_provider")]
+    pub web_search_provider: String,
+    /// Brave Search API key. Setting one and choosing `brave` as the provider
+    /// raises the search rate limit well above the keyless DuckDuckGo budget.
+    #[serde(default)]
+    pub brave_api_key: Option<String>,
+    /// SafeSearch level for web search: `moderate` (default), `strict`, `off`.
+    #[serde(default = "default_web_safesearch")]
+    pub web_safesearch: String,
+    /// Default region/locale for web search (e.g. `us-en`, `de-de`, `wt-wt`).
+    #[serde(default)]
+    pub web_search_region: Option<String>,
+}
+
+fn default_web_search_provider() -> String {
+    "duckduckgo".to_owned()
+}
+
+fn default_web_safesearch() -> String {
+    "moderate".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -242,6 +264,10 @@ impl Default for RuntimeSettings {
             generation_memory_headroom_mb: default_generation_headroom_mb(),
             reload_llm_after_generation: true,
             javascript_sandbox: crate::js_sandbox::JavascriptSandboxSettings::default(),
+            web_search_provider: default_web_search_provider(),
+            brave_api_key: None,
+            web_safesearch: default_web_safesearch(),
+            web_search_region: None,
         }
     }
 }
@@ -313,6 +339,14 @@ impl RuntimeSettings {
                 path.display()
             );
         }
+        anyhow::ensure!(
+            matches!(self.web_search_provider.as_str(), "duckduckgo" | "brave"),
+            "web_search_provider must be `duckduckgo` or `brave`"
+        );
+        anyhow::ensure!(
+            matches!(self.web_safesearch.as_str(), "moderate" | "strict" | "off"),
+            "web_safesearch must be `moderate`, `strict`, or `off`"
+        );
         self.javascript_sandbox.validate()?;
         Ok(())
     }
@@ -373,6 +407,35 @@ mod tests {
             ..RuntimeSettings::default()
         };
         settings.validate().unwrap();
+    }
+
+    #[test]
+    fn web_search_settings_default_to_keyless_duckduckgo_and_validate() {
+        let settings = RuntimeSettings::default();
+        assert_eq!(settings.web_search_provider, "duckduckgo");
+        assert_eq!(settings.web_safesearch, "moderate");
+        assert!(settings.brave_api_key.is_none());
+        settings.validate().unwrap();
+
+        let brave = RuntimeSettings {
+            web_search_provider: "brave".into(),
+            brave_api_key: Some("key".into()),
+            ..RuntimeSettings::default()
+        };
+        brave.validate().unwrap();
+
+        RuntimeSettings {
+            web_search_provider: "brave".into(),
+            ..RuntimeSettings::default()
+        }
+        .validate()
+        .unwrap(); // a missing key is a runtime error, not a config failure
+
+        let bogus = RuntimeSettings {
+            web_search_provider: "startpage".into(),
+            ..RuntimeSettings::default()
+        };
+        assert!(bogus.validate().is_err());
     }
 
     /// Reproduces a real poisoned settings file: activating the PersonaPlex MLX

@@ -1,17 +1,16 @@
 //! Bundled tools the runtime can execute on behalf of a model.
 //!
 //! Tools are intentionally conservative: no filesystem access, no shell, and
-//! web retrieval is bounded (size, time, and private-network guard). JavaScript
-//! runs in an isolated QuickJS runtime with memory, stack, and time limits.
-
-use std::time::Duration;
+//! web retrieval is bounded (size, time, rate, and private-network guard).
+//! JavaScript runs in an isolated QuickJS runtime with memory, stack, and time
+//! limits.
 
 use anyhow::Context;
 use serde_json::{Value, json};
 
-const FETCH_MAX_BYTES: usize = 256 * 1024;
-const FETCH_MAX_OUTPUT_CHARS: usize = 8_000;
-const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+use crate::web;
+
+const FETCH_MAX_OUTPUT_CHARS: usize = web::FETCH_MAX_OUTPUT_CHARS;
 
 /// A completed built-in tool invocation, suitable for UI display and for the
 /// `tool` role message returned to the model.
@@ -140,16 +139,50 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "fetch_url",
-                "description": "Fetch a public http(s) URL and return text content. Public PDFs are saved as conversation attachments and read by page; PDF links returned by MCP web tools use the same path. Set render_pages for scans/layout when using a vision model. Private and local addresses are blocked.",
+                "description": "Fetch a public http(s) URL and return text content. Public PDFs are saved as conversation attachments and read by page; PDF links returned by MCP web tools use the same path. Set render_pages for scans/layout when using a vision model. Private and local addresses are blocked. Long pages are truncated with a character count; pass start to fetch the next chunk.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": { "type": "string", "description": "Absolute http:// or https:// URL." },
+                        "start": { "type": "integer", "minimum": 0, "description": "Character offset to start from; use the count in the previous result to page through long pages. Default 0." },
+                        "max_chars": { "type": "integer", "minimum": 500, "maximum": 50000, "description": "Maximum characters to return. Default 8000." },
                         "start_page": { "type": "integer", "minimum": 1, "description": "First PDF page, 1-based; default 1." },
                         "end_page": { "type": "integer", "minimum": 1, "description": "Last PDF page, inclusive; default first three pages." },
                         "render_pages": { "type": "boolean", "description": "Render PDF pages as images for scans or layout-sensitive reading." }
                     },
                     "required": ["url"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web for up-to-date information and return a ranked list of results with titles, URLs, and short snippets. Use it for facts that changed recently or are outside your knowledge. DuckDuckGo is the default backend (no key); a Brave API key can be configured in Manage → Engine → Web search for a higher rate limit.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query, phrased like you would type into a search engine."
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10,
+                            "description": "Maximum results to return. Default 5."
+                        },
+                        "region": {
+                            "type": "string",
+                            "description": "Optional region/locale code such as `us-en`, `de-de`, or `wt-wt`. DuckDuckGo only."
+                        },
+                        "safesearch": {
+                            "type": "string",
+                            "enum": ["moderate", "strict", "off"],
+                            "description": "Filtering level. Default moderate."
+                        }
+                    },
+                    "required": ["query"]
                 }
             }
         },
@@ -308,9 +341,16 @@ fn catalog_for_config(js_config: &crate::js_sandbox::JsSandboxConfig) -> Value {
                 "title": "Web fetch",
                 "description": format!(
                     "Bounded retrieval of public web pages (max {} KB, {}s timeout); MCP PDF links use the same guarded downloader. Local and private addresses are blocked.",
-                    FETCH_MAX_BYTES / 1024,
-                    FETCH_TIMEOUT.as_secs()
+                    web::FETCH_MAX_BYTES / 1024,
+                    web::FETCH_TIMEOUT.as_secs()
                 ),
+                "network": true,
+                "source": "builtin"
+            },
+            {
+                "name": "web_search",
+                "title": "Web search",
+                "description": "Ranked web search results (DuckDuckGo by default, Brave with an API key). Rate-limited to stay under the engine's block threshold.",
                 "network": true,
                 "source": "builtin"
             },
@@ -352,6 +392,7 @@ pub fn is_builtin(name: &str) -> bool {
         "get_current_time"
             | "calculator"
             | "fetch_url"
+            | "web_search"
             | "run_javascript"
             | "doc_read"
             | "generate_image"
@@ -417,6 +458,12 @@ pub async fn execute_with_context(
             )),
             (_, None) => Err(anyhow::anyhow!(
                 "fetch_url requires a `url` string argument"
+            )),
+        },
+        "web_search" => match data_dir {
+            Some(dir) => web_search_tool(client, dir, &parsed).await,
+            None => Err(anyhow::anyhow!(
+                "web_search requires daemon data directory context"
             )),
         },
         other => simple_tool(client, data_dir, other, &parsed)
@@ -1068,232 +1115,37 @@ pub fn evaluate(expression: &str) -> anyhow::Result<f64> {
     Ok(value)
 }
 
-// --- Bounded web retrieval ----------------------------------------------------
+// --- Web search and bounded retrieval ----------------------------------------
 
-/// True when an address is safe for outbound tool fetches (not loopback,
-/// private, link-local, documentation, or similarly non-routable).
-pub fn ip_is_public(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            !(v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                // Carrier-grade NAT 100.64.0.0/10.
-                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])))
-        }
-        std::net::IpAddr::V6(v6) => {
-            // IPv4-mapped addresses must use the IPv4 policy; otherwise
-            // ::ffff:127.0.0.1 and ::ffff:169.254.169.254 look "public".
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return ip_is_public(std::net::IpAddr::V4(v4));
-            }
-            let segments = v6.segments();
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (segments[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
-                || (segments[0] & 0xffc0) == 0xfe80 // link local fe80::/10
-                || (segments[0] == 0x2001 && segments[1] == 0xdb8)) // documentation
-        }
-    }
-}
-
-/// Resolve `host` and ensure every address is publicly routable. Returns the
-/// public addresses so callers can pin connects and avoid DNS rebinding.
-pub async fn resolve_public_host(
-    host: &str,
-    port: u16,
-) -> anyhow::Result<Vec<std::net::SocketAddr>> {
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        anyhow::ensure!(ip_is_public(ip), "address {ip} is not publicly routable");
-        return Ok(vec![std::net::SocketAddr::new(ip, port)]);
-    }
-    anyhow::ensure!(
-        !host.eq_ignore_ascii_case("localhost") && !host.ends_with(".local"),
-        "local hostnames are not allowed"
-    );
-    let addresses = tokio::net::lookup_host((host, port))
-        .await
-        .with_context(|| format!("resolve host {host}"))?;
-    let mut public = Vec::new();
-    for address in addresses {
-        anyhow::ensure!(
-            ip_is_public(address.ip()),
-            "host {host} resolves to non-public address {}",
-            address.ip()
-        );
-        public.push(address);
-    }
-    anyhow::ensure!(
-        !public.is_empty(),
-        "host {host} resolved to no addresses"
-    );
-    Ok(public)
-}
-
-pub async fn guard_host(host: &str) -> anyhow::Result<()> {
-    resolve_public_host(host, 443).await.map(|_| ())
-}
-
-/// Strip tags from HTML and collapse whitespace. Deliberately simple.
-pub fn html_to_text(html: &str) -> String {
-    let mut output = String::with_capacity(html.len() / 2);
-    let mut chars = html.char_indices().peekable();
-    let mut skip_until: Option<&str> = None;
-    let lower = html.to_ascii_lowercase();
-    while let Some((index, character)) = chars.next() {
-        if let Some(end_tag) = skip_until {
-            if character == '<' && lower[index..].starts_with(end_tag) {
-                skip_until = None;
-                // Consume through the closing '>'.
-                for (_, inner) in chars.by_ref() {
-                    if inner == '>' {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        if character == '<' {
-            if lower[index..].starts_with("<script") {
-                skip_until = Some("</script");
-                continue;
-            }
-            if lower[index..].starts_with("<style") {
-                skip_until = Some("</style");
-                continue;
-            }
-            for (_, inner) in chars.by_ref() {
-                if inner == '>' {
-                    break;
-                }
-            }
-            output.push(' ');
-            continue;
-        }
-        output.push(character);
-    }
-    // Collapse runs of whitespace but keep paragraph-ish newlines.
-    let mut collapsed = String::with_capacity(output.len());
-    let mut last_was_space = true;
-    for character in output.chars() {
-        if character.is_whitespace() {
-            if !last_was_space {
-                collapsed.push(' ');
-                last_was_space = true;
-            }
-        } else {
-            collapsed.push(character);
-            last_was_space = false;
-        }
-    }
-    collapsed.trim().to_owned()
-}
-
-struct DownloadedUrl {
-    final_url: reqwest::Url,
-    content_type: String,
-    bytes: Vec<u8>,
-}
-
-fn downloaded_is_pdf(download: &DownloadedUrl) -> bool {
-    download.content_type.contains("application/pdf") || download.bytes.starts_with(b"%PDF-")
-}
-
-async fn download_url(url: &str) -> anyhow::Result<DownloadedUrl> {
-    let mut parsed = reqwest::Url::parse(url).context("invalid URL")?;
-    anyhow::ensure!(
-        matches!(parsed.scheme(), "http" | "https"),
-        "only http and https URLs are supported"
-    );
-    // Do redirects ourselves: reqwest's default policy would follow a public
-    // URL to a private address after we checked only the first host. Each hop
-    // also pins DNS to the addresses we already vetted so a rebinding TTL
-    // cannot steer the TCP connect at a private target.
-    let mut redirects = 0_u8;
-    let response = loop {
-        let host = parsed
-            .host_str()
-            .context("URL has no host")?
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_owned();
-        let port = parsed
-            .port_or_known_default()
-            .context("URL has no port")?;
-        let addresses = resolve_public_host(&host, port).await?;
-        let mut builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(FETCH_TIMEOUT);
-        // Pin every vetted address; reqwest uses these instead of re-resolving.
-        for address in &addresses {
-            builder = builder.resolve(&host, *address);
-        }
-        let client = builder.build().context("build bounded fetch client")?;
-        let response = client
-            .get(parsed.clone())
-            .header("user-agent", "brazier-tools/0.1 (+bounded-fetch)")
-            .send()
-            .await
-            .context("request failed")?;
-        if !response.status().is_redirection() {
-            break response;
-        }
-        redirects += 1;
-        anyhow::ensure!(redirects <= 10, "too many redirects");
-        let next = response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .context("redirect response has no valid Location header")?;
-        parsed = parsed.join(next).context("invalid redirect URL")?;
-        anyhow::ensure!(
-            matches!(parsed.scheme(), "http" | "https"),
-            "redirected to unsupported URL scheme"
-        );
-    };
-    let status = response.status();
-    anyhow::ensure!(status.is_success(), "server returned {status}");
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    use futures::StreamExt;
-    let mut stream = response.bytes_stream();
-    let mut bytes: Vec<u8> = Vec::new();
-    let pdf_content = content_type.contains("application/pdf");
-    let byte_limit = if pdf_content || content_type.contains("octet-stream") {
-        crate::blob_store::MAX_DOCUMENT_BYTES as usize
-    } else {
-        FETCH_MAX_BYTES
-    };
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("read response body")?;
-        bytes.extend_from_slice(&chunk);
-        anyhow::ensure!(
-            bytes.len() <= byte_limit,
-            "response exceeds the {} limit",
-            if pdf_content { "document" } else { "web fetch" }
-        );
-    }
-    Ok(DownloadedUrl {
-        final_url: parsed,
-        content_type,
-        bytes,
-    })
+/// Run the shared `web_search` against the daemon's configured backend.
+async fn web_search_tool(
+    client: &reqwest::Client,
+    data_dir: &std::path::Path,
+    parsed: &Value,
+) -> anyhow::Result<ToolOutput> {
+    let query = parsed
+        .get("query")
+        .and_then(Value::as_str)
+        .context("web_search requires a `query` string argument")?
+        .trim();
+    anyhow::ensure!(!query.is_empty(), "`query` must not be empty");
+    let max_results = parsed
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(5) as usize;
+    let region = parsed.get("region").and_then(Value::as_str);
+    let safesearch = parsed.get("safesearch").and_then(Value::as_str);
+    let settings = crate::runtime_settings::load(data_dir);
+    let results = web::search(client, query, max_results, region, safesearch, &settings).await?;
+    Ok(ToolOutput::from(web::format_results(&results)))
 }
 
 async fn ingest_pdf(
     data_dir: &std::path::Path,
-    download: DownloadedUrl,
+    download: web::DownloadedUrl,
     args: &Value,
 ) -> anyhow::Result<ToolOutput> {
-    anyhow::ensure!(downloaded_is_pdf(&download), "response is not a PDF");
+    anyhow::ensure!(web::downloaded_is_pdf(&download), "response is not a PDF");
     let name = download
         .final_url
         .path_segments()
@@ -1337,8 +1189,8 @@ pub(crate) async fn fetch_pdf_candidate(
     data_dir: &std::path::Path,
     url: &str,
 ) -> anyhow::Result<Option<(String, Vec<ToolMedia>)>> {
-    let download = download_url(url).await?;
-    if !downloaded_is_pdf(&download) {
+    let download = web::download_url(url).await?;
+    if !web::downloaded_is_pdf(&download) {
         return Ok(None);
     }
     let output = ingest_pdf(data_dir, download, &json!({})).await?;
@@ -1351,35 +1203,19 @@ async fn fetch_url(
     url: &str,
     args: &Value,
 ) -> anyhow::Result<ToolOutput> {
-    let download = download_url(url).await?;
-    if downloaded_is_pdf(&download) {
+    let download = web::download_url(url).await?;
+    if web::downloaded_is_pdf(&download) {
         return ingest_pdf(data_dir, download, args).await;
     }
-    let content_type = download.content_type;
-    let bytes = download.bytes;
-    anyhow::ensure!(
-        content_type.is_empty()
-            || content_type.contains("text/")
-            || content_type.contains("json")
-            || content_type.contains("xml"),
-        "unsupported content type `{content_type}`"
-    );
-    let body = String::from_utf8_lossy(&bytes);
-    let mut text = if content_type.contains("html") {
-        html_to_text(&body)
-    } else {
-        body.into_owned()
-    };
-    if text.len() > FETCH_MAX_OUTPUT_CHARS {
-        let mut cut = FETCH_MAX_OUTPUT_CHARS;
-        while !text.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        text.truncate(cut);
-        text.push_str("… [truncated]");
-    }
-    anyhow::ensure!(!text.is_empty(), "response contained no text");
-    Ok(ToolOutput::from(text))
+    let start = args.get("start").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let max_chars = args
+        .get("max_chars")
+        .and_then(Value::as_u64)
+        .unwrap_or(FETCH_MAX_OUTPUT_CHARS as u64)
+        .clamp(500, 50_000) as usize;
+    Ok(ToolOutput::from(web::fetch_content_text(
+        &download, start, max_chars,
+    )?))
 }
 
 #[cfg(test)]
@@ -1407,33 +1243,6 @@ mod tests {
     fn time_tool_formats_a_known_timestamp() {
         assert_eq!(civil_from_unix(0), (1970, 1, 1, 0, 0, 0));
         assert_eq!(civil_from_unix(1_753_000_000), (2025, 7, 20, 8, 26, 40));
-    }
-
-    #[test]
-    fn html_reduction_strips_scripts_and_tags() {
-        let html = "<html><head><script>alert(1)</script><style>p{}</style></head>\
-                    <body><h1>Title</h1><p>Hello <b>world</b></p></body></html>";
-        assert_eq!(html_to_text(html), "Title Hello world");
-    }
-
-    #[test]
-    fn private_addresses_are_blocked() {
-        assert!(!ip_is_public("127.0.0.1".parse().unwrap()));
-        assert!(!ip_is_public("10.1.2.3".parse().unwrap()));
-        assert!(!ip_is_public("192.168.1.1".parse().unwrap()));
-        assert!(!ip_is_public("169.254.169.254".parse().unwrap()));
-        assert!(!ip_is_public("100.100.0.1".parse().unwrap()));
-        assert!(!ip_is_public("fe80::1".parse().unwrap()));
-        assert!(!ip_is_public("::1".parse().unwrap()));
-        assert!(!ip_is_public("::ffff:127.0.0.1".parse().unwrap()));
-        assert!(!ip_is_public("::ffff:169.254.169.254".parse().unwrap()));
-        assert!(!ip_is_public("::ffff:10.0.0.1".parse().unwrap()));
-        assert!(!ip_is_public("2001:db8::1".parse().unwrap()));
-        assert!(!ip_is_public("ff02::1".parse().unwrap()));
-        assert!(ip_is_public("93.184.216.34".parse().unwrap()));
-        assert!(ip_is_public(
-            "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap()
-        ));
     }
 
     #[tokio::test]

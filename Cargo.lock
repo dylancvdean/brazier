@@ -321,6 +321,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "regex",
  "reqwest",
  "rquickjs",
  "serde",

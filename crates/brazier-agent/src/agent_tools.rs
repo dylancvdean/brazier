@@ -591,7 +591,9 @@ fn raw_definitions() -> Vec<RawDefinition> {
             "web_search",
             "Search the web for up-to-date information and return a ranked list of results \
              with titles, URLs, and short snippets. Use it for facts that changed recently or \
-             are outside the workspace.",
+             are outside the workspace. Runs on DuckDuckGo by default (keyless, rate-limited); \
+             a Brave API key can be configured in Manage → Engine → Web search for a higher \
+             rate limit.",
             object(
                 json!({
                     "query": {
@@ -603,6 +605,15 @@ fn raw_definitions() -> Vec<RawDefinition> {
                         "description": "Maximum results to return. Default 5.",
                         "minimum": 1,
                         "maximum": 10
+                    },
+                    "region": {
+                        "type": "string",
+                        "description": "Optional region/locale code such as `us-en`, `de-de`, or `wt-wt`. DuckDuckGo only."
+                    },
+                    "safesearch": {
+                        "type": "string",
+                        "enum": ["moderate", "strict", "off"],
+                        "description": "Filtering level. Default moderate."
                     }
                 }),
                 vec!["query"],
@@ -611,12 +622,18 @@ fn raw_definitions() -> Vec<RawDefinition> {
         (
             "web_fetch",
             "Fetch a URL and return its text content. Useful for reading a page the model \
-             cannot reach directly, such as documentation or an API reference.",
+             cannot reach directly, such as documentation or an API reference. Public PDFs are \
+             stored and read by page with doc_read.",
             object(
                 json!({
                     "url": {
                         "type": "string",
                         "description": "Absolute http(s) URL to fetch."
+                    },
+                    "start": {
+                        "type": "integer",
+                        "description": "Character offset to start from; use the count in the previous result to page through long pages. Default 0.",
+                        "minimum": 0
                     },
                     "max_chars": {
                         "type": "integer",

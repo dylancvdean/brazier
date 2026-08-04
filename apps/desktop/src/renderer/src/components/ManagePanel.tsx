@@ -439,14 +439,6 @@ type McpRecipe = {
  */
 const MCP_RECIPES: McpRecipe[] = [
   {
-    id: 'duckduckgo',
-    name: 'DuckDuckGo search',
-    command: 'uvx',
-    args: ['--with', 'duckduckgo-mcp-server[browser]', 'duckduckgo-mcp-server'],
-    description: 'Search the web and fetch readable page content without an API key.',
-    setup: 'Requires uvx. The browser extra lets searches fall back when DuckDuckGo blocks basic clients.'
-  },
-  {
     id: 'blender',
     name: 'Blender bridge',
     command: 'blender-mcp-server',
@@ -4679,6 +4671,77 @@ function EngineSection(props: SectionProps): React.JSX.Element {
           </label>
         ))}
       </div>
+      <div className="settings-group">
+        <div className="section-label">Web search</div>
+        <p className="model-help">
+          Web search runs keyless on DuckDuckGo, rate-limited so the engine does not block the
+          machine. A Brave Search API key (1000 free searches/month, then $5 per extra 1000) raises
+          the ceiling: pick Brave and paste the key below. Both chat and agent search use this.
+        </p>
+        <div className="settings-grid">
+          <label>
+            <span>Provider</span>
+            <select
+              value={draft.web_search_provider ?? 'duckduckgo'}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  web_search_provider: event.target.value as 'duckduckgo' | 'brave'
+                })
+              }
+            >
+              <option value="duckduckgo">DuckDuckGo (no key)</option>
+              <option value="brave">Brave Search API</option>
+            </select>
+          </label>
+          <label>
+            <span>SafeSearch</span>
+            <select
+              value={draft.web_safesearch ?? 'moderate'}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  web_safesearch: event.target.value as 'moderate' | 'strict' | 'off'
+                })
+              }
+            >
+              <option value="moderate">Moderate</option>
+              <option value="strict">Strict</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <label>
+            <span>Region (DuckDuckGo)</span>
+            <input
+              type="text"
+              placeholder="us-en, de-de, wt-wt"
+              value={draft.web_search_region ?? ''}
+              onChange={(event) =>
+                setDraft({ ...draft, web_search_region: event.target.value || null })
+              }
+            />
+          </label>
+        </div>
+        {draft.web_search_provider === 'brave' && (
+          <label className="setting-row">
+            <span>Brave API key</span>
+            <input
+              type="password"
+              autoComplete="off"
+              placeholder={draft.brave_api_key ? 'Stored — enter a replacement to rotate' : 'Required'}
+              value={draft.brave_api_key ?? ''}
+              onChange={(event) =>
+                setDraft({ ...draft, brave_api_key: event.target.value || null })
+              }
+            />
+          </label>
+        )}
+        {draft.web_search_provider === 'brave' && !draft.brave_api_key && (
+          <p className="settings-warning">
+            Brave is selected but no API key is saved; web search will fail until one is set.
+          </p>
+        )}
+      </div>
       <div className="runtime-actions">
         <button className="primary-action" disabled={saving || !dirty} onClick={() => void apply()}>
           {saving ? <LoaderCircle className="spin" size={15} /> : 'Apply & restart'}
@@ -5493,8 +5556,8 @@ function McpSection(props: SectionProps): React.JSX.Element {
                   placeholder="-y,@modelcontextprotocol/server-filesystem,/Users/me"
                 />
               </label>
-            </div>
-            <div className="runtime-actions">
+      </div>
+      <div className="runtime-actions">
               <button className="primary-action" type="submit" disabled={saving}>
                 {saving ? <LoaderCircle className="spin" size={15} /> : 'Add server'}
               </button>

@@ -37,6 +37,7 @@ pub mod toolchain_hints;
 pub mod tools;
 pub mod vllm;
 pub mod voice;
+pub mod web;
 pub mod whisper;
 pub mod whisperkit;
 

@@ -15,7 +15,6 @@ use std::{
 };
 
 use anyhow::Context;
-use regex::Regex;
 use serde_json::{Value, json};
 use tokio::{
     io::{
@@ -986,17 +985,49 @@ async fn doc_read(
     workspace: Option<&Path>,
     arguments: &Value,
 ) -> anyhow::Result<ToolOutcome> {
-    let path = checked_path(context, plan, workspace, arguments, "path", false)?;
+    // A `document` id refers to a PDF a previous web_fetch attached (stored as
+    // a blob), mirroring the chat `doc_read` attachment flow. Otherwise the
+    // path-based workspace form applies.
+    let path = match arguments.get("document").and_then(Value::as_str) {
+        Some(requested) => {
+            let sha256 = requested
+                .strip_prefix("brazier_blob:")
+                .unwrap_or(requested)
+                .trim();
+            let path = brazier_runtime::blob_store::blob_path(context.data_dir, sha256)
+                .context("invalid `document` id")?;
+            anyhow::ensure!(
+                path.is_file(),
+                "that document is no longer stored locally — re-fetch it with web_fetch"
+            );
+            path
+        }
+        None => checked_path(context, plan, workspace, arguments, "path", false)?,
+    };
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("document");
-    let kind = brazier_runtime::documents::kind_for_name(name).with_context(|| {
-        format!(
-            "{} is not a PDF, RTF, DOC, or DOCX — use fs_read for text files",
-            relative_display(workspace, &path)
-        )
-    })?;
+    let kind = match brazier_runtime::documents::kind_for_name(name) {
+        Some(kind) => kind,
+        None => {
+            // Web-fetched blobs are stored without an extension; sniff the
+            // magic bytes instead.
+            let mut header = [0_u8; 8];
+            let mut file = tokio::fs::File::open(&path)
+                .await
+                .context("open document to identify its kind")?;
+            let read = file.read(&mut header).await?;
+            if header[..read].starts_with(b"%PDF-") {
+                brazier_runtime::documents::DocumentKind::Pdf
+            } else {
+                anyhow::bail!(
+                    "{} is not a PDF, RTF, DOC, or DOCX — use fs_read for text files",
+                    relative_display(workspace, &path)
+                )
+            }
+        }
+    };
 
     let render = arguments
         .get("render_pages")
@@ -2559,6 +2590,8 @@ async fn code_symbols(
 
 /// Browser-like user agent so search engines and sites do not treat the daemon
 /// as a bot.
+/// Browser-like user agent so search engines and sites do not treat the daemon
+/// as a bot.
 const WEB_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
                               (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const WEB_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -2572,169 +2605,8 @@ fn web_http_client() -> anyhow::Result<reqwest::Client> {
         .context("build HTTP client")
 }
 
-fn percent_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' if index + 2 < bytes.len() => {
-                match u8::from_str_radix(&input[index + 1..index + 3], 16) {
-                    Ok(value) => {
-                        out.push(value);
-                        index += 3;
-                    }
-                    Err(_) => {
-                        out.push(bytes[index]);
-                        index += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                index += 1;
-            }
-            byte => {
-                out.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Decode the handful of HTML entities search results actually use.
-fn decode_html_entities(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(start) = rest.find('&') {
-        out.push_str(&rest[..start]);
-        let tail = &rest[start..];
-        let Some(end) = tail.find(';') else {
-            out.push_str(tail);
-            return out;
-        };
-        let entity = &tail[..=end];
-        let replacement = match entity {
-            "&amp;" => "&",
-            "&lt;" => "<",
-            "&gt;" => ">",
-            "&quot;" => "\"",
-            "&#39;" | "&apos;" => "'",
-            "&nbsp;" => " ",
-            _ => {
-                if let Some(code) = entity
-                    .strip_prefix("&#")
-                    .and_then(|rest| rest.strip_suffix(';'))
-                    && let Ok(code) = code.parse::<u32>()
-                    && let Some(character) = char::from_u32(code)
-                {
-                    out.push(character);
-                    rest = &tail[entity.len()..];
-                    continue;
-                }
-                entity
-            }
-        };
-        out.push_str(replacement);
-        rest = &tail[entity.len()..];
-    }
-    out.push_str(rest);
-    out
-}
-
-fn strip_inline(fragment: &str) -> String {
-    let tags = Regex::new(r"(?is)<[^>]+>").expect("valid regex");
-    let text = decode_html_entities(&tags.replace_all(fragment, ""));
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Turn a page of HTML into readable text: drop script/style blocks and tags,
-/// collapse whitespace, and limit blank runs.
-fn strip_html_tags(html: &str) -> String {
-    // The regex crate has no backreferences, so each block type is matched
-    // explicitly rather than via `</\1>`.
-    let blocks = Regex::new(
-        r"(?is)<script[^>]*>.*?</script\s*>|<style[^>]*>.*?</style\s*>|\
-         <noscript[^>]*>.*?</noscript\s*>|<svg[^>]*>.*?</svg\s*>|<head[^>]*>.*?</head\s*>",
-    )
-    .expect("valid regex");
-    let without_blocks = blocks.replace_all(html, " ");
-    let tags = Regex::new(r"(?is)<[^>]+>").expect("valid regex");
-    let without_tags = tags.replace_all(&without_blocks, " ");
-    let whitespace = Regex::new(r"[ \t\r\f]+").expect("valid regex");
-    let spaced = whitespace.replace_all(&without_tags, " ");
-    let mut out = String::new();
-    let mut blanks = 0usize;
-    for line in spaced.lines() {
-        let line = decode_html_entities(line.trim());
-        if line.is_empty() {
-            blanks += 1;
-            if blanks > 1 {
-                continue;
-            }
-            out.push('\n');
-        } else {
-            blanks = 0;
-            out.push_str(&line);
-            out.push('\n');
-        }
-    }
-    out.trim().to_owned()
-}
-
-/// DuckDuckGo wraps real URLs in `//duckduckgo.com/l/?uddg=<encoded>&rut=…`.
-fn redirect_url(href: &str) -> Option<String> {
-    let query = href.split('?').nth(1)?;
-    let uddg = query
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("uddg="))?;
-    Some(percent_decode(uddg))
-}
-
-/// Parse DuckDuckGo's HTML result page into `(title, url, snippet)` tuples.
-fn parse_search_results(html: &str, max: usize) -> Vec<(String, String, String)> {
-    let title_re = Regex::new(r#"(?is)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
-        .expect("valid regex");
-    let snippet_re =
-        Regex::new(r#"(?is)<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#).expect("valid regex");
-    let titles: Vec<(String, String)> = title_re
-        .captures_iter(html)
-        .map(|captures| {
-            let href = decode_html_entities(&captures[1]);
-            let url = redirect_url(&href).unwrap_or(href);
-            let title = strip_inline(&captures[2]);
-            (url, title)
-        })
-        .collect();
-    let snippets: Vec<String> = snippet_re
-        .captures_iter(html)
-        .map(|captures| strip_inline(&captures[1]))
-        .collect();
-    titles
-        .into_iter()
-        .zip(snippets.into_iter().chain(std::iter::repeat_with(String::new)))
-        .take(max)
-        .map(|((url, title), snippet)| (title, url, snippet))
-        .collect()
-}
-
 async fn web_search(
-    _context: &BrokerContext<'_>,
+    context: &BrokerContext<'_>,
     _workspace: Option<&Path>,
     arguments: &Value,
 ) -> anyhow::Result<ToolOutcome> {
@@ -2749,67 +2621,23 @@ async fn web_search(
         .and_then(Value::as_u64)
         .unwrap_or(5)
         .clamp(1, 10) as usize;
-    let url = format!(
-        "https://html.duckduckgo.com/html/?q={}",
-        percent_encode(query)
-    );
-    let response = web_http_client()?
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("web search request failed for `{query}`"))?;
-    let status = response.status();
-    let body = response.text().await.context("read web search response")?;
-    let results = parse_search_results(&body, max_results);
-    if results.is_empty() {
-        return Ok(ToolOutcome {
-            output: format!(
-                "DuckDuckGo returned no results for `{query}` (HTTP {status}). The search engine \
-                 may be rate-limiting or blocking this machine. Try again later or rephrase the \
-                 query."
-            ),
-            is_error: true,
-            exit_code: None,
-            changed_paths: Vec::new(),
-            images: Vec::new(),
-        });
-    }
-    let mut output = String::new();
-    for (index, (title, url, snippet)) in results.iter().enumerate() {
-        output.push_str(&format!("{}. {title}\n   {url}\n   {snippet}\n\n", index + 1));
-    }
-    Ok(ToolOutcome::text(output))
-}
-
-/// Turn a fetched body into text based on its content type. Binary payloads are
-/// described, not dumped.
-fn content_from_bytes(bytes: &[u8], content_type: &str) -> String {
-    let media = content_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-    if media == "text/html" || media == "application/xhtml+xml" {
-        return strip_html_tags(&String::from_utf8_lossy(bytes));
-    }
-    if media == "application/json" || media.ends_with("+json") {
-        return serde_json::from_slice::<Value>(bytes)
-            .ok()
-            .and_then(|value| serde_json::to_string_pretty(&value).ok())
-            .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned());
-    }
-    if media.starts_with("text/") {
-        return String::from_utf8_lossy(bytes).into_owned();
-    }
-    format!(
-        "[Binary content: {media}, {} bytes. Not shown; this response is not text.]",
-        bytes.len()
+    let region = arguments.get("region").and_then(Value::as_str);
+    let safesearch = arguments.get("safesearch").and_then(Value::as_str);
+    let settings = brazier_runtime::runtime_settings::load(context.data_dir);
+    let results = brazier_runtime::web::search(
+        &web_http_client()?,
+        query,
+        max_results,
+        region,
+        safesearch,
+        &settings,
     )
+    .await?;
+    Ok(ToolOutcome::text(brazier_runtime::web::format_results(&results)))
 }
 
 async fn web_fetch(
-    _context: &BrokerContext<'_>,
+    context: &BrokerContext<'_>,
     _workspace: Option<&Path>,
     arguments: &Value,
 ) -> anyhow::Result<ToolOutcome> {
@@ -2828,37 +2656,59 @@ async fn web_fetch(
         .and_then(Value::as_u64)
         .unwrap_or(12_000)
         .clamp(500, 50_000) as usize;
-    let response = web_http_client()?
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("request to `{raw_url}` failed"))?;
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_owned();
-    let bytes = response.bytes().await.context("read response body")?;
-    let mut text = content_from_bytes(&bytes, &content_type);
-    if text.is_empty() {
-        text = "(empty body)".to_owned();
+    let start = arguments
+        .get("start")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    // Same guarded downloader as the chat `fetch_url` tool: private and local
+    // addresses are refused, every redirect hop is re-vetted, and the shared
+    // fetch rate budget is consumed here too.
+    let download = brazier_runtime::web::download_url(raw_url).await?;
+    if brazier_runtime::web::downloaded_is_pdf(&download) {
+        return web_fetch_pdf(context, download).await;
     }
-    let total_chars = text.chars().count();
-    let mut output = format!("{raw_url}\nHTTP {status} · {content_type}\n\n");
-    if total_chars > max_chars {
-        let shown: String = text.chars().take(max_chars).collect();
-        output.push_str(&shown);
-        output.push_str(&format!(
-            "\n\n[... {} of {total_chars} characters shown. Fetch again with a larger max_chars to \
-             see more.]",
-            shown.chars().count()
-        ));
-    } else {
-        output.push_str(&text);
-    }
-    Ok(ToolOutcome::text(output))
+    Ok(ToolOutcome::text(
+        brazier_runtime::web::fetch_content_text(&download, start, max_chars)?,
+    ))
+}
+
+/// Store a fetched PDF as a blob, read its first pages, and hand the model a
+/// `doc_read` document id for paging — the same attach-and-read flow as the
+/// chat `fetch_url` tool.
+async fn web_fetch_pdf(
+    context: &BrokerContext<'_>,
+    download: brazier_runtime::web::DownloadedUrl,
+) -> anyhow::Result<ToolOutcome> {
+    let name = download
+        .final_url
+        .path_segments()
+        .and_then(|mut parts| parts.next_back())
+        .filter(|part| !part.is_empty())
+        .unwrap_or("download.pdf");
+    let blob = brazier_runtime::blob_store::store_bytes(
+        context.data_dir,
+        &download.bytes,
+        "application/pdf",
+        Some(name),
+    )
+    .await
+    .context("store fetched PDF")?;
+    let path = brazier_runtime::blob_store::blob_path(context.data_dir, &blob.sha256)?;
+    let extraction = brazier_runtime::documents::extract_text(
+        &path,
+        brazier_runtime::documents::DocumentKind::Pdf,
+        Some((1, brazier_runtime::documents::DEFAULT_PAGE_COUNT)),
+        None,
+        brazier_runtime::documents::MAX_EXTRACTION_CHARS,
+    )
+    .await
+    .context("read fetched PDF")?;
+    Ok(ToolOutcome::text(format!(
+        "Fetched PDF {name}. It was stored; page further with doc_read using document \
+         `brazier_blob:{}`.\n\n{}",
+        blob.sha256,
+        extraction.describe()
+    )))
 }
 
 const LSP_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(12);
@@ -3315,6 +3165,115 @@ mod tests {
         assert!(response.output.contains("Beta"), "{}", response.output);
         assert!(response.output.contains("lines 1–2"), "{}", response.output);
         assert!(!response.output.contains("Gamma"), "{}", response.output);
+    }
+
+    /// A tiny single-page PDF with a known line, so the document-id path can
+    /// run end to end when poppler is installed.
+    const MINIMAL_PDF: &[u8] = br#"%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 48 >>
+stream
+BT /F1 24 Tf 72 720 Td (Hello from doc_read) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+455
+%%EOF
+"#;
+
+    #[tokio::test]
+    async fn doc_read_resolves_web_fetched_document_ids() {
+        if !brazier_runtime::documents::missing_poppler_tools().is_empty() {
+            return; // pdftotext not installed; the sniffing still works
+        }
+        let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        // A blob stored without an extension, exactly what web_fetch produces.
+        let blob = brazier_runtime::blob_store::store_bytes(
+            &harness.data_dir,
+            MINIMAL_PDF,
+            "application/pdf",
+            Some("paper.pdf"),
+        )
+        .await
+        .expect("store pdf");
+
+        let response = harness
+            .call(
+                "doc_read",
+                json!({ "document": format!("brazier_blob:{}", blob.sha256) }),
+            )
+            .await;
+        assert_eq!(
+            response.status,
+            ToolExecStatus::Completed,
+            "{}",
+            response.output
+        );
+        assert!(
+            response.output.contains("Hello from doc_read"),
+            "{}",
+            response.output
+        );
+    }
+
+    #[tokio::test]
+    async fn doc_read_document_id_refuses_non_pdf_blobs() {
+        let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        let blob = brazier_runtime::blob_store::store_bytes(
+            &harness.data_dir,
+            br"{\rtf1\ansi Alpha\par}",
+            "application/rtf",
+            Some("letter.rtf"),
+        )
+        .await
+        .expect("store rtf");
+
+        let response = harness
+            .call("doc_read", json!({ "document": blob.sha256 }))
+            .await;
+        assert!(response.is_error, "{}", response.output);
+        assert!(
+            response.output.contains("not a PDF"),
+            "{}",
+            response.output
+        );
+    }
+
+    #[tokio::test]
+    async fn doc_read_document_id_rejects_unknown_or_missing_blobs() {
+        let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        let invalid = harness
+            .call("doc_read", json!({ "document": "not-a-sha" }))
+            .await;
+        assert!(invalid.is_error, "{}", invalid.output);
+        assert!(invalid.output.contains("invalid `document` id"), "{}", invalid.output);
+
+        let missing = harness
+            .call(
+                "doc_read",
+                json!({ "document": "ab".repeat(32) }),
+            )
+            .await;
+        assert!(missing.is_error, "{}", missing.output);
+        assert!(
+            missing.output.contains("no longer stored locally"),
+            "{}",
+            missing.output
+        );
     }
 
     #[tokio::test]
@@ -3892,45 +3851,15 @@ mod tests {
     }
 
     #[test]
-    fn percent_encoding_round_trips() {
-        let encoded = percent_encode("what is brazier? 100% done");
-        assert_eq!(encoded, "what+is+brazier%3F+100%25+done");
-        assert_eq!(percent_decode(&encoded), "what is brazier? 100% done");
-        assert_eq!(percent_decode("hello%20world"), "hello world");
-    }
-
-    #[test]
-    fn html_entities_and_tags_are_cleaned() {
-        assert_eq!(
-            decode_html_entities("a &amp; b &#39;c&#39; &lt;d&gt; &nbsp;"),
-            "a & b 'c' <d>  "
-        );
-        assert_eq!(
-            strip_inline("<b>Rust</b> &amp; <i>WebAssembly</i>"),
-            "Rust & WebAssembly"
-        );
+    fn html_text_is_cleaned_for_the_model() {
         let page = "<html><head><style>p{color:red}</style><script>alert(1)</script></head>\
                     <body><h1>Hello</h1><p>First line.</p><p></p><p>Second line.</p></body></html>";
-        let text = strip_html_tags(page);
+        let text = brazier_runtime::web::html_to_text(page);
         assert!(text.contains("Hello"));
         assert!(text.contains("First line."));
         assert!(!text.contains("<style>"));
         assert!(!text.contains("alert"));
         assert!(!text.contains("<h1>"));
-    }
-
-    #[test]
-    fn content_from_bytes_picks_the_right_representation() {
-        assert_eq!(
-            content_from_bytes(b"<html><body>Hi <b>there</b></body></html>", "text/html; charset=utf-8"),
-            "Hi there"
-        );
-        let json = content_from_bytes(br#"{"a":[1,2]}"#, "application/json");
-        assert!(json.contains("\"a\""));
-        assert!(content_from_bytes(b"plain text", "text/plain").starts_with("plain text"));
-        let binary = content_from_bytes(&[0x89, 0x50, 0x4e, 0x47], "image/png");
-        assert!(binary.contains("image/png"));
-        assert!(binary.contains("Binary content"));
     }
 
     #[test]
@@ -3949,15 +3878,15 @@ mod tests {
         <div class="result">
           <a rel="nofollow" class="result__a" href="https://crates.io">crates.io</a>
         </div>"#;
-        let results = parse_search_results(html, 10);
+        let results = brazier_runtime::web::parse_html_results(html, 10);
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, "Rust docs & guides");
-        assert_eq!(results[0].1, "https://example.com/docs");
-        assert!(results[0].2.contains("Learn Rust"));
-        assert_eq!(results[1].0, "crates.io");
-        assert_eq!(results[1].1, "https://crates.io");
+        assert_eq!(results[0].title, "Rust docs & guides");
+        assert_eq!(results[0].url, "https://example.com/docs");
+        assert!(results[0].snippet.contains("Learn Rust"));
+        assert_eq!(results[1].title, "crates.io");
+        assert_eq!(results[1].url, "https://crates.io");
         // max_results is honored.
-        assert_eq!(parse_search_results(html, 1).len(), 1);
+        assert_eq!(brazier_runtime::web::parse_html_results(html, 1).len(), 1);
     }
 
     #[tokio::test]
