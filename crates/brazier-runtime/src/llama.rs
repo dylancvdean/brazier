@@ -162,6 +162,12 @@ pub fn describe_server_startup_failure(
              Lower context size, turn off Parallel subagents, reduce GPU layers, \
              or close other apps, then try again.\n\n{excerpt}"
         )
+    } else if startup_looks_like_invalid_gguf(trimmed) {
+        format!(
+            "{server} could not load this GGUF model because its tensor data is inconsistent. \
+             The file is likely incomplete, corrupt, or an incompatible quantization. \
+             Remove that model file and download a fresh copy, preferably the model's recommended quantization.\n\n{excerpt}"
+        )
     } else {
         format!("{server} exited during startup with {status}:\n{excerpt}")
     }
@@ -183,6 +189,16 @@ pub fn startup_looks_like_oom(text: &str) -> bool {
         || lower
             .split(|c: char| !c.is_ascii_alphanumeric())
             .any(|token| token == "oom")
+}
+
+/// Detect the GGUF loader signature for a malformed tensor table or payload.
+/// This is distinct from GPU allocation failure: the server has already found
+/// the device, but cannot trust the model file enough to load it.
+pub fn startup_looks_like_invalid_gguf(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("gguf_init_from_reader")
+        && (lower.contains("failed to read tensor data")
+            || lower.contains("tensor") && lower.contains("expected"))
 }
 
 /// Managed install prefix under the application data directory.
@@ -3027,6 +3043,16 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
         );
         assert!(message.contains("ran out of memory"));
         assert!(message.contains("Parallel subagents"));
+    }
+
+    #[test]
+    fn startup_invalid_gguf_detection_explains_redownload() {
+        let stderr = "E gguf_init_from_reader: tensor 'output_norm.weight' has offset 337715200, expected 357580800\nE gguf_init_from_reader: failed to read tensor data";
+        assert!(startup_looks_like_invalid_gguf(stderr));
+        let message = describe_server_startup_failure("llama-server", "exit status: 1", stderr);
+        assert!(message.contains("tensor data is inconsistent"));
+        assert!(message.contains("fresh copy"));
+        assert!(!startup_looks_like_invalid_gguf("model file not found"));
     }
 
     #[test]

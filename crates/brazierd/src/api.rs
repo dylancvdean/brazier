@@ -1493,6 +1493,17 @@ async fn update_welcome_preference(
 
 const AGENT_PREFERENCE_KEY: &str = "agent";
 
+/// Keep preferences and sessions created by removed agent adapters usable.
+/// OMP had the broadest tool surface, so Powerful is the closest current mode;
+/// the old Pi id maps to the current Simple mode.
+fn migrate_legacy_agent_runtime_id(runtime_id: &str) -> String {
+    match runtime_id.trim() {
+        "omp" => crate::agent_types::AGENT_RUNTIME_POWERFUL.to_owned(),
+        "pi" => crate::agent_types::AGENT_RUNTIME_SIMPLE.to_owned(),
+        value => value.to_owned(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct UpdateAgentPreference {
     default_runtime_id: String,
@@ -1508,7 +1519,15 @@ async fn load_default_agent_runtime_id(state: &AppState) -> ApiResult<String> {
         .map_err(ApiError::internal)?
         .and_then(|value| value["default_runtime_id"].as_str().map(str::to_owned))
         .unwrap_or_else(|| crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned());
-    Ok(stored)
+    let migrated = migrate_legacy_agent_runtime_id(&stored);
+    let known = agent_runtime_catalog()
+        .iter()
+        .any(|entry| entry["id"].as_str() == Some(migrated.as_str()));
+    Ok(if known {
+        migrated
+    } else {
+        crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned()
+    })
 }
 
 async fn load_enabled_power_tools(state: &AppState) -> ApiResult<Vec<String>> {
@@ -1536,7 +1555,13 @@ async fn agent_preference(State(state): State<AppState>) -> ApiResult<Json<Value
     let default_runtime_id = stored
         .as_ref()
         .and_then(|value| value["default_runtime_id"].as_str())
-        .unwrap_or(crate::agent_types::DEFAULT_AGENT_RUNTIME_ID);
+        .map(migrate_legacy_agent_runtime_id)
+        .filter(|runtime_id| {
+            agent_runtime_catalog()
+                .iter()
+                .any(|entry| entry["id"].as_str() == Some(runtime_id.as_str()))
+        })
+        .unwrap_or_else(|| crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned());
     let power_tools = stored
         .as_ref()
         .and_then(|value| value["power_tools"].as_array())
@@ -1552,11 +1577,11 @@ async fn update_agent_preference(
     State(state): State<AppState>,
     Json(preference): Json<UpdateAgentPreference>,
 ) -> ApiResult<Json<Value>> {
-    let runtime_id = preference.default_runtime_id.trim();
+    let runtime_id = migrate_legacy_agent_runtime_id(&preference.default_runtime_id);
     let catalog = agent_runtime_catalog();
     let entry = catalog
         .iter()
-        .find(|entry| entry["id"].as_str() == Some(runtime_id))
+        .find(|entry| entry["id"].as_str() == Some(runtime_id.as_str()))
         .ok_or_else(|| {
             ApiError::bad_request(format!(
                 "unknown agent runtime `{runtime_id}`. Available: {}",
@@ -1635,7 +1660,7 @@ fn agent_runtime_catalog() -> Vec<Value> {
 
 fn resolve_agent_runtime_id(requested: Option<String>, default_id: &str) -> String {
     requested
-        .map(|value| value.trim().to_owned())
+        .map(|value| migrate_legacy_agent_runtime_id(&value))
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default_id.to_owned())
 }
@@ -7697,6 +7722,16 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(initial["default_runtime_id"], "simple");
         assert_eq!(initial["power_tools"], json!([]));
+
+        let (status, migrated) = json_request(
+            &app,
+            "PUT",
+            "/api/v1/preferences/agent",
+            json!({ "default_runtime_id": "omp" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{migrated}");
+        assert_eq!(migrated["default_runtime_id"], "powerful");
 
         let (status, body) = json_request(
             &app,
