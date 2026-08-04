@@ -16,6 +16,15 @@
   --accent: #ff8a3d;
   --accent-dark: #2a1608;
   --on-accent: #1a0e04;
+  /* Type scale for UI chrome. Rendered model output (`.markdown-body`) keeps
+     its own larger reading scale on top of these. */
+  --font-micro: 9px;
+  --font-caption: 10px;
+  --font-small: 11px;
+  --font-body: 12px;
+  --font-emphasis: 13px;
+  --font-title: 14px;
+  --font-heading: 18px;
 }
 
 * {
@@ -3241,7 +3250,7 @@ a.inline-link {
   overflow-wrap: anywhere;
   color: #b7b7b7;
   font-family: ui-monospace, monospace;
-  font-size: 9.5px;
+  font-size: var(--font-caption);
   line-height: 1.5;
   white-space: pre-wrap;
 }
@@ -4798,7 +4807,7 @@ label.span-2 {
   grid-template-columns: auto 1fr;
   gap: 8px 12px;
   align-items: start;
-  padding: 12px 14px;
+  padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel-raised);
@@ -4816,12 +4825,17 @@ label.span-2 {
 
 .agent-runtime-choice strong {
   display: block;
+  color: var(--soft);
+  font-size: var(--font-body);
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .agent-runtime-choice small {
   display: block;
   color: var(--muted);
   margin-top: 2px;
+  font-size: var(--font-caption);
   line-height: 1.4;
 }
 
@@ -4829,40 +4843,57 @@ label.span-2 {
   margin-top: 3px;
 }
 
+/* Each tool is a flat row rather than a card: the list is meant to hold many
+   tools, and cards would make every new addition cost a screenful. */
 .power-tools-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
 }
 
 .power-tools-list label {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 8px 12px;
+  gap: 8px 10px;
   align-items: start;
-  padding: 11px 14px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel-raised);
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
   cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.power-tools-list label:hover {
+  background: #0c0c0d;
 }
 
 .power-tools-list label.active {
-  border-color: var(--accent, #7aa2c8);
+  border-color: #4a2a15;
+  background: #1a1009;
+}
+
+.power-tools-list label.active .power-tool-label strong {
+  color: #f78438;
 }
 
 .power-tools-list input {
-  margin-top: 3px;
+  margin-top: 2px;
 }
 
 .power-tool-label strong {
   display: block;
+  color: var(--soft);
+  font-size: var(--font-body);
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .power-tool-label small {
   display: block;
   color: var(--muted);
-  margin-top: 2px;
+  margin-top: 1px;
+  font-size: var(--font-caption);
   line-height: 1.4;
 }
 
@@ -5133,7 +5164,7 @@ label.span-2 {
 
 .agent-empty h2 {
   margin: 16px 0 8px;
-  font-size: 20px;
+  font-size: var(--font-heading);
 }
 
 .agent-empty p {
@@ -5867,7 +5898,7 @@ label.span-2 {
 .voice-turn p {
   margin: 5px 0 0;
   color: #d6d6d6;
-  font-size: 15px;
+  font-size: var(--font-title);
   line-height: 1.7;
   white-space: pre-wrap;
 }
@@ -5892,7 +5923,7 @@ label.span-2 {
 
 .voice-setup-inner h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--font-heading);
 }
 
 .voice-setup-mark {
@@ -6510,7 +6541,7 @@ label.span-2 {
 .model-field textarea.chat-template-editor {
   min-height: 180px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 10.5px;
+  font-size: var(--font-small);
   line-height: 1.45;
   white-space: pre;
   overflow-wrap: normal;
