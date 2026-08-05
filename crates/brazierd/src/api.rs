@@ -5525,6 +5525,13 @@ fn bundle_json(
         "key": bundle.key,
         "summary": bundle.summary,
         "license": bundle.license,
+        // The full agreement fields travel with the bundle so an inline
+        // round-trip (a variant install sends `{ bundle }` back) keeps what
+        // validation and the consent gate need. `consent` carries the same
+        // values for display; these mirror the daemon-side `Bundle` fields.
+        "license_url": bundle.license_url,
+        "license_version": bundle.license_version,
+        "license_summary": bundle.license_summary,
         "requires_license_acceptance": bundle.requires_license_acceptance,
         "consent": consent,
         "model_id": bundle.model_id(),

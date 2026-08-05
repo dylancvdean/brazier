@@ -2116,6 +2116,12 @@ export type SdcppBundle = {
   key: string
   summary: string
   license?: string | null
+  /** Full agreement text the bundle's license links to. */
+  license_url?: string | null
+  /** Version of the terms the person must have accepted. */
+  license_version?: string | null
+  /** Plain-language summary of what accepting the agreement means. */
+  license_summary?: string | null
   /** Gated behind an explicit license acceptance before it can be installed. */
   requires_license_acceptance?: boolean
   /** The agreement to accept, when the bundle requires one. */
