@@ -52,6 +52,7 @@ import {
   fetchManagedLlamaStatus,
   fetchModelTrust,
   assembleSdcppBundle,
+  acceptSdcppLicense,
   deleteSdcppBundle,
   formatBytes,
   listSdcppBundles,
@@ -186,9 +187,9 @@ const BUILD_ENGINE_LABELS: Record<BuildEngine, string> = {
 }
 
 // stable-diffusion.cpp intentionally has an unstable CLI. Keep this in sync
-// with the managed release pin in crates/brazierd/src/sdcpp.rs; the build form
-// remains editable for users who deliberately choose another revision.
-const SDCPP_SOURCE_REVISION = '2d0385ba85af358f7115dda608a63eafd9de7ffd'
+// with the managed release pin in crates/brazier-runtime/src/sdcpp.rs; the
+// build form remains editable for users who deliberately choose another revision.
+const SDCPP_SOURCE_REVISION = 'ea7f0c87cfe4c673263b4c201c596c7f1cbe2528'
 
 const BUILD_ENGINE_DEFAULTS: Record<
   BuildEngine,
@@ -1997,6 +1998,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [bundles, setBundles] = useState<SdcppBundle[]>([])
   const [bundlesLoading, setBundlesLoading] = useState(false)
   const [showAllBundles, setShowAllBundles] = useState(false)
+  /** A licensed bundle awaiting explicit acceptance before it can install. */
+  const [consentBundle, setConsentBundle] = useState<SdcppBundle | null>(null)
+  const [acceptingConsent, setAcceptingConsent] = useState(false)
   /** Chosen size per bundle, keyed by the component's position. */
   const [variantChoices, setVariantChoices] = useState<
     Record<string, Record<number, string>>
@@ -2227,17 +2231,55 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       )
       return
     }
+    // A licensed model may not be installed until its agreement is accepted.
+    // The check mirrors the daemon's own gate, so a stale catalog entry cannot
+    // send the user to a download the server would refuse.
+    if (bundle.requires_license_acceptance && !bundle.consent?.accepted) {
+      setConsentBundle(bundle)
+      return
+    }
     props.onError(null)
     const resolved = resolveBundleVariants(bundle, choices)
     try {
       // A bundle whose sizes were chosen is no longer the shipped one, so it
-      // travels in full rather than by id.
+      // travels in full rather than by id. That includes in-place choices
+      // (e.g. MiniMax-H3's FL2VA/Ref2VA and quant switches), which keep the
+      // same id but must still install the files the person picked — sending
+      // `{ id }` here would silently install the default variant instead.
+      const choicesMade = Object.keys(choices).length > 0
       await queueSdcppInstall(
-        resolved.id === bundle.id ? { id: bundle.id } : { bundle: resolved }
+        choicesMade ? { bundle: resolved } : { id: bundle.id }
       )
       setQueuedRepos((current) => ({ ...current, [resolved.id]: true }))
     } catch (cause) {
       props.onError(errorText(cause))
+    }
+  }
+
+  /** Record acceptance of a licensed bundle's terms, then install it. */
+  async function agreeAndInstall(bundle: SdcppBundle): Promise<void> {
+    setAcceptingConsent(true)
+    props.onError(null)
+    try {
+      await acceptSdcppLicense(bundle.id)
+      // The bundle handed to install must carry the fresh acceptance, or
+      // installBundle would re-open the consent dialog on its own gate.
+      const acceptedBundle = bundle.consent
+        ? { ...bundle, consent: { ...bundle.consent, accepted: true } }
+        : bundle
+      setBundles((current) =>
+        current.map((candidate) =>
+          candidate.id === bundle.id && candidate.consent
+            ? { ...candidate, consent: { ...candidate.consent, accepted: true } }
+            : candidate
+        )
+      )
+      setConsentBundle(null)
+      await installBundle(acceptedBundle, {})
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setAcceptingConsent(false)
     }
   }
 
@@ -2827,6 +2869,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                       flags={{
                         imageOut: bundle.modality === 'image',
                         videoOut: bundle.modality === 'video',
+                        audioOut: bundle.components.some(
+                          (component) => component.flag === 'audio-vae'
+                        ),
                         imageIn: bundle.supports_init_image
                       }}
                     />
@@ -2848,8 +2893,22 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                     {bundle.gated && !installed && (
                       <span className="installed-badge gated">Token required</span>
                     )}
+                    {bundle.requires_license_acceptance && !installed && (
+                      <span
+                        className={`installed-badge ${bundle.consent?.accepted ? '' : 'gated'}`}
+                        title={
+                          bundle.consent?.accepted
+                            ? 'You have accepted this model\u2019s license agreement.'
+                            : 'This model is licensed and must be accepted before it can be installed.'
+                        }
+                      >
+                        {bundle.consent?.accepted ? 'License accepted' : 'License required'}
+                      </span>
+                    )}
                   </strong>
-                  <span className={`generation-fit ${fit}`}>{generationFitLabel(fit)}</span>
+                  {!bundle.requires_license_acceptance && (
+                    <span className={`generation-fit ${fit}`}>{generationFitLabel(fit)}</span>
+                  )}
                   </div>
                   <span className="bundle-meta">
                     {bundle.modality === 'video' ? 'Video' : 'Image'}
@@ -3179,6 +3238,88 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           </div>
         )}
       </div>
+
+      {consentBundle?.consent && (
+        <div
+          className="menu-backdrop model-settings-backdrop"
+          onMouseDown={() => setConsentBundle(null)}
+        >
+          <div
+            className="model-settings-modal license-consent-modal"
+            role="dialog"
+            aria-label={`${consentBundle.label} license agreement`}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="model-settings-head">
+              <div>
+                <strong>License required</strong>
+                <span>{consentBundle.label} must be accepted before it can be installed</span>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setConsentBundle(null)}
+                aria-label="Close"
+              >
+                <X size={17} />
+              </button>
+            </header>
+            <div className="model-settings-body">
+              <div className="build-warning license-consent-body">
+                <ShieldAlert size={15} />
+                <div>
+                  <p>
+                    This model is released under the <strong>{consentBundle.consent.id}</strong>.
+                  </p>
+                  <p className="license-consent-summary">{consentBundle.consent.summary}</p>
+                  <p>
+                    You are responsible for making sure you are allowed to use it. In particular,
+                    the agreement limits where it may be used — a separate license from MiniMax may
+                    be required in some countries, including the United States. Read the full terms
+                    before agreeing.
+                  </p>
+                  <p>
+                    <a
+                      href={consentBundle.consent.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="license-consent-link"
+                    >
+                      Read the full {consentBundle.consent.id}
+                    </a>
+                  </p>
+                </div>
+              </div>
+            </div>
+            <footer className="model-settings-foot">
+              <button
+                type="button"
+                className="chip-button subtle"
+                disabled={acceptingConsent}
+                onClick={() => setConsentBundle(null)}
+              >
+                Not now
+              </button>
+              <div className="model-settings-foot-actions">
+                <button
+                  type="button"
+                  className="chip-button"
+                  disabled={acceptingConsent}
+                  onClick={() => void agreeAndInstall(consentBundle)}
+                >
+                  {acceptingConsent ? (
+                    <>
+                      <LoaderCircle className="spin" size={13} /> Saving…
+                    </>
+                  ) : (
+                    'I agree — install the model'
+                  )}
+                </button>
+              </div>
+            </footer>
+          </div>
+        </div>
+      )}
     </section>
   )
 }

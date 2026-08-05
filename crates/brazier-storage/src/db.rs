@@ -744,6 +744,30 @@ impl Database {
             tx.commit().await?;
         }
 
+        if version < 11 {
+            // Durable acceptances of model license agreements. Some curated
+            // models (MiniMax-H3) are only licensed in part of the world
+            // without a separate grant from the publisher, so whether the
+            // person agreed — and to which version of the terms — must survive
+            // restarts rather than living in renderer memory.
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS license_consents (
+                    license_id TEXT PRIMARY KEY,
+                    license_version TEXT NOT NULL,
+                    accepted_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO schema_migrations(version) VALUES (11)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+
         Ok(())
     }
 

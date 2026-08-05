@@ -4179,6 +4179,73 @@ a.inline-link {
   gap: 10px;
 }
 
+/* Conditioning inputs (first/last frame, Ref2VA references) for video
+   generation. Compact rows of attachment chips under the prompt. */
+.generate-conditioning {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #2a2a2a;
+  border-radius: 10px;
+  background: #0a0a0a;
+}
+
+.generate-conditioning-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #b6b6b6;
+  font-size: 12px;
+}
+
+.generate-conditioning-head strong {
+  color: #e5e5e5;
+}
+
+.generate-conditioning-head span {
+  color: #757575;
+  font-size: 11px;
+}
+
+.conditioning-stacks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.conditioning-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.conditioning-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid #343434;
+  border-radius: 7px;
+  color: #b6b6b6;
+  background: #060606;
+  font-size: 11px;
+}
+
+.conditioning-file button {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  color: #757575;
+  background: none;
+  cursor: pointer;
+}
+
+.conditioning-file button:hover {
+  color: #f8924e;
+}
+
 .generate-gallery {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -6901,6 +6968,35 @@ label.span-2 {
 
 .model-settings-modal {
   animation: drop-in 160ms ease;
+}
+
+/* License acceptance dialog: narrower than the settings modal, and the
+   summary stands out so the plain-language requirement is read before the
+   full terms are opened. */
+.license-consent-modal {
+  width: min(560px, 100%);
+}
+
+.license-consent-body {
+  align-items: flex-start;
+}
+
+.license-consent-body p {
+  margin: 4px 0;
+  line-height: 1.55;
+}
+
+.license-consent-summary {
+  padding: 10px 12px;
+  border: 1px solid #343434;
+  border-radius: 10px;
+  background: #0b0b0b;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.license-consent-link {
+  color: var(--accent, #5b9dff);
 }
 
 /* —— Computer Use mode —— */

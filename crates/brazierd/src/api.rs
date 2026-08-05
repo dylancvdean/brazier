@@ -391,6 +391,7 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/models/sdcpp/bundles/{id}",
             axum::routing::delete(delete_sdcpp_bundle),
         )
+        .route("/api/v1/models/sdcpp/consent", post(accept_sdcpp_license))
         .route("/api/v1/models/sdcpp/install", post(install_sdcpp_bundle))
         .route("/api/v1/generate/image", post(generate_image))
         .route("/api/v1/generate/video", post(generate_video))
@@ -3867,6 +3868,21 @@ struct GenerateVideoApiRequest {
     init_image_blob: Option<String>,
     #[serde(default)]
     video_frames: Option<u32>,
+    /// Ending image for first/last-frame conditioning (`--end-img`).
+    #[serde(default)]
+    end_image_blob: Option<String>,
+    /// Reference images for Ref2VA conditioning.
+    #[serde(default)]
+    ref_image_blobs: Vec<String>,
+    /// Reference videos for Ref2VA conditioning; frames are sampled to 24 fps.
+    #[serde(default)]
+    ref_video_blobs: Vec<String>,
+    /// WAV soundtracks paired by index with `ref_video_blobs`.
+    #[serde(default)]
+    ref_video_audio_blobs: Vec<String>,
+    /// Standalone audio references for Ref2VA conditioning.
+    #[serde(default)]
+    ref_audio_blobs: Vec<String>,
 }
 
 /// On-disk size of a generation checkpoint, used as a memory proxy for
@@ -3969,6 +3985,38 @@ async fn generate_video(
         .model_id
         .or(settings.default_video_gen_model.clone())
         .ok_or_else(|| ApiError::bad_request("model_id or default_video_gen_model is required"))?;
+
+    // Ref2VA accepts at most 9 reference images, 3 videos, 3 audio clips, and
+    // 12 files in total. Enforce here so a malformed request fails before
+    // sd-cli spends minutes loading a 40 GB checkpoint.
+    let ref_image_count = request.ref_image_blobs.len();
+    let ref_video_count = request.ref_video_blobs.len();
+    let ref_audio_count = request.ref_video_audio_blobs.len() + request.ref_audio_blobs.len();
+    let total_refs = ref_image_count + ref_video_count + ref_audio_count;
+    let limit = |allowed: bool, message: &str| {
+        if allowed {
+            Ok(())
+        } else {
+            Err(ApiError::bad_request(message))
+        }
+    };
+    limit(
+        ref_image_count <= 9,
+        "MiniMax-H3 Ref2VA accepts at most 9 reference images",
+    )?;
+    limit(
+        ref_video_count <= 3,
+        "MiniMax-H3 Ref2VA accepts at most 3 reference videos",
+    )?;
+    limit(
+        ref_audio_count <= 3,
+        "MiniMax-H3 Ref2VA accepts at most 3 reference audio clips",
+    )?;
+    limit(
+        total_refs <= 12,
+        "MiniMax-H3 Ref2VA accepts at most 12 reference files in total",
+    )?;
+
     let init_image = if let Some(blob) = &request.init_image_blob {
         Some(
             blob_store::blob_path(&state.data_dir, blob)
@@ -3977,6 +4025,71 @@ async fn generate_video(
     } else {
         None
     };
+    let end_image = if let Some(blob) = &request.end_image_blob {
+        Some(
+            blob_store::blob_path(&state.data_dir, blob)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let ref_images = {
+        let mut paths = Vec::with_capacity(request.ref_image_blobs.len());
+        for blob in &request.ref_image_blobs {
+            paths.push(
+                blob_store::blob_path(&state.data_dir, blob)
+                    .map_err(|e| ApiError::bad_request(e.to_string()))?,
+            );
+        }
+        paths
+    };
+    let ref_audios = {
+        let mut paths = Vec::with_capacity(request.ref_audio_blobs.len());
+        for blob in &request.ref_audio_blobs {
+            paths.push(
+                media::materialize_wav_from_blob(&state.data_dir, blob, "audio/wav")
+                    .await
+                    .map_err(|e| ApiError::bad_request(e.to_string()))?,
+            );
+        }
+        paths
+    };
+    let ref_video_audios = {
+        let mut paths = Vec::with_capacity(request.ref_video_audio_blobs.len());
+        for blob in &request.ref_video_audio_blobs {
+            paths.push(
+                media::materialize_wav_from_blob(&state.data_dir, blob, "audio/wav")
+                    .await
+                    .map_err(|e| ApiError::bad_request(e.to_string()))?,
+            );
+        }
+        paths
+    };
+
+    // Reference videos are handed to sd-cli as a directory of 24 fps frames,
+    // so each source clip is sampled into its own temp directory first. The
+    // directories are removed once the job has finished, whether it succeeded
+    // or not.
+    let mut ref_frame_dirs = Vec::new();
+    let mut ref_videos = Vec::new();
+    for blob in &request.ref_video_blobs {
+        let input = blob_store::blob_path(&state.data_dir, blob)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let frame_dir = state
+            .data_dir
+            .join("tmp")
+            .join("sdcpp")
+            .join(format!("ref-{blob}-frames"));
+        let extracted = media::extract_reference_video_frames(&input, &frame_dir)
+            .await
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        if extracted == 0 {
+            return Err(ApiError::bad_request("reference video produced no frames"));
+        }
+        ref_videos.push(frame_dir.clone());
+        ref_frame_dirs.push(frame_dir);
+    }
+
     let gen_bytes = generation_model_bytes(&state.data_dir, &model_id);
     let profiles = model_settings::load(&state.data_dir);
     let profile = profiles.diffusion(&model_id).cloned();
@@ -3996,6 +4109,15 @@ async fn generate_video(
         timeout_secs: Some(settings.generation_timeout_secs),
         video_frames: request.video_frames,
         fps: request.fps,
+        end_image,
+        end_image_blob: request.end_image_blob.clone(),
+        ref_images,
+        ref_image_blobs: request.ref_image_blobs.clone(),
+        ref_videos,
+        ref_video_blobs: request.ref_video_blobs.clone(),
+        ref_video_audios,
+        ref_audios,
+        ref_audio_blobs: request.ref_audio_blobs.clone(),
     };
     let memory_plan = state.runtime.prepare_generation_memory(gen_bytes).await;
     let generated = sdcpp::generate_video(
@@ -4006,6 +4128,9 @@ async fn generate_video(
     )
     .await;
     state.runtime.restore_after_generation(memory_plan).await;
+    for dir in ref_frame_dirs {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
     let result = generated.map_err(|e| {
         if e.downcast_ref::<sdcpp::BusyError>().is_some() {
             ApiError::bad_request(e.to_string())
@@ -4715,6 +4840,9 @@ async fn queue_sdcpp_install(
             .ok_or_else(|| ApiError::bad_request(format!("unknown model bundle `{id}`")))?,
         (None, None) => return Err(ApiError::bad_request("id or bundle is required")),
     };
+    ensure_license_consent(&state, &bundle)
+        .await
+        .map_err(ApiError::bad_request)?;
     let body = enqueue_work(
         &state,
         crate::download_queue::QueuedWork::SdcppBundle(bundle),
@@ -5258,10 +5386,22 @@ async fn download_personaplex_model(
 
 /// Every stable-diffusion.cpp bundle on offer, with what is already installed.
 async fn sdcpp_catalog(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let data: Vec<Value> = sdcpp_catalog::catalog(&state.data_dir)
-        .into_iter()
-        .map(|entry| bundle_json(&entry.bundle, entry.origin, &state.data_dir))
-        .collect();
+    let mut data = Vec::new();
+    for entry in sdcpp_catalog::catalog(&state.data_dir) {
+        let mut value = bundle_json(&entry.bundle, entry.origin, &state.data_dir);
+        // Fold the durable acceptance state into the bundle's consent
+        // requirement, since `bundle_json` itself cannot touch the DB.
+        if let Some(consent) = value.get_mut("consent").and_then(Value::as_object_mut)
+            && let Some(requirement) = entry.bundle.license_requirement()
+        {
+            let accepted =
+                crate::license_store::has_consent(&state.db, &requirement.id, &requirement.version)
+                    .await
+                    .unwrap_or(false);
+            consent.insert("accepted".into(), Value::Bool(accepted));
+        }
+        data.push(value);
+    }
     Ok(Json(json!({ "data": data })))
 }
 
@@ -5270,6 +5410,23 @@ fn bundle_json(
     origin: sdcpp_catalog::Origin,
     data_dir: &std::path::Path,
 ) -> Value {
+    let consent = bundle.license_requirement().map(|requirement| {
+        json!({
+            "id": requirement.id,
+            "version": requirement.version,
+            "url": requirement.url,
+            "summary": requirement.summary,
+        })
+    });
+    let conditioning =
+        bundle
+            .installed_conditioning(data_dir)
+            .map(|conditioning| match conditioning {
+                sdcpp::VideoConditioning::None => "text",
+                sdcpp::VideoConditioning::InitImage => "init_image",
+                sdcpp::VideoConditioning::FirstLastFrame => "first_last_frame",
+                sdcpp::VideoConditioning::References => "references",
+            });
     json!({
         "id": bundle.id,
         "label": bundle.label,
@@ -5277,8 +5434,11 @@ fn bundle_json(
         "key": bundle.key,
         "summary": bundle.summary,
         "license": bundle.license,
+        "requires_license_acceptance": bundle.requires_license_acceptance,
+        "consent": consent,
         "model_id": bundle.model_id(),
         "installed": bundle.installed(data_dir),
+        "conditioning": conditioning,
         "gated": bundle.gated(),
         "approx_bytes": bundle.approx_bytes(),
         "supports_init_image": bundle.supports_init_image,
@@ -5295,6 +5455,32 @@ fn bundle_json(
             "variants": component.variants,
         })).collect::<Vec<_>>(),
     })
+}
+
+/// Refuse to install a bundle whose license requires an acceptance the person
+/// has not recorded.
+///
+/// This is enforced here in the daemon rather than only in the interface so a
+/// direct API caller or the download queue cannot install a licensed model
+/// past its agreement. The error names the license and is distinct enough for
+/// the interface to route to the consent dialog.
+async fn ensure_license_consent(
+    state: &AppState,
+    bundle: &sdcpp_catalog::Bundle,
+) -> anyhow::Result<()> {
+    let Some(requirement) = bundle.license_requirement() else {
+        return Ok(());
+    };
+    let accepted =
+        crate::license_store::has_consent(&state.db, &requirement.id, &requirement.version).await?;
+    anyhow::ensure!(
+        accepted,
+        "{} is released under the {} license, which must be accepted before it can be installed. \
+         Review the terms and agree to them to continue.",
+        bundle.label,
+        requirement.id,
+    );
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -5356,6 +5542,41 @@ async fn delete_sdcpp_bundle(
 }
 
 #[derive(Debug, Deserialize)]
+struct SdcppConsentRequest {
+    /// Installable id of the bundle whose license is being accepted.
+    bundle_id: String,
+}
+
+/// Record acceptance of a bundle's license agreement.
+///
+/// Consent is durable and versioned: the daemon stores the version of the
+/// terms the person saw, and installs require a matching record, so a license
+/// that gets re-termed cannot be silently grandfathered.
+async fn accept_sdcpp_license(
+    State(state): State<AppState>,
+    Json(request): Json<SdcppConsentRequest>,
+) -> ApiResult<Json<Value>> {
+    let bundle = sdcpp_catalog::find(&state.data_dir, &request.bundle_id).ok_or_else(|| {
+        ApiError::bad_request(format!("unknown model bundle `{}`", request.bundle_id))
+    })?;
+    let requirement = bundle.license_requirement().ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "{} does not require a license agreement",
+            bundle.label
+        ))
+    })?;
+    crate::license_store::record_consent(&state.db, &requirement.id, &requirement.version)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "license_id": requirement.id,
+        "version": requirement.version,
+        "accepted": true,
+        "bundle_id": bundle.id,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
 struct InstallSdcppBundleRequest {
     #[serde(default)]
     id: Option<String>,
@@ -5385,6 +5606,10 @@ async fn install_sdcpp_bundle(
             return ApiError::bad_request("id or bundle is required").into_response();
         }
     };
+
+    if let Err(error) = ensure_license_consent(&state, &bundle).await {
+        return ApiError::bad_request(error).into_response();
+    }
 
     if !query.stream {
         let result = download::install_sdcpp_bundle_with_progress(

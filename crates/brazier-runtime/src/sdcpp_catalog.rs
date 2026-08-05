@@ -50,6 +50,27 @@ pub struct Variant {
     pub note: Option<String>,
 }
 
+/// An agreement a person must accept before a licensed model can be installed.
+///
+/// The requirement is keyed by a stable `id` (shared across bundles that use
+/// the same agreement) and stamped with the `version` of the terms the person
+/// saw. Consent is stored durably by the daemon and enforced server-side on
+/// install, not just remembered by the interface.
+#[derive(Debug, Clone, Serialize)]
+pub struct LicenseRequirement {
+    /// Stable identifier used to key the persisted consent record. For
+    /// MiniMax-H3 this is the license slug, so a future second bundle under
+    /// the same agreement shares one acceptance.
+    pub id: String,
+    /// Version of the terms the person must have seen. The UI passes this
+    /// back when recording consent, and installs require a matching record.
+    pub version: String,
+    /// Link to the full agreement text.
+    pub url: String,
+    /// Plain-language summary shown in the consent dialog.
+    pub summary: String,
+}
+
 /// One file within a bundle, and the sd-cli flag it is passed as.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Component {
@@ -132,6 +153,20 @@ pub struct Bundle {
     pub summary: String,
     #[serde(default)]
     pub license: Option<String>,
+    /// Whether this model is gated behind explicit acceptance of a license
+    /// agreement before it may be installed or used. The agreement is shown,
+    /// recorded durably, and enforced server-side on install.
+    #[serde(default)]
+    pub requires_license_acceptance: bool,
+    /// Link to the full agreement text for `requires_license_acceptance`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_url: Option<String>,
+    /// Version of the terms the person must accept (e.g. the license date).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_version: Option<String>,
+    /// Plain-language summary of what acceptance means, shown in the dialog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_summary: Option<String>,
     #[serde(default)]
     pub defaults: GenerationDefaults,
     /// Whether the model can animate or restyle a supplied image.
@@ -156,6 +191,23 @@ impl Bundle {
     /// Whether any component needs a Hugging Face token.
     pub fn gated(&self) -> bool {
         self.components.iter().any(|component| component.gated)
+    }
+
+    /// The agreement that must be accepted before this bundle can install,
+    /// when the model requires one.
+    ///
+    /// The consent is keyed by the license slug so bundles that share an
+    /// agreement (e.g. two MiniMax-H3 checkpoints) reuse one acceptance.
+    pub fn license_requirement(&self) -> Option<LicenseRequirement> {
+        if !self.requires_license_acceptance {
+            return None;
+        }
+        Some(LicenseRequirement {
+            id: self.license.clone().unwrap_or_else(|| self.id.clone()),
+            version: self.license_version.clone().unwrap_or_else(|| "1".into()),
+            url: self.license_url.clone().unwrap_or_default(),
+            summary: self.license_summary.clone().unwrap_or_default(),
+        })
     }
 
     pub fn approx_bytes(&self) -> Option<u64> {
@@ -188,6 +240,7 @@ impl Bundle {
             component_sources,
             single_file,
             supports_init_image: self.supports_init_image,
+            conditioning: None,
         }
     }
 
@@ -207,6 +260,17 @@ impl Bundle {
                     && manifest.component_sources == self.manifest().component_sources
                     && manifest.single_file == self.manifest().single_file
             })
+    }
+
+    /// The conditioning surface the installed checkpoint offers, if any.
+    ///
+    /// For MiniMax-H3 the diffusion checkpoint is swapped in place between
+    /// FL2VA and Ref2VA, so the installed manifest — not the shipped bundle —
+    /// decides whether first/last-frame images or reference inputs are valid.
+    pub fn installed_conditioning(&self, data_dir: &Path) -> Option<sdcpp::VideoConditioning> {
+        let dir = self.install_dir(data_dir).ok()?;
+        let manifest = sdcpp::load_manifest(&dir).ok()?;
+        Some(sdcpp::video_conditioning(&manifest))
     }
 }
 
@@ -313,6 +377,41 @@ pub fn validate(bundle: &Bundle) -> anyhow::Result<()> {
         "bundle id must be alphanumeric with dashes, dots, or underscores"
     );
     anyhow::ensure!(!bundle.label.trim().is_empty(), "bundle needs a label");
+    if bundle.requires_license_acceptance {
+        let license = bundle
+            .license
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("a licensed bundle needs a license name"))?;
+        anyhow::ensure!(
+            license.len() <= 120
+                && license
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+            "license name must be a short identifier"
+        );
+        let version = bundle
+            .license_version
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("a licensed bundle needs a license version"))?;
+        anyhow::ensure!(version.len() <= 40, "license version is too long");
+        let url = bundle
+            .license_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("a licensed bundle needs a license URL"))?;
+        let url =
+            reqwest::Url::parse(url).with_context(|| anyhow::anyhow!("invalid license URL"))?;
+        anyhow::ensure!(url.scheme() == "https", "license URL must use HTTPS");
+        anyhow::ensure!(
+            bundle
+                .license_summary
+                .as_deref()
+                .is_some_and(|summary| !summary.trim().is_empty()),
+            "a licensed bundle needs a plain-language license summary"
+        );
+    }
     sdcpp::model_dir_for_key(Path::new("/"), bundle.modality, &bundle.key)
         .context("invalid bundle key")?;
     anyhow::ensure!(
@@ -672,6 +771,10 @@ mod tests {
             key: "acme/test".into(),
             summary: "test".into(),
             license: None,
+            requires_license_acceptance: false,
+            license_url: None,
+            license_version: None,
+            license_summary: None,
             defaults: GenerationDefaults::default(),
             supports_init_image: false,
             featured: false,
@@ -781,6 +884,86 @@ mod tests {
         assert!(validate(&collision).is_err());
 
         assert!(validate(&sample_bundle("fine")).is_ok());
+    }
+
+    #[test]
+    fn licensed_bundles_require_a_coherent_agreement() {
+        fn licensed(id: &str) -> Bundle {
+            let mut bundle = sample_bundle(id);
+            bundle.requires_license_acceptance = true;
+            bundle.license = Some("minimax-h3-community-license-agreement".into());
+            bundle.license_url = Some("https://example.com/LICENSE".into());
+            bundle.license_version = Some("2026-08-02".into());
+            bundle.license_summary = Some("Only licensed in part of the world.".into());
+            bundle
+        }
+        assert!(validate(&licensed("fine-licensed")).is_ok());
+
+        let mut no_url = licensed("no-url");
+        no_url.license_url = None;
+        assert!(validate(&no_url).is_err());
+
+        let mut http_url = licensed("http-url");
+        http_url.license_url = Some("http://example.com/LICENSE".into());
+        assert!(validate(&http_url).is_err());
+
+        let mut no_summary = licensed("no-summary");
+        no_summary.license_summary = None;
+        assert!(validate(&no_summary).is_err());
+
+        let mut no_version = licensed("no-version");
+        no_version.license_version = None;
+        assert!(validate(&no_version).is_err());
+
+        let requirement = licensed("req").license_requirement().expect("requirement");
+        assert_eq!(requirement.id, "minimax-h3-community-license-agreement");
+        assert_eq!(requirement.version, "2026-08-02");
+        assert_eq!(requirement.url, "https://example.com/LICENSE");
+        assert!(sample_bundle("plain").license_requirement().is_none());
+    }
+
+    #[test]
+    fn minimax_h3_is_gated_behind_its_license() {
+        let bundle = builtin("minimax-h3").expect("MiniMax H3 bundle");
+        assert_eq!(bundle.modality, Modality::Video);
+        assert!(bundle.requires_license_acceptance);
+        assert!(!bundle.featured, "licensed models must not be shortlisted");
+        let requirement = bundle.license_requirement().expect("license requirement");
+        assert_eq!(requirement.id, "minimax-h3-community-license-agreement");
+        assert!(!requirement.summary.is_empty());
+        assert!(requirement.url.starts_with("https://"));
+        // The FL2VA/Ref2VA choice is made in place so the shared encoder and
+        // VAEs are downloaded once.
+        let diffusion = bundle
+            .components
+            .iter()
+            .find(|component| component.flag.as_deref() == Some("diffusion-model"))
+            .expect("diffusion model");
+        assert!(diffusion.variants.len() >= 5);
+        assert!(
+            diffusion
+                .variants
+                .iter()
+                .any(|variant| variant.in_place && variant.path.contains("fl2va"))
+        );
+        assert!(
+            diffusion
+                .variants
+                .iter()
+                .any(|variant| variant.in_place && variant.path.contains("ref2va"))
+        );
+        assert!(
+            bundle
+                .components
+                .iter()
+                .any(|component| component.flag.as_deref() == Some("audio-vae"))
+        );
+        assert!(
+            bundle
+                .components
+                .iter()
+                .any(|component| component.flag.as_deref() == Some("llm"))
+        );
     }
 
     #[test]

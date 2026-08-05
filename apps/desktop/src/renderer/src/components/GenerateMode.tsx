@@ -1,5 +1,5 @@
-import { Download, Image, LoaderCircle, Square, Video } from 'lucide-react'
-import { type FormEvent, useEffect, useState } from 'react'
+import { Download, Image, LoaderCircle, Music, Paperclip, Square, Video, X } from 'lucide-react'
+import { type FormEvent, useEffect, useRef, useState } from 'react'
 import {
   cancelGeneration,
   fetchBlobObjectUrl,
@@ -8,12 +8,15 @@ import {
   generateVideo,
   listSdcppBundles,
   saveBlobToDisk,
+  uploadAttachmentBlob,
   type DiffusionProfile,
   type GenerateBlobResult,
   type HardwareInfo,
   type LocalModel,
   type RuntimeSettings,
-  type SdcppDefaults
+  type SdcppBundle,
+  type SdcppDefaults,
+  type StoredBlob
 } from '../api'
 import {
   AMD_APU_VIDEO_DEFAULTS,
@@ -66,7 +69,24 @@ export function GenerateMode(props: Props) {
   const [results, setResults] = useState<GenerateBlobResult[]>([])
   const [urls, setUrls] = useState<Record<string, string>>({})
   const [defaultsByModel, setDefaultsByModel] = useState<Record<string, SdcppDefaults>>({})
+  const [bundlesByModel, setBundlesByModel] = useState<Record<string, SdcppBundle>>({})
   const [configuredByModel, setConfiguredByModel] = useState<Record<string, DiffusionProfile>>({})
+  const initImageInput = useRef<HTMLInputElement>(null)
+  const endImageInput = useRef<HTMLInputElement>(null)
+  const refImageInput = useRef<HTMLInputElement>(null)
+  const refVideoInput = useRef<HTMLInputElement>(null)
+  const refAudioInput = useRef<HTMLInputElement>(null)
+  /** First-frame image for image-to-video conditioning. */
+  const [initImage, setInitImage] = useState<StoredBlob | null>(null)
+  /** Last-frame image for first/last-frame conditioning. */
+  const [endImage, setEndImage] = useState<StoredBlob | null>(null)
+  /** Reference images for Ref2VA conditioning. */
+  const [refImages, setRefImages] = useState<StoredBlob[]>([])
+  /** Reference videos for Ref2VA, each with an optional paired soundtrack. */
+  const [refVideos, setRefVideos] = useState<{ blob: StoredBlob; soundtrack: StoredBlob | null }[]>([])
+  /** Standalone audio references for Ref2VA conditioning. */
+  const [refAudios, setRefAudios] = useState<StoredBlob[]>([])
+  const [uploading, setUploading] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -115,11 +135,14 @@ export function GenerateMode(props: Props) {
   // which has to be 1.0 for distilled models like Flux schnell.
   useEffect(() => {
     void listSdcppBundles()
-      .then((bundles) =>
+      .then((bundles) => {
         setDefaultsByModel(
           Object.fromEntries(bundles.map((bundle) => [bundle.model_id, bundle.defaults]))
         )
-      )
+        setBundlesByModel(
+          Object.fromEntries(bundles.map((bundle) => [bundle.model_id, bundle]))
+        )
+      })
       .catch(() => {
         // Non-fatal: the panel just keeps whatever settings are on screen.
       })
@@ -128,6 +151,79 @@ export function GenerateMode(props: Props) {
   const available = props.models
   const selected = props.modelId
   const useApuDefaults = usesAmdApuVulkanDefaults(props.settings, props.hardware)
+  const selectedBundle = bundlesByModel[selected]
+  const conditioning = selectedBundle?.conditioning ?? null
+
+  // Conditioning inputs belong to the previous model; clear them on change.
+  useEffect(() => {
+    setInitImage(null)
+    setEndImage(null)
+    setRefImages([])
+    setRefVideos([])
+    setRefAudios([])
+  }, [selected])
+
+  async function uploadFile(
+    file: File,
+    onUploaded: (blob: StoredBlob) => void
+  ): Promise<void> {
+    setUploading(file.name)
+    try {
+      onUploaded(await uploadAttachmentBlob(file))
+    } finally {
+      setUploading(null)
+    }
+  }
+
+  function pickFiles(
+    input: HTMLInputElement | null,
+    accept: string[],
+    onFiles: (files: File[]) => void
+  ): void {
+    if (!input) return
+    input.accept = accept.join(',')
+    input.onchange = () => {
+      const files = Array.from(input.files ?? [])
+      input.value = ''
+      if (files.length > 0) onFiles(files)
+    }
+    input.click()
+  }
+
+  function attachImage(
+    input: HTMLInputElement | null,
+    setter: (blob: StoredBlob) => void
+  ): void {
+    pickFiles(input, ['image/png', 'image/jpeg', 'image/webp'], (files) => {
+      for (const file of files) void uploadFile(file, setter)
+    })
+  }
+
+  function attachRefVideos(files: File[]): void {
+    for (const file of files) {
+      // Upload first, then append — an entry must never be rendered before
+      // its blob exists.
+      void uploadFile(file, (blob) => {
+        setRefVideos((current) =>
+          current.length >= 3 ? current : [...current, { blob, soundtrack: null }]
+        )
+      })
+    }
+  }
+
+  function attachSoundtrack(entry: { blob: StoredBlob; soundtrack: StoredBlob | null }): void {
+    pickFiles(refAudioInput.current, ['audio/wav', 'audio/mpeg', 'audio/mp4', 'audio/flac'], (files) => {
+      for (const file of files) {
+        void uploadFile(file, (blob) => {
+          setRefVideos((latest) =>
+            latest.map((candidate) =>
+              candidate === entry ? { ...candidate, soundtrack: blob } : candidate
+            )
+          )
+        })
+      }
+    })
+  }
 
   useEffect(() => {
     if (!props.activeHistoryId) {
@@ -191,7 +287,21 @@ export function GenerateMode(props: Props) {
         cfg_scale: cfgScale,
         guidance: guidance.trim() ? Number(guidance) : undefined,
         video_frames: frames,
-        fps
+        fps,
+        ...(initImage ? { init_image_blob: initImage.sha256 } : {}),
+        ...(endImage ? { end_image_blob: endImage.sha256 } : {}),
+        ...(refImages.length > 0 ? { ref_image_blobs: refImages.map((blob) => blob.sha256) } : {}),
+        ...(refVideos.length > 0
+          ? { ref_video_blobs: refVideos.map((entry) => entry.blob.sha256) }
+          : {}),
+        ...(refVideos.some((entry) => entry.soundtrack)
+          ? {
+              ref_video_audio_blobs: refVideos.flatMap((entry) =>
+                entry.soundtrack ? [entry.soundtrack.sha256] : []
+              )
+            }
+          : {}),
+        ...(refAudios.length > 0 ? { ref_audio_blobs: refAudios.map((blob) => blob.sha256) } : {})
       }
       const result =
         modality === 'image' ? await generateImage(body) : await generateVideo(body)
@@ -297,6 +407,216 @@ export function GenerateMode(props: Props) {
               placeholder="Optional"
             />
           </label>
+
+          {modality === 'video' && conditioning !== null && conditioning !== 'text' && (
+            <div className="generate-conditioning">
+              <div className="generate-conditioning-head">
+                <Paperclip size={13} />
+                <strong>
+                  {conditioning === 'first_last_frame'
+                    ? 'First / last frame'
+                    : conditioning === 'references'
+                      ? 'Reference inputs'
+                      : 'Starting image'}
+                </strong>
+                <span>
+                  {conditioning === 'first_last_frame'
+                    ? 'Start from an image, and optionally pin the final frame too.'
+                    : conditioning === 'references'
+                      ? 'Images, videos, and audio that steer the result (max 9 images, 3 videos, 3 audio).'
+                      : 'Animate a photo you supply.'}
+                </span>
+              </div>
+
+              {conditioning === 'init_image' ? (
+                <div className="conditioning-row">
+                  <button
+                    type="button"
+                    className="chip-button subtle"
+                    onClick={() => attachImage(initImageInput.current, setInitImage)}
+                  >
+                    {uploading ? (
+                      <LoaderCircle className="spin" size={13} />
+                    ) : (
+                      <Image size={13} />
+                    )}
+                    {initImage ? 'Change starting image' : 'Starting image'}
+                  </button>
+                  {initImage && (
+                    <span className="conditioning-file">
+                      {initImage.original_name ?? 'starting image'}
+                      <button
+                        type="button"
+                        aria-label="Remove starting image"
+                        onClick={() => setInitImage(null)}
+                      >
+                        <X size={13} />
+                      </button>
+                    </span>
+                  )}
+                </div>
+              ) : conditioning === 'first_last_frame' ? (
+                <div className="conditioning-row">
+                  <button
+                    type="button"
+                    className="chip-button subtle"
+                    onClick={() => attachImage(initImageInput.current, setInitImage)}
+                  >
+                    {uploading ? (
+                      <LoaderCircle className="spin" size={13} />
+                    ) : (
+                      <Image size={13} />
+                    )}
+                    {initImage ? 'Change first frame' : 'First frame'}
+                  </button>
+                  {initImage && (
+                    <span className="conditioning-file">
+                      {initImage.original_name ?? 'first frame'}
+                      <button
+                        type="button"
+                        aria-label="Remove first frame"
+                        onClick={() => setInitImage(null)}
+                      >
+                        <X size={13} />
+                      </button>
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="chip-button subtle"
+                    onClick={() => attachImage(endImageInput.current, setEndImage)}
+                  >
+                    <Image size={13} />
+                    {endImage ? 'Change last frame' : 'Last frame (optional)'}
+                  </button>
+                  {endImage && (
+                    <span className="conditioning-file">
+                      {endImage.original_name ?? 'last frame'}
+                      <button
+                        type="button"
+                        aria-label="Remove last frame"
+                        onClick={() => setEndImage(null)}
+                      >
+                        <X size={13} />
+                      </button>
+                    </span>
+                  )}
+                </div>
+              ) : conditioning === 'references' ? (
+                <div className="conditioning-stacks">
+                  <div className="conditioning-row">
+                    <button
+                      type="button"
+                      className="chip-button subtle"
+                      onClick={() =>
+                        pickFiles(refImageInput.current, ['image/png', 'image/jpeg', 'image/webp'], (files) => {
+                          for (const file of files) {
+                            if (refImages.length >= 9) break
+                            void uploadFile(file, (blob) =>
+                              setRefImages((current) => [...current, blob])
+                            )
+                          }
+                        })
+                      }
+                      disabled={refImages.length >= 9}
+                    >
+                      <Image size={13} /> Reference images ({refImages.length}/9)
+                    </button>
+                    {refImages.map((blob) => (
+                      <span className="conditioning-file" key={blob.sha256}>
+                        {blob.original_name ?? 'image'}
+                        <button
+                          type="button"
+                          aria-label="Remove reference image"
+                          onClick={() =>
+                            setRefImages((current) => current.filter((candidate) => candidate !== blob))
+                          }
+                        >
+                          <X size={13} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="conditioning-row">
+                    <button
+                      type="button"
+                      className="chip-button subtle"
+                      onClick={() =>
+                        pickFiles(
+                          refVideoInput.current,
+                          ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska'],
+                          (files) => attachRefVideos(files.slice(0, 3 - refVideos.length))
+                        )
+                      }
+                      disabled={refVideos.length >= 3}
+                    >
+                      <Video size={13} /> Reference videos ({refVideos.length}/3)
+                    </button>
+                    {refVideos.map((entry) => (
+                      <span className="conditioning-file" key={entry.blob.sha256}>
+                        {entry.blob.original_name ?? 'video'}
+                        <button
+                          type="button"
+                          className="chip-button subtle"
+                          onClick={() => attachSoundtrack(entry)}
+                        >
+                          <Music size={12} />
+                          {entry.soundtrack ? 'Change soundtrack' : 'Soundtrack'}
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Remove reference video"
+                          onClick={() =>
+                            setRefVideos((current) => current.filter((candidate) => candidate !== entry))
+                          }
+                        >
+                          <X size={13} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="conditioning-row">
+                    <button
+                      type="button"
+                      className="chip-button subtle"
+                      onClick={() =>
+                        pickFiles(
+                          refAudioInput.current,
+                          ['audio/wav', 'audio/mpeg', 'audio/mp4', 'audio/flac', 'audio/ogg'],
+                          (files) => {
+                            for (const file of files) {
+                              if (refAudios.length >= 3) break
+                              void uploadFile(file, (blob) =>
+                                setRefAudios((current) => [...current, blob])
+                              )
+                            }
+                          }
+                        )
+                      }
+                      disabled={refAudios.length >= 3}
+                    >
+                      <Music size={13} /> Reference audio ({refAudios.length}/3)
+                    </button>
+                    {refAudios.map((blob) => (
+                      <span className="conditioning-file" key={blob.sha256}>
+                        {blob.original_name ?? 'audio'}
+                        <button
+                          type="button"
+                          aria-label="Remove reference audio"
+                          onClick={() =>
+                            setRefAudios((current) => current.filter((candidate) => candidate !== blob))
+                          }
+                        >
+                          <X size={13} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          )}
+
           <div className="generate-params">
             <label>
               Width
@@ -397,6 +717,11 @@ export function GenerateMode(props: Props) {
               </button>
             )}
           </div>
+          <input ref={initImageInput} type="file" style={{ display: 'none' }} />
+          <input ref={endImageInput} type="file" style={{ display: 'none' }} />
+          <input ref={refImageInput} type="file" style={{ display: 'none' }} multiple />
+          <input ref={refVideoInput} type="file" style={{ display: 'none' }} multiple />
+          <input ref={refAudioInput} type="file" style={{ display: 'none' }} multiple />
         </form>
       )}
 

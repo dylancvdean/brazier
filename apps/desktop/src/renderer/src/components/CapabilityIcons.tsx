@@ -1,4 +1,4 @@
-import { Brain, Image, Video, Wrench } from 'lucide-react'
+import { Brain, Image, Music, Video, Wrench } from 'lucide-react'
 import type { LocalModel } from '../api'
 
 /** What a model can take in and put out, as shown in model lists. */
@@ -9,6 +9,8 @@ export type CapabilityFlags = {
   tools?: boolean
   imageOut?: boolean
   videoOut?: boolean
+  /** Model also generates synchronized audio (e.g. MiniMax-H3). */
+  audioOut?: boolean
 }
 
 /** Which set of icons a model is judged by. */
@@ -80,6 +82,7 @@ const CHAT_ENTRIES: Entry[] = [
 const GENERATOR_ENTRIES: Entry[] = [
   { key: 'imageOut', icon: <Image size={12} />, label: 'images out', direction: 'out' },
   { key: 'videoOut', icon: <Video size={12} />, label: 'video out', direction: 'out' },
+  { key: 'audioOut', icon: <Music size={12} />, label: 'audio out', direction: 'out' },
   { key: 'imageIn', icon: <Image size={12} />, label: 'accepts a starting image', direction: 'in' }
 ]
 

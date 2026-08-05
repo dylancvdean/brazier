@@ -40,10 +40,14 @@ pub const ENGINE: &str = "stable-diffusion.cpp";
 /// Upstream intentionally ships an unstable CLI, so managed installs stay on
 /// this release until Brazier is updated and tested against a newer one. Users
 /// can still build another revision explicitly under Manage → Runtimes.
-const PINNED_RELEASE_TAG: &str = "master-796-2d0385b";
-pub const PINNED_SOURCE_REVISION: &str = "2d0385ba85af358f7115dda608a63eafd9de7ffd";
+///
+/// `master-812-ea7f0c8` is the first release with MiniMax-H3 support
+/// (day-1, 2026-08-04). If you move this pin, re-run the sd.cpp smoke tests:
+/// the audio-preserving AVI→MP4 path and the H3 conditioning args depend on it.
+const PINNED_RELEASE_TAG: &str = "master-812-ea7f0c8";
+pub const PINNED_SOURCE_REVISION: &str = "ea7f0c87cfe4c673263b4c201c596c7f1cbe2528";
 const GITHUB_API: &str =
-    "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/tags/master-796-2d0385b";
+    "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/tags/master-812-ea7f0c8";
 const USER_AGENT: &str = "brazier-sdcpp-manager";
 
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -651,6 +655,26 @@ pub fn video_root(data_dir: &Path) -> PathBuf {
     data_dir.join("models").join("sdcpp").join("video")
 }
 
+/// How a video model accepts conditioning inputs beyond its prompt.
+///
+/// The distinction matters for argument assembly and validation: MiniMax-H3
+/// ships two checkpoints under one install — FL2VA takes a first and/or last
+/// image, Ref2VA takes reference images/videos/audio — and the two input
+/// families are mutually exclusive. Legacy image-to-video models take only a
+/// starting image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoConditioning {
+    /// No conditioning inputs; text-to-video only.
+    None,
+    /// A starting image only (`-i`), the classic image-to-video surface.
+    InitImage,
+    /// A starting image (`-i`) and optionally an ending image (`--end-img`).
+    FirstLastFrame,
+    /// Reference images, videos, and audio (`--ref-*`).
+    References,
+}
+
 /// Sidecar manifest describing how to invoke sd-cli for one model.
 ///
 /// Placed as `manifest.json` inside the model's directory, either next to a
@@ -678,6 +702,41 @@ pub struct SdcppManifest {
     /// ignore the flag or produce nonsense, so it is opt-in per model.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub supports_init_image: bool,
+    /// Explicit conditioning surface for a video model, when the bundle knows
+    /// it. Absent means "derive from [`video_conditioning`]", which keeps old
+    /// manifests and hand-assembled bundles working unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditioning: Option<VideoConditioning>,
+}
+
+/// The conditioning surface an installed video model actually offers.
+///
+/// A manifest may declare it explicitly; otherwise it is derived from the
+/// installed diffusion checkpoint's name, because MiniMax-H3 ships its FL2VA
+/// and Ref2VA checkpoints under one install with only that filename changing.
+/// Everything else falls back to the legacy init-image flag.
+pub fn video_conditioning(manifest: &SdcppManifest) -> VideoConditioning {
+    if let Some(conditioning) = manifest.conditioning {
+        return conditioning;
+    }
+    if let Some(file) = manifest
+        .args
+        .get("diffusion-model")
+        .or(manifest.single_file.as_ref())
+    {
+        let lower = file.to_ascii_lowercase();
+        if lower.contains("ref2va") {
+            return VideoConditioning::References;
+        }
+        if lower.contains("fl2va") {
+            return VideoConditioning::FirstLastFrame;
+        }
+    }
+    if manifest.supports_init_image {
+        VideoConditioning::InitImage
+    } else {
+        VideoConditioning::None
+    }
 }
 
 /// Whether a model accepts an init image, from its installed manifest.
@@ -992,6 +1051,13 @@ pub struct ActiveGeneration {
     pub negative_prompt: Option<String>,
     /// Blob the conditioning image came from, so the interface can show it.
     pub init_image_blob: Option<String>,
+    /// Blob the ending image came from, for first/last-frame conditioning.
+    #[serde(default)]
+    pub end_image_blob: Option<String>,
+    /// Blobs behind any reference conditioning (images, videos, audio), shown
+    /// while the job runs.
+    #[serde(default)]
+    pub conditioning_blobs: Vec<String>,
     pub origin: GenerationOrigin,
     /// How long it has been running, refreshed on every read.
     pub elapsed_secs: u64,
@@ -1163,6 +1229,33 @@ pub struct GenerateVideoRequest {
     /// Playback rate written into the clip; sd-cli defaults to 24.
     #[serde(default)]
     pub fps: Option<u32>,
+    /// Optional ending image for first/last-frame conditioning (`--end-img`).
+    #[serde(default)]
+    pub end_image: Option<PathBuf>,
+    /// Blob the ending image came from, shown while the job runs.
+    #[serde(default)]
+    pub end_image_blob: Option<String>,
+    /// Reference images for Ref2VA conditioning (`--ref-image`).
+    #[serde(default)]
+    pub ref_images: Vec<PathBuf>,
+    #[serde(default)]
+    pub ref_image_blobs: Vec<String>,
+    /// Reference videos for Ref2VA conditioning (`--ref-video`). Each is a
+    /// directory of 24 fps frames, already extracted from the source clip.
+    #[serde(default)]
+    pub ref_videos: Vec<PathBuf>,
+    /// Blobs the reference videos came from, shown while the job runs.
+    #[serde(default)]
+    pub ref_video_blobs: Vec<String>,
+    /// WAV soundtracks paired by index with `ref_videos` (`--ref-video-audio`).
+    #[serde(default)]
+    pub ref_video_audios: Vec<PathBuf>,
+    /// Standalone audio references (`--ref-audio`).
+    #[serde(default)]
+    pub ref_audios: Vec<PathBuf>,
+    /// Blobs the standalone audio references came from, shown while the job runs.
+    #[serde(default)]
+    pub ref_audio_blobs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1828,6 +1921,10 @@ fn format_tail(tail: &str) -> String {
 /// AVI container, appending `.avi` even when the requested output name ends in
 /// `.mp4`. Convert that AVI here so callers consistently receive a browser-
 /// playable MP4 instead of treating a successfully rendered clip as missing.
+///
+/// MiniMax-H3 muxes its generated stereo soundtrack into the AVI, so the
+/// conversion maps every input stream and re-encodes audio as AAC — dropping
+/// the audio track would silently remove half of what the model generated.
 async fn finalize_video_output(requested_output: &Path) -> anyhow::Result<PathBuf> {
     if requested_output.is_file() {
         return Ok(requested_output.to_path_buf());
@@ -1853,10 +1950,14 @@ async fn finalize_video_output(requested_output: &Path) -> anyhow::Result<PathBu
         .arg("-i")
         .arg(&avi_output)
         .args([
+            "-map",
+            "0",
             "-c:v",
             "libx264",
             "-pix_fmt",
             "yuv420p",
+            "-c:a",
+            "aac",
             "-movflags",
             "+faststart",
         ])
@@ -1976,6 +2077,8 @@ pub async fn generate_image(
         prompt: request.prompt.clone(),
         negative_prompt: negative.clone(),
         init_image_blob: request.init_image_blob.clone(),
+        end_image_blob: None,
+        conditioning_blobs: Vec::new(),
         origin: request.origin,
         elapsed_secs: 0,
         timeout_secs: timeout.as_secs(),
@@ -2004,6 +2107,59 @@ pub async fn generate_image(
     })
 }
 
+/// Reject conditioning inputs the installed checkpoint does not support, and
+/// return the surface it does offer.
+///
+/// MiniMax-H3's two checkpoints under one install take different inputs, so a
+/// request built for the wrong one must fail clearly rather than feed flags
+/// sd-cli would silently ignore.
+fn check_conditioning(
+    manifest: &SdcppManifest,
+    request: &GenerateVideoRequest,
+) -> anyhow::Result<VideoConditioning> {
+    let conditioning = video_conditioning(manifest);
+    let has_first_last = request.init_image.is_some() || request.end_image.is_some();
+    let has_references = !request.ref_images.is_empty()
+        || !request.ref_videos.is_empty()
+        || !request.ref_video_audios.is_empty()
+        || !request.ref_audios.is_empty();
+    match conditioning {
+        VideoConditioning::None => {
+            anyhow::ensure!(
+                !has_first_last && !has_references,
+                "this model does not accept conditioning images or references"
+            );
+        }
+        VideoConditioning::InitImage => {
+            anyhow::ensure!(
+                request.end_image.is_none(),
+                "this model takes a starting image only, not a last-frame image"
+            );
+            anyhow::ensure!(
+                !has_references,
+                "this model does not accept reference images, videos, or audio"
+            );
+        }
+        VideoConditioning::FirstLastFrame => {
+            anyhow::ensure!(
+                !has_references,
+                "this checkpoint (first/last-frame) does not accept reference images, videos, or audio"
+            );
+        }
+        VideoConditioning::References => {
+            anyhow::ensure!(
+                !has_first_last,
+                "this checkpoint (reference) does not accept init or end images; use reference inputs instead"
+            );
+            anyhow::ensure!(
+                request.ref_video_audios.len() <= request.ref_videos.len(),
+                "each reference video soundtrack needs a reference video"
+            );
+        }
+    }
+    Ok(conditioning)
+}
+
 /// Generate a short video clip with sd-cli. Same lifecycle as
 /// [`generate_image`] but with a longer timeout and video-specific argv.
 pub async fn generate_video(
@@ -2030,6 +2186,27 @@ pub async fn generate_video(
             init_image.display()
         );
     }
+    if let Some(end_image) = &request.end_image {
+        anyhow::ensure!(
+            end_image.is_file(),
+            "end image not found: {}",
+            end_image.display()
+        );
+    }
+    for path in request
+        .ref_images
+        .iter()
+        .chain(request.ref_videos.iter())
+        .chain(request.ref_audios.iter())
+        .chain(request.ref_video_audios.iter())
+    {
+        anyhow::ensure!(
+            path.is_file() || path.is_dir(),
+            "reference input not found: {}",
+            path.display()
+        );
+    }
+    let conditioning = check_conditioning(&manifest, request)?;
 
     let job_dir = job_output_dir(data_dir).await?;
     let output_path = job_dir.join("output.mp4");
@@ -2099,6 +2276,21 @@ pub async fn generate_video(
     if let Some(init_image) = &request.init_image {
         command.arg("-i").arg(init_image);
     }
+    if let Some(end_image) = &request.end_image {
+        command.arg("--end-img").arg(end_image);
+    }
+    for path in &request.ref_images {
+        command.arg("--ref-image").arg(path);
+    }
+    for path in &request.ref_videos {
+        command.arg("--ref-video").arg(path);
+    }
+    for path in &request.ref_video_audios {
+        command.arg("--ref-video-audio").arg(path);
+    }
+    for path in &request.ref_audios {
+        command.arg("--ref-audio").arg(path);
+    }
     let prompt = apply_diffusion_profile(&mut command, data_dir, profile, &request.prompt).await?;
     command.arg("-p").arg(&prompt);
     apply_manifest_args(&mut command, &model_dir, &manifest)?;
@@ -2114,6 +2306,14 @@ pub async fn generate_video(
         prompt: request.prompt.clone(),
         negative_prompt: negative.clone(),
         init_image_blob: request.init_image_blob.clone(),
+        end_image_blob: request.end_image_blob.clone(),
+        conditioning_blobs: request
+            .ref_image_blobs
+            .iter()
+            .chain(request.ref_video_blobs.iter())
+            .chain(request.ref_audio_blobs.iter())
+            .cloned()
+            .collect(),
         origin: request.origin,
         elapsed_secs: 0,
         timeout_secs: timeout.as_secs(),
@@ -2135,6 +2335,12 @@ pub async fn generate_video(
             "seed": seed,
             "cfg_scale": cfg_scale,
             "video_frames": video_frames,
+            "conditioning": match conditioning {
+                VideoConditioning::None => "text",
+                VideoConditioning::InitImage => "init_image",
+                VideoConditioning::FirstLastFrame => "first_last_frame",
+                VideoConditioning::References => "references",
+            },
         }),
     })
 }
@@ -2397,6 +2603,7 @@ mod tests {
             component_sources: BTreeMap::new(),
             single_file: None,
             supports_init_image: false,
+            conditioning: None,
         };
         tokio::runtime::Runtime::new()
             .unwrap()
@@ -2570,6 +2777,7 @@ mod tests {
                 component_sources: BTreeMap::new(),
                 single_file: None,
                 supports_init_image: false,
+                conditioning: None,
             })
             .unwrap(),
         )
@@ -2586,6 +2794,7 @@ mod tests {
                 component_sources: BTreeMap::new(),
                 single_file: Some("model.gguf".to_owned()),
                 supports_init_image: false,
+                conditioning: None,
             })
             .unwrap(),
         )
@@ -2642,5 +2851,120 @@ mod tests {
             download_destination(dir.path(), Modality::Image, "acme/flux-schnell", "../evil")
                 .is_err()
         );
+    }
+
+    fn fl2va_manifest() -> SdcppManifest {
+        SdcppManifest {
+            modality: Modality::Video,
+            args: BTreeMap::from([(
+                "diffusion-model".to_owned(),
+                "minimax_h3_fl2va_pruned-Q4_K_M.gguf".to_owned(),
+            )]),
+            component_sources: BTreeMap::new(),
+            single_file: None,
+            supports_init_image: true,
+            conditioning: None,
+        }
+    }
+
+    fn ref2va_manifest() -> SdcppManifest {
+        let mut manifest = fl2va_manifest();
+        manifest.args.insert(
+            "diffusion-model".to_owned(),
+            "minimax_h3_ref2va-Q4_K_M.gguf".to_owned(),
+        );
+        manifest
+    }
+
+    fn request_with(paths: Vec<&'static str>) -> GenerateVideoRequest {
+        GenerateVideoRequest {
+            prompt: "test".into(),
+            model_id: "sdcpp-video:minimax-ai/minimax-h3".into(),
+            negative_prompt: None,
+            width: None,
+            height: None,
+            steps: None,
+            seed: None,
+            cfg_scale: None,
+            guidance: None,
+            init_image: None,
+            init_image_blob: None,
+            origin: GenerationOrigin::User,
+            timeout_secs: None,
+            video_frames: None,
+            fps: None,
+            end_image: None,
+            end_image_blob: None,
+            ref_images: Vec::new(),
+            ref_image_blobs: Vec::new(),
+            ref_videos: Vec::new(),
+            ref_video_blobs: Vec::new(),
+            ref_video_audios: Vec::new(),
+            ref_audios: paths.into_iter().map(PathBuf::from).collect(),
+            ref_audio_blobs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn video_conditioning_is_derived_from_the_installed_checkpoint() {
+        assert_eq!(
+            video_conditioning(&fl2va_manifest()),
+            VideoConditioning::FirstLastFrame
+        );
+        assert_eq!(
+            video_conditioning(&ref2va_manifest()),
+            VideoConditioning::References
+        );
+
+        let mut declared = fl2va_manifest();
+        declared.conditioning = Some(VideoConditioning::References);
+        assert_eq!(video_conditioning(&declared), VideoConditioning::References);
+
+        // Legacy manifest: only the init-image flag, no fl2va/ref2va hint.
+        let mut legacy = fl2va_manifest();
+        legacy.args.clear();
+        legacy.supports_init_image = true;
+        assert_eq!(video_conditioning(&legacy), VideoConditioning::InitImage);
+        legacy.supports_init_image = false;
+        assert_eq!(video_conditioning(&legacy), VideoConditioning::None);
+    }
+
+    #[test]
+    fn conditioning_inputs_are_checked_against_the_checkpoint() {
+        // FL2VA accepts init/end images, never references.
+        assert!(check_conditioning(&fl2va_manifest(), &request_with(vec![])).is_ok());
+        let mut first_last = request_with(vec![]);
+        first_last.end_image = Some(PathBuf::from("end.png"));
+        assert!(check_conditioning(&fl2va_manifest(), &first_last).is_ok());
+        assert!(check_conditioning(&fl2va_manifest(), &request_with(vec!["a.wav"])).is_err());
+
+        // Ref2VA accepts references, never init/end images.
+        assert!(check_conditioning(&ref2va_manifest(), &request_with(vec!["a.wav"])).is_ok());
+        let mut with_init = request_with(vec![]);
+        with_init.init_image = Some(PathBuf::from("start.png"));
+        assert!(check_conditioning(&ref2va_manifest(), &with_init).is_err());
+
+        // Paired video soundtracks need their video.
+        let mut unmatched = request_with(vec![]);
+        unmatched.ref_video_audios = vec![PathBuf::from("track.wav")];
+        assert!(check_conditioning(&ref2va_manifest(), &unmatched).is_err());
+        let mut matched = request_with(vec![]);
+        matched.ref_videos = vec![PathBuf::from("clip")];
+        matched.ref_video_audios = vec![PathBuf::from("track.wav")];
+        assert!(check_conditioning(&ref2va_manifest(), &matched).is_ok());
+
+        // Legacy image-to-video takes a starting image but never a last frame
+        // or references.
+        let mut legacy = fl2va_manifest();
+        legacy.args.clear();
+        legacy.supports_init_image = true;
+        assert!(check_conditioning(&legacy, &request_with(vec![])).is_ok());
+        let mut legacy_init = request_with(vec![]);
+        legacy_init.init_image = Some(PathBuf::from("start.png"));
+        assert!(check_conditioning(&legacy, &legacy_init).is_ok());
+        let mut legacy_end = request_with(vec![]);
+        legacy_end.end_image = Some(PathBuf::from("end.png"));
+        assert!(check_conditioning(&legacy, &legacy_end).is_err());
+        assert!(check_conditioning(&legacy, &request_with(vec!["a.wav"])).is_err());
     }
 }

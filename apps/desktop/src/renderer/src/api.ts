@@ -1477,6 +1477,18 @@ export type GenerateBody = {
   guidance?: number
   video_frames?: number
   fps?: number
+  /** First-frame conditioning (image-to-video). */
+  init_image_blob?: string
+  /** Last-frame conditioning for first/last-frame models (`--end-img`). */
+  end_image_blob?: string
+  /** Reference images for Ref2VA conditioning. */
+  ref_image_blobs?: string[]
+  /** Reference videos for Ref2VA conditioning; frames are sampled to 24 fps. */
+  ref_video_blobs?: string[]
+  /** Soundtracks paired by index with `ref_video_blobs`. */
+  ref_video_audio_blobs?: string[]
+  /** Standalone audio references for Ref2VA conditioning. */
+  ref_audio_blobs?: string[]
 }
 
 export function generateImage(body: GenerateBody): Promise<GenerateBlobResult> {
@@ -1502,6 +1514,10 @@ export type ActiveGeneration = {
   negative_prompt?: string | null
   /** Blob of the conditioning image, when the job was given one. */
   init_image_blob?: string | null
+  /** Blob of the ending image, for first/last-frame conditioning. */
+  end_image_blob?: string | null
+  /** Blobs behind reference conditioning (images, videos, audio). */
+  conditioning_blobs?: string[]
   /** Whether the person or a model asked for this. */
   origin: 'user' | 'model'
   elapsed_secs: number
@@ -2013,6 +2029,20 @@ export type SdcppBundleComponent = {
   variants?: SdcppComponentVariant[]
 }
 
+/** The license agreement a bundle requires the user to accept before install. */
+export type SdcppConsentRequirement = {
+  /** Stable license identifier, shared across bundles under the same terms. */
+  id: string
+  /** Version of the terms the user must have seen. */
+  version: string
+  /** Link to the full agreement text. */
+  url: string
+  /** Plain-language summary shown in the consent dialog. */
+  summary: string
+  /** Whether this machine has recorded acceptance. */
+  accepted?: boolean
+}
+
 export type SdcppBundle = {
   id: string
   label: string
@@ -2020,6 +2050,10 @@ export type SdcppBundle = {
   key: string
   summary: string
   license?: string | null
+  /** Gated behind an explicit license acceptance before it can be installed. */
+  requires_license_acceptance?: boolean
+  /** The agreement to accept, when the bundle requires one. */
+  consent?: SdcppConsentRequirement | null
   model_id: string
   installed: boolean
   gated: boolean
@@ -2028,10 +2062,25 @@ export type SdcppBundle = {
   origin: 'builtin' | 'custom'
   /** Whether the model can start from a supplied image. */
   supports_init_image?: boolean
+  /** Conditioning surface the installed checkpoint offers, when installed. */
+  conditioning?: 'text' | 'init_image' | 'first_last_frame' | 'references' | null
   /** Shown in the short list rather than behind "show every model". */
   featured?: boolean
   defaults: SdcppDefaults
   components: SdcppBundleComponent[]
+}
+
+/** Record acceptance of a bundle's license agreement. */
+export function acceptSdcppLicense(bundleId: string): Promise<{
+  license_id: string
+  version: string
+  accepted: boolean
+  bundle_id: string
+}> {
+  return request('/api/v1/models/sdcpp/consent', {
+    method: 'POST',
+    body: JSON.stringify({ bundle_id: bundleId })
+  })
 }
 
 /**

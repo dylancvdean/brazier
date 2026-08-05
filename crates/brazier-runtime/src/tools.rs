@@ -892,6 +892,15 @@ async fn generate_video_tool(
             .and_then(Value::as_u64)
             .map(|v| v as u32),
         fps: args.get("fps").and_then(Value::as_u64).map(|v| v as u32),
+        end_image: None,
+        end_image_blob: None,
+        ref_images: Vec::new(),
+        ref_image_blobs: Vec::new(),
+        ref_videos: Vec::new(),
+        ref_video_blobs: Vec::new(),
+        ref_video_audios: Vec::new(),
+        ref_audios: Vec::new(),
+        ref_audio_blobs: Vec::new(),
     };
     let profiles = crate::model_settings::load(data_dir);
     let result = crate::sdcpp::generate_video(

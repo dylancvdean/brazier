@@ -1575,6 +1575,7 @@ mod tests {
                 component_sources: std::collections::BTreeMap::new(),
                 single_file: None,
                 supports_init_image: false,
+                conditioning: None,
             })
             .unwrap(),
         )

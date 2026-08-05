@@ -483,6 +483,10 @@ pub fn assemble(
             key: bundle_key(repo_id, file_name),
             summary: format!("Assembled from {repo_id}/{path}"),
             license: None,
+            requires_license_acceptance: false,
+            license_url: None,
+            license_version: None,
+            license_summary: None,
             defaults,
             // Hand-assembled bundles are the user's own, not a shortlist pick.
             featured: false,

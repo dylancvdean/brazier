@@ -329,6 +329,59 @@ async fn sample_frames(
     Ok(paths)
 }
 
+/// Extract every frame of a reference video into `frame_dir` at 24 fps.
+///
+/// MiniMax-H3's Ref2VA conditioning reads a reference video as a directory of
+/// image frames sorted lexicographically and treats them as 24 fps, so the
+/// source is resampled to that rate and written one frame per file. Returns
+/// the number of frames written.
+pub async fn extract_reference_video_frames(
+    input: &Path,
+    frame_dir: &Path,
+) -> anyhow::Result<usize> {
+    anyhow::ensure!(ffmpeg_available(), "{}", ffmpeg_missing_message());
+    tokio::fs::create_dir_all(frame_dir)
+        .await
+        .context("create reference frame directory")?;
+    let pattern = frame_dir.join("frame-%04d.jpg");
+    let status = ffmpeg_command()
+        .args([
+            "-y",
+            "-i",
+            &input.display().to_string(),
+            "-vf",
+            "fps=24",
+            "-q:v",
+            "3",
+            &pattern.display().to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .context("run ffmpeg for reference video frame extraction")?;
+    anyhow::ensure!(
+        status.success(),
+        "ffmpeg failed to extract reference video frames"
+    );
+    let mut entries = tokio::fs::read_dir(frame_dir)
+        .await
+        .context("read reference frame directory")?;
+    let mut count = 0;
+    while let Some(entry) = entries.next_entry().await? {
+        if entry
+            .path()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"))
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 async fn image_part_from_blob(data_dir: &Path, sha256: &str, mime: &str) -> anyhow::Result<Value> {
     let (bytes, stored_mime) = blob_store::read_blob(data_dir, sha256).await?;
     let mime = if stored_mime.starts_with("image/") {
