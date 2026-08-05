@@ -3,7 +3,7 @@
 pkgname=brazier
 # Pacman reserves `-` as the separator before pkgrel, so encode upstream
 # prerelease separators with `_` in pkgver.
-pkgver=0.2.11_beta.50
+pkgver=0.2.12_beta.51
 pkgrel=1
 pkgdesc='Desktop client and local API for open-weight AI models'
 arch=('x86_64' 'aarch64')
