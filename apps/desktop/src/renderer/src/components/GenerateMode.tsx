@@ -1,5 +1,6 @@
 import { Download, Image, LoaderCircle, Music, Paperclip, Square, Video, X } from 'lucide-react'
 import { type FormEvent, useEffect, useRef, useState } from 'react'
+import { MediaFullscreenExit, MediaFullscreenIcon, useFullscreen } from './FullscreenButton'
 import {
   cancelGeneration,
   fetchBlobObjectUrl,
@@ -43,6 +44,52 @@ type Props = {
 
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
+}
+
+function GenerateCard({
+  result,
+  url,
+  saving,
+  saved,
+  onSave
+}: {
+  result: GenerateBlobResult
+  url?: string
+  saving: boolean
+  saved: boolean
+  onSave: (result: GenerateBlobResult) => void
+}): React.JSX.Element {
+  const { setRef, active, toggle } = useFullscreen<HTMLElement>()
+  const isVideo = result.blob.mime_type.startsWith('video/')
+  return (
+    <figure className="generate-card">
+      {!url ? (
+        <div className="manage-placeholder">Loading…</div>
+      ) : isVideo ? (
+        <video ref={setRef} src={url} controls playsInline />
+      ) : (
+        <div className="generate-card-preview" ref={setRef}>
+          <img src={url} alt="Generated output" />
+          {!active && <MediaFullscreenIcon active={active} toggle={toggle} />}
+          {active && <MediaFullscreenExit toggle={toggle} />}
+        </div>
+      )}
+      <figcaption>
+        <span>
+          {result.blob.mime_type} · {(result.blob.size_bytes / 1024).toFixed(0)} KB
+        </span>
+        <button
+          type="button"
+          className="chip-button subtle"
+          disabled={saving}
+          onClick={() => onSave(result)}
+        >
+          <Download size={12} />
+          {saved ? 'Saved' : 'Save'}
+        </button>
+      </figcaption>
+    </figure>
+  )
 }
 
 /** Whether a failed generation was simply stopped by the user. */
@@ -727,34 +774,16 @@ export function GenerateMode(props: Props) {
 
       {results.length > 0 ? (
         <div className="generate-gallery">
-          {results.map((result) => {
-            const url = urls[result.blob.sha256]
-            return (
-              <figure key={result.blob.sha256} className="generate-card">
-                {!url ? (
-                  <div className="manage-placeholder">Loading…</div>
-                ) : result.blob.mime_type.startsWith('video/') ? (
-                  <video src={url} controls playsInline />
-                ) : (
-                  <img src={url} alt="Generated output" />
-                )}
-                <figcaption>
-                  <span>
-                    {result.blob.mime_type} · {(result.blob.size_bytes / 1024).toFixed(0)} KB
-                  </span>
-                  <button
-                    type="button"
-                    className="chip-button subtle"
-                    disabled={saving === result.blob.sha256}
-                    onClick={() => void save(result)}
-                  >
-                    <Download size={12} />
-                    {saved[result.blob.sha256] ? 'Saved' : 'Save'}
-                  </button>
-                </figcaption>
-              </figure>
-            )
-          })}
+          {results.map((result) => (
+            <GenerateCard
+              key={result.blob.sha256}
+              result={result}
+              url={urls[result.blob.sha256]}
+              saving={saving === result.blob.sha256}
+              saved={Boolean(saved[result.blob.sha256])}
+              onSave={(target) => void save(target)}
+            />
+          ))}
         </div>
       ) : null}
     </section>

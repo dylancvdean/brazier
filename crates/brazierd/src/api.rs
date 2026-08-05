@@ -341,6 +341,14 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             post(computer_screenshot),
         )
         .route(
+            "/api/v1/computer/sessions/{id}/preview",
+            post(computer_preview),
+        )
+        .route(
+            "/api/v1/computer/sessions/{id}/stream",
+            get(computer_stream),
+        )
+        .route(
             "/api/v1/computer/sessions/{id}/stop",
             post(stop_computer_session),
         )
@@ -2047,6 +2055,48 @@ async fn computer_screenshot(
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!(result)))
+}
+
+/// Non-recording viewport capture for live polling. The renderer streams this
+/// while a browser session is idle so the page appears to render in real time;
+/// unlike `computer_screenshot` it never writes a step into the trajectory.
+async fn computer_preview(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let result = state
+        .computer_broker
+        .live_screenshot(&id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(result)))
+}
+
+/// Live browser screencast. Each SSE `data:` line is a base64 JPEG frame of
+/// the current page; the renderer paints the newest frame as it arrives, which
+/// is what makes the viewport feel like a real browser rather than a series of
+/// stills. Nothing here is recorded into the trajectory.
+async fn computer_stream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let mut frames = state
+        .computer_broker
+        .subscribe_screencast(&id)
+        .await
+        .map_err(ApiError::bad_request)?;
+    let events = stream! {
+        loop {
+            match frames.recv().await {
+                Ok(data) => yield Ok::<Event, Infallible>(Event::default().data(data)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    };
+    Ok(Sse::new(events)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
+        .into_response())
 }
 
 async fn computer_exec_action(

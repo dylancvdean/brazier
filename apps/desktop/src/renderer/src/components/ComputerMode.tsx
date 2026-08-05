@@ -1,16 +1,21 @@
 import {
   Check,
   LoaderCircle,
+  Maximize,
+  Minimize,
   Monitor,
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { parseFaraOutput as parseFaraLocal } from '../../../computer/faraAdapter'
+import { useFullscreen } from './FullscreenButton'
 import {
   appendComputerStep,
   computerExec,
+  computerPreview,
   computerScreenshot,
+  streamComputerPreview,
   stopComputerSession,
   setComputerSafetyAuthority,
   createComputerSession,
@@ -116,6 +121,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
   const abortRef = useRef<AbortController | null>(null)
   const sessionRef = useRef<ComputerSession | null>(null)
   sessionRef.current = session
+  // Fills the window (or screen) with the browser viewport and the step log
+  // side by side, so the user can watch the agent drive the page at full size.
+  const { setRef: setFullscreenRef, active: fullscreenActive, toggle: toggleFullscreen } =
+    useFullscreen<HTMLDivElement>()
 
   useEffect(() => {
     void fetchComputerUsePreference()
@@ -210,6 +219,155 @@ export function ComputerMode(props: Props): React.JSX.Element {
       return null
     }
   }
+
+  // Direct user control of a browser-target viewport: clicks and keystrokes
+  // are forwarded to the running Chromium as computer actions, so the browser
+  // responds to the user the same way it responds to the model. The daemon
+  // records these as steps too, keeping the model's next turn honest about
+  // what actually changed on the page.
+  const [interacting, setInteracting] = useState(false)
+  const lastScrollRef = useRef(0)
+
+  async function interact(action: ComputerAction): Promise<void> {
+    const active = sessionRef.current
+    if (!active || active.target !== 'browser' || running || interacting || pendingApproval) return
+    setInteracting(true)
+    try {
+      // A short settle gives the page a moment to respond without making the
+      // user wait out the agent's full 750ms; the live stream below then
+      // delivers the fully settled frame once it exists.
+      const result = await computerExec({
+        session_id: active.id,
+        action,
+        settle_delay_ms: 100
+      })
+      if (result.needs_approval || result.status === 'needs_approval') {
+        if (result.approval_id) {
+          setPendingApproval({ approvalId: result.approval_id, action, message: result.message })
+        }
+        return
+      }
+      const shotUrl = computerScreenshotDataUrl(result)
+      if (shotUrl) setViewportUrl(shotUrl)
+      await syncSteps(active.id)
+    } catch (cause) {
+      onError(errorText(cause))
+    } finally {
+      setInteracting(false)
+    }
+  }
+
+  /** Pixel position on the screenshot -> Fara's normalized 0..1000 space. */
+  function viewportCoords(
+    event: { currentTarget: HTMLElement; clientX: number; clientY: number }
+  ): { x: number; y: number } {
+    const rect = event.currentTarget.getBoundingClientRect()
+    return {
+      x: Math.min(1000, Math.max(0, ((event.clientX - rect.left) / rect.width) * 1000)),
+      y: Math.min(1000, Math.max(0, ((event.clientY - rect.top) / rect.height) * 1000))
+    }
+  }
+
+  function onViewportClick(event: React.MouseEvent<HTMLImageElement>): void {
+    if (event.button !== 0) return
+    const { x, y } = viewportCoords(event)
+    void interact({ type: 'left_click', x, y })
+  }
+
+  function onViewportContextMenu(event: React.MouseEvent<HTMLImageElement>): void {
+    event.preventDefault()
+    const { x, y } = viewportCoords(event)
+    void interact({ type: 'right_click', x, y })
+  }
+
+  function onViewportWheel(event: React.WheelEvent<HTMLImageElement>): void {
+    const now = Date.now()
+    if (now - lastScrollRef.current < 150) return
+    lastScrollRef.current = now
+    const { x, y } = viewportCoords(event)
+    void interact({ type: 'scroll', x, y, delta_x: event.deltaX, delta_y: event.deltaY })
+  }
+
+  const VIEWPORT_KEYS: Record<string, string[]> = {
+    Enter: ['Enter'],
+    Tab: ['Tab'],
+    Backspace: ['Backspace'],
+    Escape: ['Escape'],
+    ' ': ['Space'],
+    ArrowUp: ['ArrowUp'],
+    ArrowDown: ['ArrowDown'],
+    ArrowLeft: ['ArrowLeft'],
+    ArrowRight: ['ArrowRight'],
+    Home: ['Home'],
+    End: ['End'],
+    Delete: ['Delete']
+  }
+
+  function onViewportKeyDown(event: React.KeyboardEvent<HTMLImageElement>): void {
+    const keys = VIEWPORT_KEYS[event.key]
+    if (keys) {
+      event.preventDefault()
+      void interact({ type: 'keypress', keys })
+      return
+    }
+    // Ctrl/Cmd+letter shortcuts reach the browser page as real hotkeys.
+    if (event.key.length === 1 && (event.ctrlKey || event.metaKey) && !event.altKey) {
+      event.preventDefault()
+      const modifier = event.metaKey ? 'Cmd' : 'Ctrl'
+      void interact({ type: 'keypress', keys: [modifier, event.key.toUpperCase()] })
+      return
+    }
+    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault()
+      void interact({ type: 'type', text: event.key })
+    }
+  }
+
+  const browserInteractive = Boolean(session && session.target === 'browser' && viewportUrl)
+
+  // Live viewport: while a browser session is idle the daemon streams CDP
+  // screencast frames over SSE, so the page tracks under the cursor (hover
+  // menus, form typing, streamed content) instead of only updating after an
+  // action. The stream stays connected through user interactions so the
+  // 100ms quick frame and the 750ms settled frame both arrive. If streaming is
+  // unavailable, fall back to polling the non-recording preview endpoint.
+  useEffect(() => {
+    const sessionId = session?.id
+    if (!sessionId || session.target !== 'browser' || running) return
+    const controller = new AbortController()
+    let streaming = true
+    void streamComputerPreview(
+      sessionId,
+      (data) => {
+        setViewportUrl((current) => {
+          const url = `data:image/jpeg;base64,${data}`
+          return url === current ? current : url
+        })
+      },
+      controller.signal
+    )
+      .catch(() => {})
+      .finally(() => {
+        streaming = false
+      })
+    const timer = window.setInterval(() => {
+      if (streaming) return
+      void computerPreview(sessionId)
+        .then((shot) => {
+          const url = computerScreenshotDataUrl(shot)
+          if (url) {
+            setViewportUrl((current) => (url === current ? current : url))
+          }
+        })
+        .catch(() => {
+          // Transient; the last frame stays on screen.
+        })
+    }, 800)
+    return () => {
+      controller.abort()
+      window.clearInterval(timer)
+    }
+  }, [session?.id, session?.target, running])
 
   async function parseModelOutput(text: string): Promise<{
     thought: string | null
@@ -506,7 +664,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
   useEffect(() => window.brazier.computer.onEscape(() => { void stop() }), [stop])
 
   return (
-    <div className="computer-mode">
+    <div className="computer-mode" ref={setFullscreenRef}>
       <header className="computer-header">
         <div className="computer-controls">
           <label>
@@ -538,17 +696,44 @@ export function ComputerMode(props: Props): React.JSX.Element {
             </select>
           </label>
         </div>
+        <div className="computer-header-actions">
+          <button
+            type="button"
+            className="chip-button subtle"
+            title={
+              fullscreenActive
+                ? 'Exit fullscreen'
+                : 'Fill the window with the browser and steps side by side'
+            }
+            onClick={toggleFullscreen}
+          >
+            {fullscreenActive ? <Minimize size={13} /> : <Maximize size={13} />}
+            {fullscreenActive ? 'Exit' : 'Fullscreen'}
+          </button>
+        </div>
       </header>
 
       <div className="computer-body">
         <div className="computer-viewport">
           {viewportUrl ? (
-            <img src={viewportUrl} alt="Computer Use viewport" />
+            <img
+              src={viewportUrl}
+              alt="Computer Use viewport"
+              className={browserInteractive ? 'interactive' : ''}
+              tabIndex={browserInteractive ? 0 : undefined}
+              onClick={browserInteractive ? onViewportClick : undefined}
+              onContextMenu={browserInteractive ? onViewportContextMenu : undefined}
+              onKeyDown={browserInteractive ? onViewportKeyDown : undefined}
+              onWheel={browserInteractive ? onViewportWheel : undefined}
+            />
           ) : (
             <div className="computer-viewport-empty">
               <Monitor size={28} />
               <p>Viewport preview appears after the first screenshot.</p>
             </div>
+          )}
+          {browserInteractive && !running && (
+            <span className="computer-input-hint">Click or type to drive the browser</span>
           )}
           {running && (
             <div className="computer-viewport-busy">

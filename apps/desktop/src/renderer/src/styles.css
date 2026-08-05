@@ -4270,9 +4270,32 @@ a.inline-link {
   background: #050505;
 }
 
-/* Native fullscreen should show the entire clip rather than inherit a preview crop. */
+/* Native fullscreen should show the whole image and the entire clip rather
+   than inherit a preview crop. Images fullscreen their preview wrapper so an
+   exit button can float in the corner; videos fullscreen directly. */
 video:fullscreen,
 video:-webkit-full-screen {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+.message-media-preview:fullscreen,
+.message-media-preview:-webkit-full-screen,
+.generate-card-preview:fullscreen,
+.generate-card-preview:-webkit-full-screen {
+  display: grid;
+  place-items: center;
+  background: #000;
+}
+
+.message-media-preview:fullscreen img,
+.message-media-preview:-webkit-full-screen img,
+.generate-card-preview:fullscreen img,
+.generate-card-preview:-webkit-full-screen img {
+  width: 100%;
+  height: 100%;
   object-fit: contain;
 }
 
@@ -4284,6 +4307,43 @@ video:-webkit-full-screen {
   padding: 8px 10px;
   color: #8c8c8c;
   font-size: 11px;
+}
+
+/* A preview wrapper positions the fullscreen corner icon over the image. */
+.generate-card-preview,
+.message-media-preview {
+  position: relative;
+}
+
+/* Overlay icon for putting a generated image on the full screen. Videos keep
+   the fullscreen control their native player already provides, so this corner
+   button is only rendered for stills. */
+.media-fullscreen-corner {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.media-fullscreen-corner:hover,
+.media-fullscreen-corner:focus-visible {
+  background: rgba(0, 0, 0, 0.72);
+  opacity: 1;
+}
+
+.generate-card:hover .media-fullscreen-corner,
+.message-media-item:hover .media-fullscreen-corner {
+  opacity: 1;
 }
 
 .generate-submit {
@@ -4338,6 +4398,13 @@ video:-webkit-full-screen {
   padding: 7px 9px;
   color: #8c8c8c;
   font-size: 10px;
+}
+
+.message-media-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* A generation in flight, above the composer in every mode. */
@@ -7085,6 +7152,13 @@ label.span-2 {
   gap: 10px;
 }
 
+.computer-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .computer-controls label {
   display: flex;
   flex-direction: column;
@@ -7132,6 +7206,29 @@ label.span-2 {
   border-radius: 4px;
   background: #000;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+/* A browser-target viewport is live: clicks and keystrokes are forwarded to
+   the running Chromium, so the page reacts exactly as it would to the agent. */
+.computer-viewport img.interactive {
+  cursor: crosshair;
+}
+
+.computer-viewport img.interactive:focus-visible {
+  outline: 2px solid #f67b29;
+  outline-offset: 2px;
+}
+
+.computer-input-hint {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(10, 10, 11, 0.88);
+  color: var(--soft);
+  font-size: 11px;
 }
 
 .computer-viewport-empty {

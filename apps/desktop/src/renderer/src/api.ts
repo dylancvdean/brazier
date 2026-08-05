@@ -263,6 +263,13 @@ export async function computerScreenshot(sessionId: string): Promise<ComputerAct
   })
 }
 
+/** Live viewport capture that never writes a step into the trajectory. */
+export async function computerPreview(sessionId: string): Promise<ComputerActionResult> {
+  return request(`/api/v1/computer/sessions/${encodeURIComponent(sessionId)}/preview`, {
+    method: 'POST'
+  })
+}
+
 export async function stopComputerSession(sessionId: string): Promise<void> {
   await request(`/api/v1/computer/sessions/${encodeURIComponent(sessionId)}/stop`, {
     method: 'POST'
@@ -286,11 +293,54 @@ export async function computerExec(body: {
   session_id: string
   action: ComputerAction
   approval_id?: string | null
+  /** Override the broker's settle delay; the renderer sends a short one for direct user input. */
+  settle_delay_ms?: number
 }): Promise<ComputerActionResult> {
   return request('/api/v1/computer/exec', {
     method: 'POST',
     body: JSON.stringify(body)
   })
+}
+
+/**
+ * Live browser viewport. Opens the daemon's SSE screencast stream and invokes
+ * `onFrame` with each base64-encoded JPEG frame as it arrives. Resolves when
+ * the stream ends (normally or because `signal` aborted it).
+ */
+export async function streamComputerPreview(
+  sessionId: string,
+  onFrame: (data: string) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const daemon = await connection()
+  const headers = new Headers({ accept: 'text/event-stream' })
+  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
+  const response = await fetch(
+    `${daemon.address}/api/v1/computer/sessions/${encodeURIComponent(sessionId)}/stream`,
+    { headers, signal }
+  )
+  if (!response.ok || !response.body) {
+    throw new Error(`Preview stream failed with status ${response.status}.`)
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let separator = buffer.indexOf('\n\n')
+    while (separator >= 0) {
+      const frame = buffer.slice(0, separator)
+      buffer = buffer.slice(separator + 2)
+      const line = frame.split('\n').find((entry) => entry.startsWith('data:'))
+      if (line) {
+        const payload = line.slice(5).trimStart()
+        if (payload) onFrame(payload)
+      }
+      separator = buffer.indexOf('\n\n')
+    }
+  }
 }
 
 export async function decideComputerApproval(

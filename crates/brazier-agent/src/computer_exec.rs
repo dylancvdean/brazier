@@ -34,6 +34,12 @@ pub struct ComputerExecRequest {
     pub action: ComputerAction,
     #[serde(default)]
     pub approval_id: Option<String>,
+    /// Optional per-request settle delay, overriding the broker default. The
+    /// renderer sends a short one for direct user input so the viewport
+    /// responds almost immediately, then the live stream delivers the fully
+    /// settled frame.
+    #[serde(default)]
+    pub settle_delay_ms: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingComputerApproval {
@@ -74,6 +80,12 @@ struct PersistedSession {
 pub struct ComputerBroker {
     browsers: SharedBrowserRegistry,
     sessions: Mutex<HashMap<String, LiveSession>>,
+    /// Live browser frames keyed by session id. The relay keeps a sender here
+    /// so every SSE subscriber shares one Chromium screencast per session.
+    screencasts: Mutex<HashMap<String, tokio::sync::broadcast::Sender<String>>>,
+    /// Serializes starting a screencast so concurrent subscribers cannot begin
+    /// a second relay (double-acking) for the same browser.
+    screencast_start: Mutex<()>,
     approvals_changed: Arc<Notify>,
     persist_path: Option<PathBuf>,
     /// Serializes durable snapshots. State is copied while this is held, then
@@ -141,6 +153,8 @@ impl ComputerBroker {
         Self {
             browsers: Arc::new(BrowserSessionRegistry::new()),
             sessions: Mutex::new(sessions),
+            screencasts: Mutex::new(HashMap::new()),
+            screencast_start: Mutex::new(()),
             approvals_changed: Arc::new(Notify::new()),
             persist_path,
             persistence: Mutex::new(()),
@@ -280,7 +294,31 @@ impl ComputerBroker {
         if let Some(browser_id) = session.browser_id {
             self.browsers.close(&browser_id).await;
         }
+        self.screencasts.lock().await.remove(id);
         self.persist().await
+    }
+
+    /// Subscribe to a browser session's live screencast frames (base64 JPEG).
+    /// Starts Chromium's screencast on first use and fans every subscriber out
+    /// from the single relay, so the daemon pushes one stream per session.
+    pub async fn subscribe_screencast(
+        &self,
+        session_id: &str,
+    ) -> Result<tokio::sync::broadcast::Receiver<String>> {
+        let _start = self.screencast_start.lock().await;
+        if let Some(frames) = self.screencasts.lock().await.get(session_id) {
+            return Ok(frames.subscribe());
+        }
+        let browser_id = self.ensure_browser(session_id).await?;
+        let (frames, _) = tokio::sync::broadcast::channel(16);
+        self.browsers
+            .start_screencast(&browser_id, frames.clone())
+            .await?;
+        self.screencasts
+            .lock()
+            .await
+            .insert(session_id.to_owned(), frames.clone());
+        Ok(frames.subscribe())
     }
     pub async fn list_steps(&self, id: &str) -> Result<Vec<ComputerStep>> {
         Ok(self
@@ -590,7 +628,9 @@ impl ComputerBroker {
                             .execute(
                                 &id,
                                 &driver_action,
-                                self.action_settle_delay_ms(),
+                                request.settle_delay_ms.unwrap_or_else(|| {
+                                    self.action_settle_delay_ms()
+                                }),
                                 Some(cancel.as_ref()),
                             )
                             .await
@@ -600,7 +640,9 @@ impl ComputerBroker {
                 ComputerTarget::Desktop => Ok(computer_desktop::execute_desktop_action(
                     &driver_action,
                     &viewport,
-                    self.action_settle_delay_ms(),
+                    request
+                        .settle_delay_ms
+                        .unwrap_or_else(|| self.action_settle_delay_ms()),
                     Some(cancel.as_ref()),
                 )
                 .await),
@@ -668,6 +710,7 @@ impl ComputerBroker {
                 session_id,
                 action,
                 approval_id: Some(approval_id.into()),
+                settle_delay_ms: None,
             })
             .await?;
         self.approvals_changed.notify_waiters();
@@ -678,8 +721,44 @@ impl ComputerBroker {
             session_id: session_id.into(),
             action: ComputerAction::Screenshot,
             approval_id: None,
+            settle_delay_ms: None,
         })
         .await
+    }
+
+    /// Capture the current browser viewport without appending a durable step.
+    ///
+    /// The renderer polls this while a browser session is idle so the page
+    /// updates live under the user's cursor (hover menus, form typing, streamed
+    /// content) rather than only after an action. Unlike `screenshot`, nothing
+    /// is recorded: live previews must not leak into the model's trajectory or
+    /// flood the step log.
+    pub async fn live_screenshot(&self, session_id: &str) -> Result<ComputerActionResult> {
+        let gate = self.action_gate(session_id).await?;
+        let _gate = gate.lock().await;
+        let target = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .with_context(|| format!("unknown computer session {session_id}"))?
+            .record
+            .target;
+        if target != ComputerTarget::Browser {
+            bail!("live preview is only available for browser sessions");
+        }
+        let id = self.ensure_browser(session_id).await?;
+        let cancel = {
+            let sessions = self.sessions.lock().await;
+            let session = sessions
+                .get(session_id)
+                .context("session disappeared")?;
+            session.cancel.reset();
+            session.cancel.clone()
+        };
+        self.browsers
+            .execute(&id, &ComputerAction::Screenshot, 0, Some(cancel.as_ref()))
+            .await
     }
 
     /// Revoke host-desktop authority immediately. The renderer calls this for
@@ -822,6 +901,7 @@ mod tests {
                     fact: "persist me".into(),
                 },
                 approval_id: None,
+                settle_delay_ms: None,
             })
             .await
             .unwrap();
@@ -941,6 +1021,7 @@ mod tests {
                 session_id: session.id.clone(),
                 action: ComputerAction::LeftClick { x: 1.0, y: 1.0 },
                 approval_id: None,
+                settle_delay_ms: None,
             })
             .await
             .unwrap();
@@ -970,6 +1051,7 @@ mod tests {
                 session_id: session.id,
                 action: ComputerAction::LeftClick { x: 1.0, y: 1.0 },
                 approval_id: None,
+                settle_delay_ms: None,
             })
             .await
             .unwrap();

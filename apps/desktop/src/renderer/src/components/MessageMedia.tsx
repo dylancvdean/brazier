@@ -2,11 +2,60 @@ import { Download } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 import { fetchBlobObjectUrl, saveBlobToDisk } from '../api'
+import { MediaFullscreenExit, MediaFullscreenIcon, useFullscreen } from './FullscreenButton'
 
 export type MessageBlob = {
   sha256: string
   mime_type: string
   original_name?: string | null
+}
+
+function MessageMediaItem({
+  blob,
+  url,
+  saving,
+  saved,
+  onSave
+}: {
+  blob: MessageBlob
+  url?: string
+  saving: boolean
+  saved: boolean
+  onSave: (blob: MessageBlob) => void
+}): React.JSX.Element {
+  const { setRef, active, toggle } = useFullscreen<HTMLElement>()
+  const isVideo = blob.mime_type.startsWith('video/')
+  const isImage = blob.mime_type.startsWith('image/')
+  const isAudio = blob.mime_type.startsWith('audio/')
+  return (
+    <figure className="message-media-item">
+      {url && isImage ? (
+        <div className="message-media-preview" ref={setRef}>
+          <img src={url} alt="Attached or generated image" />
+          {!active && <MediaFullscreenIcon active={active} toggle={toggle} />}
+          {active && <MediaFullscreenExit toggle={toggle} />}
+        </div>
+      ) : url && isVideo ? (
+        <video ref={setRef} src={url} controls playsInline />
+      ) : url && isAudio ? (
+        <audio src={url} controls />
+      ) : (
+        <div className="message-media-placeholder">Loading…</div>
+      )}
+      <figcaption>
+        <span className="message-media-name">{blob.original_name ?? blob.mime_type}</span>
+        <button
+          type="button"
+          className="chip-button subtle"
+          disabled={saving}
+          onClick={() => onSave(blob)}
+        >
+          <Download size={12} />
+          {saved ? 'Saved' : 'Save'}
+        </button>
+      </figcaption>
+    </figure>
+  )
 }
 
 /**
@@ -66,32 +115,16 @@ export function MessageMedia({
 
   return (
     <div className="message-media">
-      {blobs.map((blob, index) => {
-        const url = urls[blob.sha256]
-        const isVideo = blob.mime_type.startsWith('video/')
-        const isImage = blob.mime_type.startsWith('image/')
-        const isAudio = blob.mime_type.startsWith('audio/')
-        return (
-          <figure className="message-media-item" key={`${blob.sha256}:${blob.mime_type}:${index}`}>
-            {url && isImage && <img src={url} alt="Attached or generated image" />}
-            {url && isVideo && <video src={url} controls playsInline />}
-            {url && isAudio && <audio src={url} controls />}
-            {!url && <div className="message-media-placeholder">Loading…</div>}
-            <figcaption>
-              <span>{blob.original_name ?? blob.mime_type}</span>
-              <button
-                type="button"
-                className="chip-button subtle"
-                disabled={saving === blob.sha256}
-                onClick={() => void save(blob)}
-              >
-                <Download size={12} />
-                {saved[blob.sha256] ? 'Saved' : 'Save'}
-              </button>
-            </figcaption>
-          </figure>
-        )
-      })}
+      {blobs.map((blob, index) => (
+        <MessageMediaItem
+          key={`${blob.sha256}:${blob.mime_type}:${index}`}
+          blob={blob}
+          url={urls[blob.sha256]}
+          saving={saving === blob.sha256}
+          saved={Boolean(saved[blob.sha256])}
+          onSave={(target) => void save(target)}
+        />
+      ))}
     </div>
   )
 }

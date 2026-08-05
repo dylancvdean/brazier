@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
-    sync::Mutex,
+    sync::{Mutex, broadcast, mpsc},
     time::{Duration, sleep, timeout},
 };
 use uuid::Uuid;
@@ -78,21 +78,82 @@ impl Default for ActionCancel {
     }
 }
 
-/// Private CDP transport over Chromium's `--remote-debugging-pipe`.
-///
-/// Unlike `--remote-debugging-port`, this never opens a TCP listener that any
-/// local process could attach to for the session lifetime.
-struct CdpPipe {
-    reader: tokio::fs::File,
-    writer: tokio::fs::File,
-    next_id: u64,
-    /// Flattened page-target session id for Page/Input/Runtime commands.
+/// A single CDP event (no `id`) arriving over the DevTools pipe, forwarded to
+/// subscribers such as the live screencast relay.
+#[derive(Clone)]
+struct CdpEvent {
+    method: String,
+    params: Value,
+}
+
+/// Shared write handle the screencast relay uses to acknowledge frames without
+/// serializing against the pipe's normal command/response flow.
+#[derive(Clone)]
+struct CdpWriter {
+    writer: Arc<Mutex<tokio::fs::File>>,
     page_session_id: String,
 }
 
+impl CdpWriter {
+    async fn send_ack(&self, frame_id: &Value) -> Result<()> {
+        let mut message = json!({
+            "method": "Page.screencastFrameAck",
+            "params": { "sessionId": frame_id },
+        });
+        message["sessionId"] = Value::String(self.page_session_id.clone());
+        let mut bytes = message.to_string().into_bytes();
+        bytes.push(0);
+        self.writer
+            .lock()
+            .await
+            .write_all(&bytes)
+            .await
+            .context("acknowledge Chromium screencast frame")
+    }
+}
+
+/// Private CDP transport over Chromium's `--remote-debugging-pipe`.
+///
+/// Unlike `--remote-debugging-port`, this never opens a TCP listener that any
+/// local process could attach to for the session lifetime. A background task
+/// owns the read end, routing command responses to their pending calls while
+/// broadcasting events (screencast frames, etc.) to subscribers.
+struct CdpPipe {
+    writer: Arc<Mutex<tokio::fs::File>>,
+    next_id: u64,
+    page_session_id: String,
+    /// Pending command responses keyed by request id.
+    pending: Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<anyhow::Result<Value>>>>>,
+    events: broadcast::Sender<CdpEvent>,
+}
+
 impl CdpPipe {
+    fn new(reader: tokio::fs::File, writer: tokio::fs::File) -> Self {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (events, _) = broadcast::channel(64);
+        spawn_reader(reader, Arc::clone(&pending), events.clone());
+        Self {
+            writer: Arc::new(Mutex::new(writer)),
+            next_id: 1,
+            page_session_id: String::new(),
+            pending,
+            events,
+        }
+    }
+
+    fn subscribe_events(&self) -> broadcast::Receiver<CdpEvent> {
+        self.events.subscribe()
+    }
+
+    fn writer_handle(&self) -> CdpWriter {
+        CdpWriter {
+            writer: Arc::clone(&self.writer),
+            page_session_id: self.page_session_id.clone(),
+        }
+    }
+
     async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
-        self.call_raw(method, params, Some(&self.page_session_id.clone()))
+        self.call_raw(method, params, Some(self.page_session_id.clone()))
             .await
     }
 
@@ -104,46 +165,80 @@ impl CdpPipe {
         &mut self,
         method: &str,
         params: Value,
-        session_id: Option<&str>,
+        session_id: Option<String>,
     ) -> Result<Value> {
         let request_id = self.next_id;
         self.next_id += 1;
         let mut message = json!({"id": request_id, "method": method, "params": params});
         if let Some(session_id) = session_id {
-            message["sessionId"] = Value::String(session_id.to_owned());
+            message["sessionId"] = Value::String(session_id);
         }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        self.pending.lock().await.insert(request_id, tx);
         let mut bytes = message.to_string().into_bytes();
         bytes.push(0);
-        timeout(Duration::from_secs(10), self.writer.write_all(&bytes))
+        timeout(Duration::from_secs(10), self.writer.lock().await.write_all(&bytes))
             .await
             .context("timed out sending Chromium command")?
             .context("send Chromium command")?;
+        match timeout(Duration::from_secs(10), rx.recv()).await {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                self.pending.lock().await.remove(&request_id);
+                bail!("Chromium DevTools channel closed while executing {method}");
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&request_id);
+                bail!("timed out waiting for Chromium response to {method}");
+            }
+        }
+    }
+}
+
+/// Own the read end of the DevTools pipe and dispatch its messages. Frames are
+/// null-delimited JSON: responses carry an `id`, events do not.
+fn spawn_reader(
+    mut reader: tokio::fs::File,
+    pending: Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<anyhow::Result<Value>>>>>,
+    events: broadcast::Sender<CdpEvent>,
+) {
+    tokio::spawn(async move {
         let mut buffer = Vec::new();
         loop {
             let mut chunk = [0_u8; 8192];
-            let read = timeout(Duration::from_secs(10), self.reader.read(&mut chunk))
-                .await
-                .context("timed out waiting for Chromium response")?
-                .context("read Chromium response")?;
-            if read == 0 {
-                bail!("Chromium DevTools pipe closed while executing {method}");
-            }
+            let read = match reader.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
             buffer.extend_from_slice(&chunk[..read]);
             while let Some(end) = buffer.iter().position(|byte| *byte == 0) {
                 let frame = String::from_utf8_lossy(&buffer[..end]).into_owned();
                 buffer.drain(..=end);
-                let response: Value =
-                    serde_json::from_str(&frame).context("decode Chromium response")?;
-                if response.get("id").and_then(Value::as_u64) != Some(request_id) {
-                    continue;
+                let message: Value = match serde_json::from_str(&frame) {
+                    Ok(message) => message,
+                    Err(_) => continue,
+                };
+                if let Some(id) = message.get("id").and_then(Value::as_u64) {
+                    let reply = if let Some(error) = message.get("error") {
+                        Err(anyhow::anyhow!("Chromium command failed: {error}"))
+                    } else {
+                        Ok(message.get("result").cloned().unwrap_or(Value::Null))
+                    };
+                    if let Some(tx) = pending.lock().await.remove(&id) {
+                        let _ = tx.send(reply);
+                    }
+                } else if let (Some(method), Some(params)) = (
+                    message.get("method").and_then(Value::as_str),
+                    message.get("params"),
+                ) {
+                    let _ = events.send(CdpEvent {
+                        method: method.to_owned(),
+                        params: params.clone(),
+                    });
                 }
-                if let Some(error) = response.get("error") {
-                    bail!("Chromium {method} failed: {error}");
-                }
-                return Ok(response.get("result").cloned().unwrap_or(Value::Null));
             }
         }
-    }
+    });
 }
 
 struct CdpBrowserSession {
@@ -211,12 +306,7 @@ impl CdpBrowserSession {
         let writer = tokio::fs::File::from_std(std::fs::File::from(unsafe {
             OwnedFd::from_raw_fd(to_chrome_write.into_raw_fd())
         }));
-        let mut pipe = CdpPipe {
-            reader,
-            writer,
-            next_id: 1,
-            page_session_id: String::new(),
-        };
+        let mut pipe = CdpPipe::new(reader, writer);
         let page_session_id = match timeout(Duration::from_secs(5), attach_page_session(&mut pipe))
             .await
         {
@@ -244,6 +334,52 @@ impl CdpBrowserSession {
         let _ = self.process.kill().await;
         let _ = self.process.wait().await;
         let _ = std::fs::remove_dir_all(&self.profile_dir);
+    }
+
+    /// Begin streaming the page as JPEG screencast frames into `frames`
+    /// (base64 payloads). The relay acks each frame so Chromium keeps
+    /// producing them and ends when the browser closes; a slow subscriber
+    /// simply misses frames instead of backing up the pipe.
+    async fn start_screencast(&mut self, frames: broadcast::Sender<String>) -> Result<()> {
+        self.pipe
+            .call(
+                "Page.startScreencast",
+                json!({
+                    "format": "jpeg",
+                    "quality": 60,
+                    "maxWidth": self.viewport.width,
+                    "maxHeight": self.viewport.height,
+                    "everyNthFrame": 1,
+                }),
+            )
+            .await?;
+        let mut events = self.pipe.subscribe_events();
+        let writer = self.pipe.writer_handle();
+        tokio::spawn(async move {
+            loop {
+                let event = match events.recv().await {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                };
+                if event.method != "Page.screencastFrame" {
+                    continue;
+                }
+                let data = event
+                    .params
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let frame_id = event.params.get("sessionId").cloned();
+                if let Some(frame_id) = frame_id {
+                    let _ = writer.send_ack(&frame_id).await;
+                }
+                if let Some(data) = data {
+                    let _ = frames.send(data);
+                }
+            }
+        });
+        Ok(())
     }
 
     async fn execute(
@@ -831,6 +967,16 @@ impl BrowserSessionRegistry {
             .execute(action, settle_delay_ms, cancel)
             .await
     }
+    /// Start streaming live frames for a browser session. Re-entrant: calling
+    /// again for a browser already screencasting simply subscribes more senders.
+    pub async fn start_screencast(&self, id: &str, frames: broadcast::Sender<String>) -> Result<()> {
+        self.session(id)
+            .await?
+            .lock()
+            .await
+            .start_screencast(frames)
+            .await
+    }
 }
 pub type SharedBrowserRegistry = Arc<BrowserSessionRegistry>;
 
@@ -1036,6 +1182,31 @@ mod tests {
             .unwrap();
         assert_eq!(&png[16..20], &640_u32.to_be_bytes());
         assert_eq!(&png[20..24], &480_u32.to_be_bytes());
+        registry.close(&id).await;
+    }
+    #[tokio::test]
+    #[ignore = "requires a working Chromium and local TCP loopback"]
+    async fn screencast_streams_live_jpeg_frames() {
+        if !chromium_available() {
+            return;
+        }
+        let registry = BrowserSessionRegistry::new();
+        let viewport = ComputerViewport {
+            width: 640,
+            height: 480,
+            device_pixel_ratio: Some(1.0),
+        };
+        let id = registry.open(viewport).await.unwrap();
+        let (frames, mut rx) = tokio::sync::broadcast::channel::<String>(8);
+        registry.start_screencast(&id, frames).await.unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("screencast produced no frame within 5s")
+            .expect("screencast stream closed before the first frame");
+        let jpeg = base64::engine::general_purpose::STANDARD
+            .decode(frame)
+            .unwrap();
+        assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF], "expected a JPEG screencast frame");
         registry.close(&id).await;
     }
 }
