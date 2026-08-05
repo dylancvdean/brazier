@@ -32,7 +32,15 @@ const CATALOG: &str = include_str!("../../../model-recipes/recommendations.json"
 /// own overhead, and on a unified-memory machine the OS and everything else on
 /// screen are drawing from the same pool. Filling memory with weights produces a
 /// model that loads and then stalls the machine on the first long conversation.
-const WEIGHT_MEMORY_FRACTION: f64 = 0.60;
+pub const WEIGHT_MEMORY_FRACTION: f64 = 0.60;
+
+/// Share of usable memory a computer-use agent's weights may occupy.
+///
+/// These models hold long screenshot trajectories, and their KV cache is the
+/// dominant cost once the context reaches the tens of thousands of tokens Fara
+/// trains for. The 40% headroom chat leaves for KV, OS, and projector is not
+/// enough there, so the weight budget is deliberately tighter.
+pub const COMPUTER_USE_WEIGHT_FRACTION: f64 = 0.45;
 
 /// Quantisations in the order they would be preferred if memory were free,
 /// each with the filename fragments that mean the same rung.
@@ -104,6 +112,12 @@ pub struct RepoRecommendation {
     /// source-built runtime fork whose local toolchain is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<Box<RepoRecommendation>>,
+    /// Context window, in tokens, this model should default to on a machine in
+    /// the tier that names it. Used for computer-use models whose trained
+    /// context (262k for Fara1.5) would overflow the KV cache of a small host;
+    /// a per-model setting overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
 }
 
 impl RepoRecommendation {
@@ -159,6 +173,10 @@ pub struct Tier {
     pub image: Option<BundleRecommendation>,
     #[serde(default)]
     pub video: Option<BundleRecommendation>,
+    /// A screenshot-driven computer-use agent (e.g. Fara1.5), by repository.
+    /// Its vision projector is discovered at resolve time, not listed here.
+    #[serde(default)]
+    pub computer_use: Option<RepoRecommendation>,
 }
 
 /// A model a voice session needs, by the engine that loads it.
@@ -240,6 +258,25 @@ pub fn catalog(data_dir: &Path) -> Catalog {
         }
     }
     serde_json::from_str(CATALOG).expect("the shipped recommendations catalog must parse")
+}
+
+/// The context window a computer-use model should default to on this machine.
+///
+/// Fara1.5 trains for 262k tokens, but the KV cache at that length exceeds
+/// what a small host can hold, so the tier's `computer_use` recommendation
+/// names a context that leaves room. This stays data-driven so a catalogue
+/// override can tune it without a rebuild.
+pub fn computer_use_context_for_memory(data_dir: &Path, memory_bytes: u64) -> u32 {
+    const FALLBACK: u32 = 16_384;
+    let catalog = catalog(data_dir);
+    let Some(tier) = catalog.tier_for(memory_bytes) else {
+        return FALLBACK;
+    };
+    tier.computer_use
+        .as_ref()
+        .and_then(|entry| entry.context_tokens)
+        .filter(|value| *value >= 512)
+        .unwrap_or(FALLBACK)
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +372,19 @@ fn dynamic_first(left: &Candidate, right: &Candidate) -> std::cmp::Ordering {
 /// and there are several — still resolves: the ladder simply matches nothing
 /// and the largest build that fits is taken instead.
 pub fn choose_quant(files: &[(String, Option<u64>)], memory_bytes: u64) -> Option<QuantChoice> {
-    let budget = (memory_bytes as f64 * WEIGHT_MEMORY_FRACTION) as u64;
+    choose_quant_with_fraction(files, memory_bytes, WEIGHT_MEMORY_FRACTION)
+}
+
+/// Choose a build with a caller-chosen share of memory reserved for weights.
+///
+/// Computer-use models use a smaller fraction than chat so the KV cache for a
+/// long screenshot trajectory has room beside the weights.
+pub fn choose_quant_with_fraction(
+    files: &[(String, Option<u64>)],
+    memory_bytes: u64,
+    weight_fraction: f64,
+) -> Option<QuantChoice> {
+    let budget = (memory_bytes as f64 * weight_fraction) as u64;
     let candidates = candidates(files);
     if candidates.is_empty() {
         return None;
@@ -592,6 +641,14 @@ pub fn pending_swaps(
             .as_ref()
             .and_then(|entry| entry.summary.as_deref()),
     );
+    consider(
+        "computer_use",
+        tier.computer_use.as_ref().map(|entry| entry.id.as_str()),
+        tier.computer_use.as_ref().map(|entry| entry.label.as_str()),
+        tier.computer_use
+            .as_ref()
+            .and_then(|entry| entry.summary.as_deref()),
+    );
     swaps
 }
 
@@ -650,6 +707,71 @@ mod tests {
             .expect("the shipped voice recommendation includes PersonaPlex");
         assert_eq!(personaplex.repo_id, "nvidia/personaplex-7b-v1");
         assert!(personaplex.gated);
+    }
+
+    /// Every tier names a computer-use model, the 16 GB tier picks a quant
+    /// that leaves room for the vision projector and a long trajectory, and
+    /// small tiers get a context that keeps their KV cache affordable.
+    #[test]
+    fn every_tier_names_a_computer_use_model() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        for tier in &catalog.tiers {
+            let computer_use = tier
+                .computer_use
+                .as_ref()
+                .unwrap_or_else(|| panic!("tier {} has no computer_use", tier.min_gb));
+            assert!(!computer_use.repo_id.starts_with("TODO"));
+            assert!(!computer_use.repo_id.contains("TODO"));
+            assert!(computer_use.summary.is_some());
+            let context = computer_use
+                .context_tokens
+                .expect("computer_use carries a recommended context");
+            assert!((8_192..=262_144).contains(&context));
+            assert!(context <= 262_144);
+        }
+        // The smallest tier is capped well below the trained 262k ceiling so
+        // its KV cache fits beside the weights and the projector.
+        assert_eq!(
+            catalog
+                .tier_for(gb(8))
+                .unwrap()
+                .computer_use
+                .as_ref()
+                .unwrap()
+                .context_tokens,
+            Some(16_384)
+        );
+        assert_eq!(
+            catalog
+                .tier_for(gb(16))
+                .unwrap()
+                .computer_use
+                .as_ref()
+                .unwrap()
+                .quant
+                .as_deref(),
+            Some("Q5_K_M")
+        );
+        assert_eq!(
+            catalog
+                .tier_for(gb(8))
+                .unwrap()
+                .computer_use
+                .as_ref()
+                .unwrap()
+                .repo_id,
+            "bartowski/Fara1.5-4B-GGUF"
+        );
+        assert_eq!(
+            catalog
+                .tier_for(gb(48))
+                .unwrap()
+                .computer_use
+                .as_ref()
+                .unwrap()
+                .repo_id,
+            "bartowski/Fara1.5-27B-GGUF"
+        );
     }
 
     /// A machine between two tiers gets the smaller one; it cannot hold what

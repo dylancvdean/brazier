@@ -20,7 +20,12 @@
     "",
     "A tier with no `agent` entry uses its `text` one. A category set to null is",
     "offered nothing at that tier. `agent_options` adds optional agent cards after",
-    "the default agent; each has its own explanation and exact quant selection."
+    "the default agent; each has its own explanation and exact quant selection.",
+    "",
+    "`computer_use` recommends a screenshot-driven agent model (Fara1.5). Its",
+    "vision projector is discovered automatically at resolve time, so the entry",
+    "only names the repository. Fara1.5 natively supports up to 262k context;",
+    "keep at least ~15k for multi-step trajectories."
   ],
   "tiers": [
     {
@@ -44,6 +49,13 @@
         "label": "Stable Diffusion 1.5",
         "bundle_id": "sd15",
         "summary": "Small, fast, and endlessly finetuned. A 512px image in seconds on almost any machine."
+      },
+      "computer_use": {
+        "id": "fara1.5-4b-gguf",
+        "label": "Fara1.5 4B",
+        "repo_id": "bartowski/Fara1.5-4B-GGUF",
+        "context_tokens": 16384,
+        "summary": "Microsoft's smallest computer-use model. It reads screenshots and drives the browser or desktop with click and type actions. Fits this tier with room for a useful context window."
       },
       "video": null
     },
@@ -74,6 +86,14 @@
         "label": "Wan 2.1 T2V 1.3B",
         "bundle_id": "wan2.1-t2v-1.3b",
         "summary": "A practical text-to-video model for 16 GB machines. The larger Wan 2.2 image-to-video model needs more memory."
+      },
+      "computer_use": {
+        "id": "fara1.5-9b-gguf-16gb",
+        "label": "Fara1.5 9B",
+        "repo_id": "bartowski/Fara1.5-9B-GGUF",
+        "quant": "Q5_K_M",
+        "context_tokens": 32768,
+        "summary": "Microsoft's mid-size computer-use model. Reads screenshots and drives the browser or desktop with click and type actions. The Q5 build leaves room for the vision projector and a long trajectory."
       }
     },
     {
@@ -110,6 +130,13 @@
         "label": "Wan 2.2 TI2V 5B",
         "bundle_id": "wan2.2-ti2v-5b",
         "summary": "Text-to-video and image-to-video in one model."
+      },
+      "computer_use": {
+        "id": "fara1.5-9b-gguf",
+        "label": "Fara1.5 9B",
+        "repo_id": "bartowski/Fara1.5-9B-GGUF",
+        "context_tokens": 65536,
+        "summary": "Microsoft's mid-size computer-use model. Reads screenshots and drives the browser or desktop with click and type actions."
       }
     },
     {
@@ -147,6 +174,13 @@
         "label": "Wan 2.2 TI2V 5B",
         "bundle_id": "wan2.2-ti2v-5b",
         "summary": "Text-to-video and image-to-video in one model."
+      },
+      "computer_use": {
+        "id": "fara1.5-9b-gguf",
+        "label": "Fara1.5 9B",
+        "repo_id": "bartowski/Fara1.5-9B-GGUF",
+        "context_tokens": 131072,
+        "summary": "Microsoft's mid-size computer-use model. Reads screenshots and drives the browser or desktop with click and type actions. This tier can hold it at a high quant."
       }
     },
     {
@@ -184,6 +218,13 @@
         "label": "LTX-2.3 dev (audio + video)",
         "bundle_id": "ltx-2.3-dev",
         "summary": "Undistilled LTX-2.3 at ~30 steps with real CFG; better quality than the distilled model and still does audio plus video together."
+      },
+      "computer_use": {
+        "id": "fara1.5-27b-gguf",
+        "label": "Fara1.5 27B",
+        "repo_id": "bartowski/Fara1.5-27B-GGUF",
+        "context_tokens": 131072,
+        "summary": "Microsoft's largest computer-use model. Reads screenshots and drives the browser or desktop with click and type actions; the strongest option for hard multi-step tasks."
       }
     },
     {
@@ -221,6 +262,13 @@
         "label": "LTX-2.3 dev (audio + video)",
         "bundle_id": "ltx-2.3-dev",
         "summary": "Generates a soundtrack alongside the picture, which nothing else here does."
+      },
+      "computer_use": {
+        "id": "fara1.5-27b-gguf",
+        "label": "Fara1.5 27B",
+        "repo_id": "bartowski/Fara1.5-27B-GGUF",
+        "context_tokens": 262144,
+        "summary": "Microsoft's largest computer-use model. Reads screenshots and drives the browser or desktop with click and type actions."
       }
     },
     {
@@ -250,6 +298,13 @@
         "label": "LTX-2.3 dev (audio + video)",
         "bundle_id": "ltx-2.3-dev",
         "summary": "Generates a soundtrack alongside the picture."
+      },
+      "computer_use": {
+        "id": "fara1.5-27b-gguf",
+        "label": "Fara1.5 27B",
+        "repo_id": "bartowski/Fara1.5-27B-GGUF",
+        "context_tokens": 262144,
+        "summary": "Microsoft's largest computer-use model. Reads screenshots and drives the browser or desktop with click and type actions."
       }
     },
     {
@@ -272,6 +327,13 @@
         "label": "LTX-2.3 dev (audio + video)",
         "bundle_id": "ltx-2.3-dev",
         "summary": "Generates a soundtrack alongside the picture."
+      },
+      "computer_use": {
+        "id": "fara1.5-27b-gguf",
+        "label": "Fara1.5 27B",
+        "repo_id": "bartowski/Fara1.5-27B-GGUF",
+        "context_tokens": 262144,
+        "summary": "Microsoft's largest computer-use model. Reads screenshots and drives the browser or desktop with click and type actions, at a high quant."
       }
     }
   ],

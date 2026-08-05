@@ -12,12 +12,20 @@ export type BrazierFlags = {
   forceWelcome: boolean
 }
 
+export type BrazierServerKey = {
+  id: string
+  name: string
+  createdAt: number
+}
+
 export type BrazierServerSettings = {
   enabled: boolean
   port: number
   apiKeyEnabled: boolean
-  hasApiKey: boolean
+  hasApiKeys: boolean
+  localhostOnly: boolean
   jitLoading: boolean
+  keys: BrazierServerKey[]
 }
 
 export type BrazierInputGuardStatus = {
@@ -67,9 +75,14 @@ contextBridge.exposeInMainWorld('brazier', {
   getConnection: (): Promise<BrazierConnection> => ipcRenderer.invoke('brazier:connection'),
   getServerSettings: (): Promise<BrazierServerSettings> => ipcRenderer.invoke('brazier:server-settings'),
   saveServerSettings: (
-    settings: Omit<BrazierServerSettings, 'hasApiKey'> & { apiKey?: string | null }
+    settings: Omit<BrazierServerSettings, 'hasApiKeys' | 'keys'>
   ): Promise<BrazierServerSettings> => ipcRenderer.invoke('brazier:save-server-settings', settings),
-  generateServerApiKey: (): Promise<string> => ipcRenderer.invoke('brazier:generate-server-api-key'),
+  addServerApiKey: (
+    name: string
+  ): Promise<BrazierServerKey & { value: string }> => ipcRenderer.invoke('brazier:add-server-api-key', name),
+  removeServerApiKey: (id: string): Promise<BrazierServerSettings> =>
+    ipcRenderer.invoke('brazier:remove-server-api-key', id),
+  copyText: (text: string): Promise<void> => ipcRenderer.invoke('brazier:copy-text', text),
   getFlags: (): Promise<BrazierFlags> => ipcRenderer.invoke('brazier:flags'),
   checkForUpdates: (): Promise<{ supported: boolean }> => ipcRenderer.invoke('brazier:check-for-updates'),
   getUpdateSettings: (): Promise<{

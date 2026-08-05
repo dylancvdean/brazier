@@ -30,7 +30,7 @@ use tokio::sync::Mutex;
 pub struct AppState {
     pub db: Database,
     pub runtime: Arc<Runtime>,
-    pub api_key: Option<String>,
+    pub api_keys: Vec<String>,
     pub http: reqwest::Client,
     pub data_dir: PathBuf,
     pub active_builds: Arc<builds::ActiveBuilds>,

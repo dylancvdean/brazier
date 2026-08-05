@@ -1,10 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, type WriteStream } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, screen, shell } from 'electron'
 
 import { AgentSupervisor, registerAgentIpc } from './agent'
 import {
@@ -517,21 +517,34 @@ async function setComputerUseActive(active: boolean): Promise<void> {
   computerUseActive = true
 }
 
+export type ServerKey = {
+  id: string
+  name: string
+  createdAt: number
+}
+
 export type ServerSettings = {
   enabled: boolean
   port: number
   apiKeyEnabled: boolean
-  hasApiKey: boolean
+  hasApiKeys: boolean
+  localhostOnly: boolean
   jitLoading: boolean
+  keys: ServerKey[]
 }
 
-type StoredServerSettings = Omit<ServerSettings, 'hasApiKey'> & { apiKey: string | null }
+type StoredApiKey = ServerKey & { value: string }
+
+type StoredServerSettings = Omit<ServerSettings, 'hasApiKeys' | 'keys'> & {
+  apiKeys: StoredApiKey[]
+}
 
 const DEFAULT_SERVER_SETTINGS: StoredServerSettings = {
   enabled: false,
   port: 7614,
   apiKeyEnabled: true,
-  apiKey: null,
+  apiKeys: [],
+  localhostOnly: false,
   jitLoading: true
 }
 
@@ -539,25 +552,51 @@ function serverSettingsPath(): string {
   return join(app.getPath('userData'), 'server-settings.json')
 }
 
+function validApiKeys(value: unknown): StoredApiKey[] {
+  if (!Array.isArray(value)) return []
+  const now = Date.now()
+  return value.flatMap((entry, index) => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const candidate = entry as Record<string, unknown>
+    const value_ = typeof candidate.value === 'string' && candidate.value.trim() ? candidate.value.trim() : ''
+    if (!value_) return []
+    const name = typeof candidate.name === 'string' && candidate.name.trim() ? candidate.name.trim() : `Key ${index + 1}`
+    const createdAt = typeof candidate.createdAt === 'number' && Number.isFinite(candidate.createdAt) ? candidate.createdAt : now
+    const id = typeof candidate.id === 'string' && candidate.id ? candidate.id : randomUUID()
+    return [{ id, name, value: value_, createdAt }]
+  })
+}
+
 function loadServerSettings(): StoredServerSettings {
   try {
-    const parsed = JSON.parse(readFileSync(serverSettingsPath(), 'utf8')) as Partial<StoredServerSettings>
+    const parsed = JSON.parse(readFileSync(serverSettingsPath(), 'utf8')) as Partial<StoredServerSettings> & { apiKey?: string | null }
     const port = Number(parsed.port)
+    // Legacy single-key files migrate into the named list so existing OpenAI
+    // clients keep working with the credential they were configured with.
+    let apiKeys = validApiKeys(parsed.apiKeys)
+    if (apiKeys.length === 0 && typeof parsed.apiKey === 'string' && parsed.apiKey.trim()) {
+      apiKeys = [{ id: randomUUID(), name: 'Default', value: parsed.apiKey.trim(), createdAt: Date.now() }]
+    }
     return {
       enabled: parsed.enabled === true,
       port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : DEFAULT_SERVER_SETTINGS.port,
       apiKeyEnabled: parsed.apiKeyEnabled !== false,
-      apiKey: typeof parsed.apiKey === 'string' && parsed.apiKey.trim() ? parsed.apiKey : null,
+      apiKeys,
+      localhostOnly: parsed.localhostOnly === true,
       jitLoading: parsed.jitLoading !== false
     }
   } catch {
-    return { ...DEFAULT_SERVER_SETTINGS }
+    return { ...DEFAULT_SERVER_SETTINGS, apiKeys: [] }
   }
 }
 
 function publicServerSettings(settings: StoredServerSettings): ServerSettings {
-  const { apiKey: _apiKey, ...publicSettings } = settings
-  return { ...publicSettings, hasApiKey: Boolean(settings.apiKey) }
+  const { apiKeys, ...publicSettings } = settings
+  return {
+    ...publicSettings,
+    hasApiKeys: apiKeys.length > 0,
+    keys: apiKeys.map(({ id, name, createdAt }) => ({ id, name, createdAt }))
+  }
 }
 
 function saveServerSettings(settings: StoredServerSettings): void {
@@ -713,16 +752,19 @@ function startDaemon(): Promise<Connection> {
     : ['run', '-q', '-p', 'brazierd', '--', '--data-dir', directory]
   const serverSettings = loadServerSettings()
   if (serverSettings.enabled) {
-    args.push('--host', '0.0.0.0', '--port', String(serverSettings.port))
+    args.push('--host', serverSettings.localhostOnly ? '127.0.0.1' : '0.0.0.0', '--port', String(serverSettings.port))
     if (serverSettings.apiKeyEnabled) {
-      const apiKey = serverSettings.apiKey ?? generatedApiKey()
-      args.push('--api-key', apiKey)
-      // Keep an auto-generated key stable across desktop restarts; otherwise
-      // every configured OpenAI client would be revoked without warning.
-      if (!serverSettings.apiKey) {
-        serverSettings.apiKey = apiKey
+      // The desktop's own connection needs a credential too. If the user has
+      // not named any keys yet, mint one and keep it stable across restarts so
+      // a configured OpenAI client is not silently revoked.
+      let apiKeys = serverSettings.apiKeys
+      if (apiKeys.length === 0) {
+        const value = generatedApiKey()
+        apiKeys = [{ id: randomUUID(), name: 'Auto-generated', value, createdAt: Date.now() }]
+        serverSettings.apiKeys = apiKeys
         saveServerSettings(serverSettings)
       }
+      for (const key of apiKeys) args.push('--api-key', key.value)
     } else {
       args.push('--no-auth', '--allow-insecure-remote')
     }
@@ -984,25 +1026,43 @@ app.whenReady().then(async () => {
   ipcMain.handle('brazier:server-settings', (): ServerSettings => publicServerSettings(loadServerSettings()))
   ipcMain.handle(
     'brazier:save-server-settings',
-    (_event, requested: Omit<ServerSettings, 'hasApiKey'> & { apiKey?: string | null }) => {
+    (_event, requested: Omit<ServerSettings, 'hasApiKeys' | 'keys'>) => {
       const port = Number(requested.port)
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
         throw new Error('Server port must be between 1 and 65535.')
       }
-      const current = loadServerSettings()
-      const apiKey = requested.apiKey === undefined ? current.apiKey : requested.apiKey?.trim() || null
       const next: StoredServerSettings = {
         enabled: requested.enabled === true,
         port,
         apiKeyEnabled: requested.apiKeyEnabled !== false,
+        localhostOnly: requested.localhostOnly === true,
         jitLoading: requested.jitLoading !== false,
-        apiKey
+        apiKeys: loadServerSettings().apiKeys
       }
       saveServerSettings(next)
       return publicServerSettings(next)
     }
   )
-  ipcMain.handle('brazier:generate-server-api-key', (): string => generatedApiKey())
+  ipcMain.handle(
+    'brazier:add-server-api-key',
+    (_event, name: string): StoredApiKey => {
+      const current = loadServerSettings()
+      const label = (name ?? '').trim() || `Key ${current.apiKeys.length + 1}`
+      const key: StoredApiKey = { id: randomUUID(), name: label, value: generatedApiKey(), createdAt: Date.now() }
+      current.apiKeys = [...current.apiKeys, key]
+      saveServerSettings(current)
+      return { id: key.id, name: key.name, value: key.value, createdAt: key.createdAt }
+    }
+  )
+  ipcMain.handle('brazier:remove-server-api-key', (_event, id: string): ServerSettings => {
+    const current = loadServerSettings()
+    current.apiKeys = current.apiKeys.filter((key) => key.id !== id)
+    saveServerSettings(current)
+    return publicServerSettings(current)
+  })
+  ipcMain.handle('brazier:copy-text', (_event, text: string) => {
+    clipboard.writeText(String(text ?? ''))
+  })
   ipcMain.handle('brazier:flags', () => ({
     forceWelcome: forceWelcomeRequested()
   }))

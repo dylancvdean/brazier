@@ -39,7 +39,8 @@ const FEATURE_BLURBS: Record<RecommendationCategory, string> = {
   agent: 'Let a model edit files and run commands inside a folder you choose.',
   image: 'Generate pictures from a description.',
   video: 'Generate short clips from a description.',
-  voice: 'Talk to a model and be answered out loud, in real time.'
+  voice: 'Talk to a model and be answered out loud, in real time.',
+  computer_use: ''
 }
 
 const FEATURE_LABELS: Record<RecommendationCategory, string> = {
@@ -271,7 +272,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
           ) : (
             <RecommendedModels
               recommendations={recommendations}
-              categories={wanted}
+              categories={[...wanted, ...(wantsComputerUse ? (['computer_use'] as const) : [])]}
               onInstalled={props.onModelsChanged}
               onError={setError}
               onOpenRuntimes={props.onOpenRuntimes}

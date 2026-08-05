@@ -4673,6 +4673,91 @@ label.span-2 {
   color: #e8d2a0;
 }
 
+/* Named API keys for the OpenAI-compatible server in Manage → Server. */
+.server-key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.server-key-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0a0a0a;
+}
+
+.server-key-name {
+  min-width: 0;
+  overflow: hidden;
+  color: #e3e3e3;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-key-meta {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.server-key-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.server-key-add .runtime-actions {
+  padding-bottom: 1px;
+}
+
+.server-key-reveal {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #984a16;
+  border-radius: 10px;
+  background: #2b190d;
+}
+
+.server-key-reveal-head strong,
+.server-key-reveal-head span {
+  display: block;
+}
+
+.server-key-reveal-head strong {
+  color: #f7a45f;
+  font-size: 12px;
+}
+
+.server-key-reveal-head span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.server-key-reveal code {
+  display: block;
+  margin: 10px 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px dashed #67393c;
+  border-radius: 8px;
+  color: #ffd9a0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  white-space: pre-wrap;
+  background: #17100a;
+}
+
 /* Capability icons in model lists: what a model takes in and puts out. */
 .capability-icons {
   display: inline-flex;

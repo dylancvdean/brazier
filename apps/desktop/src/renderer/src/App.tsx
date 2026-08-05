@@ -96,6 +96,7 @@ import { ManagePanel, type ManageSection } from './components/ManagePanel'
 import { ModelMenu } from './components/ModelMenu'
 import { profileCount } from './components/ModelSettingsFields'
 import { ModelSettingsModal } from './components/ModelSettingsModal'
+import { CATEGORY_LABELS } from './components/RecommendedModels'
 import { ToolsMenu } from './components/ToolsMenu'
 import { VoiceMode } from './components/VoiceMode'
 import { WelcomeScreen } from './components/WelcomeScreen'
@@ -2632,7 +2633,7 @@ export function App(): React.JSX.Element {
             <strong>A recommended model has changed</strong>
             <span>
               {recommendationSwaps
-                .map((swap) => `${swap.recommended_label} for ${swap.category}`)
+                .map((swap) => `${swap.recommended_label} for ${CATEGORY_LABELS[swap.category] ?? swap.category}`)
                 .join(' · ')}
             </span>
           </div>

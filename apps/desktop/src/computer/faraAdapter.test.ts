@@ -37,4 +37,13 @@ describe('parseFaraOutput', () => {
     )
     expect(parsed.actions).toEqual([{ type: 'terminate', response: 'done' }])
   })
+
+  it('parses pause_and_memorize_fact into a memorize action', () => {
+    const parsed = parseFaraOutput(`<tool_call>
+{"name":"computer_use","arguments":{"action":"pause_and_memorize_fact","fact":"The account is #88321"}}
+</tool_call>`)
+    expect(parsed.actions).toEqual([
+      { type: 'memorize', fact: 'The account is #88321' }
+    ])
+  })
 })

@@ -87,6 +87,8 @@ export async function requestComputerPermissions(): Promise<OsPermissionStatus> 
 
 export type ComputerUsePreference = {
   action_settle_delay_ms: number
+  /** Screenshots retained in a computer-use trajectory (Fara defaults to 3). */
+  max_screenshots_kept: number
 }
 
 export function fetchComputerUsePreference(): Promise<ComputerUsePreference> {
@@ -1526,7 +1528,7 @@ export async function cancelGeneration(): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 /** The things a first-run installation can be set up for. */
-export type RecommendationCategory = 'text' | 'agent' | 'image' | 'video' | 'voice'
+export type RecommendationCategory = 'text' | 'agent' | 'image' | 'video' | 'voice' | 'computer_use'
 
 /** A chat or agent model, resolved to the exact files to download. */
 export type RepoRecommendation = {
@@ -1562,6 +1564,8 @@ export type RepoRecommendation = {
     target: string
     label: string
   }
+  /** Context window in tokens this model should default to on this machine. */
+  context_tokens?: number
   /** This repository requires a Hugging Face token before it can be downloaded. */
   gated?: boolean
 }
@@ -1622,6 +1626,7 @@ export type Recommendations = {
     agent?: RepoRecommendation
     image?: BundleRecommendation
     video?: BundleRecommendation
+    computer_use?: RepoRecommendation
   }
   /** Alternative agent models for this tier, including the default first. */
   agent_options?: RepoRecommendation[]

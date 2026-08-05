@@ -1843,6 +1843,27 @@ impl Runtime {
             profile.clone(),
             request.brazier_mode.as_deref() == Some("agent"),
         );
+        // Computer-use agents hold long screenshot trajectories, so they
+        // default to the large context the recommendation tier chose for this
+        // machine (Fara1.5 trains for 262k) unless a per-model setting says
+        // otherwise. This stays data-driven and never overrides an explicit
+        // context_size.
+        let effective_profile = if crate::models_store::looks_like_computer_use_model(&model_id)
+            && effective_profile
+                .as_ref()
+                .map_or(true, |profile| profile.context_size.is_none())
+        {
+            let memory = crate::hardware::recommendation_memory_bytes(&crate::hardware::detect())
+                .unwrap_or(u64::MAX);
+            let mut profile = effective_profile.unwrap_or_default();
+            profile.context_size = Some(crate::recommendations::computer_use_context_for_memory(
+                &self.data_dir,
+                memory,
+            ));
+            Some(profile)
+        } else {
+            effective_profile
+        };
         let jit_loading = self.settings.lock().await.jit_loading;
         if !jit_loading && !self.model_is_resident(&backend, &model_id, &extra).await {
             anyhow::bail!(

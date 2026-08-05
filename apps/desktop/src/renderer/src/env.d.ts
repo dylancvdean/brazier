@@ -17,23 +17,42 @@ declare global {
         enabled: boolean
         port: number
         apiKeyEnabled: boolean
-        hasApiKey: boolean
+        hasApiKeys: boolean
+        localhostOnly: boolean
         jitLoading: boolean
+        keys: Array<{ id: string; name: string; createdAt: number }>
       }>
       saveServerSettings(settings: {
         enabled: boolean
         port: number
         apiKeyEnabled: boolean
+        localhostOnly: boolean
         jitLoading: boolean
-        apiKey?: string | null
       }): Promise<{
         enabled: boolean
         port: number
         apiKeyEnabled: boolean
-        hasApiKey: boolean
+        hasApiKeys: boolean
+        localhostOnly: boolean
         jitLoading: boolean
+        keys: Array<{ id: string; name: string; createdAt: number }>
       }>
-      generateServerApiKey(): Promise<string>
+      addServerApiKey(name: string): Promise<{
+        id: string
+        name: string
+        value: string
+        createdAt: number
+      }>
+      removeServerApiKey(id: string): Promise<{
+        enabled: boolean
+        port: number
+        apiKeyEnabled: boolean
+        hasApiKeys: boolean
+        localhostOnly: boolean
+        jitLoading: boolean
+        keys: Array<{ id: string; name: string; createdAt: number }>
+      }>
+      copyText(text: string): Promise<void>
       getFlags(): Promise<{
         forceWelcome: boolean
       }>

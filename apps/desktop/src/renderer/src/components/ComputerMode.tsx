@@ -16,6 +16,7 @@ import {
   createComputerSession,
   decideComputerApproval,
   deleteComputerSession,
+  fetchComputerUsePreference,
   listComputerSessions,
   listComputerSteps,
   parseFaraOutput as parseFaraRemote,
@@ -111,9 +112,16 @@ export function ComputerMode(props: Props): React.JSX.Element {
   } | null>(null)
   const [pendingUserQuestion, setPendingUserQuestion] = useState<string | null>(null)
   const [liveThought, setLiveThought] = useState('')
+  const [maxScreenshotsKept, setMaxScreenshotsKept] = useState(3)
   const abortRef = useRef<AbortController | null>(null)
   const sessionRef = useRef<ComputerSession | null>(null)
   sessionRef.current = session
+
+  useEffect(() => {
+    void fetchComputerUsePreference()
+      .then((preference) => setMaxScreenshotsKept(preference.max_screenshots_kept))
+      .catch(() => {})
+  }, [])
 
   const refreshSessions = useCallback(async (): Promise<ComputerSession[]> => {
     const list = await listComputerSessions()
@@ -252,7 +260,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
     const activeModelId = active.model_id || modelId
 
     for (let step = 0; step < MAX_LOOP_STEPS && !controller.signal.aborted; step += 1) {
-      const history = buildComputerHistory(active, await syncSteps(active.id))
+      const history = buildComputerHistory(active, await syncSteps(active.id), maxScreenshotsKept)
       let responseText = ''
       setLiveThought('')
       const completion = await streamCompletion(

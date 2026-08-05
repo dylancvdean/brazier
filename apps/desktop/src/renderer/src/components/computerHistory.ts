@@ -1,8 +1,8 @@
 import type { ComputerAction, ComputerActionResult, ComputerSession, ComputerStep } from '../api'
 import type { ContentPart, Message } from '../types'
 
-/** Matches the documented vLLM recipes' `--limit-mm-per-prompt image=10`. */
-export const MAX_COMPUTER_HISTORY_IMAGES = 10
+/** Matches Fara's reference agent: keep only the most recent few screenshots. */
+export const MAX_COMPUTER_HISTORY_IMAGES = 3
 /** Keep enough trajectory for recovery without letting a long task consume its context. */
 export const MAX_COMPUTER_HISTORY_MESSAGES = 80
 
@@ -136,15 +136,19 @@ function toolResultText(step: ComputerStep): string {
  * Turn durable ComputerStep records into the prompt for the next model turn.
  * Broker-written tool records are represented as user messages so the model sees
  * the environment observation without pretending it authored the result.
+ *
+ * `maxImages` bounds how many screenshots are replayed; Fara is trained with
+ * only the most recent few, and each one costs roughly 1500 tokens of context.
  */
 export function buildComputerHistory(
   session: Pick<ComputerSession, 'target' | 'permission_mode'>,
-  steps: ComputerStep[]
+  steps: ComputerStep[],
+  maxImages: number = MAX_COMPUTER_HISTORY_IMAGES
 ): Message[] {
   const imageStepIds = new Set(
     steps
       .filter((step) => Boolean(computerScreenshotDataUrl(step.result)))
-      .slice(-MAX_COMPUTER_HISTORY_IMAGES)
+      .slice(-Math.max(1, maxImages))
       .map((step) => step.id)
   )
   const messages: Message[] = []

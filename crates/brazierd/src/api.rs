@@ -583,14 +583,14 @@ async fn require_auth(
     request: Request,
     next: Next,
 ) -> Response {
-    let Some(expected) = &state.api_key else {
+    if state.api_keys.is_empty() {
         return next.run(request).await;
-    };
+    }
     let supplied = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if supplied == Some(expected.as_str()) {
+    if supplied.is_some_and(|key| state.api_keys.iter().any(|expected| expected == key)) {
         next.run(request).await
     } else {
         (
@@ -1728,11 +1728,27 @@ async fn update_workspace_preference(
 
 pub const COMPUTER_PREFERENCE_KEY: &str = "computer";
 
+/// How many screenshots a computer-use trajectory keeps by default. Fara's
+/// reference agent retains the most recent three; more costs context fast.
+pub const DEFAULT_MAX_SCREENSHOTS_KEPT: u32 = 3;
+const MIN_SCREENSHOTS_KEPT: u32 = 1;
+const MAX_SCREENSHOTS_KEPT: u32 = 20;
+
 fn computer_settle_delay(value: Option<&Value>) -> u64 {
     value
         .and_then(|value| value["action_settle_delay_ms"].as_u64())
         .unwrap_or(crate::computer_exec::DEFAULT_ACTION_SETTLE_DELAY_MS)
         .min(crate::computer_exec::MAX_ACTION_SETTLE_DELAY_MS)
+}
+
+fn computer_screenshots_kept(value: Option<&Value>) -> u32 {
+    value
+        .and_then(|value| value["max_screenshots_kept"].as_u64())
+        .unwrap_or(u64::from(DEFAULT_MAX_SCREENSHOTS_KEPT))
+        .clamp(
+            u64::from(MIN_SCREENSHOTS_KEPT),
+            u64::from(MAX_SCREENSHOTS_KEPT),
+        ) as u32
 }
 
 async fn computer_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -1745,14 +1761,21 @@ async fn computer_preference(State(state): State<AppState>) -> ApiResult<Json<Va
     state
         .computer_broker
         .set_action_settle_delay_ms(action_settle_delay_ms);
-    Ok(Json(
-        json!({ "action_settle_delay_ms": action_settle_delay_ms }),
-    ))
+    Ok(Json(json!({
+        "action_settle_delay_ms": action_settle_delay_ms,
+        "max_screenshots_kept": computer_screenshots_kept(stored.as_ref()),
+    })))
 }
 
 #[derive(Debug, Deserialize)]
 struct UpdateComputerPreference {
     action_settle_delay_ms: u64,
+    #[serde(default = "default_max_screenshots_kept")]
+    max_screenshots_kept: u32,
+}
+
+fn default_max_screenshots_kept() -> u32 {
+    DEFAULT_MAX_SCREENSHOTS_KEPT
 }
 
 async fn update_computer_preference(
@@ -1765,20 +1788,27 @@ async fn update_computer_preference(
             crate::computer_exec::MAX_ACTION_SETTLE_DELAY_MS
         )));
     }
+    let max_screenshots_kept = preference
+        .max_screenshots_kept
+        .clamp(MIN_SCREENSHOTS_KEPT, MAX_SCREENSHOTS_KEPT);
     state
         .db
         .set_application_preference(
             COMPUTER_PREFERENCE_KEY,
-            &json!({ "action_settle_delay_ms": preference.action_settle_delay_ms }),
+            &json!({
+                "action_settle_delay_ms": preference.action_settle_delay_ms,
+                "max_screenshots_kept": max_screenshots_kept,
+            }),
         )
         .await
         .map_err(ApiError::internal)?;
     state
         .computer_broker
         .set_action_settle_delay_ms(preference.action_settle_delay_ms);
-    Ok(Json(
-        json!({ "action_settle_delay_ms": preference.action_settle_delay_ms }),
-    ))
+    Ok(Json(json!({
+        "action_settle_delay_ms": preference.action_settle_delay_ms,
+        "max_screenshots_kept": max_screenshots_kept,
+    })))
 }
 
 async fn computer_os_permissions(State(state): State<AppState>) -> Json<Value> {
@@ -2445,6 +2475,7 @@ async fn resolve_repo_recommendation(
     state: &AppState,
     entry: &recommendations::RepoRecommendation,
     memory_bytes: u64,
+    weight_fraction: Option<f64>,
 ) -> Value {
     let mut resolved = json!({
         "id": entry.id,
@@ -2452,6 +2483,9 @@ async fn resolve_repo_recommendation(
         "repo_id": entry.repo_id,
         "summary": entry.summary,
     });
+    if let Some(context) = entry.context_tokens {
+        resolved["context_tokens"] = json!(context);
+    }
     // A catalogue entry still waiting for a real repository should say so
     // rather than sending anyone to a 404.
     if entry.repo_id.starts_with("TODO") || entry.repo_id.contains("TODO") {
@@ -2475,7 +2509,11 @@ async fn resolve_repo_recommendation(
         .collect();
 
     let choice = match entry.quant.as_deref() {
-        Some("by_memory") | None => recommendations::choose_quant(&listing, memory_bytes),
+        Some("by_memory") | None => recommendations::choose_quant_with_fraction(
+            &listing,
+            memory_bytes,
+            weight_fraction.unwrap_or(recommendations::WEIGHT_MEMORY_FRACTION),
+        ),
         Some(quant) => recommendations::find_quant(&listing, quant),
     };
     match choice {
@@ -2600,8 +2638,9 @@ async fn resolve_recommended_repo(
     state: &AppState,
     entry: &recommendations::RepoRecommendation,
     memory: u64,
+    weight_fraction: Option<f64>,
 ) -> Value {
-    resolve_repo_recommendation(state, entry, memory).await
+    resolve_repo_recommendation(state, entry, memory, weight_fraction).await
 }
 
 /// What to install on this machine, and whether any of it has changed.
@@ -2640,11 +2679,26 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
     if let Some(text) = tier.text.as_ref() {
         categories.insert(
             "text".into(),
-            resolve_recommended_repo(&state, text, memory).await,
+            resolve_recommended_repo(&state, text, memory, None).await,
+        );
+    }
+    if let Some(computer_use) = tier.computer_use.as_ref() {
+        // Computer-use agents hold long screenshot trajectories; their quant
+        // is chosen against a tighter weight budget that leaves room for the
+        // KV cache the recommended context needs.
+        categories.insert(
+            "computer_use".into(),
+            resolve_recommended_repo(
+                &state,
+                computer_use,
+                memory,
+                Some(recommendations::COMPUTER_USE_WEIGHT_FRACTION),
+            )
+            .await,
         );
     }
     if let Some(agent) = recommendations::resolved_agent(tier) {
-        let mut resolved = resolve_repo_recommendation(&state, agent, memory).await;
+        let mut resolved = resolve_repo_recommendation(&state, agent, memory, None).await;
         // When the tier's own agent model cannot run here, say why the chat
         // model is standing in rather than showing two identical cards with no
         // explanation.
@@ -2656,7 +2710,7 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
     let agent_options: Vec<Value> = futures::future::join_all(
         recommendations::resolved_agent_options(tier)
             .into_iter()
-            .map(|agent| resolve_repo_recommendation(&state, agent, memory)),
+            .map(|agent| resolve_repo_recommendation(&state, agent, memory, None)),
     )
     .await;
     for (name, entry) in [
@@ -7107,7 +7161,7 @@ mod tests {
         AppState {
             db,
             runtime,
-            api_key: None,
+            api_keys: Vec::new(),
             http,
             data_dir: data_dir.to_path_buf(),
             active_builds: Arc::new(builds::ActiveBuilds::new()),
@@ -7533,7 +7587,7 @@ mod tests {
     async fn daemon_info_is_authenticated_and_describes_the_versioned_boundary() {
         let dir = tempdir().unwrap();
         let mut state = test_state(dir.path()).await;
-        state.api_key = Some("test-service-key".into());
+        state.api_keys = vec!["test-service-key".into()];
         let app = router(state);
 
         let (status, _) = get_request(&app, "/api/v1/daemon/info").await;
@@ -7555,6 +7609,43 @@ mod tests {
         assert_eq!(info["product"], "brazier");
         assert_eq!(info["management_api"]["major"], 1);
         assert_eq!(info["openai_api"]["responses"], "/v1/responses");
+    }
+
+    #[tokio::test]
+    async fn any_configured_api_key_authenticates_but_unknown_ones_do_not() {
+        let dir = tempdir().unwrap();
+        let mut state = test_state(dir.path()).await;
+        state.api_keys = vec!["key-one".into(), "key-two".into()];
+        let app = router(state);
+
+        for key in ["key-one", "key-two"] {
+            let (status, _) = get_request(&app, "/api/v1/daemon/info").await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/daemon/info")
+                        .header("authorization", format!("Bearer {key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/daemon/info")
+                    .header("authorization", "Bearer key-three")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

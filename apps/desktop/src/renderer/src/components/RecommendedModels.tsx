@@ -50,7 +50,8 @@ export const CATEGORY_LABELS: Record<RecommendationCategory, string> = {
   agent: 'Agent',
   image: 'Image generation',
   video: 'Video generation',
-  voice: 'Voice'
+  voice: 'Voice',
+  computer_use: 'Computer use'
 }
 
 const CATEGORY_BLURBS: Record<RecommendationCategory, string> = {
@@ -58,11 +59,17 @@ const CATEGORY_BLURBS: Record<RecommendationCategory, string> = {
   agent: 'Editing files and running commands in a workspace you choose.',
   image: 'Generating pictures from a description.',
   video: 'Generating short clips from a description.',
-  voice: 'Speaking to a model and being answered out loud.'
+  voice: 'Speaking to a model and being answered out loud.',
+  computer_use: 'Driving a browser or desktop from screenshots.'
 }
 
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
+}
+
+function formatContextTokens(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+  return `${Math.round(tokens / 1000)}k`
 }
 
 function progressText(event: ProgressEvent | null): string {
@@ -271,7 +278,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
   }
 
   function repoCard(
-    categories: Array<'text' | 'agent'>,
+    categories: Array<'text' | 'agent' | 'computer_use'>,
     entry: RepoRecommendation
   ): React.JSX.Element {
     const combined = categories.length === 2
@@ -321,13 +328,22 @@ export function RecommendedModels(props: Props): React.JSX.Element {
       })
     }
     const companions = entry.companion_files ?? []
-    const includeCompanion = includeCompanions[key] ?? true
+    const computerUseModel = categories.includes('computer_use')
+    const includeCompanion = computerUseModel || (includeCompanions[key] ?? true)
     const drafts = entry.draft_files ?? []
     const includeDraft = includeDrafts[key] ?? true
     if (companions.length > 0) {
       notes.push({
         tone: 'plain',
-        text: 'Optional vision projector: lets this model understand images you attach. It is not needed for text-only chat.'
+        text: computerUseModel
+          ? 'Required vision projector: lets the model read the screenshots it drives from. Installed automatically.'
+          : 'Optional vision projector: lets this model understand images you attach. It is not needed for text-only chat.'
+      })
+    }
+    if (computerUseModel && entry.context_tokens) {
+      notes.push({
+        tone: 'plain',
+        text: `Defaults to ${formatContextTokens(entry.context_tokens)} of context so a long screenshot trajectory fits. Tune it per model under model settings.`
       })
     }
     if (entry.runtime_build) {
@@ -369,7 +385,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
         notes={notes}
         action={
           <div className="recommendation-actions">
-            {companions.length > 0 ? (
+            {companions.length > 0 && !computerUseModel ? (
               <label className="recommendation-companion-choice">
                 <input
                   type="checkbox"
@@ -574,7 +590,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
     )
   }
 
-  const wanted = props.categories ?? (['text', 'agent', 'image', 'video', 'voice'] as const)
+  const wanted = props.categories ?? (['text', 'agent', 'image', 'video', 'voice', 'computer_use'] as const)
   const cards: React.JSX.Element[] = []
   const wantsText = wanted.includes('text')
   const wantsAgent = wanted.includes('agent')
@@ -607,6 +623,11 @@ export function RecommendedModels(props: Props): React.JSX.Element {
       }
       const entry = recommendations.categories[category]
       if (entry) cards.push(repoCard([category], entry))
+      continue
+    }
+    if (category === 'computer_use') {
+      const entry = recommendations.categories.computer_use
+      if (entry) cards.push(repoCard(['computer_use'], entry))
       continue
     }
     const entry = recommendations.categories[category]

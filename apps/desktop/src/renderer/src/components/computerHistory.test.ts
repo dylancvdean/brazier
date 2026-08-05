@@ -82,7 +82,7 @@ describe('computer history', () => {
     expect(prompt).not.toContain('"action":"visit_url"')
   })
 
-  it('rebuilds durable conversation and keeps the newest ten screenshots', () => {
+  it('rebuilds durable conversation and keeps only the most recent screenshots', () => {
     const steps = [
       step(0, { role: 'user', content: 'Book a table for two tomorrow.' }),
       step(1, { role: 'assistant', content: '<tool_call>first action</tool_call>' }),
@@ -94,9 +94,20 @@ describe('computer history', () => {
     expect(history.some((message) => message.content === 'Book a table for two tomorrow.')).toBe(true)
     expect(history.some((message) => message.content === '<tool_call>first action</tool_call>')).toBe(true)
     const images = imagePayloads(history)
+    // Fara is trained with only the most recent few screenshots.
     expect(images).toHaveLength(MAX_COMPUTER_HISTORY_IMAGES)
-    expect(images[0]).toContain('base64,4')
+    expect(images[0]).toContain(`base64,${steps.length - MAX_COMPUTER_HISTORY_IMAGES}`)
     expect(images.at(-1)).toContain('base64,13')
+  })
+
+  it('honors a configured screenshot budget', () => {
+    const steps = [
+      step(0, { role: 'user', content: 'Book a table for two tomorrow.' }),
+      ...Array.from({ length: 12 }, (_, index) => step(index + 1, {}))
+    ]
+    const history = buildComputerHistory(session, steps, 1)
+    expect(imagePayloads(history)).toHaveLength(1)
+    expect(imagePayloads(history)[0]).toContain('base64,12')
   })
 
   it('pins the original goal while bounding a very long text trajectory', () => {

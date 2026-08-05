@@ -34,8 +34,11 @@ struct Args {
     /// credential and is owner-only on Unix.
     #[arg(long, requires = "service")]
     ready_file: Option<PathBuf>,
+    /// Bearer credential accepted by the API. Repeatable: any listed key
+    /// authenticates, so distinct clients can each be revoked independently.
+    /// A single key is still the common case.
     #[arg(long, env = "BRAZIER_API_KEY")]
-    api_key: Option<String>,
+    api_key: Vec<String>,
     /// Whether API requests may load a non-resident local model on demand.
     #[arg(long)]
     jit_loading: Option<bool>,
@@ -117,15 +120,21 @@ async fn main() -> anyhow::Result<()> {
     // that were mid-flight as paused so they can be resumed rather than
     // appearing to still be running.
     db.interrupt_running_download_jobs().await?;
-    let api_key = if args.no_auth {
-        None
+    let api_keys = if args.no_auth {
+        Vec::new()
     } else if args.service {
-        Some(brazierd::service::service_api_key(&data_dir, args.api_key)?)
+        // Service mode keeps a single durable credential keyed to the data
+        // directory; an explicitly supplied key remains its source of truth.
+        vec![brazierd::service::service_api_key(
+            &data_dir,
+            args.api_key.first().cloned(),
+        )?]
     } else {
-        Some(
-            args.api_key
-                .unwrap_or_else(|| format!("brazier_{}", Uuid::new_v4().simple())),
-        )
+        let mut keys = args.api_key.clone();
+        if keys.is_empty() {
+            keys.push(format!("brazier_{}", Uuid::new_v4().simple()));
+        }
+        keys
     };
     let http = reqwest::Client::builder()
         .user_agent(format!("brazier/{}", env!("CARGO_PKG_VERSION")))
@@ -153,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db,
         runtime: Arc::clone(&runtime),
-        api_key: api_key.clone(),
+        api_keys: api_keys.clone(),
         http,
         data_dir: data_dir.clone(),
         active_builds: Arc::new(builds::ActiveBuilds::new()),
@@ -186,7 +195,9 @@ async fn main() -> anyhow::Result<()> {
         "BRAZIER_READY {}",
         serde_json::to_string(&serde_json::json!({
             "address": address_url,
-            "api_key": api_key
+            // The desktop's internal connection uses the first key; extra keys
+            // are passed for its configured clients, not reported here.
+            "api_key": api_keys.first()
         }))?
     );
     tracing::info!(%address, data_dir = %data_dir.display(), "brazier daemon ready");

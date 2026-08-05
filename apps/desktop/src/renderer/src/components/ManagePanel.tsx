@@ -4,6 +4,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   Cpu,
   Download,
   FolderOpen,
@@ -980,11 +981,32 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
   async function saveActionSettleDelay(milliseconds: number): Promise<void> {
     const action_settle_delay_ms = Math.max(0, Math.min(10_000, Math.round(milliseconds)))
     const previous = computerPreference
-    setComputerPreference({ action_settle_delay_ms })
+    const next = { action_settle_delay_ms, max_screenshots_kept: computerPreference?.max_screenshots_kept ?? 3 }
+    setComputerPreference(next)
     setSavingComputerPreference(true)
     props.onError(null)
     try {
-      setComputerPreference(await saveComputerUsePreference({ action_settle_delay_ms }))
+      setComputerPreference(await saveComputerUsePreference(next))
+    } catch (cause) {
+      setComputerPreference(previous)
+      props.onError(errorText(cause))
+    } finally {
+      setSavingComputerPreference(false)
+    }
+  }
+
+  async function saveScreenshotsKept(count: number): Promise<void> {
+    const max_screenshots_kept = Math.max(1, Math.min(20, Math.round(count)))
+    const previous = computerPreference
+    const next = {
+      action_settle_delay_ms: computerPreference?.action_settle_delay_ms ?? 750,
+      max_screenshots_kept
+    }
+    setComputerPreference(next)
+    setSavingComputerPreference(true)
+    props.onError(null)
+    try {
+      setComputerPreference(await saveComputerUsePreference(next))
     } catch (cause) {
       setComputerPreference(previous)
       props.onError(errorText(cause))
@@ -1097,7 +1119,8 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
             disabled={!computerPreference || savingComputerPreference}
             onChange={(event) =>
               setComputerPreference({
-                action_settle_delay_ms: Number(event.target.value)
+                action_settle_delay_ms: Number(event.target.value),
+                max_screenshots_kept: computerPreference?.max_screenshots_kept ?? 3
               })
             }
             onBlur={(event) => void saveActionSettleDelay(Number(event.target.value))}
@@ -1110,6 +1133,33 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
           <small>
             Wait after an input action before capturing the next screenshot. Explicit wait actions
             are not delayed again.
+          </small>
+        </label>
+        <label className="model-field" style={{ maxWidth: 360, marginBottom: 16 }}>
+          <span>Screenshots kept in history</span>
+          <input
+            type="number"
+            min={1}
+            max={20}
+            step={1}
+            value={computerPreference?.max_screenshots_kept ?? 3}
+            disabled={!computerPreference || savingComputerPreference}
+            onChange={(event) =>
+              setComputerPreference({
+                action_settle_delay_ms: computerPreference?.action_settle_delay_ms ?? 750,
+                max_screenshots_kept: Number(event.target.value)
+              })
+            }
+            onBlur={(event) => void saveScreenshotsKept(Number(event.target.value))}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.currentTarget.blur()
+              }
+            }}
+          />
+          <small>
+            How many recent screenshots the model can see on each step. Each costs roughly 1500
+            tokens of context; Fara is trained with 3.
           </small>
         </label>
         {permissions ? (
@@ -4815,18 +4865,55 @@ function WebSearchSection(props: SectionProps): React.JSX.Element {
 /** Configure Brazier's own OpenAI-compatible daemon without exposing secrets to React state. */
 function ServerSection(props: SectionProps): React.JSX.Element {
   const [settings, setSettings] = useState<Awaited<ReturnType<typeof window.brazier.getServerSettings>> | null>(null)
-  const [apiKey, setApiKey] = useState('')
+  const [keyName, setKeyName] = useState('')
+  const [revealed, setRevealed] = useState<{ id: string; name: string; value: string } | null>(null)
+  const [copied, setCopied] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [adding, setAdding] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     void window.brazier.getServerSettings().then(setSettings).catch((cause) => props.onError(errorText(cause)))
+    return () => {
+      if (revealTimer.current) clearTimeout(revealTimer.current)
+    }
   }, [])
 
-  async function generateKey(): Promise<void> {
+  function reveal(key: { id: string; name: string; value: string }): void {
+    if (revealTimer.current) clearTimeout(revealTimer.current)
+    setRevealed(key)
+    setCopied(false)
+    // The full key is never stored in React state beyond this brief window.
+    // Auto-dismiss keeps it from lingering on screen for shoulder surfers.
+    revealTimer.current = setTimeout(() => setRevealed(null), 30_000)
+  }
+
+  async function copyKey(value: string): Promise<void> {
+    await window.brazier.copyText(value)
+    setCopied(true)
+  }
+
+  async function addKey(): Promise<void> {
+    setAdding(true)
+    props.onError(null)
     try {
-      setApiKey(await window.brazier.generateServerApiKey())
-      setNotice('New key generated. Save settings to use it after restart.')
+      const key = await window.brazier.addServerApiKey(keyName)
+      setKeyName('')
+      if (settings) setSettings({ ...settings, hasApiKeys: true, keys: [...settings.keys, { id: key.id, name: key.name, createdAt: key.createdAt }] })
+      reveal(key)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  async function removeKey(id: string): Promise<void> {
+    props.onError(null)
+    try {
+      setSettings(await window.brazier.removeServerApiKey(id))
+      if (revealed?.id === id) setRevealed(null)
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -4841,11 +4928,10 @@ function ServerSection(props: SectionProps): React.JSX.Element {
         enabled: settings.enabled,
         port: settings.port,
         apiKeyEnabled: settings.apiKeyEnabled,
-        jitLoading: settings.jitLoading,
-        ...(apiKey ? { apiKey } : {})
+        localhostOnly: settings.localhostOnly,
+        jitLoading: settings.jitLoading
       })
       setSettings(saved)
-      setApiKey('')
       setNotice('Saved. Restart Brazier to apply server exposure, port, authentication, or JIT changes.')
     } catch (cause) {
       props.onError(errorText(cause))
@@ -4855,6 +4941,12 @@ function ServerSection(props: SectionProps): React.JSX.Element {
   }
 
   if (!settings) return <section><div className="manage-placeholder"><LoaderCircle className="spin" size={16} />Loading server settings…</div></section>
+
+  const baseUrl = settings.enabled
+    ? `http://${settings.localhostOnly ? '127.0.0.1' : '<this-machine>'}:${settings.port}/v1`
+    : 'Private to Brazier desktop'
+  const keysMissing = settings.enabled && settings.apiKeyEnabled && settings.keys.length === 0
+  const saveDisabled = saving || keysMissing
 
   return (
     <section>
@@ -4866,21 +4958,55 @@ function ServerSection(props: SectionProps): React.JSX.Element {
         <div className="section-label">Network access</div>
         <label className="settings-toggle">
           <input type="checkbox" checked={settings.enabled} onChange={(event) => setSettings({ ...settings, enabled: event.target.checked })} />
-          <span>Enable network server<small>Off keeps the daemon private to this desktop app. On listens on every local network interface.</small></span>
+          <span>Enable network server<small>Off keeps the daemon private to this desktop app. On serves the OpenAI-compatible API on the configured port.</small></span>
+        </label>
+        <label className="settings-toggle">
+          <input type="checkbox" checked={settings.localhostOnly} disabled={!settings.enabled} onChange={(event) => setSettings({ ...settings, localhostOnly: event.target.checked })} />
+          <span>Listen on localhost only<small>On accepts connections only from this machine (127.0.0.1) — nothing else on your network can reach the server. Off listens on every local network interface.</small></span>
         </label>
         <div className="settings-grid">
           <label><span>Port</span><input type="number" min={1} max={65535} disabled={!settings.enabled} value={settings.port} onChange={(event) => setSettings({ ...settings, port: Number(event.target.value) })} /></label>
-          <label><span>Base URL</span><input readOnly value={settings.enabled ? `http://<this-machine>:${settings.port}/v1` : 'Private to Brazier desktop'} /></label>
+          <label><span>Base URL</span><input readOnly value={baseUrl} /></label>
         </div>
       </div>
       <div className="settings-group">
         <div className="section-label">Authentication</div>
         <label className="settings-toggle">
           <input type="checkbox" checked={settings.apiKeyEnabled} disabled={!settings.enabled} onChange={(event) => setSettings({ ...settings, apiKeyEnabled: event.target.checked })} />
-          <span>Require API key<small>{settings.hasApiKey ? 'A key is stored securely in the desktop configuration.' : 'Generate or enter a key before enabling the server.'}</small></span>
+          <span>Require API key<small>Every named key below is accepted. Keys are stored securely and shown in full only once, right after you create them.</small></span>
         </label>
-        {settings.apiKeyEnabled && <><label className="setting-row"><span>API key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={settings.hasApiKey ? 'Stored — enter a replacement to rotate' : 'Required'} autoComplete="off" /></label><div className="runtime-actions"><button className="chip-button" onClick={() => void generateKey()}>Generate key</button></div></>}
-        {!settings.apiKeyEnabled && settings.enabled && <p className="settings-warning">Anyone on your network can call Brazier, including agent and management APIs. Keep this off only on an isolated, trusted network.</p>}
+        {settings.keys.length > 0 && (
+          <div className="server-key-list">
+            {settings.keys.map((key) => (
+              <div className="server-key-row" key={key.id}>
+                <span className="server-key-name">{key.name || 'Unnamed key'}</span>
+                <span className="server-key-meta">Created {new Date(key.createdAt).toLocaleDateString()}</span>
+                <button className="chip-button subtle" onClick={() => void removeKey(key.id)} title="Revoke this key" disabled={!settings.apiKeyEnabled}>
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="server-key-add">
+          <label className="setting-row"><span>New key name</span><input type="text" value={keyName} placeholder="e.g. VS Code extension" maxLength={60} disabled={!settings.enabled || !settings.apiKeyEnabled} onChange={(event) => setKeyName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void addKey() }} /></label>
+          <div className="runtime-actions"><button className="chip-button" onClick={() => void addKey()} disabled={!settings.enabled || !settings.apiKeyEnabled || adding}>{adding ? <LoaderCircle className="spin" size={13} /> : <KeyRound size={13} />}Generate key</button></div>
+        </div>
+        {revealed && (
+          <div className="server-key-reveal">
+            <div className="server-key-reveal-head">
+              <strong>Key “{revealed.name}” — shown only once</strong>
+              <span>It disappears automatically; copy it before then.</span>
+            </div>
+            <code>{revealed.value}</code>
+            <div className="runtime-actions">
+              <button className="chip-button" onClick={() => void copyKey(revealed.value)}>{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? 'Copied' : 'Copy key'}</button>
+              <button className="chip-button subtle" onClick={() => setRevealed(null)}>Hide</button>
+            </div>
+          </div>
+        )}
+        {!settings.apiKeyEnabled && settings.enabled && <p className="settings-warning">Anyone who can reach this server can call Brazier, including agent and management APIs. Keep this off only on an isolated, trusted network.</p>}
+        {keysMissing && <p className="settings-warning">Add at least one API key before enabling the server with authentication.</p>}
       </div>
       <div className="settings-group">
         <div className="section-label">Model loading</div>
@@ -4890,7 +5016,7 @@ function ServerSection(props: SectionProps): React.JSX.Element {
         </label>
       </div>
       {notice && <p className="model-help">{notice}</p>}
-      <div className="runtime-actions"><button className="primary-action" disabled={saving || (settings.apiKeyEnabled && settings.enabled && !settings.hasApiKey && !apiKey)} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={15} /> : 'Save server settings'}</button></div>
+      <div className="runtime-actions"><button className="primary-action" disabled={saveDisabled} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={15} /> : 'Save server settings'}</button></div>
     </section>
   )
 }

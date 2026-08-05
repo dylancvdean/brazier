@@ -309,4 +309,18 @@ mod tests {
             ComputerAction::LeftClick { x: 120.0, y: 240.0 }
         );
     }
+
+    #[test]
+    fn parses_pause_and_memorize_fact() {
+        let text = r#"<tool_call>
+{"name":"computer_use","arguments":{"action":"pause_and_memorize_fact","fact":"The account is #88321"}}
+</tool_call>"#;
+        let parsed = parse_fara_output(text).unwrap();
+        assert_eq!(
+            parsed.actions[0],
+            ComputerAction::Memorize {
+                fact: "The account is #88321".into()
+            }
+        );
+    }
 }
