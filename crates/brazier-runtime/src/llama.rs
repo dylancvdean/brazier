@@ -443,6 +443,34 @@ pub fn discover_binary(data_dir: &Path, path_env: Option<&str>) -> Option<PathBu
         .find(|path| path.is_file())
 }
 
+/// Managed llama.cpp targets upstream publishes a prebuilt for on this
+/// platform, in preference order.
+///
+/// Upstream ships no CUDA or ROCm build for ARM64 Linux — only CPU and Vulkan
+/// (`ubuntu-vulkan-arm64`) — so an NVIDIA ARM64 machine like the DGX Spark has
+/// no managed CUDA install even though CUDA is its best runtime. Auto placement
+/// walks this list so a fresh machine degrades to an installable target instead
+/// of failing chat's first launch.
+pub fn managed_targets_for_platform() -> &'static [RuntimeTarget] {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => &[
+            RuntimeTarget::Cuda,
+            RuntimeTarget::Rocm,
+            RuntimeTarget::Vulkan,
+            RuntimeTarget::Cpu,
+        ],
+        ("linux", "aarch64") => &[RuntimeTarget::Vulkan, RuntimeTarget::Cpu],
+        ("macos", _) => &[RuntimeTarget::Cpu],
+        ("windows", "x86_64") => &[
+            RuntimeTarget::Cuda,
+            RuntimeTarget::Vulkan,
+            RuntimeTarget::Cpu,
+        ],
+        ("windows", "aarch64") => &[RuntimeTarget::Cpu],
+        _ => &[],
+    }
+}
+
 /// Which sampler names the endpoint on the other end understands.
 ///
 /// llama.cpp exposes a much larger sampler set than OpenAI describes, and MLX a
@@ -1495,8 +1523,10 @@ pub async fn ensure_binary_with_progress(
     force: bool,
     mut progress: ProgressCallback,
 ) -> anyhow::Result<PathBuf> {
-    let target = if target == RuntimeTarget::Auto {
-        crate::hardware::detect().recommended_target
+    let auto = target == RuntimeTarget::Auto;
+    let hardware = crate::hardware::detect();
+    let target = if auto {
+        hardware.recommended_target
     } else {
         target
     };
@@ -1536,7 +1566,61 @@ pub async fn ensure_binary_with_progress(
             );
         }
     }
-    install_managed_binary_with_progress(client, data_dir, target, progress).await
+
+    // Auto placement has to install *something* this platform publishes. The
+    // recommended target (CUDA on an NVIDIA machine) has no managed prebuilt on
+    // some platforms — ARM64 Linux, for example — so walk the platform's
+    // managed set rather than failing the first launch. An explicitly requested
+    // target keeps its single install attempt.
+    let attempts: Vec<RuntimeTarget> = if auto {
+        let supported = managed_targets_for_platform();
+        // A Vulkan build with no Vulkan loader cannot reach a device; skip it
+        // rather than installing something that only fails at model load.
+        let vulkan_ready = supported.contains(&RuntimeTarget::Vulkan)
+            && hardware
+                .targets
+                .iter()
+                .any(|t| t.id == RuntimeTarget::Vulkan && t.available);
+        let supported: Vec<RuntimeTarget> = supported
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != RuntimeTarget::Vulkan || vulkan_ready)
+            .collect();
+        if supported.contains(&target) {
+            std::iter::once(target)
+                .chain(
+                    supported
+                        .into_iter()
+                        .filter(|candidate| *candidate != target),
+                )
+                .collect()
+        } else {
+            supported
+        }
+    } else {
+        vec![target]
+    };
+    // The callback is one owner shared across install attempts; each attempt
+    // forwards through it so the caller still sees one progress stream.
+    let shared = Arc::new(StdMutex::new(progress));
+    let mut last_error: Option<anyhow::Error> = None;
+    for candidate in attempts {
+        let callback = {
+            let shared = Arc::clone(&shared);
+            Box::new(move |event| {
+                if let Ok(mut progress) = shared.lock() {
+                    progress(event);
+                }
+            })
+        };
+        match install_managed_binary_with_progress(client, data_dir, candidate, callback).await {
+            Ok(path) => return Ok(path),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        anyhow::anyhow!("no managed llama.cpp build is available for this platform")
+    }))
 }
 
 /// Running llama-server child process bound to a loopback port.
@@ -2540,6 +2624,67 @@ mod tests {
         );
     }
 
+    /// Upstream publishes a Vulkan prebuilt for ARM64 Linux but no CUDA one, so
+    /// an NVIDIA ARM64 machine (the DGX Spark) can managed-install Vulkan and
+    /// CPU only — which is exactly what the Auto fallback relies on.
+    #[test]
+    fn arm64_linux_selects_vulkan_but_never_cuda() {
+        let assets = [
+            "llama-b10289-bin-ubuntu-arm64.tar.gz",
+            "llama-b10289-bin-ubuntu-vulkan-arm64.tar.gz",
+        ];
+        assert_eq!(
+            select_release_asset_for_target(
+                assets.iter().copied(),
+                "ubuntu-arm64",
+                RuntimeTarget::Vulkan
+            ),
+            Some("llama-b10289-bin-ubuntu-vulkan-arm64.tar.gz")
+        );
+        assert_eq!(
+            select_release_asset_for_target(
+                assets.iter().copied(),
+                "ubuntu-arm64",
+                RuntimeTarget::Cuda
+            ),
+            None
+        );
+        assert_eq!(
+            select_release_asset_for_target(
+                assets.iter().copied(),
+                "ubuntu-arm64",
+                RuntimeTarget::Rocm
+            ),
+            None
+        );
+        assert_eq!(
+            select_release_asset_for_target(
+                assets.iter().copied(),
+                "ubuntu-arm64",
+                RuntimeTarget::Cpu
+            ),
+            Some("llama-b10289-bin-ubuntu-arm64.tar.gz")
+        );
+    }
+
+    #[test]
+    fn managed_targets_are_ordered_by_preference_and_gate_by_platform() {
+        // The set is compile-time from std::env::consts, so assert the shape
+        // that holds on every Linux host: accelerated x86_64 set, and on ARM64
+        // no CUDA/ROCm prebuilt exists upstream.
+        let list = managed_targets_for_platform();
+        assert!(list.contains(&RuntimeTarget::Cpu));
+        if std::env::consts::ARCH == "x86_64" && std::env::consts::OS == "linux" {
+            assert!(list.contains(&RuntimeTarget::Cuda));
+            assert!(list.contains(&RuntimeTarget::Rocm));
+        }
+        if std::env::consts::ARCH == "aarch64" && std::env::consts::OS == "linux" {
+            assert!(!list.contains(&RuntimeTarget::Cuda));
+            assert!(!list.contains(&RuntimeTarget::Rocm));
+            assert!(list.contains(&RuntimeTarget::Vulkan));
+        }
+    }
+
     #[test]
     fn discovery_prefers_managed_path_first() {
         let data = PathBuf::from("/tmp/brazier-data");
@@ -3115,6 +3260,7 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
             gpu: Some("integrated GPU".into()),
             gpu_arch: None,
             amd_apu: true,
+            intel_igpu: false,
             targets: Vec::new(),
             recommended_target: RuntimeTarget::Vulkan,
         };
@@ -3142,6 +3288,7 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
             gpu_offload_memory_bytes: Some(16 * 1024 * 1024 * 1024),
             usable_model_memory_bytes: Some(16 * 1024 * 1024 * 1024),
             amd_apu: false,
+            intel_igpu: false,
             ..integrated
         };
         assert_eq!(

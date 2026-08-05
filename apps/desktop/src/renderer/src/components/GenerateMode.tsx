@@ -20,8 +20,8 @@ import {
   type StoredBlob
 } from '../api'
 import {
-  AMD_APU_VIDEO_DEFAULTS,
-  usesAmdApuVulkanDefaults
+  INTEGRATED_GPU_VIDEO_DEFAULTS,
+  usesIntegratedGpuVulkanDefaults
 } from '../runtime-defaults'
 import type { GenerateHistoryEntry } from './GenerateHistorySidebar'
 
@@ -200,7 +200,7 @@ export function GenerateMode(props: Props) {
 
   const available = props.models
   const selected = props.modelId
-  const useApuDefaults = usesAmdApuVulkanDefaults(props.settings, props.hardware)
+  const useIntegratedDefaults = usesIntegratedGpuVulkanDefaults(props.settings, props.hardware)
   const selectedBundle = bundlesByModel[selected]
   const conditioning = selectedBundle?.conditioning ?? null
 
@@ -291,23 +291,23 @@ export function GenerateMode(props: Props) {
     const curated = defaultsByModel[selected]
     const configured = configuredByModel[selected]
     if (!curated && !configured) return
-    const apuWidth = modality === 'video' ? AMD_APU_VIDEO_DEFAULTS.width : 512
-    const apuHeight = modality === 'video' ? AMD_APU_VIDEO_DEFAULTS.height : 512
+    const apuWidth = modality === 'video' ? INTEGRATED_GPU_VIDEO_DEFAULTS.width : 512
+    const apuHeight = modality === 'video' ? INTEGRATED_GPU_VIDEO_DEFAULTS.height : 512
     const width =
       configured?.width ??
-      (useApuDefaults ? Math.min(curated?.width ?? apuWidth, apuWidth) : curated?.width)
+      (useIntegratedDefaults ? Math.min(curated?.width ?? apuWidth, apuWidth) : curated?.width)
     const height =
       configured?.height ??
-      (useApuDefaults ? Math.min(curated?.height ?? apuHeight, apuHeight) : curated?.height)
+      (useIntegratedDefaults ? Math.min(curated?.height ?? apuHeight, apuHeight) : curated?.height)
     const steps = configured?.steps ?? curated?.steps
     const cfg = configured?.cfg_scale ?? curated?.cfg_scale
     const guidance = configured?.guidance ?? curated?.guidance
     const frames =
       configured?.video_frames ??
-      (useApuDefaults && modality === 'video'
+      (useIntegratedDefaults && modality === 'video'
         ? Math.min(
-            curated?.video_frames ?? AMD_APU_VIDEO_DEFAULTS.frames,
-            AMD_APU_VIDEO_DEFAULTS.frames
+            curated?.video_frames ?? INTEGRATED_GPU_VIDEO_DEFAULTS.frames,
+            INTEGRATED_GPU_VIDEO_DEFAULTS.frames
           )
         : curated?.video_frames)
     const fps = configured?.fps ?? curated?.fps
@@ -318,7 +318,7 @@ export function GenerateMode(props: Props) {
     setGuidance(guidance != null ? String(guidance) : '')
     if (frames) setFrames(frames)
     if (fps) setFps(fps)
-  }, [selected, modality, defaultsByModel, configuredByModel, useApuDefaults])
+  }, [selected, modality, defaultsByModel, configuredByModel, useIntegratedDefaults])
 
   async function onSubmit(event: FormEvent): Promise<void> {
     event.preventDefault()

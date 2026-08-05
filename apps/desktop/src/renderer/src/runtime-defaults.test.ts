@@ -1,32 +1,42 @@
 import { describe, expect, it } from 'vitest'
 
 import type { HardwareInfo, RuntimeSettings } from './api'
-import { usesAmdApuVulkanDefaults } from './runtime-defaults'
+import { usesIntegratedGpuVulkanDefaults } from './runtime-defaults'
 
 const hardware = {
   amd_apu: true,
+  intel_igpu: false,
   recommended_target: 'vulkan'
 } as HardwareInfo
 
-describe('usesAmdApuVulkanDefaults', () => {
+describe('usesIntegratedGpuVulkanDefaults', () => {
   it('enables the policy for explicit and automatically selected Vulkan', () => {
     expect(
-      usesAmdApuVulkanDefaults({ target: 'vulkan' } as RuntimeSettings, hardware)
+      usesIntegratedGpuVulkanDefaults({ target: 'vulkan' } as RuntimeSettings, hardware)
     ).toBe(true)
     expect(
-      usesAmdApuVulkanDefaults({ target: 'auto' } as RuntimeSettings, hardware)
+      usesIntegratedGpuVulkanDefaults({ target: 'auto' } as RuntimeSettings, hardware)
+    ).toBe(true)
+  })
+
+  it('covers an Intel iGPU as well as an AMD APU', () => {
+    expect(
+      usesIntegratedGpuVulkanDefaults(
+        { target: 'auto' } as RuntimeSettings,
+        { ...hardware, amd_apu: false, intel_igpu: true }
+      )
     ).toBe(true)
   })
 
   it('does not affect discrete GPUs or non-Vulkan runtimes', () => {
     expect(
-      usesAmdApuVulkanDefaults(
+      usesIntegratedGpuVulkanDefaults(
         { target: 'vulkan' } as RuntimeSettings,
-        { ...hardware, amd_apu: false }
+        { ...hardware, amd_apu: false, intel_igpu: false }
       )
     ).toBe(false)
     expect(
-      usesAmdApuVulkanDefaults({ target: 'cpu' } as RuntimeSettings, hardware)
+      usesIntegratedGpuVulkanDefaults({ target: 'cpu' } as RuntimeSettings, hardware)
     ).toBe(false)
   })
 })

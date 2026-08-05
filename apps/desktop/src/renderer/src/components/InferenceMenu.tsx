@@ -11,8 +11,8 @@ import {
 } from '../api'
 import { modelEngine, modelKindFor } from '../model-utils'
 import {
-  AMD_APU_VIDEO_DEFAULTS,
-  usesAmdApuVulkanDefaults
+  INTEGRATED_GPU_VIDEO_DEFAULTS,
+  usesIntegratedGpuVulkanDefaults
 } from '../runtime-defaults'
 import { ModelSettingsFields, emptyProfile } from './ModelSettingsFields'
 
@@ -156,7 +156,7 @@ export function InferenceMenu({
   const advancedModel = advancedModelId ?? selectedModel
   const advancedEntry = models.find((entry) => entry.id === advancedModel)
   const modelKind = advancedModel ? modelKindFor(advancedModel) : null
-  const useApuDefaults = usesAmdApuVulkanDefaults(draft, hardware)
+  const useIntegratedDefaults = usesIntegratedGpuVulkanDefaults(draft, hardware)
   const storedProfile = useMemo(
     () => profile ?? (modelKind ? emptyProfile(modelKind) : null),
     [profile, modelKind]
@@ -405,27 +405,27 @@ export function InferenceMenu({
                         kvCacheTypeV: draft.kv_cache_type_v,
                         maxTokens: draft.max_tokens,
                         diffusionWidth:
-                          useApuDefaults && modelKind === 'video'
-                            ? AMD_APU_VIDEO_DEFAULTS.width
+                          useIntegratedDefaults && modelKind === 'video'
+                            ? INTEGRATED_GPU_VIDEO_DEFAULTS.width
                             : 512,
                         diffusionHeight:
-                          useApuDefaults && modelKind === 'video'
-                            ? AMD_APU_VIDEO_DEFAULTS.height
+                          useIntegratedDefaults && modelKind === 'video'
+                            ? INTEGRATED_GPU_VIDEO_DEFAULTS.height
                             : 512,
-                        videoFrames: useApuDefaults
-                          ? AMD_APU_VIDEO_DEFAULTS.frames
+                        videoFrames: useIntegratedDefaults
+                          ? INTEGRATED_GPU_VIDEO_DEFAULTS.frames
                           : 16,
-                        vaeTiling: useApuDefaults,
-                        clipOnCpu: useApuDefaults && modelKind === 'image',
+                        vaeTiling: useIntegratedDefaults,
+                        clipOnCpu: useIntegratedDefaults && modelKind === 'image',
                         diffusionFa: true,
-                        autoFit: !useApuDefaults,
+                        autoFit: !useIntegratedDefaults,
                         maxVram:
-                          useApuDefaults && modelKind === 'video'
-                            ? AMD_APU_VIDEO_DEFAULTS.maxVram
+                          useIntegratedDefaults && modelKind === 'video'
+                            ? INTEGRATED_GPU_VIDEO_DEFAULTS.maxVram
                             : undefined,
                         paramsBackend:
-                          useApuDefaults && modelKind === 'video' ? 'cpu' : undefined,
-                        streamLayers: useApuDefaults && modelKind === 'video',
+                          useIntegratedDefaults && modelKind === 'video' ? 'cpu' : undefined,
+                        streamLayers: useIntegratedDefaults && modelKind === 'video',
                         offloadToCpu: false
                       }}
                       onChange={setProfileDraft}

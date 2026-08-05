@@ -299,9 +299,16 @@ function generationFit(
   }
   // A detected discrete GPU with no readable VRAM must not be reported as a
   // green system-memory fit. That would hide the actual GPU constraint.
-  // Apple Silicon intentionally has no separate VRAM figure: its GPU uses
-  // unified memory, which is the correct budget to assess here.
-  if (hardware.os !== 'macos' && hardware.gpu && !hardware.amd_apu) return 'unknown'
+  // Apple Silicon and integrated GPUs (AMD APU, Intel iGPU) intentionally have
+  // no separate VRAM figure: their GPU uses unified memory, which is the
+  // correct budget to assess here.
+  if (
+    hardware.os !== 'macos' &&
+    hardware.gpu &&
+    !hardware.amd_apu &&
+    !hardware.intel_igpu
+  )
+    return 'unknown'
   if (system != null && bytes <= system * 0.6) return 'system'
   return system == null ? 'unknown' : 'none'
 }

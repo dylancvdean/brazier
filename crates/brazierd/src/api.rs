@@ -2840,7 +2840,13 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
     let swaps = recommendations::pending_swaps(&catalog, &recorded, tier);
     Ok(Json(json!({
         "memory_bytes": memory,
-        "memory_source": if hardware.gpu_offload_memory_bytes.or(hardware.vram_bytes).is_some() { "vram" } else { "system" },
+        "memory_source": if hardware.integrated_gpu() {
+            "system"
+        } else if hardware.gpu_offload_memory_bytes.or(hardware.vram_bytes).is_some() {
+            "vram"
+        } else {
+            "system"
+        },
         "tier_gb": tier.min_gb,
         "categories": categories,
         "agent_options": agent_options,

@@ -51,9 +51,9 @@ const GITHUB_API: &str =
 const USER_AGENT: &str = "brazier-sdcpp-manager";
 
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(3600);
-const AMD_APU_VIDEO_WIDTH: u32 = 512;
-const AMD_APU_VIDEO_HEIGHT: u32 = 320;
-const AMD_APU_VIDEO_FRAMES: u32 = 17;
+const INTEGRATED_GPU_VIDEO_WIDTH: u32 = 512;
+const INTEGRATED_GPU_VIDEO_HEIGHT: u32 = 320;
+const INTEGRATED_GPU_VIDEO_FRAMES: u32 = 17;
 /// Floor for a video job, covering model load plus a short clip.
 const VIDEO_TIMEOUT_BASE: Duration = Duration::from_secs(1800);
 /// Added per frame-step, so long clips are not cut off mid-render.
@@ -1324,14 +1324,15 @@ fn merge_negative_prompt(
     }
 }
 
-/// Conservative sd.cpp defaults for a Vulkan AMD APU.
+/// Conservative sd.cpp defaults for a Vulkan integrated GPU (an AMD APU or an
+/// Intel iGPU).
 ///
-/// RADV exposes an APU as a unified-memory Vulkan device, but sd.cpp otherwise
-/// places every model component on it. Large text encoders can then make the
-/// compute context reset with `VK_ERROR_DEVICE_LOST`. Keep those encoders in
-/// host memory and reduce peak attention/VAE allocations. A model profile can
-/// explicitly override every value here.
-fn with_amd_apu_vulkan_defaults(
+/// RADV/ANV expose an integrated GPU as a unified-memory Vulkan device, but
+/// sd.cpp otherwise places every model component on it. Large text encoders can
+/// then make the compute context reset with `VK_ERROR_DEVICE_LOST`. Keep those
+/// encoders in host memory and reduce peak attention/VAE allocations. A model
+/// profile can explicitly override every value here.
+fn with_integrated_gpu_vulkan_defaults(
     profile: Option<&DiffusionProfile>,
     enabled: bool,
     modality: Modality,
@@ -1343,12 +1344,14 @@ fn with_amd_apu_vulkan_defaults(
     let mut profile = profile.cloned().unwrap_or_default();
     let (width, height) = match modality {
         Modality::Image => (FALLBACK_WIDTH, FALLBACK_HEIGHT),
-        Modality::Video => (AMD_APU_VIDEO_WIDTH, AMD_APU_VIDEO_HEIGHT),
+        Modality::Video => (INTEGRATED_GPU_VIDEO_WIDTH, INTEGRATED_GPU_VIDEO_HEIGHT),
     };
     profile.width.get_or_insert(width);
     profile.height.get_or_insert(height);
     if modality == Modality::Video {
-        profile.video_frames.get_or_insert(AMD_APU_VIDEO_FRAMES);
+        profile
+            .video_frames
+            .get_or_insert(INTEGRATED_GPU_VIDEO_FRAMES);
     }
     profile.vae_tiling.get_or_insert(true);
     profile
@@ -1501,9 +1504,11 @@ fn effective_diffusion_profile(
     } else {
         configured_target
     };
-    let enabled = hardware.amd_apu && effective_target == RuntimeTarget::Vulkan;
+    let enabled = hardware.integrated_gpu() && effective_target == RuntimeTarget::Vulkan;
     if enabled {
-        tracing::info!("applying Vulkan AMD APU defaults to stable-diffusion.cpp generation");
+        tracing::info!(
+            "applying Vulkan integrated-GPU defaults to stable-diffusion.cpp generation"
+        );
     }
     let profile = with_bundle_defaults(data_dir, model_id, profile).or_else(|| profile.cloned());
     let profile = with_component_placement_defaults(
@@ -1511,7 +1516,7 @@ fn effective_diffusion_profile(
         hardware.gpu_offload_memory_bytes,
         installed_memory_plan(data_dir, model_id),
     );
-    let profile = with_amd_apu_vulkan_defaults(profile.as_ref(), enabled, modality);
+    let profile = with_integrated_gpu_vulkan_defaults(profile.as_ref(), enabled, modality);
     let profile = with_performance_defaults(profile.as_ref(), enabled);
     with_accelerator_memory_budget(
         profile.as_ref(),
@@ -1527,19 +1532,20 @@ fn effective_diffusion_profile(
 /// Flash attention (`--diffusion-fa`) lowers attention memory and speeds up
 /// the denoiser on every backend, and automatic placement (`--auto-fit`) lets
 /// sd.cpp choose phase-aware device budgets instead of guessing. The one
-/// exception is a Vulkan AMD APU, where upstream auto-fit currently skips
-/// integrated devices, so it stays off there (and the APU defaults cover it).
+/// exception is a Vulkan integrated GPU (AMD APU or Intel iGPU), where upstream
+/// auto-fit currently skips integrated devices, so it stays off there (and the
+/// integrated-GPU defaults cover it).
 fn with_performance_defaults(
     profile: Option<&DiffusionProfile>,
-    apu_vulkan: bool,
+    integrated_vulkan: bool,
 ) -> Option<DiffusionProfile> {
     let mut profile = profile.cloned().unwrap_or_default();
     profile.diffusion_fa.get_or_insert(true);
-    profile.auto_fit.get_or_insert(!apu_vulkan);
+    profile.auto_fit.get_or_insert(!integrated_vulkan);
     Some(profile)
 }
 
-/// Apply a model-size-aware sd.cpp memory cap on Vulkan AMD APUs. Unlike
+/// Apply a model-size-aware sd.cpp memory cap on Vulkan integrated GPUs. Unlike
 /// llama.cpp, sd.cpp has no layer-count control: `--max-vram` is its placement
 /// budget and it streams graph parameters as needed. The user can always
 /// override this value in the model settings.
@@ -2432,8 +2438,8 @@ mod tests {
     }
 
     #[test]
-    fn vulkan_amd_apu_defaults_cover_image_and_video_flags() {
-        let image = with_amd_apu_vulkan_defaults(None, true, Modality::Image).unwrap();
+    fn vulkan_integrated_gpu_defaults_cover_image_and_video_flags() {
+        let image = with_integrated_gpu_vulkan_defaults(None, true, Modality::Image).unwrap();
         assert_eq!(image.width, Some(512));
         assert_eq!(image.height, Some(512));
         assert_eq!(image.vae_tiling, Some(true));
@@ -2445,10 +2451,10 @@ mod tests {
         assert_eq!(image.stream_layers, None);
         assert_eq!(image.offload_to_cpu, Some(false));
 
-        let video = with_amd_apu_vulkan_defaults(None, true, Modality::Video).unwrap();
-        assert_eq!(video.width, Some(AMD_APU_VIDEO_WIDTH));
-        assert_eq!(video.height, Some(AMD_APU_VIDEO_HEIGHT));
-        assert_eq!(video.video_frames, Some(AMD_APU_VIDEO_FRAMES));
+        let video = with_integrated_gpu_vulkan_defaults(None, true, Modality::Video).unwrap();
+        assert_eq!(video.width, Some(INTEGRATED_GPU_VIDEO_WIDTH));
+        assert_eq!(video.height, Some(INTEGRATED_GPU_VIDEO_HEIGHT));
+        assert_eq!(video.video_frames, Some(INTEGRATED_GPU_VIDEO_FRAMES));
         assert_eq!(video.auto_fit, Some(false));
         assert_eq!(video.max_vram, None);
         assert_eq!(video.params_backend.as_deref(), Some("cpu"));
@@ -2456,7 +2462,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_model_settings_override_vulkan_amd_apu_defaults() {
+    fn explicit_model_settings_override_vulkan_integrated_gpu_defaults() {
         let configured = DiffusionProfile {
             width: Some(768),
             vae_tiling: Some(false),
@@ -2470,7 +2476,7 @@ mod tests {
             ..DiffusionProfile::default()
         };
         let profile =
-            with_amd_apu_vulkan_defaults(Some(&configured), true, Modality::Image).unwrap();
+            with_integrated_gpu_vulkan_defaults(Some(&configured), true, Modality::Image).unwrap();
         assert_eq!(profile.width, Some(768));
         assert_eq!(profile.height, Some(512));
         assert_eq!(profile.vae_tiling, Some(false));
@@ -2483,7 +2489,7 @@ mod tests {
         assert_eq!(profile.offload_to_cpu, Some(true));
 
         assert_eq!(
-            with_amd_apu_vulkan_defaults(None, false, Modality::Video),
+            with_integrated_gpu_vulkan_defaults(None, false, Modality::Video),
             None
         );
     }
@@ -2496,7 +2502,7 @@ mod tests {
             ..DiffusionProfile::default()
         };
         let profile =
-            with_amd_apu_vulkan_defaults(Some(&configured), true, Modality::Video).unwrap();
+            with_integrated_gpu_vulkan_defaults(Some(&configured), true, Modality::Video).unwrap();
         assert_eq!(profile.clip_on_cpu, Some(true));
         assert_eq!(profile.offload_to_cpu, Some(false));
         assert_eq!(profile.auto_fit, Some(false));
@@ -2528,7 +2534,7 @@ mod tests {
         assert_eq!(defaults.diffusion_fa, Some(true));
         assert_eq!(defaults.auto_fit, Some(true));
 
-        // A Vulkan AMD APU keeps auto-fit off: upstream skips integrated devices.
+        // A Vulkan integrated GPU keeps auto-fit off: upstream skips integrated devices.
         let apu = with_performance_defaults(None, true).unwrap();
         assert_eq!(apu.diffusion_fa, Some(true));
         assert_eq!(apu.auto_fit, Some(false));
@@ -2552,7 +2558,7 @@ mod tests {
             ..DiffusionProfile::default()
         };
         let migrated =
-            with_amd_apu_vulkan_defaults(Some(&old_default), true, Modality::Video).unwrap();
+            with_integrated_gpu_vulkan_defaults(Some(&old_default), true, Modality::Video).unwrap();
         assert_eq!(migrated.params_backend.as_deref(), Some("cpu"));
         assert_eq!(migrated.stream_layers, Some(true));
 
@@ -2562,7 +2568,8 @@ mod tests {
             ..DiffusionProfile::default()
         };
         let preserved =
-            with_amd_apu_vulkan_defaults(Some(&explicit_disk), true, Modality::Video).unwrap();
+            with_integrated_gpu_vulkan_defaults(Some(&explicit_disk), true, Modality::Video)
+                .unwrap();
         assert_eq!(preserved.params_backend.as_deref(), Some("disk"));
         assert_eq!(preserved.stream_layers, Some(false));
     }

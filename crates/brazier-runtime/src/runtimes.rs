@@ -40,12 +40,13 @@ fn llama_managed_label(target: &str) -> String {
 fn default_llama_managed_label() -> String {
     // The macOS release bundle contains Metal support in the same install
     // location as the CPU fallback. Calling it "CPU" made a correctly
-    // installed Apple-Silicon runtime look like the wrong download.
-    #[cfg(target_os = "macos")]
+    // installed Apple-Silicon runtime look like the wrong download. The Metal
+    // backend is Apple Silicon-only; an Intel Mac gets the plain CPU build.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         llama_managed_label("metal")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     {
         llama_managed_label("cpu")
     }
@@ -224,7 +225,7 @@ pub fn list(
             kind: "managed".to_owned(),
             label: default_llama_managed_label(),
             target: Some(
-                if cfg!(target_os = "macos") {
+                if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
                     "metal"
                 } else {
                     "cpu"
@@ -327,14 +328,14 @@ pub fn list(
             // default install location alongside its CPU fallback.
             label: format!(
                 "stable-diffusion.cpp · {}",
-                if cfg!(target_os = "macos") {
+                if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
                     "Metal"
                 } else {
                     "CPU"
                 }
             ),
             target: Some(
-                if cfg!(target_os = "macos") {
+                if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
                     "metal"
                 } else {
                     "cpu"

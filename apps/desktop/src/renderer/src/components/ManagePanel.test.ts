@@ -139,6 +139,7 @@ describe('sortQuantGroups', () => {
     gpu: null,
     gpu_arch: null,
     amd_apu: false,
+    intel_igpu: false,
     recommended_target: 'cpu',
     targets: []
   } as unknown as HardwareInfo

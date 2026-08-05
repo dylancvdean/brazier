@@ -43,8 +43,23 @@ pub struct HardwareInfo {
     /// sd.cpp needs more conservative placement defaults on these devices than
     /// it does on a discrete Vulkan GPU.
     pub amd_apu: bool,
+    /// An Intel GPU without local memory, sharing system RAM the way an AMD APU
+    /// does. Intel integrated parts expose no VRAM or GTT aperture in sysfs, so
+    /// the shared system pool is their placement budget.
+    pub intel_igpu: bool,
     pub targets: Vec<RuntimeTargetInfo>,
     pub recommended_target: RuntimeTarget,
+}
+
+impl HardwareInfo {
+    /// Whether the machine's accelerator draws on shared system memory.
+    ///
+    /// A unified-memory device is not a hard placement limit: model weights
+    /// come out of the same RAM the OS and everything else use, so falling back
+    /// to system memory is legitimate rather than an over-recommendation.
+    pub fn integrated_gpu(&self) -> bool {
+        self.amd_apu || self.intel_igpu
+    }
 }
 
 /// One AMD GPU as the kernel describes it.
@@ -56,6 +71,12 @@ pub struct AmdGpu {
     /// covered by the ROCm builds and some discrete cards are not.
     pub integrated: bool,
 }
+
+/// A DRM VRAM figure below this is an integrated device's firmware carve-out,
+/// not a model-placement budget. An AMD APU or Intel iGPU that reports a small
+/// value is treated as unified memory; a multi-gigabyte value is decisive
+/// evidence of a discrete card even if KFD topology said otherwise.
+const MIN_DEDICATED_VRAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 fn command_exists(name: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
@@ -94,6 +115,41 @@ fn linux_gpu() -> (bool, bool, Option<String>) {
 #[cfg(not(target_os = "linux"))]
 fn linux_gpu() -> (bool, bool, Option<String>) {
     (false, false, None)
+}
+
+/// Whether an Intel GPU is present, and whether it is integrated.
+///
+/// Integrated Intel parts share system memory, so they get the same
+/// unified-memory treatment as AMD APUs. A discrete Arc card is told apart by
+/// its VRAM region: `mem_info_vram_total` reports a multi-gigabyte value on a
+/// discrete part, and is absent or a small stolen carve-out on an iGPU.
+#[cfg(target_os = "linux")]
+fn intel_gpu() -> Option<bool> {
+    let mut present = false;
+    let mut integrated = true;
+    if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let device = entry.path().join("device");
+            let vendor = std::fs::read_to_string(device.join("vendor")).unwrap_or_default();
+            if vendor.trim() != "0x8086" {
+                continue;
+            }
+            present = true;
+            let vram = std::fs::read_to_string(device.join("mem_info_vram_total"))
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            if vram >= MIN_DEDICATED_VRAM_BYTES {
+                integrated = false;
+            }
+        }
+    }
+    present.then_some(integrated)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn intel_gpu() -> Option<bool> {
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -244,6 +300,25 @@ fn run_first_line(program: &str, args: &[&str]) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Run a command and return every non-empty line of output.
+fn run_all_lines(program: &str, args: &[&str]) -> Option<Vec<String>> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    )
+}
+
 /// Dedicated video memory on a discrete GPU.
 ///
 /// Unified-memory machines deliberately report `None`: on Apple Silicon and on
@@ -254,20 +329,20 @@ fn run_first_line(program: &str, args: &[&str]) -> Option<String> {
 /// reports only a small firmware carveout. The caller decides whether a small
 /// value is meaningful after it has combined this result with KFD topology.
 fn vram_bytes() -> Option<u64> {
-    if let Some(line) = run_first_line(
+    if let Some(lines) = run_all_lines(
         "nvidia-smi",
-        &[
-            "--query-gpu=memory.total",
-            "--format=csv,noheader,nounits",
-            "-i",
-            "0",
-        ],
+        &["--query-gpu=memory.total", "--format=csv,noheader,nounits"],
     ) {
-        // nvidia-smi reports mebibytes.
-        if let Ok(mib) = line.trim().parse::<u64>()
-            && mib > 0
-        {
-            return Some(mib * 1024 * 1024);
+        // nvidia-smi reports mebibytes. The largest card wins, since that is
+        // the one a model would be loaded onto.
+        let mut best = 0_u64;
+        for line in lines {
+            if let Ok(mib) = line.trim().parse::<u64>() {
+                best = best.max(mib);
+            }
+        }
+        if best > 0 {
+            return Some(best * 1024 * 1024);
         }
     }
     #[cfg(target_os = "linux")]
@@ -339,7 +414,7 @@ pub fn usable_model_memory_bytes(vram: Option<u64>, system: Option<u64>) -> Opti
 /// memory instead.
 pub fn recommendation_memory_bytes(hardware: &HardwareInfo) -> Option<u64> {
     let accelerator = hardware.gpu_offload_memory_bytes.or(hardware.vram_bytes);
-    if hardware.os != "macos" && hardware.gpu.is_some() && !hardware.amd_apu {
+    if hardware.os != "macos" && hardware.gpu.is_some() && !hardware.integrated_gpu() {
         return accelerator;
     }
     accelerator.or(hardware.memory_bytes)
@@ -440,7 +515,8 @@ pub fn detect() -> HardwareInfo {
 
 fn detect_uncached() -> HardwareInfo {
     let (nvidia, amd, gpu_name) = gpu_capabilities();
-    let metal = cfg!(target_os = "macos");
+    // The Metal backend is Apple Silicon-only; an Intel Mac is a CPU machine.
+    let metal = cfg!(all(target_os = "macos", target_arch = "aarch64"));
     let vulkan = command_exists("vulkaninfo")
         || Path::new("/usr/lib/libvulkan.so").exists()
         || Path::new("/usr/lib64/libvulkan.so").exists()
@@ -448,17 +524,23 @@ fn detect_uncached() -> HardwareInfo {
             && Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists());
     let gpus = amd_gpus();
     let amd_apu_only = !gpus.is_empty() && gpus.iter().all(|gpu| gpu.integrated);
+    let intel = intel_gpu();
     let raw_vram = vram_bytes();
-    // An APU's small firmware carveout is not a model-placement budget. A
-    // multi-gigabyte DRM value, however, is decisive evidence of a discrete
-    // card even if KFD topology happened to report it as integrated.
-    const MIN_DEDICATED_VRAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-    let vram = if amd_apu_only && raw_vram.is_some_and(|bytes| bytes < MIN_DEDICATED_VRAM_BYTES) {
+    // An integrated device's small firmware carveout is not a model-placement
+    // budget. A multi-gigabyte DRM value, however, is decisive evidence of a
+    // discrete card even if KFD topology happened to report it as integrated.
+    let integrated_only = amd_apu_only || matches!(intel, Some(true));
+    let vram = if integrated_only && raw_vram.is_some_and(|bytes| bytes < MIN_DEDICATED_VRAM_BYTES)
+    {
         None
     } else {
         raw_vram
     };
     let amd_apu = amd_apu_only && vram.is_none();
+    // An Intel iGPU with no discrete VRAM anywhere draws on system memory, the
+    // same situation an AMD APU is in. A discrete Intel Arc (or any discrete
+    // card) leaves this false.
+    let intel_igpu = matches!(intel, Some(true)) && vram.is_none();
     let gfx_arches: Vec<String> = gpus.iter().map(|gpu| gpu.arch.clone()).collect();
     // Verified only against an installed ROCm build, which is the only thing
     // that knows which architectures it carries device code for. Until one is
@@ -485,6 +567,12 @@ fn detect_uncached() -> HardwareInfo {
         managed_install,
         detail: detail.to_owned(),
     };
+    // llama.cpp publishes managed prebuilts for these platform/target pairs.
+    // CUDA and ROCm are x86_64 Linux only; Vulkan also ships for ARM64 Linux.
+    let linux_managed_accelerated = cfg!(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ));
     let mut targets = vec![target(
         RuntimeTarget::Cpu,
         "CPU",
@@ -529,7 +617,7 @@ fn detect_uncached() -> HardwareInfo {
             RuntimeTarget::Vulkan,
             "Vulkan",
             vulkan,
-            cfg!(all(target_os = "linux", target_arch = "x86_64")),
+            linux_managed_accelerated,
             if vulkan {
                 "Vulkan loader detected"
             } else {
@@ -538,7 +626,18 @@ fn detect_uncached() -> HardwareInfo {
         ));
     }
     let system_memory = memory_bytes();
-    let gpu_offload_memory = vram.or_else(|| amd_apu.then(amd_gtt_bytes).flatten());
+    let gpu_offload_memory = vram.or_else(|| {
+        if amd_apu {
+            amd_gtt_bytes()
+        } else if intel_igpu {
+            // Intel exposes no GTT aperture in sysfs, so the shared system
+            // pool is the honest ceiling — the same figure unified-memory Macs
+            // draw on.
+            system_memory
+        } else {
+            None
+        }
+    });
     HardwareInfo {
         os: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
@@ -553,10 +652,12 @@ fn detect_uncached() -> HardwareInfo {
             nvidia
                 .then(|| "NVIDIA GPU".to_owned())
                 .or_else(|| amd.then(|| "AMD GPU".to_owned()))
+                .or_else(|| intel.is_some().then(|| "Intel GPU".to_owned()))
                 .or_else(|| metal.then(|| "Apple GPU".to_owned()))
         }),
         gpu_arch: (!gfx_arches.is_empty()).then(|| gfx_arches.join(", ")),
         amd_apu,
+        intel_igpu,
         targets,
         recommended_target,
     }
@@ -607,10 +708,63 @@ mod tests {
             gpu: Some("AMD GPU".into()),
             gpu_arch: None,
             amd_apu: false,
+            intel_igpu: false,
             targets: Vec::new(),
             recommended_target: RuntimeTarget::Vulkan,
         };
         assert_eq!(recommendation_memory_bytes(&hardware), None);
+    }
+
+    /// An Intel iGPU shares system memory the way an AMD APU does, so it is
+    /// treated as unified memory rather than as a discrete hard limit.
+    #[test]
+    fn an_intel_igpu_sizes_recommendations_against_system_memory() {
+        let hardware = HardwareInfo {
+            os: "linux",
+            architecture: "x86_64",
+            logical_cpus: 16,
+            memory_bytes: Some(32 * 1024 * 1024 * 1024),
+            vram_bytes: None,
+            gpu_offload_memory_bytes: Some(32 * 1024 * 1024 * 1024),
+            usable_model_memory_bytes: Some(32 * 1024 * 1024 * 1024),
+            gpu: Some("Intel GPU".into()),
+            gpu_arch: None,
+            amd_apu: false,
+            intel_igpu: true,
+            targets: Vec::new(),
+            recommended_target: RuntimeTarget::Vulkan,
+        };
+        assert!(hardware.integrated_gpu());
+        assert_eq!(
+            recommendation_memory_bytes(&hardware),
+            Some(32 * 1024 * 1024 * 1024)
+        );
+    }
+
+    /// A discrete Intel Arc is not unified memory: it has its own VRAM and is a
+    /// hard placement limit like any other discrete card.
+    #[test]
+    fn a_discrete_intel_card_is_not_unified_memory() {
+        let hardware = HardwareInfo {
+            os: "linux",
+            architecture: "x86_64",
+            logical_cpus: 16,
+            memory_bytes: Some(64 * 1024 * 1024 * 1024),
+            vram_bytes: Some(16 * 1024 * 1024 * 1024),
+            gpu_offload_memory_bytes: Some(16 * 1024 * 1024 * 1024),
+            usable_model_memory_bytes: Some(16 * 1024 * 1024 * 1024),
+            gpu: Some("Intel Arc".into()),
+            gpu_arch: None,
+            amd_apu: false,
+            intel_igpu: false,
+            targets: Vec::new(),
+            recommended_target: RuntimeTarget::Vulkan,
+        };
+        assert!(!hardware.integrated_gpu());
+        assert_eq!(
+            recommendation_memory_bytes(&hardware),
+            Some(16 * 1024 * 1024 * 1024)
+        );
     }
 
     #[test]
