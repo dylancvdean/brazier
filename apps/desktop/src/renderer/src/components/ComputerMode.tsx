@@ -2,8 +2,6 @@ import {
   Check,
   LoaderCircle,
   Monitor,
-  Plus,
-  Trash2,
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -43,11 +41,25 @@ import {
   type ComputerContinuation
 } from './computerHistory'
 
+/**
+ * Session list for the app sidebar while Computer Use is active. Replaces the
+ * conversation list so sessions live where chats normally do.
+ */
+export type ComputerSidebarControls = {
+  sessions: ComputerSession[]
+  activeId: string | null
+  select: (id: string) => void
+  remove: (id: string) => void
+  newSession: () => void
+}
+
 type Props = {
   modelId: string
   models: LocalModel[]
   onError: (message: string | null) => void
   onComposerChange?: (controls: AgentComposerControls | null) => void
+  /** Publish the session list for the app sidebar; null on unmount. */
+  onSidebarChange?: (controls: ComputerSidebarControls | null) => void
 }
 
 const MAX_LOOP_STEPS = 20
@@ -79,7 +91,7 @@ function errorText(cause: unknown): string {
 }
 
 export function ComputerMode(props: Props): React.JSX.Element {
-  const { modelId, models, onError, onComposerChange } = props
+  const { modelId, models, onError, onComposerChange, onSidebarChange } = props
   const modelLabel = useMemo(() => {
     const model = models.find((entry) => entry.id === modelId)
     return modelDisplayName(modelId, model).title
@@ -467,58 +479,27 @@ export function ComputerMode(props: Props): React.JSX.Element {
     }
   }, [])
 
+  // Same pattern for the app sidebar: Computer mode replaces conversations
+  // with its session list, so the list and its actions live up there.
+  const sidebarActionsRef = useRef({ loadSession, removeSession, createSession })
+  sidebarActionsRef.current = { loadSession, removeSession, createSession }
+  useEffect(() => {
+    onSidebarChange?.({
+      sessions,
+      activeId: session?.id ?? null,
+      select: (id) => void sidebarActionsRef.current.loadSession(id),
+      remove: (id) => void sidebarActionsRef.current.removeSession(id),
+      newSession: () =>
+        void sidebarActionsRef.current.createSession().catch((cause) => onError(errorText(cause)))
+    })
+    return () => onSidebarChange?.(null)
+  }, [onSidebarChange, sessions, session?.id, onError])
+
   useEffect(() => window.brazier.computer.onEscape(() => { void stop() }), [stop])
 
   return (
     <div className="computer-mode">
       <header className="computer-header">
-        <div className="computer-session-bar">
-          <button
-            type="button"
-            className="computer-new-session"
-            title="Start a new computer session"
-            onClick={() => void createSession().catch((cause) => onError(errorText(cause)))}
-          >
-            <Plus size={14} />
-            New session
-          </button>
-          <div className="computer-session-list" role="list">
-            {sessions.length === 0 ? (
-              <span className="computer-session-empty">No sessions yet</span>
-            ) : (
-              sessions.map((entry) => (
-                <button
-                  key={entry.id}
-                  type="button"
-                  role="listitem"
-                  className={session?.id === entry.id ? 'active' : ''}
-                  onClick={() => void loadSession(entry.id)}
-                >
-                  <Monitor size={13} />
-                  <span>{entry.title || 'Session'}</span>
-                  <i
-                    role="button"
-                    tabIndex={0}
-                    title="Delete session"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      void removeSession(entry.id)
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault()
-                        event.stopPropagation()
-                        void removeSession(entry.id)
-                      }
-                    }}
-                  >
-                    <Trash2 size={12} />
-                  </i>
-                </button>
-              ))
-            )}
-          </div>
-        </div>
         <div className="computer-controls">
           <label>
             <span>Target</span>

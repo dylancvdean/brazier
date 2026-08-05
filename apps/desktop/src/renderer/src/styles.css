@@ -6835,72 +6835,68 @@ label.span-2 {
   border-bottom: 1px solid var(--line);
 }
 
-.computer-session-bar {
-  display: flex;
+/* Computer session list in the app sidebar while Computer mode is active. */
+.computer-sidebar-sessions {
+  margin-top: 12px;
   flex: 1;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
 }
 
-.computer-new-session {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel);
-  color: var(--soft);
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.computer-new-session:hover {
-  border-color: #2c2c30;
-}
-
-.computer-session-list {
+.computer-session {
   display: flex;
-  gap: 6px;
-  min-width: 0;
-  overflow-x: auto;
-}
-
-.computer-session-list > button {
-  display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 9px;
+}
+
+.computer-session > button:first-child {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
   border: 1px solid transparent;
   border-radius: 9px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
+  background: none;
   cursor: pointer;
+  text-align: left;
+}
+
+.computer-session > button:first-child:hover {
+  background: #16161a;
+}
+
+.computer-session.active > button:first-child {
+  border-color: #33241a;
+  background: var(--accent-dark);
+}
+
+.computer-session strong {
+  display: block;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.computer-session-list > button.active {
-  border-color: var(--line);
-  color: var(--text);
-  background: var(--panel-raised);
-}
-
-.computer-session-list > button i {
-  display: inline-flex;
-  opacity: 0.45;
-}
-
-.computer-session-list > button i:hover {
-  opacity: 1;
-  color: #e8adb1;
-}
-
-.computer-session-empty {
+.computer-session span {
+  display: block;
+  overflow: hidden;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.computer-session-delete {
+  flex: none;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.computer-session-delete:hover {
+  border-color: #67393c;
+  color: #e8adb1;
 }
 
 .computer-controls {

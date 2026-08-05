@@ -42,6 +42,11 @@ const FEATURE_BLURBS: Record<RecommendationCategory, string> = {
   voice: 'Talk to a model and be answered out loud, in real time.'
 }
 
+const FEATURE_LABELS: Record<RecommendationCategory, string> = {
+  ...CATEGORY_LABELS,
+  voice: 'Voice (alpha)'
+}
+
 function platformLines(
   hardware: HardwareInfo | null,
   toolchain: ToolchainStatus | null
@@ -189,7 +194,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
                 >
                   <span className="welcome-feature-check">{on ? <Check size={13} /> : null}</span>
                   <span>
-                    <strong>{CATEGORY_LABELS[feature]}</strong>
+                    <strong>{FEATURE_LABELS[feature]}</strong>
                     <small>{FEATURE_BLURBS[feature]}</small>
                   </span>
                 </button>
@@ -204,7 +209,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
             >
               <span className="welcome-feature-check">{wantsComputerUse ? <Check size={13} /> : null}</span>
               <span>
-                <strong>Computer use</strong>
+                <strong>Computer use (beta)</strong>
                 <small>Let a model use a browser or desktop to complete tasks.</small>
               </span>
             </button>

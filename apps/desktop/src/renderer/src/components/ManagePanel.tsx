@@ -701,9 +701,9 @@ const MODE_DESCRIPTIONS: Record<
   chat: { label: 'Chat', detail: 'Private conversations with local chat models.' },
   agent: { label: 'Agent', detail: 'Workspace tasks that edit files and run commands.' },
   generate: { label: 'Generate', detail: 'Image and video generation with sd.cpp models.' },
-  voice: { label: 'Voice', detail: 'Realtime speech with PersonaPlex voice models.' },
+  voice: { label: 'Voice (alpha)', detail: 'Realtime speech with PersonaPlex voice models.' },
   computer: {
-    label: 'Computer',
+    label: 'Computer (beta)',
     detail: 'Screenshot-driven computer use with Fara-style action models.'
   }
 }

@@ -79,7 +79,8 @@ import {
 } from './api'
 import { AgentMode, type AgentComposerControls, type AgentSidebarControls } from './components/AgentMode'
 import { AgentSessionSidebar } from './components/AgentSessionSidebar'
-import { ComputerMode } from './components/ComputerMode'
+import { ComputerMode, type ComputerSidebarControls } from './components/ComputerMode'
+import { ComputerSessionSidebar } from './components/ComputerSessionSidebar'
 import { DownloadTray } from './components/DownloadTray'
 import { GenerationActivity } from './components/GenerationActivity'
 import {
@@ -536,6 +537,7 @@ export function App(): React.JSX.Element {
   const [agentComposer, setAgentComposer] = useState<AgentComposerControls | null>(null)
   const [computerComposer, setComputerComposer] = useState<AgentComposerControls | null>(null)
   const [agentSidebar, setAgentSidebar] = useState<AgentSidebarControls | null>(null)
+  const [computerSidebar, setComputerSidebar] = useState<ComputerSidebarControls | null>(null)
 
   useEffect(() => {
     if (showWelcome !== false) return
@@ -1659,7 +1661,7 @@ export function App(): React.JSX.Element {
               : appMode === 'generate'
                 ? 'History'
                 : appMode === 'computer'
-                  ? 'Computer'
+                  ? 'Sessions'
                   : 'Conversations'}
           </span>
           <ChevronUp className="handle-chevron" size={15} />
@@ -1672,6 +1674,8 @@ export function App(): React.JSX.Element {
             activeId={activeGenerateHistoryId}
             onSelect={setActiveGenerateHistoryId}
           />
+        ) : appMode === 'computer' ? (
+          <ComputerSessionSidebar controls={computerSidebar} />
         ) : (
           <>
             <button className="new-chat" onClick={() => void newConversation()}>
@@ -1986,6 +1990,7 @@ export function App(): React.JSX.Element {
             modelId={computerModel}
             models={computerModels}
             onComposerChange={setComputerComposer}
+            onSidebarChange={setComputerSidebar}
             onError={setError}
           />
         ) : null}
