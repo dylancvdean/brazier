@@ -231,6 +231,27 @@ impl ComputerBroker {
             .with_context(|| format!("unknown computer session {id}"))
     }
 
+    /// Update mutable session settings. The permission mode is changeable on a
+    /// live session so the user can tighten or relax how future actions are
+    /// judged without abandoning the current task; the target is not.
+    pub async fn update_session(
+        &self,
+        id: &str,
+        permission_mode: ComputerPermissionMode,
+    ) -> Result<ComputerSession> {
+        let record = {
+            let mut sessions = self.sessions.lock().await;
+            let session = sessions
+                .get_mut(id)
+                .with_context(|| format!("unknown computer session {id}"))?;
+            session.record.permission_mode = permission_mode;
+            session.record.updated_at = now_stamp();
+            session.record.clone()
+        };
+        self.persist().await?;
+        Ok(record)
+    }
+
     pub async fn create_session(
         &self,
         title: Option<String>,
@@ -877,6 +898,34 @@ mod tests {
         assert_eq!(broker.action_settle_delay_ms(), 1_250);
         broker.set_action_settle_delay_ms(MAX_ACTION_SETTLE_DELAY_MS + 1);
         assert_eq!(broker.action_settle_delay_ms(), MAX_ACTION_SETTLE_DELAY_MS);
+    }
+
+    #[tokio::test]
+    async fn permission_mode_is_changeable_on_a_live_session() {
+        let broker = ComputerBroker::new();
+        let session = broker
+            .create_session(
+                None,
+                ComputerTarget::Desktop,
+                None,
+                ComputerPermissionMode::Ask,
+                None,
+            )
+            .await
+            .unwrap();
+        let updated = broker
+            .update_session(&session.id, ComputerPermissionMode::BrowserOnly)
+            .await
+            .unwrap();
+        assert_eq!(updated.permission_mode, ComputerPermissionMode::BrowserOnly);
+        assert_eq!(
+            broker
+                .get_session(&session.id)
+                .await
+                .unwrap()
+                .permission_mode,
+            ComputerPermissionMode::BrowserOnly
+        );
     }
 
     #[tokio::test]

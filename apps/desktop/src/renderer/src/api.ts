@@ -218,6 +218,22 @@ export async function fetchComputerSession(id: string): Promise<ComputerSession>
   return request(`/api/v1/computer/sessions/${encodeURIComponent(id)}`)
 }
 
+/** Change the permission mode of a live session. Elevated modes are confirmed. */
+export async function updateComputerSession(
+  id: string,
+  permission_mode: ComputerPermissionMode
+): Promise<ComputerSession> {
+  const elevated =
+    permission_mode === 'skip-permissions' || permission_mode === 'allow-all'
+  return request(`/api/v1/computer/sessions/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      permission_mode,
+      ...(elevated ? { confirm_elevated_permissions: true } : {})
+    })
+  })
+}
+
 export async function deleteComputerSession(id: string): Promise<void> {
   const daemon = await connection()
   const headers = new Headers({ 'content-type': 'application/json' })

@@ -330,7 +330,9 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         )
         .route(
             "/api/v1/computer/sessions/{id}",
-            get(get_computer_session).delete(delete_computer_session),
+            get(get_computer_session)
+                .put(update_computer_session)
+                .delete(delete_computer_session),
         )
         .route(
             "/api/v1/computer/sessions/{id}/steps",
@@ -1942,6 +1944,45 @@ async fn get_computer_session(
     let session = state
         .computer_broker
         .get_session(&id)
+        .await
+        .map_err(ApiError::not_found)?;
+    Ok(Json(json!(session)))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateComputerSession {
+    permission_mode: String,
+    /// Required for skip-permissions / allow-all, mirroring session creation so
+    /// a bare bearer token cannot silently elevate a live session.
+    #[serde(default)]
+    confirm_elevated_permissions: bool,
+}
+
+async fn update_computer_session(
+    State(state): State<AppState>,
+    client: ClientAddr,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateComputerSession>,
+) -> ApiResult<Json<Value>> {
+    let permission_mode = match body.permission_mode.as_str() {
+        "browser-only" => crate::computer_types::ComputerPermissionMode::BrowserOnly,
+        "skip-permissions" => crate::computer_types::ComputerPermissionMode::SkipPermissions,
+        "allow-all" => crate::computer_types::ComputerPermissionMode::AllowAll,
+        _ => crate::computer_types::ComputerPermissionMode::Ask,
+    };
+    let elevated = matches!(
+        permission_mode,
+        crate::computer_types::ComputerPermissionMode::SkipPermissions
+            | crate::computer_types::ComputerPermissionMode::AllowAll
+    );
+    require_elevated_permission_step_up(
+        elevated,
+        body.confirm_elevated_permissions,
+        client_is_loopback(&client),
+    )?;
+    let session = state
+        .computer_broker
+        .update_session(&id, permission_mode)
         .await
         .map_err(ApiError::not_found)?;
     Ok(Json(json!(session)))

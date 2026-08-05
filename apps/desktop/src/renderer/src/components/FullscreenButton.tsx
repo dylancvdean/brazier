@@ -25,12 +25,19 @@ export function useFullscreen<T extends HTMLElement>(): {
     return () => document.removeEventListener('fullscreenchange', sync)
   }, [element])
 
-  const toggle = useCallback(() => {
+  const toggle = useCallback(async () => {
+    const target = element
     if (document.fullscreenElement) {
-      void document.exitFullscreen()
-    } else {
-      void element?.requestFullscreen?.()
+      await document.exitFullscreen()
+      setActive(false)
+      return
     }
+    if (!target) return
+    await target.requestFullscreen?.()
+    // The fullscreenchange event is the source of truth, but it can arrive
+    // late; the resolved request already tells us the element is the target,
+    // so flip immediately so the exit button and fit layout render at once.
+    setActive(Boolean(document.fullscreenElement === target))
   }, [element])
 
   return { setRef: setElement, active, toggle }

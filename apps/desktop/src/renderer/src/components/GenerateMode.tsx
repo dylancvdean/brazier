@@ -68,7 +68,10 @@ function GenerateCard({
       ) : isVideo ? (
         <video ref={setRef} src={url} controls playsInline />
       ) : (
-        <div className="generate-card-preview" ref={setRef}>
+        <div
+          className={`generate-card-preview${active ? ' media-fullscreen' : ''}`}
+          ref={setRef}
+        >
           <img src={url} alt="Generated output" />
           {!active && <MediaFullscreenIcon active={active} toggle={toggle} />}
           {active && <MediaFullscreenExit toggle={toggle} />}

@@ -4271,8 +4271,10 @@ a.inline-link {
 }
 
 /* Native fullscreen should show the whole image and the entire clip rather
-   than inherit a preview crop. Images fullscreen their preview wrapper so an
-   exit button can float in the corner; videos fullscreen directly. */
+   than inherit a preview crop. Videos fullscreen directly; images fullscreen
+   their preview wrapper so an exit button can float in the corner. The
+   `.media-fullscreen` class is driven by the same state as the exit button, so
+   fit layout works even where the `:fullscreen` pseudo-class is unreliable. */
 video:fullscreen,
 video:-webkit-full-screen {
   width: 100%;
@@ -4281,21 +4283,33 @@ video:-webkit-full-screen {
   background: #000;
 }
 
+.message-media-preview.media-fullscreen,
 .message-media-preview:fullscreen,
 .message-media-preview:-webkit-full-screen,
+.generate-card-preview.media-fullscreen,
 .generate-card-preview:fullscreen,
 .generate-card-preview:-webkit-full-screen {
-  display: grid;
-  place-items: center;
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: #000;
 }
 
+/* Fit, not fill: constrain the image to the screen and center it, so nothing
+   is cropped or stretched regardless of the preview's square crop. */
+.message-media-preview.media-fullscreen img,
 .message-media-preview:fullscreen img,
 .message-media-preview:-webkit-full-screen img,
+.generate-card-preview.media-fullscreen img,
 .generate-card-preview:fullscreen img,
 .generate-card-preview:-webkit-full-screen img {
-  width: 100%;
-  height: 100%;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
 }
 
@@ -4344,6 +4358,28 @@ video:-webkit-full-screen {
 .generate-card:hover .media-fullscreen-corner,
 .message-media-item:hover .media-fullscreen-corner {
   opacity: 1;
+}
+
+/* The X that leaves image fullscreen. Rendered only while the wrapper is the
+   fullscreen element, so it can sit above the fitted image at screen top-right. */
+.media-fullscreen-exit {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  cursor: pointer;
+}
+
+.media-fullscreen-exit:hover {
+  background: rgba(0, 0, 0, 0.82);
 }
 
 .generate-submit {

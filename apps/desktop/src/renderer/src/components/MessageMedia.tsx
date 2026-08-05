@@ -30,7 +30,10 @@ function MessageMediaItem({
   return (
     <figure className="message-media-item">
       {url && isImage ? (
-        <div className="message-media-preview" ref={setRef}>
+        <div
+          className={`message-media-preview${active ? ' media-fullscreen' : ''}`}
+          ref={setRef}
+        >
           <img src={url} alt="Attached or generated image" />
           {!active && <MediaFullscreenIcon active={active} toggle={toggle} />}
           {active && <MediaFullscreenExit toggle={toggle} />}

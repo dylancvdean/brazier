@@ -26,6 +26,7 @@ import {
   listComputerSteps,
   parseFaraOutput as parseFaraRemote,
   streamCompletion,
+  updateComputerSession,
   type ComputerAction,
   type ComputerActionResult,
   type ComputerPermissionMode,
@@ -192,6 +193,38 @@ export function ComputerMode(props: Props): React.JSX.Element {
     return created
   }
 
+  /** Change the permission mode, applying it to the active session if any. */
+  async function changePermissionMode(mode: ComputerPermissionMode): Promise<void> {
+    setPermissionMode(mode)
+    const active = sessionRef.current
+    if (!active) return
+    try {
+      const updated = await updateComputerSession(active.id, mode)
+      setSession(updated)
+    } catch (cause) {
+      onError(errorText(cause))
+      // Revert the select to what the daemon actually kept.
+      setPermissionMode(active.permission_mode)
+    }
+  }
+
+  /**
+   * Start a blank session without creating one yet. Deselecting the current
+   * session unlocks the target/permission pickers (a session's target is
+   * immutable) so the next task can choose fresh settings; the old session
+   * stays in the sidebar ready to reopen.
+   */
+  function startNewSession(): void {
+    if (running) return
+    setSession(null)
+    sessionRef.current = null
+    setSteps([])
+    setViewportUrl(null)
+    setPendingApproval(null)
+    setPendingUserQuestion(null)
+    setLiveThought('')
+  }
+
   async function removeSession(id: string): Promise<void> {
     try {
       await deleteComputerSession(id)
@@ -233,14 +266,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
     if (!active || active.target !== 'browser' || running || interacting || pendingApproval) return
     setInteracting(true)
     try {
-      // A short settle gives the page a moment to respond without making the
-      // user wait out the agent's full 750ms; the live stream below then
-      // delivers the fully settled frame once it exists.
-      const result = await computerExec({
-        session_id: active.id,
-        action,
-        settle_delay_ms: 100
-      })
+      // The live stream shows the page's reaction almost immediately; the
+      // exec keeps the full settle delay so the screenshot recorded for the
+      // model is the settled state, not a half-loaded one.
+      const result = await computerExec({ session_id: active.id, action })
       if (result.needs_approval || result.status === 'needs_approval') {
         if (result.approval_id) {
           setPendingApproval({ approvalId: result.approval_id, action, message: result.message })
@@ -325,15 +354,16 @@ export function ComputerMode(props: Props): React.JSX.Element {
 
   const browserInteractive = Boolean(session && session.target === 'browser' && viewportUrl)
 
-  // Live viewport: while a browser session is idle the daemon streams CDP
+  // Live viewport: while a browser session exists the daemon streams CDP
   // screencast frames over SSE, so the page tracks under the cursor (hover
-  // menus, form typing, streamed content) instead of only updating after an
-  // action. The stream stays connected through user interactions so the
-  // 100ms quick frame and the 750ms settled frame both arrive. If streaming is
-  // unavailable, fall back to polling the non-recording preview endpoint.
+  // menus, form typing, streamed content) at ~50ms. The stream stays connected
+  // through user and agent actions — the quick frames are display-only and are
+  // never recorded, so only the settled 750ms screenshots after actions reach
+  // the model. If streaming is unavailable, fall back to polling the
+  // non-recording preview endpoint at the same cadence.
   useEffect(() => {
     const sessionId = session?.id
-    if (!sessionId || session.target !== 'browser' || running) return
+    if (!sessionId || session.target !== 'browser') return
     const controller = new AbortController()
     let streaming = true
     void streamComputerPreview(
@@ -362,12 +392,12 @@ export function ComputerMode(props: Props): React.JSX.Element {
         .catch(() => {
           // Transient; the last frame stays on screen.
         })
-    }, 800)
+    }, 50)
     return () => {
       controller.abort()
       window.clearInterval(timer)
     }
-  }, [session?.id, session?.target, running])
+  }, [session?.id, session?.target])
 
   async function parseModelOutput(text: string): Promise<{
     thought: string | null
@@ -647,16 +677,15 @@ export function ComputerMode(props: Props): React.JSX.Element {
 
   // Same pattern for the app sidebar: Computer mode replaces conversations
   // with its session list, so the list and its actions live up there.
-  const sidebarActionsRef = useRef({ loadSession, removeSession, createSession })
-  sidebarActionsRef.current = { loadSession, removeSession, createSession }
+  const sidebarActionsRef = useRef({ loadSession, removeSession, createSession, startNewSession })
+  sidebarActionsRef.current = { loadSession, removeSession, createSession, startNewSession }
   useEffect(() => {
     onSidebarChange?.({
       sessions,
       activeId: session?.id ?? null,
       select: (id) => void sidebarActionsRef.current.loadSession(id),
       remove: (id) => void sidebarActionsRef.current.removeSession(id),
-      newSession: () =>
-        void sidebarActionsRef.current.createSession().catch((cause) => onError(errorText(cause)))
+      newSession: () => sidebarActionsRef.current.startNewSession()
     })
     return () => onSidebarChange?.(null)
   }, [onSidebarChange, sessions, session?.id, onError])
@@ -672,6 +701,11 @@ export function ComputerMode(props: Props): React.JSX.Element {
             <select
               value={target}
               disabled={running || Boolean(session)}
+              title={
+                session
+                  ? 'This session target is fixed. Start a new session to pick another.'
+                  : 'Target for the next session'
+              }
               onChange={(event) => setTarget(event.target.value as ComputerTarget)}
             >
               <option value="browser">Browser</option>
@@ -682,10 +716,14 @@ export function ComputerMode(props: Props): React.JSX.Element {
             <span>Permissions</span>
             <select
               value={permissionMode}
-              disabled={running || Boolean(session)}
-              title={PERMISSION_LABELS[permissionMode].detail}
+              disabled={running}
+              title={
+                session
+                  ? PERMISSION_LABELS[permissionMode].detail
+                  : `For the next session. ${PERMISSION_LABELS[permissionMode].detail}`
+              }
               onChange={(event) =>
-                setPermissionMode(event.target.value as ComputerPermissionMode)
+                void changePermissionMode(event.target.value as ComputerPermissionMode)
               }
             >
               {(Object.keys(PERMISSION_LABELS) as ComputerPermissionMode[]).map((mode) => (
