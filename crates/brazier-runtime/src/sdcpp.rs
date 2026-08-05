@@ -1512,12 +1512,31 @@ fn effective_diffusion_profile(
         installed_memory_plan(data_dir, model_id),
     );
     let profile = with_amd_apu_vulkan_defaults(profile.as_ref(), enabled, modality);
+    let profile = with_performance_defaults(profile.as_ref(), enabled);
     with_accelerator_memory_budget(
         profile.as_ref(),
         enabled,
         hardware.gpu_offload_memory_bytes,
         model_bytes,
     )
+}
+
+/// Default sd.cpp flags every generation benefits from, unless a model profile
+/// says otherwise.
+///
+/// Flash attention (`--diffusion-fa`) lowers attention memory and speeds up
+/// the denoiser on every backend, and automatic placement (`--auto-fit`) lets
+/// sd.cpp choose phase-aware device budgets instead of guessing. The one
+/// exception is a Vulkan AMD APU, where upstream auto-fit currently skips
+/// integrated devices, so it stays off there (and the APU defaults cover it).
+fn with_performance_defaults(
+    profile: Option<&DiffusionProfile>,
+    apu_vulkan: bool,
+) -> Option<DiffusionProfile> {
+    let mut profile = profile.cloned().unwrap_or_default();
+    profile.diffusion_fa.get_or_insert(true);
+    profile.auto_fit.get_or_insert(!apu_vulkan);
+    Some(profile)
 }
 
 /// Apply a model-size-aware sd.cpp memory cap on Vulkan AMD APUs. Unlike
@@ -2501,6 +2520,28 @@ mod tests {
             with_accelerator_memory_budget(Some(&explicit), true, Some(23 * gib), Some(28 * gib))
                 .unwrap();
         assert_eq!(preserved.max_vram, Some(4.0));
+    }
+
+    #[test]
+    fn generation_defaults_to_flash_attention_and_auto_fit() {
+        let defaults = with_performance_defaults(None, false).unwrap();
+        assert_eq!(defaults.diffusion_fa, Some(true));
+        assert_eq!(defaults.auto_fit, Some(true));
+
+        // A Vulkan AMD APU keeps auto-fit off: upstream skips integrated devices.
+        let apu = with_performance_defaults(None, true).unwrap();
+        assert_eq!(apu.diffusion_fa, Some(true));
+        assert_eq!(apu.auto_fit, Some(false));
+
+        // An explicit profile wins over the defaults.
+        let explicit = DiffusionProfile {
+            diffusion_fa: Some(false),
+            auto_fit: Some(false),
+            ..DiffusionProfile::default()
+        };
+        let preserved = with_performance_defaults(Some(&explicit), false).unwrap();
+        assert_eq!(preserved.diffusion_fa, Some(false));
+        assert_eq!(preserved.auto_fit, Some(false));
     }
 
     #[test]

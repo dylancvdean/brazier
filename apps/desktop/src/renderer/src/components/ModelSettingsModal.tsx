@@ -90,8 +90,8 @@ export function ModelSettingsModal(props: Props): React.JSX.Element {
     videoFrames: useApuDefaults ? AMD_APU_VIDEO_DEFAULTS.frames : 16,
     vaeTiling: useApuDefaults,
     clipOnCpu: useApuDefaults && props.kind === 'image',
-    diffusionFa: useApuDefaults,
-    autoFit: false,
+    diffusionFa: true,
+    autoFit: !useApuDefaults,
     maxVram:
       useApuDefaults && props.kind === 'video'
         ? AMD_APU_VIDEO_DEFAULTS.maxVram

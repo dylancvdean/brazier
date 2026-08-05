@@ -115,11 +115,26 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<{ id: string; message: string } | null>(null)
   const rates = useTransferRates(jobs)
+  /** Job ids seen as open (pending/downloading/paused) on the last poll. */
+  const seenOpen = useRef<Set<string>>(new Set())
 
   async function refresh(): Promise<void> {
     try {
       const [next] = await Promise.all([listDownloadJobs(), listRecommendationSetups()])
       setJobs(next)
+      // A queued download settling is the moment a freshly installed model
+      // becomes usable. The model install itself runs in the background, so
+      // nothing else refreshes the model list — without this, a new model
+      // stays out of the pickers until the app restarts.
+      for (const job of next) {
+        if (seenOpen.current.has(job.id) && !OPEN_STATUSES.has(job.status)) {
+          onChanged?.()
+          break
+        }
+      }
+      seenOpen.current = new Set(
+        next.filter((job) => OPEN_STATUSES.has(job.status)).map((job) => job.id)
+      )
     } catch {
       // Daemon may still be starting; the next tick retries.
     }

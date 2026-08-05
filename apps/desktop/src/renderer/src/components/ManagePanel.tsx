@@ -265,6 +265,14 @@ type QuantFit = 'gpu' | 'offload' | 'system' | 'none' | 'unknown'
  * A search result is a weight file, not a promise that it can be fully
  * offloaded. Keep the labels conservative: reserve headroom for the KV cache,
  * runtime allocations, and the desktop rather than comparing raw bytes.
+ *
+ * Multi-component bundles (stable-diffusion.cpp) stage their encoders,
+ * denoiser, and VAE as separate phases, streaming each component's weights
+ * through VRAM, so the whole bundle never needs to be resident in GPU memory
+ * at once. For those, the GPU fit is judged against the diffusion checkpoint —
+ * the one component used on every step — with the rest counting as staged
+ * offload. Single weight files pass `diffusionBytes` equal to `bytes`, which
+ * keeps the original all-resident behaviour.
  */
 function generationFit(
   bytes: number | null | undefined,
@@ -278,11 +286,12 @@ function generationFit(
   const system = hardware.memory_bytes
   if (gpu != null) {
     if (bytes <= gpu * 0.7) return 'gpu'
-    // sd.cpp can stage encoder/VAE weights through VRAM between phases, but
-    // the denoiser's activation buffers vary sharply with resolution and
-    // video frames. Treat that as an offload fit, not a guaranteed green
+    // The denoiser must be resident (it runs every step); encoders and VAE
+    // stream through VRAM for their own phases, so only it constrains a GPU
+    // fit. Its activation buffers vary sharply with resolution and video
+    // frames, so this is still a staged-offload fit, not a guaranteed green
     // resident-GPU fit.
-    if (diffusionBytes != null && diffusionBytes <= gpu * 0.7 && system != null && bytes <= system * 0.6) {
+    if (diffusionBytes != null && diffusionBytes <= gpu * 0.7 && system != null) {
       return 'offload'
     }
     if (system != null && bytes <= system * 0.6) return 'offload'
@@ -2001,6 +2010,8 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   /** A licensed bundle awaiting explicit acceptance before it can install. */
   const [consentBundle, setConsentBundle] = useState<SdcppBundle | null>(null)
   const [acceptingConsent, setAcceptingConsent] = useState(false)
+  /** Variant choices pending the consent dialog, so agreeing keeps the picks. */
+  const [pendingChoices, setPendingChoices] = useState<Record<number, string>>({})
   /** Chosen size per bundle, keyed by the component's position. */
   const [variantChoices, setVariantChoices] = useState<
     Record<string, Record<number, string>>
@@ -2074,6 +2085,33 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     const timer = window.setInterval(() => void refreshDownloadJobs(), 2000)
     return () => window.clearInterval(timer)
   }, [])
+
+  // The instant "Queued" flag is never cleared on its own, which permanently
+  // disabled an in-place bundle (MiniMax-H3's FL2VA/Ref2VA and quant switches
+  // share one id) from being queued again. The download queue is the source of
+  // truth: once its job for the bundle settles, forget the flag.
+  useEffect(() => {
+    if (Object.keys(queuedRepos).length === 0) return
+    setQueuedRepos((current) => {
+      let next = current
+      for (const id of Object.keys(current)) {
+        const bundle = bundles.find((candidate) => candidate.id === id)
+        if (!bundle) continue
+        const repos = new Set(bundle.components.map((component) => component.repo_id))
+        const bundleJobs = downloadJobs.filter(
+          (job) => job.kind === 'sdcpp-bundle' && job.repo_id != null && repos.has(job.repo_id)
+        )
+        const stillActive = bundleJobs.some(
+          (job) => job.status === 'pending' || job.status === 'downloading'
+        )
+        if (bundleJobs.length > 0 && !stillActive) {
+          if (next === current) next = { ...current }
+          delete next[id]
+        }
+      }
+      return next
+    })
+  }, [downloadJobs])
 
   async function saveHubToken(event: FormEvent): Promise<void> {
     event.preventDefault()
@@ -2235,6 +2273,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     // The check mirrors the daemon's own gate, so a stale catalog entry cannot
     // send the user to a download the server would refuse.
     if (bundle.requires_license_acceptance && !bundle.consent?.accepted) {
+      // Keep the chosen sizes so agreeing installs what the person picked,
+      // not the bundle's defaults.
+      setPendingChoices(choices)
       setConsentBundle(bundle)
       return
     }
@@ -2275,7 +2316,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         )
       )
       setConsentBundle(null)
-      await installBundle(acceptedBundle, {})
+      const choices = pendingChoices
+      setPendingChoices({})
+      await installBundle(acceptedBundle, choices)
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -2906,9 +2949,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                       </span>
                     )}
                   </strong>
-                  {!bundle.requires_license_acceptance && (
-                    <span className={`generation-fit ${fit}`}>{generationFitLabel(fit)}</span>
-                  )}
+                  <span className={`generation-fit ${fit}`}>{generationFitLabel(fit)}</span>
                   </div>
                   <span className="bundle-meta">
                     {bundle.modality === 'video' ? 'Video' : 'Image'}
@@ -3242,7 +3283,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       {consentBundle?.consent && (
         <div
           className="menu-backdrop model-settings-backdrop"
-          onMouseDown={() => setConsentBundle(null)}
+          onMouseDown={() => {
+            setPendingChoices({})
+            setConsentBundle(null)
+          }}
         >
           <div
             className="model-settings-modal license-consent-modal"
@@ -3258,7 +3302,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
               <button
                 type="button"
                 className="icon-button"
-                onClick={() => setConsentBundle(null)}
+                onClick={() => {
+                  setPendingChoices({})
+                  setConsentBundle(null)
+                }}
                 aria-label="Close"
               >
                 <X size={17} />
@@ -3296,7 +3343,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                 type="button"
                 className="chip-button subtle"
                 disabled={acceptingConsent}
-                onClick={() => setConsentBundle(null)}
+                onClick={() => {
+                  setPendingChoices({})
+                  setConsentBundle(null)
+                }}
               >
                 Not now
               </button>
@@ -3443,6 +3493,19 @@ function engineBuildable(engine: BuildEngine, hardware: HardwareInfo | null): bo
   if (!platforms) return true
   const tag = platformTag(hardware)
   return tag ? platforms.includes(tag) : false
+}
+
+/**
+ * The architecture a managed runtime is built for: the accelerator's own
+ * architecture (gfx1101, …) when one is detected, Apple Silicon on macOS, and
+ * the platform architecture otherwise. Shown on every managed runtime offer so
+ * a download can be checked against this machine at a glance.
+ */
+function managedRuntimeArch(hardware: HardwareInfo | null): string | null {
+  if (!hardware) return null
+  if (hardware.gpu_arch) return hardware.gpu_arch
+  if (hardware.os === 'macos') return 'Apple Silicon'
+  return hardware.architecture
 }
 
 function RuntimesSection(props: SectionProps): React.JSX.Element {
@@ -3870,6 +3933,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const tabEngines = RUNTIME_TAB_ENGINES[runtimeTab]
   const tabBuildOptions = buildEngineOptions.filter((engine) => tabEngines.includes(engine))
   const tabInstalledRuntimes = installedRuntimes.filter((runtime) => tabEngines.includes(runtime.engine))
+  const runtimeArch = managedRuntimeArch(props.hardware)
 
   return (
     <section>
@@ -3889,6 +3953,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
           </strong>
           <span>
             {props.hardware?.os} {props.hardware?.architecture}
+            {runtimeArch ? ` · ${runtimeArch}` : ''}
             {props.hardware?.memory_bytes
               ? ` · ${formatBytes(props.hardware.memory_bytes)} RAM`
               : ''}
@@ -3970,8 +4035,10 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             const installedVersion = status?.installed_version
             const latestVersion = status?.latest_version
             const installing = installingTarget === target.id
+            const archLabel = target.recommended && runtimeArch ? runtimeArch : null
             const versionLine = [
               target.detail,
+              archLabel ? `Built for ${archLabel}` : null,
               installed && installedVersion ? `Installed · ${installedVersion}` : null,
               updateAvailable && latestVersion ? `Latest · ${latestVersion}` : null,
               installed && !latestVersion && updateCheckPending ? 'Checking for updates…' : null
@@ -4048,6 +4115,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                       Official CLI prebuilts on Linux/Windows. macOS releases are XCFramework-only —
                       build from source there.
                     </span>
+                    {runtimeArch && <span className="runtime-offer-arch">Built for {runtimeArch}</span>}
                   </div>
                   <button
                     className="chip-button"
@@ -4087,6 +4155,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                       Prebuilt sd-cli pinned to Brazier's supported release; build from source to
                       opt into a newer version.
                     </span>
+                    {runtimeArch && <span className="runtime-offer-arch">Built for {runtimeArch}</span>}
                   </div>
                   <button
                     className="chip-button"

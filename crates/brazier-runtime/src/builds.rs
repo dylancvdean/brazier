@@ -261,6 +261,35 @@ pub fn llama_cpp_build_preflight(target: RuntimeTarget) -> Result<(), String> {
     Ok(())
 }
 
+/// The environment a build step runs with: the engine's overrides plus a PATH
+/// that includes the host tool prefixes.
+///
+/// The step's own program is resolved by full path in [`command_path`], but
+/// cmake/ninja/make spawn subprocesses — compilers, ccache, linkers — by name.
+/// macOS GUI apps do not source a login shell, so Homebrew's prefix is missing
+/// from the inherited PATH and those subprocesses fail to launch even though
+/// `cmake` itself worked in Terminal.
+fn build_step_environment(environment: &[(String, String)]) -> Vec<(String, String)> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        // Apple Silicon Homebrew and the legacy Intel Homebrew location.
+        paths.extend([
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+        ]);
+    }
+    paths.retain(|dir| dir.is_dir());
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    let mut result = environment.to_vec();
+    if let Ok(joined) = std::env::join_paths(paths) {
+        result.push(("PATH".into(), joined.to_string_lossy().into_owned()));
+    }
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_step(
     label: &str,
@@ -278,9 +307,10 @@ async fn run_step(
     progress(ProgressEvent::phase("build", format!("{label}…")));
     log.push_str(&format!("$ {program} {}\n", args.join(" ")));
     let executable = command_path(program).unwrap_or_else(|| PathBuf::from(program));
+    let step_environment = build_step_environment(environment);
     let mut child = tokio::process::Command::new(&executable)
         .args(args)
-        .envs(environment.iter().map(|(key, value)| (key, value)))
+        .envs(step_environment.iter().map(|(key, value)| (key, value)))
         .current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1125,6 +1155,27 @@ mod tests {
             },
         );
         assert_eq!(resolved, vec!["ok"]);
+    }
+
+    #[test]
+    fn build_step_environment_keeps_overrides_and_a_full_path() {
+        let overrides = [("FOO".to_owned(), "bar".to_owned())];
+        let environment = build_step_environment(&overrides);
+        let path = environment
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .expect("build steps get a PATH")
+            .1
+            .clone();
+        // The inherited PATH is always preserved, so every entry still resolves.
+        assert!(std::env::split_paths(&path).count() > 0);
+        // And the engine's own overrides survive untouched.
+        assert!(environment.contains(&("FOO".to_owned(), "bar".to_owned())));
+        // A PATH key appears only once, so the last one wins deterministically.
+        assert_eq!(
+            environment.iter().filter(|(key, _)| key == "PATH").count(),
+            1
+        );
     }
 
     #[test]

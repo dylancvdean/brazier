@@ -417,8 +417,8 @@ export function InferenceMenu({
                           : 16,
                         vaeTiling: useApuDefaults,
                         clipOnCpu: useApuDefaults && modelKind === 'image',
-                        diffusionFa: useApuDefaults,
-                        autoFit: false,
+                        diffusionFa: true,
+                        autoFit: !useApuDefaults,
                         maxVram:
                           useApuDefaults && modelKind === 'video'
                             ? AMD_APU_VIDEO_DEFAULTS.maxVram
