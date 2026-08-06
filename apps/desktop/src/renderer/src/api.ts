@@ -523,6 +523,8 @@ export type RuntimeSettings = {
   voice_python?: string | null
   default_voice_model?: string | null
   default_voice_persona?: string | null
+  /** Default chat model for chat and agent (they share one model). */
+  default_chat_model?: string | null
   build_jobs: number
   extra_model_library_paths: string[]
   generation_memory_policy: 'auto' | 'coresident' | 'exclusive'

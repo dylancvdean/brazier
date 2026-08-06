@@ -98,6 +98,7 @@ import { MessageMedia } from './components/MessageMedia'
 import { Markdown } from './components/Markdown'
 import { ReasoningDisclosure, TurnTrace } from './components/ReasoningDisclosure'
 import { GenerateMode } from './components/GenerateMode'
+import { GenerateSettings } from './components/GenerateSettings'
 import { InferenceMenu } from './components/InferenceMenu'
 import { ManagePanel, type ManageSection } from './components/ManagePanel'
 import { ModelMenu } from './components/ModelMenu'
@@ -106,6 +107,7 @@ import { ModelSettingsModal } from './components/ModelSettingsModal'
 import { CATEGORY_LABELS } from './components/RecommendedModels'
 import { ToolsMenu } from './components/ToolsMenu'
 import { VoiceMode } from './components/VoiceMode'
+import { VoiceSettings } from './components/VoiceSettings'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { hasCompletedWelcome, markWelcomeCompleted } from './welcomePrefs'
 import { voiceStreamSupported } from './audio/voiceStream'
@@ -524,6 +526,8 @@ export function App(): React.JSX.Element {
 
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [inferenceMenuOpen, setInferenceMenuOpen] = useState(false)
+  const [generateSettingsOpen, setGenerateSettingsOpen] = useState(false)
+  const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false)
   // Advanced per-model configuration, held here because three surfaces open it:
   // the model picker, the library, and the inference menu.
   const [modelProfiles, setModelProfiles] = useState<Record<string, ModelProfile>>({})
@@ -775,6 +779,8 @@ export function App(): React.JSX.Element {
     (next: AppMode): void => {
       if (next === appMode) return
       setAppMode(next)
+      setGenerateSettingsOpen(false)
+      setVoiceSettingsOpen(false)
       if ((next === 'chat' || next === 'agent') && selectedModel) {
         selectModel(selectedModel, next)
       }
@@ -1041,6 +1047,17 @@ export function App(): React.JSX.Element {
     runtime?.default_image_gen_model,
     runtime?.default_video_gen_model
   ])
+
+  // Chat and agent share one model, so the chat default seeds both. Only the
+  // selection changes; the model itself loads on the next message.
+  useEffect(() => {
+    setSelectedModel((current) => {
+      if (current && chatModels.some((model) => model.id === current)) return current
+      const preferred = runtime?.default_chat_model
+      if (preferred && chatModels.some((model) => model.id === preferred)) return preferred
+      return ''
+    })
+  }, [chatModels, runtime?.default_chat_model])
 
   useEffect(() => {
     setComputerModel((current) => {
@@ -1955,7 +1972,12 @@ export function App(): React.JSX.Element {
             setManageOpen(true)
             setShowWelcome(false)
           }}
-          onModelsChanged={() => void refreshLocalModels().catch(() => {})}
+          onModelsChanged={() => {
+            // Installs write their mode defaults daemon-side; pull the fresh
+            // settings so the seeded selections pick them up.
+            void refreshRuntime().catch(() => {})
+            void refreshLocalModels().catch(() => {})
+          }}
         />
       </main>
     )
@@ -2214,8 +2236,18 @@ export function App(): React.JSX.Element {
           </button>
           <button
             className="icon-button"
-            title="Inference settings (sampling, reasoning)"
-            onClick={() => setInferenceMenuOpen(true)}
+            title={
+              appMode === 'voice'
+                ? 'Voice settings (default model, persona)'
+                : appMode === 'generate'
+                  ? 'Generate settings (default models, timeout)'
+                  : 'Inference settings (sampling, reasoning)'
+            }
+            onClick={() => {
+              if (appMode === 'voice') setVoiceSettingsOpen(true)
+              else if (appMode === 'generate') setGenerateSettingsOpen(true)
+              else setInferenceMenuOpen(true)
+            }}
           >
             <SlidersHorizontal size={17} />
           </button>
@@ -2399,12 +2431,15 @@ export function App(): React.JSX.Element {
         ) : null}
 
         <div className="chat" hidden={appMode !== 'chat'}>
-          {modelLoadStatus && (modelPrepareState === 'loading' || (busy && !streamingText)) && (
-            <div className="model-load-status">
-              <LoaderCircle className="spin" size={18} />
-              <span>{modelLoadStatus}</span>
-            </div>
-          )}
+          {modelLoadStatus &&
+            modelPrepareState !== 'loading' &&
+            busy &&
+            !streamingText && (
+              <div className="model-load-status">
+                <LoaderCircle className="spin" size={18} />
+                <span>{modelLoadStatus}</span>
+              </div>
+            )}
           {chain.length === 0 && !liveText ? (
             <div className="welcome">
               <div className="welcome-mark">
@@ -3010,6 +3045,24 @@ export function App(): React.JSX.Element {
             }
           }}
           onClose={() => setInferenceMenuOpen(false)}
+        />
+      )}
+      {generateSettingsOpen && (
+        <GenerateSettings
+          settings={runtime}
+          models={localModels}
+          onSaved={setRuntime}
+          onError={setError}
+          onClose={() => setGenerateSettingsOpen(false)}
+        />
+      )}
+      {voiceSettingsOpen && (
+        <VoiceSettings
+          settings={runtime}
+          models={localModels}
+          onSaved={setRuntime}
+          onError={setError}
+          onClose={() => setVoiceSettingsOpen(false)}
         />
       )}
       {configuringModel && configuredModelEntry && (

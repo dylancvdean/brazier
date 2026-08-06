@@ -322,13 +322,19 @@ export function GenerateMode(props: Props) {
 
   async function onSubmit(event: FormEvent): Promise<void> {
     event.preventDefault()
-    if (!prompt.trim() || !selected) return
+    const modelId =
+      selected ||
+      (modality === 'image'
+        ? props.settings?.default_image_gen_model
+        : props.settings?.default_video_gen_model) ||
+      ''
+    if (!prompt.trim() || !modelId) return
     setBusy(true)
     props.onError(null)
     try {
       const body = {
         prompt: prompt.trim(),
-        model_id: selected,
+        model_id: modelId,
         negative_prompt: negative.trim() || undefined,
         width,
         height,
@@ -431,7 +437,7 @@ export function GenerateMode(props: Props) {
       {available.length === 0 ? (
         <p className="mode-empty">
           No {modality} generation models installed yet. Download one from Manage → Discover
-          (stable-diffusion.cpp) and set a default in Manage → Engine.
+          (stable-diffusion.cpp) and set a default in the Generate settings menu.
         </p>
       ) : (
         <form className="generate-form" onSubmit={(event) => void onSubmit(event)}>

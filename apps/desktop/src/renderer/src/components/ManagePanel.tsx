@@ -135,7 +135,6 @@ import {
   modelEngine,
   modelLibraryKey,
   runtimeNoticeForModel,
-  modelDisplayName,
   runtimesForModel
 } from '../model-utils'
 import type { HubModel } from '../types'
@@ -5020,112 +5019,6 @@ function EngineSection(props: SectionProps): React.JSX.Element {
             </small>
           </span>
         </label>
-      </div>
-      <div className="settings-group">
-        <div className="section-label">Generation & voice defaults</div>
-        <p className="model-help">
-          These models are used by chat tools (`generate_image` / `generate_video`) and as defaults
-          in Generate / Voice modes.
-        </p>
-        <div className="settings-grid">
-          <label>
-            <span>Default image model</span>
-            <select
-              value={draft.default_image_gen_model ?? ''}
-              onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  default_image_gen_model: event.target.value || null
-                })
-              }
-            >
-              <option value="">None</option>
-              {props.models
-                .filter((model) => model.id.startsWith('sdcpp-image:'))
-                .map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {modelDisplayName(model.id, model).title}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <label>
-            <span>Default video model</span>
-            <select
-              value={draft.default_video_gen_model ?? ''}
-              onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  default_video_gen_model: event.target.value || null
-                })
-              }
-            >
-              <option value="">None</option>
-              {props.models
-                .filter((model) => model.id.startsWith('sdcpp-video:'))
-                .map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {modelDisplayName(model.id, model).title}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <label>
-            <span>Generation timeout (seconds)</span>
-            <input
-              type="number"
-              min={0}
-              max={86400}
-              step={60}
-              value={draft.generation_timeout_secs ?? 0}
-              onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  generation_timeout_secs: Math.max(0, Number(event.target.value) || 0)
-                })
-              }
-            />
-            <small className="model-help">
-              0 lets Brazier work it out from the frames and steps asked for, which suits most
-              machines. Raise it if a slow, CPU-only host is being cut off while still rendering;
-              a running job can always be stopped by hand.
-            </small>
-          </label>
-          <label>
-            <span>Default voice model</span>
-            <select
-              value={draft.default_voice_model ?? ''}
-              onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  default_voice_model: event.target.value || null
-                })
-              }
-            >
-              <option value="">None</option>
-              {props.models
-                .filter((model) => model.id.startsWith('personaplex:'))
-                .map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {modelDisplayName(model.id, model).title}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <label className="span-2">
-            <span>Default voice persona</span>
-            <input
-              value={draft.default_voice_persona ?? ''}
-              onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  default_voice_persona: event.target.value || null
-                })
-              }
-              placeholder="You are a helpful assistant."
-            />
-          </label>
-        </div>
       </div>
       <div className="settings-group">
         <div className="section-label">Generation memory</div>

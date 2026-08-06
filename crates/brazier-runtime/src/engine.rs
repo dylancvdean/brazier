@@ -709,6 +709,27 @@ impl Runtime {
         self.settings.lock().await.clone()
     }
 
+    /// Point a mode default at a recommendation install. Persisted and applied
+    /// to the in-memory copy without the server restarts `update_settings`
+    /// performs — only the default pointers change.
+    pub async fn apply_recommended_default(
+        &self,
+        category: &str,
+        model_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let Some(model_id) = model_id else {
+            return Ok(false);
+        };
+        let mut settings = self.settings.lock().await.clone();
+        if !settings.set_recommended_default(category, model_id) {
+            return Ok(false);
+        }
+        settings.validate()?;
+        runtime_settings::save(&self.data_dir, &settings).await?;
+        *self.settings.lock().await = settings;
+        Ok(true)
+    }
+
     /// Lock the voice runtime state (PersonaPlex sessions).
     pub async fn voice_state(&self) -> tokio::sync::MutexGuard<'_, VoiceState> {
         self.voice.lock().await

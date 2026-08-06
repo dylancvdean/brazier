@@ -132,6 +132,10 @@ pub struct RuntimeSettings {
     /// Default persona text prompt for realtime voice sessions.
     #[serde(default)]
     pub default_voice_persona: Option<String>,
+    /// Default chat model id for chat and agent (they share one model). Seeded
+    /// on install from the welcome recommendations.
+    #[serde(default)]
+    pub default_chat_model: Option<String>,
     /// Parallel compile jobs for source builds (`cmake --build … --parallel`).
     #[serde(default = "default_build_jobs")]
     pub build_jobs: u16,
@@ -260,6 +264,7 @@ impl Default for RuntimeSettings {
             voice_python: None,
             default_voice_model: None,
             default_voice_persona: None,
+            default_chat_model: None,
             build_jobs: default_build_jobs(),
             extra_model_library_paths: Vec::new(),
             generation_memory_policy: GenerationMemoryPolicy::Auto,
@@ -351,6 +356,48 @@ impl RuntimeSettings {
         );
         self.javascript_sandbox.validate()?;
         Ok(())
+    }
+
+    /// Point a mode default at a recommendation install, so the welcome flow
+    /// leaves the app using the models it downloaded.
+    ///
+    /// `category` is a recommendation category (`text`, `agent`, `image`,
+    /// `video`, `voice`). Returns whether anything changed.
+    pub fn set_recommended_default(&mut self, category: &str, model_id: &str) -> bool {
+        fn set(slot: &mut Option<String>, model_id: &str) -> bool {
+            if slot.as_deref() == Some(model_id) {
+                return false;
+            }
+            *slot = Some(model_id.to_owned());
+            true
+        }
+        match category {
+            "image" => set(&mut self.default_image_gen_model, model_id),
+            "video" => set(&mut self.default_video_gen_model, model_id),
+            // The recognizer (whisper) is not the speaking model; only a
+            // PersonaPlex snapshot can be the default voice model.
+            "voice" => {
+                if model_id.starts_with("personaplex:") {
+                    set(&mut self.default_voice_model, model_id)
+                } else {
+                    false
+                }
+            }
+            "text" => set(&mut self.default_chat_model, model_id),
+            // Chat and agent share one model in the app. When the agent model
+            // is the same as the chat model this is a no-op; a different agent
+            // model must not hijack the chat default.
+            "agent" => {
+                if self.default_chat_model.is_none()
+                    || self.default_chat_model.as_deref() == Some(model_id)
+                {
+                    set(&mut self.default_chat_model, model_id)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
     }
 }
 
@@ -496,5 +543,57 @@ mod tests {
         let config = crate::js_sandbox::JsSandboxConfig::from_runtime_settings(&decoded);
         assert_eq!(config.timeout, std::time::Duration::from_millis(8_000));
         assert!(config.capture_console);
+    }
+
+    #[test]
+    fn recommended_defaults_map_categories_to_mode_defaults() {
+        let mut settings = RuntimeSettings::default();
+
+        assert!(settings.set_recommended_default("image", "sdcpp-image:acme/flux"));
+        assert_eq!(
+            settings.default_image_gen_model.as_deref(),
+            Some("sdcpp-image:acme/flux")
+        );
+        assert!(!settings.set_recommended_default("image", "sdcpp-image:acme/flux"));
+
+        assert!(settings.set_recommended_default("video", "sdcpp-video:acme/wan"));
+        assert_eq!(
+            settings.default_video_gen_model.as_deref(),
+            Some("sdcpp-video:acme/wan")
+        );
+
+        assert!(settings.set_recommended_default("voice", "personaplex:kyutai/moshi"));
+        assert_eq!(
+            settings.default_voice_model.as_deref(),
+            Some("personaplex:kyutai/moshi")
+        );
+        // A whisper recognizer never becomes the default voice model.
+        assert!(!settings.set_recommended_default("voice", "whisper:base"));
+        assert_eq!(
+            settings.default_voice_model.as_deref(),
+            Some("personaplex:kyutai/moshi")
+        );
+
+        // Chat and agent share one model: the same install is a no-op, and a
+        // different agent model does not hijack the chat default.
+        assert!(settings.set_recommended_default("text", "gguf:acme/fara1.5/model.gguf"));
+        assert!(!settings.set_recommended_default("agent", "gguf:acme/fara1.5/model.gguf"));
+        assert_eq!(
+            settings.default_chat_model.as_deref(),
+            Some("gguf:acme/fara1.5/model.gguf")
+        );
+        assert!(!settings.set_recommended_default("agent", "gguf:acme/other/model.gguf"));
+        assert_eq!(
+            settings.default_chat_model.as_deref(),
+            Some("gguf:acme/fara1.5/model.gguf")
+        );
+
+        // With no chat default yet, an agent install seeds it.
+        let mut fresh = RuntimeSettings::default();
+        assert!(fresh.set_recommended_default("agent", "gguf:acme/agent/model.gguf"));
+        assert_eq!(
+            fresh.default_chat_model.as_deref(),
+            Some("gguf:acme/agent/model.gguf")
+        );
     }
 }

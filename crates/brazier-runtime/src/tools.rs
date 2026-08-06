@@ -785,7 +785,7 @@ async fn generate_image_tool(
     let model_id = settings
         .default_image_gen_model
         .clone()
-        .context("no default image generation model configured (set one in Manage → Engine)")?;
+        .context("no default image generation model configured (set one in Generate settings)")?;
     let init_image = resolve_init_image(data_dir, args, images)?;
     let request = crate::sdcpp::GenerateImageRequest {
         prompt: prompt.to_owned(),
@@ -856,7 +856,7 @@ async fn generate_video_tool(
     let model_id = settings
         .default_video_gen_model
         .clone()
-        .context("no default video generation model configured (set one in Manage → Engine)")?;
+        .context("no default video generation model configured (set one in Generate settings)")?;
     let init_image = resolve_init_image(data_dir, args, images)?;
     if init_image.is_some() {
         anyhow::ensure!(

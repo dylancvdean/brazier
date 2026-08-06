@@ -3298,6 +3298,32 @@ async fn start_recommendation_setup(
     Ok(Json(json!({ "setup": setup, "existing": false })))
 }
 
+/// The model id a completed recommendation setup installed, taken from its
+/// first completed llama.cpp download step. Repo setups persist each file as
+/// `QueuedWork`, so the model id is `gguf:{repo_id}/{filename}` — the same id
+/// `listModels` reports for the download.
+fn installed_model_id_for_setup(
+    setup: &recommendations::RecommendationSetup,
+) -> Option<String> {
+    for step in &setup.steps {
+        if step.kind == "runtime-build" || step.status != "completed" {
+            continue;
+        }
+        let Ok(work) =
+            serde_json::from_value::<crate::download_queue::QueuedWork>(step.payload.clone())
+        else {
+            continue;
+        };
+        match work {
+            crate::download_queue::QueuedWork::Gguf(request) if request.engine != "whisper.cpp" => {
+                return Some(format!("gguf:{}/{}", request.repo_id, request.filename));
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
 /// Reconcile persisted plans from the durable activity rows. Polling this is
 /// sufficient after a restart because downloads themselves already resume from
 /// those rows and no browser-local state is involved.
@@ -3352,7 +3378,11 @@ async fn list_recommendation_setups(State(state): State<AppState>) -> ApiResult<
             changed = true;
         }
         if setup.status == "completed" {
-            completed.push((setup.categories.clone(), setup.recommendation_id.clone()));
+            completed.push((
+                setup.categories.clone(),
+                setup.recommendation_id.clone(),
+                installed_model_id_for_setup(setup),
+            ));
             changed = true;
         } else if failed.is_none()
             && !paused
@@ -3401,15 +3431,20 @@ async fn list_recommendation_setups(State(state): State<AppState>) -> ApiResult<
             }
         }
     }
-    for (categories, recommendation_id) in completed {
-        for category in categories {
+    for (categories, recommendation_id, model_id) in completed {
+        for category in &categories {
             recommendations::record_install(
                 &mut recorded,
-                category,
+                category.clone(),
                 recommendation_id.clone(),
-                None,
+                model_id.clone(),
                 epoch_seconds(),
             );
+            state
+                .runtime
+                .apply_recommended_default(category, model_id.as_deref())
+                .await
+                .map_err(ApiError::internal)?;
         }
     }
     if changed {
@@ -3618,10 +3653,17 @@ async fn record_recommendation_install(
         &mut recorded,
         request.category.clone(),
         request.recommendation_id.clone(),
-        request.model_id,
+        request.model_id.clone(),
         epoch_seconds(),
     );
     recommendations::save_state(&state.data_dir, &recorded)
+        .await
+        .map_err(ApiError::internal)?;
+    // Welcome-flow installs become the defaults for their modes, so the app
+    // comes up using what it just downloaded.
+    state
+        .runtime
+        .apply_recommended_default(&request.category, request.model_id.as_deref())
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(json!(recorded)))
