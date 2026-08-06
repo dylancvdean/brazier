@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { updateConversation } from '../api'
 import type { Message } from '../types'
 import { WorkerAgentAdapter } from './agentAdapter'
-import { DaemonChatAdapter, toConversationMessage } from './chatAdapter'
+import { DaemonChatAdapter, InMemoryChatAdapter, toConversationMessage } from './chatAdapter'
 import {
   readIntegrationConfig,
   resolveAsrEngine,
@@ -38,6 +38,8 @@ export type UseSessionCoordinatorOptions = {
   /** Which ASR interfaces the daemon reports as usable. */
   asrAvailable: { batch: boolean; streaming: boolean }
   persona: string
+  /** Ephemeral, memory-free chat: nothing the coordinator stores is persisted. */
+  incognito?: boolean
   /** Produces ordinary chat answers when no agent session is bound. */
   responder?: ChatResponder
   /** Called for every message the coordinator stores, to update the chat view. */
@@ -119,6 +121,9 @@ export function useSessionCoordinator(
         cancel: (correlationId) => latest.current.responder?.cancel(correlationId)
       },
       persistSummary: (conversationId, summary) => {
+        // Incognito conversations are ephemeral; a summary would be one more
+        // thing to persist and one more trace to leak.
+        if (latest.current.incognito) return
         void updateConversation(conversationId, { summary }).catch(() => undefined)
       },
       // The console is the channel that does not depend on a UI condition being
@@ -161,6 +166,20 @@ export function useSessionCoordinator(
   const conversationId = options.conversationId
   useEffect(() => {
     if (!conversationId) return
+    if (options.incognito) {
+      coordinator.setChatAdapter(
+        new InMemoryChatAdapter({
+          onMessage: (message) => latest.current.onMessage(message),
+          onStatus: (status) => latest.current.onStatus(status),
+          parentId: () => latest.current.parentId(),
+          model: () => latest.current.chatModelId || undefined
+        })
+      )
+      void coordinator.attach(conversationId, {
+        messages: latest.current.messages.map(toConversationMessage)
+      })
+      return
+    }
     const chat = new DaemonChatAdapter(conversationId, {
       onMessage: (message) => latest.current.onMessage(message),
       onStatus: (status) => latest.current.onStatus(status),
@@ -174,7 +193,7 @@ export function useSessionCoordinator(
       messages: latest.current.messages.map(toConversationMessage),
       summary: latest.current.summary ?? ''
     })
-  }, [conversationId, coordinator])
+  }, [conversationId, options.incognito, coordinator])
 
   useEffect(() => {
     coordinator.setPersona(options.persona)

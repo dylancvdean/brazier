@@ -37,6 +37,10 @@ pub struct Conversation {
     pub summary: Option<String>,
     #[serde(default)]
     pub summary_updated_at: Option<String>,
+    /// Incognito conversations are ephemeral and memory-free: the daemon
+    /// refuses to persist messages for them or to source memories from them.
+    #[serde(default)]
+    pub incognito: bool,
 }
 
 /// Which surface produced a message. Voice renderings of an agent answer are
@@ -115,6 +119,61 @@ pub struct UpdateMessage {
     pub status: Option<String>,
     #[serde(default)]
     pub metadata: Option<Value>,
+}
+
+/// A durable user memory the model saved across conversations. The store is
+/// global (not per-conversation); `source_*` records where a memory came from
+/// so the Settings editor can trace and manage it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memory {
+    pub id: String,
+    pub text: String,
+    /// `fact`, `preference`, or `summary`.
+    #[serde(default = "default_memory_kind")]
+    pub kind: String,
+    /// Pinned memories are exempt from dreaming's prune/merge passes.
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_message_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+fn default_memory_kind() -> String {
+    "fact".to_owned()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateMemory {
+    pub text: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub source_conversation_id: Option<String>,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+}
+
+/// Partial edit of a memory row. Absent fields are left alone.
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdateMemory {
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

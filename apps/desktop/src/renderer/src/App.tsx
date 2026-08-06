@@ -8,6 +8,7 @@ import {
   ChevronRight,
   ChevronUp,
   Ellipsis,
+  EyeOff,
   Gauge,
   Image,
   LoaderCircle,
@@ -75,7 +76,11 @@ import {
   updateConversation,
   updateRecommendationState,
   uploadAttachmentBlob,
-  type WorkspaceModesPreference
+  type WorkspaceModesPreference,
+  fetchMemoryPreference,
+  listMemories,
+  type ClientToolCall,
+  type MemoryPreference
 } from './api'
 import { AgentMode, type AgentComposerControls, type AgentSidebarControls } from './components/AgentMode'
 import { AgentSessionSidebar } from './components/AgentSessionSidebar'
@@ -103,6 +108,16 @@ import { WelcomeScreen } from './components/WelcomeScreen'
 import { hasCompletedWelcome, markWelcomeCompleted } from './welcomePrefs'
 import { voiceStreamSupported } from './audio/voiceStream'
 import { useSessionCoordinator } from './session/useSessionCoordinator'
+import { InMemoryChatAdapter } from './session/chatAdapter'
+import {
+  buildMemoryContext,
+  dream,
+  executeMemoryClientTool,
+  isMemoryClientTool,
+  loadRelevantMemories,
+  memoryToolDefinitions,
+  type DreamInputConversation
+} from './memory'
 import {
   isChatModel,
   isComputerUseModel,
@@ -533,6 +548,13 @@ export function App(): React.JSX.Element {
   const [activeGenerateHistoryId, setActiveGenerateHistoryId] = useState<string | null>(null)
   const [persona, setPersona] = useState('You are a helpful assistant.')
   const personaEdited = useRef(false)
+  // Chat memory: what the model may recall and write, and how dreaming runs.
+  const [memoryPreference, setMemoryPreference] = useState<MemoryPreference | null>(null)
+  // Incognito chat sessions are ephemeral and memory-free. They keep a
+  // synthetic conversation id so the message-loading effects treat them like a
+  // conversation, but every write is intercepted before it reaches the daemon.
+  const [incognito, setIncognito] = useState(false)
+  const INCOGNITO_ID = 'incognito'
   // Agent / Computer modes have no composer of their own; they publish these
   // so the one at the bottom of the window can drive them.
   const [agentComposer, setAgentComposer] = useState<AgentComposerControls | null>(null)
@@ -575,6 +597,11 @@ export function App(): React.JSX.Element {
   const fileInput = useRef<HTMLInputElement>(null)
   const importInput = useRef<HTMLInputElement>(null)
   const scrollAnchor = useRef<HTMLDivElement>(null)
+  const dreamAbortRef = useRef<AbortController | undefined>(undefined)
+  const dreamTimerRef = useRef<number | undefined>(undefined)
+  const lastDreamAtRef = useRef(0)
+  const [dreamPromptOpen, setDreamPromptOpen] = useState(false)
+  const [dreamStatus, setDreamStatus] = useState<string | null>(null)
 
   const chain = useMemo(() => messageChain(messages, tipId), [messages, tipId])
   const chatDisplayItems = useMemo(() => buildChatDisplayItems(chain), [chain])
@@ -898,15 +925,42 @@ export function App(): React.JSX.Element {
           created_at: new Date().toISOString()
         }
         try {
+          const requestMessages = await (async (): Promise<Message[]> => {
+            const base = [...chainRef.current, asked]
+            const memoryEnabled = (memoryPreference?.enabled ?? true) && !incognito
+            if (!memoryEnabled || !memoryPreference || !text) return base
+            const memories = await loadRelevantMemories(text, memoryPreference.recall_count)
+            const context = buildMemoryContext(memories, memoryPreference.recall_chars)
+            if (!context) return base
+            return [
+              {
+                id: `memory-${crypto.randomUUID()}`,
+                conversation_id: conversationId ?? INCOGNITO_ID,
+                parent_id: null,
+                role: 'system',
+                content: context,
+                model: null,
+                created_at: new Date().toISOString()
+              },
+              ...base
+            ]
+          })()
           const result = await streamCompletion(
-            [...chainRef.current, asked],
+            requestMessages,
             selectedModel,
             controller.signal,
             (token) => onPartial?.(token),
             {
               builtinTools: toolsEnabled,
               builtinToolNames: toolsEnabled ? enabledTools : undefined,
-              toolChoice: toolsEnabled ? 'auto' : undefined
+              extraTools:
+                (memoryPreference?.enabled ?? true) && !incognito
+                  ? memoryToolDefinitions()
+                  : undefined,
+              toolChoice:
+                toolsEnabled || ((memoryPreference?.enabled ?? true) && !incognito)
+                  ? 'auto'
+                  : undefined
             }
           )
           return { text: result.responseText }
@@ -918,7 +972,7 @@ export function App(): React.JSX.Element {
         controllers.get(correlationId)?.abort()
       }
     }
-  }, [conversationId, selectedModel, toolsEnabled, enabledTools])
+  }, [conversationId, selectedModel, toolsEnabled, enabledTools, memoryPreference, incognito])
 
   const session = useSessionCoordinator({
     conversationId,
@@ -931,6 +985,7 @@ export function App(): React.JSX.Element {
       streaming: Boolean(pipelineFeatures.streaming_asr)
     },
     persona,
+    incognito,
     responder: voiceResponder,
     onMessage: (message) => {
       setMessages((current) =>
@@ -1040,7 +1095,7 @@ export function App(): React.JSX.Element {
   }
 
   async function exportCurrentConversation(): Promise<void> {
-    if (!conversationId) return
+    if (!conversationId || incognito) return
     setError(null)
     try {
       const bundle = await exportConversation(conversationId)
@@ -1074,6 +1129,7 @@ export function App(): React.JSX.Element {
   }
 
   async function refreshMessages(id: string, preferredTip?: string): Promise<void> {
+    if (id === INCOGNITO_ID) return
     const refreshId = ++messageRefreshRef.current
     const data = await listMessages(id)
     if (refreshId !== messageRefreshRef.current || id !== conversationId) return
@@ -1122,6 +1178,11 @@ export function App(): React.JSX.Element {
       setError(cause instanceof Error ? cause.message : String(cause))
     )
     void refreshCapabilities()
+    void fetchMemoryPreference()
+      .then(setMemoryPreference)
+      .catch(() => {
+        // Memory defaults apply until the preference loads.
+      })
   }, [])
 
   useEffect(() => {
@@ -1157,6 +1218,11 @@ export function App(): React.JSX.Element {
     // stale, even if it completes after this effect has begun loading the new
     // conversation.
     messageRefreshRef.current += 1
+    if (incognito) {
+      // The ephemeral session lives entirely in renderer state: no daemon
+      // conversation to load, no runs, and any stale fetch is abandoned.
+      return
+    }
     if (!conversationId) {
       setMessages([])
       setTipId(null)
@@ -1171,7 +1237,7 @@ export function App(): React.JSX.Element {
     void listRunSnapshots(conversationId)
       .then(setRunSnapshots)
       .catch(() => setRunSnapshots([]))
-  }, [conversationId])
+  }, [conversationId, incognito])
 
   useEffect(() => {
     scrollAnchor.current?.scrollIntoView({ behavior: 'smooth' })
@@ -1194,6 +1260,7 @@ export function App(): React.JSX.Element {
   }, [appMode, conversationId])
 
   async function newConversation(): Promise<void> {
+    if (incognito) setIncognito(false)
     const conversation = await createConversation()
     await refreshConversations()
     // Invalidate in-flight loads for the previous chat before clearing its
@@ -1205,6 +1272,124 @@ export function App(): React.JSX.Element {
     setTipId(null)
     setDraft('')
   }
+
+  /** Begin a private session: no persistence, no memory, discarded on leave. */
+  function startIncognito(): void {
+    if (busy || dreamAbortRef.current) return
+    setIncognito(true)
+    messageRefreshRef.current += 1
+    setConversationId(INCOGNITO_ID)
+    setMessages([])
+    setTipId(null)
+    setRunSnapshots([])
+    setExpandedRunId(null)
+    setDraft('')
+    setAttachments([])
+    setError(null)
+  }
+
+  /** Leave incognito, discarding the ephemeral conversation. */
+  function leaveIncognito(): void {
+    if (busy) return
+    setIncognito(false)
+    messageRefreshRef.current += 1
+    setConversationId(null)
+    setMessages([])
+    setTipId(null)
+    setRunSnapshots([])
+    setExpandedRunId(null)
+    setDraft('')
+    void refreshConversations()
+  }
+
+  function toggleIncognito(): void {
+    if (incognito) {
+      if (messages.length > 0 && !window.confirm('Leave incognito chat? This conversation will be discarded.')) {
+        return
+      }
+      leaveIncognito()
+      return
+    }
+    if (messages.length > 0 && !window.confirm('Start an incognito chat? The current conversation will be left as-is.')) {
+      return
+    }
+    startIncognito()
+  }
+
+  async function runDream(): Promise<void> {
+    setDreamPromptOpen(false)
+    if (dreamAbortRef.current) return
+    if (!selectedModel) {
+      setError('Select a chat model before running dreaming.')
+      return
+    }
+    setDreamStatus('Preparing dreaming pass…')
+    const controller = new AbortController()
+    dreamAbortRef.current = controller
+    try {
+      const conversations: DreamInputConversation[] = (await listConversations(''))
+        .slice(0, 10)
+        .map((conversation) => ({
+          id: conversation.id,
+          title: conversation.title,
+          summary: conversation.summary ?? null,
+          updated_at: conversation.updated_at
+        }))
+      const memories = await listMemories()
+      const result = await dream({
+        model: selectedModel,
+        signal: controller.signal,
+        memories,
+        conversations,
+        onLoad: (event) => setDreamStatus(event.message)
+      })
+      lastDreamAtRef.current = Date.now()
+      const changed = result.created + result.updated + result.deleted
+      setDreamStatus(
+        changed === 0
+          ? 'Dreaming found nothing to change.'
+          : `Dreaming complete: ${result.created} added, ${result.updated} updated, ${result.deleted} removed.`
+      )
+    } catch (cause) {
+      if ((cause as Error).name !== 'AbortError') {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      }
+    } finally {
+      dreamAbortRef.current = undefined
+    }
+  }
+
+  /**
+   * After a chat turn, schedule a dreaming pass when the app stays idle. Auto
+   * runs it silently; ask surfaces a prompt first. Incognito and conversations
+   * that are still active never dream.
+   */
+  function scheduleDream(): void {
+    const mode = memoryPreference?.dreaming
+    if (!mode || mode === 'off' || incognito || !selectedModel) return
+    // Don't re-dream immediately after the last pass, or while the user is
+    // actively using the app (a new submit clears this timer).
+    if (Date.now() - lastDreamAtRef.current < 10 * 60 * 1000) return
+    if (dreamTimerRef.current !== undefined) window.clearTimeout(dreamTimerRef.current)
+    dreamTimerRef.current = window.setTimeout(() => {
+      dreamTimerRef.current = undefined
+      if (busy || dreamAbortRef.current) return
+      if (mode === 'auto') {
+        void runDream()
+      } else if (mode === 'ask') {
+        setDreamPromptOpen(true)
+      }
+    }, 2 * 60 * 1000)
+  }
+
+  function clearDreamTimer(): void {
+    if (dreamTimerRef.current !== undefined) {
+      window.clearTimeout(dreamTimerRef.current)
+      dreamTimerRef.current = undefined
+    }
+  }
+
+  useEffect(() => () => clearDreamTimer(), [])
 
   function maybeGenerateConversationTitle(
     id: string,
@@ -1379,6 +1564,47 @@ export function App(): React.JSX.Element {
     }
   }
 
+  /**
+   * Persist a chat message, or keep it in renderer memory for incognito
+   * sessions where nothing may reach the daemon.
+   */
+  async function persistChatMessage(
+    conversationId: string,
+    input: {
+      parent_id: string | null
+      role: Role
+      content: string | ContentPart[]
+      model?: string
+      tool_calls?: unknown[] | null
+      tool_call_id?: string | null
+      source?: string
+      status?: string
+      correlation_id?: string
+      metadata?: Record<string, unknown>
+    }
+  ): Promise<Message> {
+    if (incognito) {
+      const message: Message = {
+        id: `ephemeral-${crypto.randomUUID()}`,
+        conversation_id: INCOGNITO_ID,
+        parent_id: input.parent_id,
+        role: input.role,
+        content: input.content,
+        model: input.model ?? null,
+        ...(input.tool_calls !== undefined ? { tool_calls: input.tool_calls } : {}),
+        ...(input.tool_call_id !== undefined ? { tool_call_id: input.tool_call_id } : {}),
+        ...(input.source !== undefined ? { source: input.source } : {}),
+        ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.correlation_id !== undefined ? { correlation_id: input.correlation_id } : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        created_at: new Date().toISOString()
+      }
+      setMessages((current) => [...current, message])
+      return message
+    }
+    return createMessage(conversationId, input)
+  }
+
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault()
     const text = draft.trim()
@@ -1422,6 +1648,10 @@ export function App(): React.JSX.Element {
     setStreamingToolOffsets([])
     setGenerationRate(null)
     setGenerationTokens(null)
+    // New activity defers dreaming: the idle timer restarts on completion, and
+    // a pending "ask" prompt is withdrawn rather than nagging mid-conversation.
+    clearDreamTimer()
+    setDreamPromptOpen(false)
     const controller = new AbortController()
     abortRef.current = controller
     const shouldGenerateTitle =
@@ -1433,26 +1663,47 @@ export function App(): React.JSX.Element {
 
     try {
       let activeConversationId = conversationId
-      if (!activeConversationId) {
+      if (incognito) {
+        activeConversationId = INCOGNITO_ID
+      } else if (!activeConversationId) {
         const created = await createConversation()
         activeConversationId = created.id
         setConversationId(created.id)
       }
+      const memoryEnabled = (memoryPreference?.enabled ?? true) && !incognito
       const parts: ContentPart[] = [
         ...(text ? [{ type: 'text' as const, text }] : []),
         ...attachments.map(attachmentPart)
       ]
       const content = attachments.length === 0 ? text : parts
-      const userMessage = await createMessage(activeConversationId, {
+      const userMessage = await persistChatMessage(activeConversationId, {
         parent_id: chain.at(-1)?.id ?? null,
         role: 'user',
         content
       })
       let requestMessages = [...chain, userMessage]
-      setMessages((current) => [...current, userMessage])
+      if (!incognito) setMessages((current) => [...current, userMessage])
       setTipId(userMessage.id)
       setDraft('')
       setAttachments([])
+      // Recall relevant memories into this turn before the first request. The
+      // system message is ephemeral — it is never persisted to the chain.
+      if (memoryEnabled && memoryPreference && text) {
+        const memories = await loadRelevantMemories(text, memoryPreference.recall_count)
+        const context = buildMemoryContext(memories, memoryPreference.recall_chars)
+        if (context) {
+          const memorySystemMessage: Message = {
+            id: `memory-${crypto.randomUUID()}`,
+            conversation_id: activeConversationId,
+            parent_id: null,
+            role: 'system',
+            content: context,
+            model: null,
+            created_at: new Date().toISOString()
+          }
+          requestMessages = [memorySystemMessage, ...requestMessages]
+        }
+      }
 
       let parentId = userMessage.id
       let responseText = ''
@@ -1475,7 +1726,8 @@ export function App(): React.JSX.Element {
           {
             builtinTools: toolsEnabled,
             builtinToolNames: toolsEnabled ? enabledTools : undefined,
-            toolChoice: toolsEnabled ? 'auto' : undefined,
+            extraTools: memoryEnabled ? memoryToolDefinitions() : undefined,
+            toolChoice: toolsEnabled || memoryEnabled ? 'auto' : undefined,
             onLoad: (event) => setModelLoadStatus(event.message),
             onPrefill: (event) => setModelLoadStatus(prefillProgressLabel(event)),
             onReasoning: (token) => {
@@ -1507,7 +1759,7 @@ export function App(): React.JSX.Element {
           const role = entry.role as Role
           const entryReasoning =
             typeof entry.reasoning_content === 'string' ? entry.reasoning_content.trim() : ''
-          const created = await createMessage(activeConversationId, {
+          const created = await persistChatMessage(activeConversationId, {
             parent_id: parentId,
             role,
             content: entry.content ?? '',
@@ -1524,11 +1776,41 @@ export function App(): React.JSX.Element {
         if (result.clientToolCalls.length === 0) {
           break
         }
+        // Memory tools have no server-side handler; the renderer executes them
+        // against the memory API and feeds the result back to the model.
+        let allClientHandled = true
+        for (const call of result.clientToolCalls) {
+          if (isMemoryClientTool(call.name)) {
+            // Defense in depth: incognito never offers these tools, but a
+            // misbehaving model must not read or write memories either.
+            const outcome = incognito
+              ? {
+                  output: 'Memory is disabled in incognito chats; nothing was saved or read.',
+                  is_error: true
+                }
+              : await executeMemoryClientTool(call, {
+                  conversation_id: activeConversationId,
+                  message_id: userMessage.id
+                })
+            const toolMessage = await persistChatMessage(activeConversationId, {
+              parent_id: parentId,
+              role: 'tool',
+              content: outcome.output,
+              tool_call_id: call.id,
+              source: 'tool'
+            })
+            requestMessages = [...requestMessages, toolMessage]
+            parentId = toolMessage.id
+          } else {
+            allClientHandled = false
+          }
+        }
+        if (allClientHandled) continue
         throw new GenerationFailure(
           `The model requested client-side tools that Brazier cannot execute: ${result.clientToolCalls.map((call) => call.name).join(', ')}`
         )
       }
-      const assistant = await createMessage(activeConversationId, {
+      const assistant = await persistChatMessage(activeConversationId, {
         parent_id: parentId,
         role: 'assistant',
         content: responseText,
@@ -1537,7 +1819,7 @@ export function App(): React.JSX.Element {
           ? { metadata: { reasoning_content: responseReasoning } }
           : {})
       })
-      if (shouldGenerateTitle && responseText.trim()) {
+      if (!incognito && shouldGenerateTitle && responseText.trim()) {
         maybeGenerateConversationTitle(
           activeConversationId,
           text,
@@ -1557,7 +1839,7 @@ export function App(): React.JSX.Element {
         ).values()
       ]
       if (generatedMedia.length > 0) {
-        const generated = await createMessage(activeConversationId, {
+        const generated = await persistChatMessage(activeConversationId, {
           parent_id: assistant.id,
           role: 'assistant',
           content: generatedMedia.map((media, index) => ({
@@ -1581,7 +1863,7 @@ export function App(): React.JSX.Element {
         })
         finalTipId = generated.id
       }
-      if (runtime) {
+      if (runtime && !incognito) {
         await recordRun(activeConversationId, {
           parent_message_id: userMessage.id,
           assistant_message_id: assistant.id,
@@ -1596,9 +1878,14 @@ export function App(): React.JSX.Element {
       setStreamingTools([])
       setStreamingToolOffsets([])
       setModelLoadStatus(null)
-      await refreshMessages(activeConversationId, finalTipId)
-      await refreshConversations()
-      void listRunSnapshots(activeConversationId).then(setRunSnapshots).catch(() => {})
+      if (incognito) {
+        setTipId(finalTipId)
+      } else {
+        await refreshMessages(activeConversationId, finalTipId)
+        await refreshConversations()
+        void listRunSnapshots(activeConversationId).then(setRunSnapshots).catch(() => {})
+      }
+      scheduleDream()
     } catch (cause) {
       if ((cause as Error).name !== 'AbortError') {
         if (cause instanceof GenerationFailure) {
@@ -1741,7 +2028,13 @@ export function App(): React.JSX.Element {
                   className={conversation.id === conversationId ? 'conversation active' : 'conversation'}
                   key={conversation.id}
                 >
-                  <button className="conversation-select" onClick={() => setConversationId(conversation.id)}>
+                  <button
+                    className="conversation-select"
+                    onClick={() => {
+                      if (incognito) setIncognito(false)
+                      setConversationId(conversation.id)
+                    }}
+                  >
                     <span>{conversation.title}</span>
                     <time>{conversation.updated_at.slice(0, 10)}</time>
                   </button>
@@ -1894,6 +2187,20 @@ export function App(): React.JSX.Element {
           >
             <SlidersHorizontal size={17} />
           </button>
+          {appMode === 'chat' && (
+            <button
+              className={`icon-button incognito-toggle${incognito ? ' active' : ''}`}
+              title={
+                incognito
+                  ? 'Incognito chat is on: nothing is saved and no memories are used.'
+                  : 'Start an incognito chat: nothing is saved and no memories are used.'
+              }
+              aria-label="Toggle incognito chat"
+              onClick={toggleIncognito}
+            >
+              <EyeOff size={17} />
+            </button>
+          )}
           <button
             className="icon-button manage-button"
             title="Manage models, runtimes, and engine configuration"
@@ -1916,6 +2223,48 @@ export function App(): React.JSX.Element {
           <div className="runtime-notice model-prepare-notice">
             <LoaderCircle className="spin" size={16} />
             <span>{modelLoadStatus}</span>
+          </div>
+        )}
+
+        {incognito && appMode === 'chat' && (
+          <div className="runtime-notice incognito-notice">
+            <EyeOff size={14} />
+            <span>
+              Incognito chat: this conversation is ephemeral and uses no memory. It will be
+              discarded when you leave.
+            </span>
+          </div>
+        )}
+
+        {dreamPromptOpen && (
+          <div className="runtime-notice dream-notice">
+            <Brain size={14} />
+            <span>
+              Ready to consolidate memories with {selectedMeta.title}. Run a dreaming pass now?
+              It will review recent conversations and merge, prune, and add memories.
+            </span>
+            <button type="button" onClick={() => void runDream()}>
+              Run
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setDreamPromptOpen(false)
+                lastDreamAtRef.current = Date.now()
+              }}
+            >
+              Not now
+            </button>
+          </div>
+        )}
+
+        {dreamStatus && !dreamPromptOpen && (
+          <div className="runtime-notice dream-notice">
+            <Brain size={14} />
+            <span>{dreamStatus}</span>
+            <button type="button" onClick={() => setDreamStatus(null)}>
+              <X size={14} />
+            </button>
           </div>
         )}
 
@@ -2693,6 +3042,7 @@ export function App(): React.JSX.Element {
           onConfigureModel={setConfiguringModel}
           profileCounts={profileCounts}
           onWorkspaceModesChange={setWorkspaceModes}
+          onDreamRequest={() => void runDream()}
         />
       )}
     </main>

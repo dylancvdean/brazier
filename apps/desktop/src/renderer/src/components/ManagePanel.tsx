@@ -14,6 +14,8 @@ import {
   KeyRound,
   LayoutDashboard,
   LoaderCircle,
+  MessageSquare,
+  Pin,
   Plug,
   RefreshCw,
   Search,
@@ -107,8 +109,16 @@ import {
   type OsPermissionStatus,
   type SdcppBundle,
   type SdcppProposal,
-  type WorkspaceModesPreference
+  type WorkspaceModesPreference,
+  deleteMemory,
+  fetchMemoryPreference,
+  listMemories,
+  saveMemoryPreference,
+  updateMemory,
+  type DreamingMode,
+  type MemoryPreference
 } from '../api'
+import type { Memory } from '../types'
 import {
   fetchAgentCapabilities,
   fetchAgentPreference,
@@ -400,6 +410,7 @@ export type ManageSection =
   | 'agent'
   | 'computer'
   | 'remote'
+  | 'chat'
   | 'customization'
   | 'support'
 
@@ -426,6 +437,8 @@ type ManagePanelProps = {
   onPendingBuildConsumed?: () => void
   /** Fired after workspace mode toggles are saved. */
   onWorkspaceModesChange?: (modes: WorkspaceModesPreference) => void
+  /** The user asked Settings to run a dreaming pass with the current model. */
+  onDreamRequest?: () => void
 }
 
 const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Element }> = [
@@ -440,6 +453,7 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'remote', label: 'Remote servers', icon: <Globe size={15} /> },
   { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> },
   { id: 'server', label: 'OpenAI server', icon: <KeyRound size={15} /> },
+  { id: 'chat', label: 'Chat', icon: <MessageSquare size={15} /> },
   { id: 'customization', label: 'Customization', icon: <LayoutDashboard size={15} /> },
   { id: 'support', label: 'Support', icon: <ShieldAlert size={15} /> }
 ]
@@ -691,6 +705,7 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
             {props.section === 'remote' && <RemoteSection {...props} onError={setError} />}
             {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
             {props.section === 'server' && <ServerSection {...props} onError={setError} />}
+            {props.section === 'chat' && <ChatSection {...props} onError={setError} />}
             {props.section === 'customization' && (
               <CustomizationSection {...props} onError={setError} />
             )}
@@ -835,6 +850,312 @@ function InputGuardSetup(props: { onError: (message: string | null) => void }): 
               : 'Install safety fallback'}
       </button>
     </div>
+  )
+}
+
+function ChatSection(props: SectionProps): React.JSX.Element {
+  const [preference, setPreference] = useState<MemoryPreference | null>(null)
+  const [memories, setMemories] = useState<Memory[]>([])
+  const [filter, setFilter] = useState('')
+  const [loadingMemories, setLoadingMemories] = useState(true)
+  const [savingPreference, setSavingPreference] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editText, setEditText] = useState('')
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  const loadMemories = useCallback(async (): Promise<void> => {
+    setLoadingMemories(true)
+    try {
+      setMemories(await listMemories())
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setLoadingMemories(false)
+    }
+  }, [props])
+
+  useEffect(() => {
+    let cancelled = false
+    void fetchMemoryPreference()
+      .then((preference) => {
+        if (!cancelled) setPreference(preference)
+      })
+      .catch((cause) => {
+        if (!cancelled) props.onError(errorText(cause))
+      })
+    void listMemories()
+      .then((memories) => {
+        if (!cancelled) setMemories(memories)
+      })
+      .catch((cause) => {
+        if (!cancelled) props.onError(errorText(cause))
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingMemories(false)
+      })
+    return () => {
+      cancelled = true
+    }
+    // Load once when the section mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function savePreference(patch: Partial<MemoryPreference>): Promise<void> {
+    if (!preference) return
+    props.onError(null)
+    setSavingPreference(true)
+    try {
+      const saved = await saveMemoryPreference({ ...preference, ...patch })
+      setPreference(saved)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSavingPreference(false)
+    }
+  }
+
+  async function applyMemoryMutation(
+    action: () => Promise<void>
+  ): Promise<void> {
+    props.onError(null)
+    try {
+      await action()
+      await loadMemories()
+    } catch (cause) {
+      props.onError(errorText(cause))
+    }
+  }
+
+  const visibleMemories = useMemo(() => {
+    const needle = filter.trim().toLowerCase()
+    if (!needle) return memories
+    return memories.filter(
+      (memory) =>
+        memory.text.toLowerCase().includes(needle) || memory.tags.some((tag) => tag.toLowerCase().includes(needle))
+    )
+  }, [memories, filter])
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>Chat</h2>
+        <p>
+          Long-term memory the chat model can draw on and write to, plus how
+          often it reflects on what it has learned.
+        </p>
+      </header>
+
+      <div className="settings-group">
+        <div className="section-label">Chat memory</div>
+        <p className="model-help">
+          When on, relevant memories are injected into each chat turn and the
+          model can save and recall them with <code>save_memory</code> and{' '}
+          <code>recall_memory</code>. Incognito conversations never read or
+          write memories.
+        </p>
+        <label className="settings-toggle">
+          <input
+            type="checkbox"
+            checked={preference?.enabled ?? true}
+            disabled={!preference || savingPreference}
+            onChange={(event) => void savePreference({ enabled: event.target.checked })}
+          />
+          <span>
+            <strong>Remember across conversations</strong>
+            <small>Let the model save and use long-term memory in chat.</small>
+          </span>
+        </label>
+        {preference?.enabled && (
+          <div className="settings-grid">
+            <label>
+              <span>Memories recalled per turn</span>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={preference.recall_count}
+                disabled={savingPreference}
+                onChange={(event) =>
+                  void savePreference({ recall_count: Math.max(0, Number(event.target.value) || 0) })
+                }
+              />
+            </label>
+            <label>
+              <span>Recalled characters per turn</span>
+              <input
+                type="number"
+                min={0}
+                max={40000}
+                value={preference.recall_chars}
+                disabled={savingPreference}
+                onChange={(event) =>
+                  void savePreference({ recall_chars: Math.max(0, Number(event.target.value) || 0) })
+                }
+              />
+            </label>
+          </div>
+        )}
+      </div>
+
+      <div className="settings-group">
+        <div className="section-label">Dreaming</div>
+        <p className="model-help">
+          While the app is idle, the model reviews recent conversations and the
+          memory store — merging duplicates, pruning stale facts, and adding
+          what the conversations revealed. Auto runs it silently; ask prompts
+          first; off never runs it.
+        </p>
+        <div className="toggle-list">
+          {(
+            [
+              ['off', 'Off', 'Never run dreaming.'],
+              ['auto', 'Auto', 'Run silently while idle after a conversation.'],
+              ['ask', 'Ask', 'Ask before running a dreaming pass.']
+            ] as Array<[DreamingMode, string, string]>
+          ).map(([mode, label, detail]) => (
+            <label key={mode}>
+              <div>
+                <strong>{label}</strong>
+                <span>{detail}</span>
+              </div>
+              <input
+                type="radio"
+                name="dreaming-mode"
+                checked={preference?.dreaming === mode}
+                disabled={!preference || savingPreference}
+                onChange={() => void savePreference({ dreaming: mode })}
+              />
+            </label>
+          ))}
+        </div>
+        <div className="runtime-actions">
+          <button
+            className="primary-action"
+            disabled={!props.selectedModel}
+            onClick={() => props.onDreamRequest?.()}
+          >
+            Run dreaming now
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-group">
+        <div className="settings-group-head">
+          <div className="section-label">Memories</div>
+          <input
+            className="memory-search"
+            type="search"
+            placeholder="Search memories…"
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+          />
+        </div>
+        <p className="model-help">
+          Everything the model has saved. Edit or delete any of it; pinned
+          memories are protected from dreaming's pruning.
+        </p>
+        {loadingMemories ? (
+          <div className="manage-placeholder">Loading memories…</div>
+        ) : visibleMemories.length === 0 ? (
+          <div className="manage-placeholder">
+            {memories.length === 0 ? 'No memories yet.' : 'No memories match that search.'}
+          </div>
+        ) : (
+          <ul className="memory-list">
+            {visibleMemories.map((memory) =>
+              editingId === memory.id ? (
+                <li className="memory-row memory-row-editing" key={memory.id}>
+                  <textarea
+                    value={editText}
+                    autoFocus
+                    rows={2}
+                    onChange={(event) => setEditText(event.target.value)}
+                  />
+                  <div className="memory-row-actions">
+                    <button
+                      className="secondary-action"
+                      disabled={busyId === memory.id}
+                      onClick={() => {
+                        setBusyId(memory.id)
+                        void applyMemoryMutation(async () => {
+                          await updateMemory(memory.id, { text: editText.trim() })
+                        }).finally(() => {
+                          setEditingId(null)
+                          setBusyId(null)
+                        })
+                      }}
+                    >
+                      Save
+                    </button>
+                    <button
+                      className="secondary-action"
+                      disabled={busyId === memory.id}
+                      onClick={() => {
+                        setEditingId(null)
+                        setEditText('')
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </li>
+              ) : (
+                <li className="memory-row" key={memory.id}>
+                  <div className="memory-row-text">
+                    {memory.pinned && <Pin className="memory-pin" size={12} />}
+                    <span>{memory.text}</span>
+                    <small>
+                      {memory.kind}
+                      {memory.tags.length > 0 && ` · ${memory.tags.join(', ')}`}
+                      {` · ${new Date(memory.updated_at).toLocaleDateString()}`}
+                    </small>
+                  </div>
+                  <div className="memory-row-actions">
+                    <button
+                      className="secondary-action"
+                      disabled={busyId === memory.id}
+                      title={memory.pinned ? 'Unpin' : 'Pin'}
+                      onClick={() => {
+                        setBusyId(memory.id)
+                        void applyMemoryMutation(() =>
+                          updateMemory(memory.id, { pinned: !memory.pinned }).then(() => undefined)
+                        ).finally(() => setBusyId(null))
+                      }}
+                    >
+                      <Pin size={13} />
+                    </button>
+                    <button
+                      className="secondary-action"
+                      disabled={busyId === memory.id}
+                      title="Edit"
+                      onClick={() => {
+                        setEditingId(memory.id)
+                        setEditText(memory.text)
+                      }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className="secondary-action danger-action"
+                      disabled={busyId === memory.id}
+                      title="Delete"
+                      onClick={() => {
+                        setBusyId(memory.id)
+                        void applyMemoryMutation(() => deleteMemory(memory.id).then(() => undefined)).finally(
+                          () => setBusyId(null)
+                        )
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </li>
+              )
+            )}
+          </ul>
+        )}
+      </div>
+    </section>
   )
 }
 

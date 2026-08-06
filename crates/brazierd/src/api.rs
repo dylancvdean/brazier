@@ -255,6 +255,15 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/conversations/{id}/runs",
             get(list_run_snapshots).post(create_run_snapshot),
         )
+        .route("/api/v1/memories", get(list_memories).post(create_memory))
+        .route(
+            "/api/v1/memories/{id}",
+            get(get_memory).patch(update_memory).delete(delete_memory),
+        )
+        .route(
+            "/api/v1/memories/conversation/{id}",
+            get(list_memories_for_conversation),
+        )
         // Attachments are sent as base64 JSON. Allow for the 4/3 encoding
         // overhead of the 50 MiB video limit while `blob_store` continues to
         // enforce the actual type-specific limits after decoding.
@@ -319,6 +328,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         .route(
             "/api/v1/preferences/computer",
             get(computer_preference).put(update_computer_preference),
+        )
+        .route(
+            "/api/v1/preferences/memory",
+            get(memory_preference).put(update_memory_preference),
         )
         .route(
             "/api/v1/computer/permissions",
@@ -874,6 +887,11 @@ async fn create_message(
     Path(id): Path<String>,
     Json(request): Json<CreateMessage>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
+    if conversation_is_incognito(&state, &id).await? {
+        return Err(ApiError::bad_request(
+            "incognito conversations are ephemeral and cannot store messages",
+        ));
+    }
     register_message_blobs(&state, &request.content)
         .await
         .map_err(ApiError::bad_request)?;
@@ -883,6 +901,18 @@ async fn create_message(
         .await
         .map_err(ApiError::bad_request)?;
     Ok((StatusCode::CREATED, Json(json!(message))))
+}
+
+/// Incognito conversations are ephemeral and memory-free. The daemon enforces
+/// the flag so a misbehaving renderer cannot turn a private session into a
+/// stored one.
+async fn conversation_is_incognito(state: &AppState, id: &str) -> ApiResult<bool> {
+    let conversation = state
+        .db
+        .get_conversation(id)
+        .await
+        .map_err(ApiError::not_found)?;
+    Ok(conversation.incognito)
 }
 
 /// Tool-generated media is already present in the content-addressed blob
@@ -949,6 +979,103 @@ async fn list_run_snapshots(
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(json!({ "data": runs })))
+}
+
+// --- Memories ----------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct MemoryListQuery {
+    /// Keyword search; absent or empty lists the most recent memories.
+    q: Option<String>,
+    #[serde(default = "default_memory_limit")]
+    limit: i64,
+}
+
+fn default_memory_limit() -> i64 {
+    50
+}
+
+async fn list_memories(
+    State(state): State<AppState>,
+    Query(query): Query<MemoryListQuery>,
+) -> ApiResult<Json<Value>> {
+    let memories = state
+        .db
+        .search_memories(query.q.as_deref(), query.limit)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": memories })))
+}
+
+async fn list_memories_for_conversation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let memories = state
+        .db
+        .list_memories_for_conversation(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": memories })))
+}
+
+async fn get_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let memory = state
+        .db
+        .get_memory(&id)
+        .await
+        .map_err(ApiError::not_found)?;
+    Ok(Json(json!(memory)))
+}
+
+async fn create_memory(
+    State(state): State<AppState>,
+    Json(request): Json<crate::types::CreateMemory>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    if let Some(conversation_id) = request.source_conversation_id.as_deref()
+        && conversation_is_incognito(&state, conversation_id).await?
+    {
+        return Err(ApiError::bad_request(
+            "memories cannot be saved from incognito conversations",
+        ));
+    }
+    let memory = state
+        .db
+        .create_memory(request)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok((StatusCode::CREATED, Json(json!(memory))))
+}
+
+async fn update_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::types::UpdateMemory>,
+) -> ApiResult<Json<Value>> {
+    let memory = state
+        .db
+        .update_memory(&id, request)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!(memory)))
+}
+
+async fn delete_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let deleted = state
+        .db
+        .delete_memory(&id)
+        .await
+        .map_err(ApiError::internal)?;
+    if !deleted {
+        return Err(ApiError::not_found("memory not found"));
+    }
+    Ok(Json(json!({ "deleted": true })))
 }
 
 async fn create_run_snapshot(
@@ -1820,6 +1947,97 @@ async fn update_computer_preference(
         "action_settle_delay_ms": preference.action_settle_delay_ms,
         "max_screenshots_kept": max_screenshots_kept,
     })))
+}
+
+pub const MEMORY_PREFERENCE_KEY: &str = "memory";
+
+pub const DEFAULT_MEMORY_RECALL_COUNT: i64 = 6;
+pub const DEFAULT_MEMORY_RECALL_CHARS: i64 = 2400;
+
+fn memory_dreaming(value: Option<&Value>) -> String {
+    value
+        .and_then(|value| value["dreaming"].as_str())
+        .filter(|mode| matches!(*mode, "off" | "auto" | "ask"))
+        .unwrap_or("auto")
+        .to_owned()
+}
+
+fn memory_enabled(value: Option<&Value>) -> bool {
+    value
+        .and_then(|value| value["enabled"].as_bool())
+        .unwrap_or(true)
+}
+
+async fn memory_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let stored = state
+        .db
+        .application_preference(MEMORY_PREFERENCE_KEY)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
+        "enabled": memory_enabled(stored.as_ref()),
+        "recall_count": stored.as_ref()
+            .and_then(|value| value["recall_count"].as_i64())
+            .unwrap_or(DEFAULT_MEMORY_RECALL_COUNT),
+        "recall_chars": stored.as_ref()
+            .and_then(|value| value["recall_chars"].as_i64())
+            .unwrap_or(DEFAULT_MEMORY_RECALL_CHARS),
+        "dreaming": memory_dreaming(stored.as_ref()),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateMemoryPreference {
+    #[serde(default = "default_memory_enabled")]
+    enabled: bool,
+    #[serde(default = "default_memory_recall_count")]
+    recall_count: i64,
+    #[serde(default = "default_memory_recall_chars")]
+    recall_chars: i64,
+    #[serde(default = "default_memory_dreaming")]
+    dreaming: String,
+}
+
+fn default_memory_enabled() -> bool {
+    true
+}
+
+fn default_memory_recall_count() -> i64 {
+    DEFAULT_MEMORY_RECALL_COUNT
+}
+
+fn default_memory_recall_chars() -> i64 {
+    DEFAULT_MEMORY_RECALL_CHARS
+}
+
+fn default_memory_dreaming() -> String {
+    "auto".to_owned()
+}
+
+async fn update_memory_preference(
+    State(state): State<AppState>,
+    Json(preference): Json<UpdateMemoryPreference>,
+) -> ApiResult<Json<Value>> {
+    let dreaming = preference.dreaming.trim().to_ascii_lowercase();
+    if !matches!(dreaming.as_str(), "off" | "auto" | "ask") {
+        return Err(ApiError::bad_request(format!(
+            "Dreaming must be one of off, auto, or ask (got {dreaming})."
+        )));
+    }
+    let recall_count = preference.recall_count.clamp(0, 100);
+    let recall_chars = preference.recall_chars.clamp(0, 40_000);
+    let value = json!({
+        "enabled": preference.enabled,
+        "recall_count": recall_count,
+        "recall_chars": recall_chars,
+        "dreaming": dreaming,
+    });
+    state
+        .db
+        .set_application_preference(MEMORY_PREFERENCE_KEY, &value)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(value))
 }
 
 async fn computer_os_permissions(State(state): State<AppState>) -> Json<Value> {

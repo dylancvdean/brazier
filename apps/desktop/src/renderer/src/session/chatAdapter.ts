@@ -130,3 +130,62 @@ export class DaemonChatAdapter implements ChatAdapter {
     void messageId
   }
 }
+
+/**
+ * Chat adapter for incognito sessions: nothing is written to the daemon and
+ * nothing may reach memory. Messages live only in the renderer and are
+ * discarded when the session ends.
+ */
+export class InMemoryChatAdapter implements ChatAdapter {
+  private lastMessageId: string | null = null
+
+  constructor(private readonly hooks: ChatAdapterHooks = {}) {}
+
+  async appendMessage(message: NewMessage): Promise<ConversationMessage> {
+    const parentId = this.hooks.parentId?.() ?? this.lastMessageId
+    const stored: Message = {
+      id: `ephemeral-${crypto.randomUUID()}`,
+      conversation_id: 'incognito',
+      parent_id: parentId,
+      role: message.role,
+      content: message.content,
+      model: message.role === 'assistant' ? (this.hooks.model?.() ?? null) : null,
+      source: message.source,
+      correlation_id: message.correlationId,
+      status: message.status,
+      metadata: message.metadata ?? null,
+      created_at: new Date().toISOString()
+    }
+    this.lastMessageId = stored.id
+    this.hooks.onMessage?.(stored)
+    return toConversationMessage(stored)
+  }
+
+  async updateMessage(messageId: string, patch: MessagePatch): Promise<ConversationMessage> {
+    this.hooks.onStatus?.(null)
+    return {
+      id: messageId,
+      conversationId: 'incognito',
+      role: 'assistant',
+      source: 'assistant_chat',
+      content: patch.content ?? '',
+      createdAt: new Date().toISOString(),
+      status: patch.status ?? 'final',
+      metadata: patch.metadata
+    }
+  }
+
+  showStatus(status: string | null): void {
+    this.hooks.onStatus?.(status)
+  }
+
+  markQueued(messageId: string): void {
+    this.hooks.onStatus?.('Queued behind the turn already running.')
+    void messageId
+  }
+
+  markCancelled(messageId: string): void {
+    this.hooks.onStatus?.('Cancelled.')
+    void messageId
+  }
+}

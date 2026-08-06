@@ -2111,6 +2111,82 @@ code {
   padding: 12px 14px;
 }
 
+.memory-search {
+  width: 180px;
+}
+
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memory-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #333;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.memory-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.memory-row-text > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.memory-row-text small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.memory-pin {
+  color: #f78438;
+  flex: none;
+}
+
+.memory-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.memory-row-actions .secondary-action {
+  padding: 4px 8px;
+  font-size: 10px;
+}
+
+.danger-action {
+  color: #e5534b;
+}
+
+.memory-row-editing {
+  align-items: flex-start;
+}
+
+.memory-row-editing textarea {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  font-size: 12px;
+}
+
 .inline-link {
   padding: 0;
   border: 0;
@@ -2345,6 +2421,28 @@ a.inline-link {
   background: #3d3420;
   border: none;
   cursor: pointer;
+}
+
+.dream-notice {
+  color: #bfd6c8;
+  background: #17271f;
+  border-color: #2a4a37;
+}
+
+.dream-notice button {
+  color: #dcefe2;
+  background: #2a4a37;
+}
+
+.incognito-notice {
+  color: #c9d3e0;
+  background: #1c2230;
+  border-color: #343d52;
+}
+
+.topbar > .icon-button.incognito-toggle.active {
+  color: #f78438;
+  background: rgba(247, 132, 56, 0.14);
 }
 
 .library-runtime-picker {

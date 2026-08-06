@@ -10,6 +10,21 @@ export type Conversation = {
   /** Compact summary a fresh voice session is seeded with. */
   summary?: string | null
   summary_updated_at?: string | null
+  /** Incognito conversations are ephemeral and memory-free. */
+  incognito?: boolean
+}
+
+/** A durable user memory the model saved across conversations. */
+export type Memory = {
+  id: string
+  text: string
+  kind: string
+  pinned: boolean
+  tags: string[]
+  source_conversation_id?: string | null
+  source_message_id?: string | null
+  created_at: string
+  updated_at: string
 }
 
 export type ContentPart =

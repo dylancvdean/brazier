@@ -1,4 +1,4 @@
-import type { ContentPart, Conversation, HubModel, Message, Role } from './types'
+import type { ContentPart, Conversation, HubModel, Memory, Message, Role } from './types'
 
 type Connection = Awaited<ReturnType<typeof window.brazier.getConnection>>
 let connectionPromise: Promise<Connection> | undefined
@@ -102,6 +102,76 @@ export function saveComputerUsePreference(
     method: 'PUT',
     body: JSON.stringify(preference)
   })
+}
+
+/** How dreaming is scheduled. `ask` prompts before running inference. */
+export type DreamingMode = 'off' | 'auto' | 'ask'
+
+export type MemoryPreference = {
+  enabled: boolean
+  /** How many memories are recalled into each chat turn. */
+  recall_count: number
+  /** Maximum total characters of recalled memory per turn. */
+  recall_chars: number
+  dreaming: DreamingMode
+}
+
+export const DEFAULT_MEMORY_PREFERENCE: MemoryPreference = {
+  enabled: true,
+  recall_count: 6,
+  recall_chars: 2400,
+  dreaming: 'auto'
+}
+
+export function fetchMemoryPreference(): Promise<MemoryPreference> {
+  return request('/api/v1/preferences/memory')
+}
+
+export function saveMemoryPreference(
+  preference: MemoryPreference
+): Promise<MemoryPreference> {
+  return request('/api/v1/preferences/memory', {
+    method: 'PUT',
+    body: JSON.stringify(preference)
+  })
+}
+
+export type MemoryInput = {
+  text: string
+  kind?: string
+  pinned?: boolean
+  tags?: string[]
+  source_conversation_id?: string | null
+  source_message_id?: string | null
+}
+
+export async function listMemories(query?: string): Promise<Memory[]> {
+  const parameters = new URLSearchParams()
+  if (query?.trim()) parameters.set('q', query.trim())
+  return (
+    await request<{ data: Memory[] }>(`/api/v1/memories?${parameters.toString()}`)
+  ).data
+}
+
+export async function createMemory(input: MemoryInput): Promise<Memory> {
+  return request('/api/v1/memories', {
+    method: 'POST',
+    body: JSON.stringify(input)
+  })
+}
+
+export async function updateMemory(
+  id: string,
+  patch: Partial<Pick<Memory, 'text' | 'kind' | 'pinned' | 'tags'>>
+): Promise<Memory> {
+  return request(`/api/v1/memories/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch)
+  })
+}
+
+export async function deleteMemory(id: string): Promise<{ deleted: boolean }> {
+  return request(`/api/v1/memories/${id}`, { method: 'DELETE' })
 }
 
 export type ComputerViewport = {
@@ -1059,6 +1129,15 @@ function isHarmonyModel(modelId: string): boolean {
   return lower.includes('gpt-oss') || lower.includes('gpt_oss') || lower.includes('gptoss')
 }
 
+export type OpenAiFunctionTool = {
+  type: 'function'
+  function: {
+    name: string
+    description: string
+    parameters: Record<string, unknown>
+  }
+}
+
 export async function streamCompletion(
   messages: Message[],
   model: string,
@@ -1067,6 +1146,9 @@ export async function streamCompletion(
   options?: {
     builtinTools?: boolean
     builtinToolNames?: string[]
+    /** Client-side tools offered to the model; their calls come back in
+     * `clientToolCalls` because the daemon has no server-side handler. */
+    extraTools?: OpenAiFunctionTool[]
     toolChoice?: 'auto' | 'none' | { type: 'function'; function: { name: string } }
     onToolCall?: (record: ToolCallRecord) => void
     onReasoning?: (token: string) => void
@@ -1105,6 +1187,7 @@ export async function streamCompletion(
       ...(options?.builtinTools && options.builtinToolNames
         ? { builtin_tool_names: options.builtinToolNames }
         : {}),
+      ...(options?.extraTools?.length ? { tools: options.extraTools } : {}),
       ...(toolChoice ? { tool_choice: toolChoice } : {}),
       ...(typeof options?.enableReasoning === 'boolean'
         ? { enable_reasoning: options.enableReasoning }

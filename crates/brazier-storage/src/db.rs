@@ -166,12 +166,12 @@ const MESSAGE_COLUMNS: &str = "id, conversation_id, parent_id, role, content_jso
 
 /// Columns every conversation read selects, in `Conversation` field order.
 const CONVERSATION_COLUMNS: &str =
-    "id, title, created_at, updated_at, agent_session_id, summary, summary_updated_at";
+    "id, title, created_at, updated_at, agent_session_id, summary, summary_updated_at, incognito";
 
 /// [`CONVERSATION_COLUMNS`] qualified for the search join, where `messages` is
 /// also in scope.
 const CONVERSATION_COLUMNS_QUALIFIED: &str = "c.id, c.title, c.created_at, c.updated_at,
-     c.agent_session_id, c.summary, c.summary_updated_at";
+     c.agent_session_id, c.summary, c.summary_updated_at, c.incognito";
 
 #[derive(FromRow)]
 struct RunSnapshotRow {
@@ -768,10 +768,47 @@ impl Database {
             tx.commit().await?;
         }
 
+        if version < 12 {
+            // Chat memory: durable facts the model saves across conversations,
+            // edited in Settings, and consolidated by dreaming. Incognito
+            // conversations are ephemeral, so the flag is a daemon-side gate
+            // that refuses message writes and memory sources for them.
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY,
+                    text TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'fact',
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    source_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+                    source_message_id TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("CREATE INDEX IF NOT EXISTS memories_updated ON memories(updated_at)")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "ALTER TABLE conversations ADD COLUMN incognito INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO schema_migrations(version) VALUES (12)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+
         Ok(())
     }
 
-    fn escape_like(query: &str) -> String {
+    pub(crate) fn escape_like(query: &str) -> String {
         query
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -1753,6 +1790,12 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("INSERT INTO schema_migrations(version) VALUES (9)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // A real v9 install has the tables earlier migrations created. The
+        // migration ladder under test reuses them (v12 alters conversations).
+        sqlx::query("CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))")
             .execute(&pool)
             .await
             .unwrap();
