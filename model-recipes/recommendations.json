@@ -22,6 +22,12 @@
     "offered nothing at that tier. `agent_options` adds optional agent cards after",
     "the default agent; each has its own explanation and exact quant selection.",
     "",
+    "`skip_drafts: true` on an entry stops Brazier from offering the repository's",
+    "speculative-decoding drafter, even when the file list contains one. PrismML's",
+    "Bonsai drafter embeds the legacy group-128 embedding that only their llama.cpp",
+    "fork can read, so it is not recommended alongside the mainline Q2_g64/Q1_0",
+    "packs.",
+    "",
     "`computer_use` recommends a screenshot-driven agent model (Fara1.5). Its",
     "vision projector is discovered automatically at resolve time, so the entry",
     "only names the repository. Fara1.5 natively supports up to 262k context;",
@@ -35,6 +41,7 @@
         "label": "Bonsai 27B (1-bit)",
         "repo_id": "prism-ml/Bonsai-27B-gguf",
         "quant": "Q1_0",
+        "skip_drafts": true,
         "fallback": {
           "id": "qwen3.5-9b-mainline",
           "label": "Qwen 3.5 9B",
@@ -66,6 +73,7 @@
         "label": "Bonsai 27B (ternary)",
         "repo_id": "prism-ml/Ternary-Bonsai-27B-gguf",
         "quant": "Q2_g64",
+        "skip_drafts": true,
         "fallback": {
           "id": "qwen3.5-9b-mainline",
           "label": "Qwen 3.5 9B",

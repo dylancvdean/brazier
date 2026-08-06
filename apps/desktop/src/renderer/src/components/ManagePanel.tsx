@@ -1028,6 +1028,26 @@ function ChatSection(props: SectionProps): React.JSX.Element {
             </label>
           ))}
         </div>
+        <div className="settings-grid">
+          <label>
+            <span>Dream every</span>
+            <span className="dream-interval-field">
+              <input
+                type="number"
+                min={1}
+                max={365}
+                value={preference?.dream_interval_days ?? 7}
+                disabled={!preference || savingPreference}
+                onChange={(event) =>
+                  void savePreference({
+                    dream_interval_days: Math.max(1, Number(event.target.value) || 7)
+                  })
+                }
+              />
+              <small>days</small>
+            </span>
+          </label>
+        </div>
         <div className="runtime-actions">
           <button
             className="primary-action"

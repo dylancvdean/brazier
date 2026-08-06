@@ -1953,6 +1953,9 @@ pub const MEMORY_PREFERENCE_KEY: &str = "memory";
 
 pub const DEFAULT_MEMORY_RECALL_COUNT: i64 = 6;
 pub const DEFAULT_MEMORY_RECALL_CHARS: i64 = 2400;
+/// How often a dreaming pass may run. Once a week keeps the store consolidated
+/// without spending model time on it every session.
+pub const DEFAULT_MEMORY_DREAM_INTERVAL_DAYS: i64 = 7;
 
 fn memory_dreaming(value: Option<&Value>) -> String {
     value
@@ -1966,6 +1969,19 @@ fn memory_enabled(value: Option<&Value>) -> bool {
     value
         .and_then(|value| value["enabled"].as_bool())
         .unwrap_or(true)
+}
+
+fn memory_dream_interval_days(value: Option<&Value>) -> i64 {
+    value
+        .and_then(|value| value["dream_interval_days"].as_i64())
+        .map(|days| days.clamp(1, 365))
+        .unwrap_or(DEFAULT_MEMORY_DREAM_INTERVAL_DAYS)
+}
+
+/// Epoch milliseconds of the last dreaming pass (or decline), so the interval
+/// survives restarts.
+fn memory_last_dream_at(value: Option<&Value>) -> Option<i64> {
+    value.and_then(|value| value["last_dream_at"].as_i64())
 }
 
 async fn memory_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -1983,6 +1999,8 @@ async fn memory_preference(State(state): State<AppState>) -> ApiResult<Json<Valu
             .and_then(|value| value["recall_chars"].as_i64())
             .unwrap_or(DEFAULT_MEMORY_RECALL_CHARS),
         "dreaming": memory_dreaming(stored.as_ref()),
+        "dream_interval_days": memory_dream_interval_days(stored.as_ref()),
+        "last_dream_at": memory_last_dream_at(stored.as_ref()),
     })))
 }
 
@@ -1996,6 +2014,10 @@ struct UpdateMemoryPreference {
     recall_chars: i64,
     #[serde(default = "default_memory_dreaming")]
     dreaming: String,
+    #[serde(default = "default_memory_dream_interval_days")]
+    dream_interval_days: i64,
+    #[serde(default)]
+    last_dream_at: Option<i64>,
 }
 
 fn default_memory_enabled() -> bool {
@@ -2014,6 +2036,10 @@ fn default_memory_dreaming() -> String {
     "auto".to_owned()
 }
 
+fn default_memory_dream_interval_days() -> i64 {
+    DEFAULT_MEMORY_DREAM_INTERVAL_DAYS
+}
+
 async fn update_memory_preference(
     State(state): State<AppState>,
     Json(preference): Json<UpdateMemoryPreference>,
@@ -2026,11 +2052,23 @@ async fn update_memory_preference(
     }
     let recall_count = preference.recall_count.clamp(0, 100);
     let recall_chars = preference.recall_chars.clamp(0, 40_000);
+    let dream_interval_days = preference.dream_interval_days.clamp(1, 365);
+    // Preserve the last-pass timestamp when a client saves without it.
+    let stored = state
+        .db
+        .application_preference(MEMORY_PREFERENCE_KEY)
+        .await
+        .map_err(ApiError::internal)?;
+    let last_dream_at = preference
+        .last_dream_at
+        .or_else(|| memory_last_dream_at(stored.as_ref()));
     let value = json!({
         "enabled": preference.enabled,
         "recall_count": recall_count,
         "recall_chars": recall_chars,
         "dreaming": dreaming,
+        "dream_interval_days": dream_interval_days,
+        "last_dream_at": last_dream_at,
     });
     state
         .db
@@ -2868,51 +2906,56 @@ async fn resolve_repo_recommendation(
     // Speculative draft weights are also optional companions, but they are
     // kept separate from projectors so clients can explain what they add.
     // Prefer the smallest same-repository draft: publishers commonly expose
-    // both a bf16 reference and a much smaller runtime quant.
-    let mut discovered_drafts: Vec<(&str, Option<u64>)> = listing
-        .iter()
-        .filter(|(path, _)| {
-            path.rsplit('/').next().is_some_and(|name| {
-                let name = name.to_ascii_lowercase();
-                name.ends_with(".gguf")
-                    && !name.contains("mmproj")
-                    && (name.contains("dspark")
-                        || name.contains("dflash")
-                        || name.contains("draft"))
+    // both a bf16 reference and a much smaller runtime quant. `skip_drafts`
+    // opts a recommendation out entirely — some publishers ship a drafter
+    // packed in a format mainline llama.cpp cannot load, and a broken optional
+    // draft must not be recommended to every installer.
+    if !entry.skip_drafts {
+        let mut discovered_drafts: Vec<(&str, Option<u64>)> = listing
+            .iter()
+            .filter(|(path, _)| {
+                path.rsplit('/').next().is_some_and(|name| {
+                    let name = name.to_ascii_lowercase();
+                    name.ends_with(".gguf")
+                        && !name.contains("mmproj")
+                        && (name.contains("dspark")
+                            || name.contains("dflash")
+                            || name.contains("draft"))
+                })
             })
-        })
-        .map(|(path, size)| (path.as_str(), *size))
-        .collect();
-    discovered_drafts.sort_by(|(left_path, left_size), (right_path, right_size)| {
-        left_size
-            .unwrap_or(u64::MAX)
-            .cmp(&right_size.unwrap_or(u64::MAX))
-            .then_with(|| left_path.cmp(right_path))
-    });
-    if let Some((draft, _)) = discovered_drafts.first() {
-        resolved["draft_files"] = json!([draft]);
-    }
+            .map(|(path, size)| (path.as_str(), *size))
+            .collect();
+        discovered_drafts.sort_by(|(left_path, left_size), (right_path, right_size)| {
+            left_size
+                .unwrap_or(u64::MAX)
+                .cmp(&right_size.unwrap_or(u64::MAX))
+                .then_with(|| left_path.cmp(right_path))
+        });
+        if let Some((draft, _)) = discovered_drafts.first() {
+            resolved["draft_files"] = json!([draft]);
+        }
 
-    if !entry.draft_files.is_empty() && discovered_drafts.is_empty() {
-        let published: std::collections::HashSet<&str> =
-            listing.iter().map(|(path, _)| path.as_str()).collect();
-        let mut drafts: Vec<&str> = Vec::new();
-        let mut missing: Vec<&str> = Vec::new();
-        for wanted in &entry.draft_files {
-            if published.contains(wanted.as_str()) {
-                drafts.push(wanted);
-            } else {
-                missing.push(wanted);
+        if !entry.draft_files.is_empty() && discovered_drafts.is_empty() {
+            let published: std::collections::HashSet<&str> =
+                listing.iter().map(|(path, _)| path.as_str()).collect();
+            let mut drafts: Vec<&str> = Vec::new();
+            let mut missing: Vec<&str> = Vec::new();
+            for wanted in &entry.draft_files {
+                if published.contains(wanted.as_str()) {
+                    drafts.push(wanted);
+                } else {
+                    missing.push(wanted);
+                }
             }
-        }
-        if !drafts.is_empty() {
-            resolved["draft_files"] = json!(drafts);
-        }
-        if !missing.is_empty() {
-            resolved["unresolved_drafts"] = json!(format!(
-                "Draft file(s) {} not published by this repository.",
-                missing.join(", ")
-            ));
+            if !drafts.is_empty() {
+                resolved["draft_files"] = json!(drafts);
+            }
+            if !missing.is_empty() {
+                resolved["unresolved_drafts"] = json!(format!(
+                    "Draft file(s) {} not published by this repository.",
+                    missing.join(", ")
+                ));
+            }
         }
     }
 

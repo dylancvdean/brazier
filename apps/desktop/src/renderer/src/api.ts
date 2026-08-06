@@ -114,13 +114,19 @@ export type MemoryPreference = {
   /** Maximum total characters of recalled memory per turn. */
   recall_chars: number
   dreaming: DreamingMode
+  /** Minimum days between dreaming passes. */
+  dream_interval_days: number
+  /** Epoch ms of the last dreaming pass (or decline); durable across restarts. */
+  last_dream_at?: number | null
 }
 
 export const DEFAULT_MEMORY_PREFERENCE: MemoryPreference = {
   enabled: true,
   recall_count: 6,
   recall_chars: 2400,
-  dreaming: 'auto'
+  dreaming: 'auto',
+  dream_interval_days: 7,
+  last_dream_at: null
 }
 
 export function fetchMemoryPreference(): Promise<MemoryPreference> {

@@ -78,6 +78,8 @@ import {
   uploadAttachmentBlob,
   type WorkspaceModesPreference,
   fetchMemoryPreference,
+  saveMemoryPreference,
+  DEFAULT_MEMORY_PREFERENCE,
   listMemories,
   type ClientToolCall,
   type MemoryPreference
@@ -1353,7 +1355,7 @@ export function App(): React.JSX.Element {
         conversations,
         onLoad: (event) => setDreamStatus(event.message)
       })
-      lastDreamAtRef.current = Date.now()
+      markDreamed()
       const changed = result.created + result.updated + result.deleted
       setDreamStatus(
         changed === 0
@@ -1369,17 +1371,36 @@ export function App(): React.JSX.Element {
     }
   }
 
+  /** Record that a dreaming pass ran (or was declined) so the configured
+   * interval is honored even after the app restarts. */
+  function markDreamed(): void {
+    const now = Date.now()
+    lastDreamAtRef.current = now
+    setMemoryPreference((current) => (current ? { ...current, last_dream_at: now } : current))
+    if (memoryPreference) {
+      void saveMemoryPreference({ ...memoryPreference, last_dream_at: now }).catch(() => undefined)
+    }
+  }
+
   /**
    * After a chat turn, schedule a dreaming pass when the app stays idle. Auto
    * runs it silently; ask surfaces a prompt first. Incognito and conversations
-   * that are still active never dream.
+   * that are still active never dream, and a pass runs at most once per the
+   * configured interval (default weekly).
    */
   function scheduleDream(): void {
     const mode = memoryPreference?.dreaming
     if (!mode || mode === 'off' || incognito || !selectedModel) return
-    // Don't re-dream immediately after the last pass, or while the user is
-    // actively using the app (a new submit clears this timer).
-    if (Date.now() - lastDreamAtRef.current < 10 * 60 * 1000) return
+    const intervalMs =
+      (memoryPreference?.dream_interval_days ?? DEFAULT_MEMORY_PREFERENCE.dream_interval_days) *
+      24 *
+      60 *
+      60 *
+      1000
+    const lastDreamAt = memoryPreference?.last_dream_at ?? lastDreamAtRef.current
+    // Don't re-dream within the interval, or while the user is actively using
+    // the app (a new submit clears this timer).
+    if (Date.now() - lastDreamAt < intervalMs) return
     if (dreamTimerRef.current !== undefined) window.clearTimeout(dreamTimerRef.current)
     dreamTimerRef.current = window.setTimeout(() => {
       dreamTimerRef.current = undefined
@@ -2282,7 +2303,7 @@ export function App(): React.JSX.Element {
               type="button"
               onClick={() => {
                 setDreamPromptOpen(false)
-                lastDreamAtRef.current = Date.now()
+                markDreamed()
               }}
             >
               Not now

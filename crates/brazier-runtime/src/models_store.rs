@@ -435,8 +435,39 @@ fn same_draft_family(model: &Path, draft: &Path) -> bool {
     model_stem.to_ascii_lowercase().starts_with(&prefix)
 }
 
+/// Draft companions that mainline llama.cpp cannot load, identified by family.
+///
+/// PrismML ships a dspark drafter beside the Bonsai weights that embeds the
+/// target's legacy group-128 embedding. Mainline llama.cpp's Q2_0 is a
+/// group-64 layout (18 bytes per 64 weights), so reading the drafter's
+/// group-128 tensor table always fails with "tensor data is inconsistent";
+/// only PrismML's own llama.cpp fork can load it. The engine must never
+/// auto-attach such a drafter to a mainline build.
+fn is_mainline_incompatible_draft(path: &Path) -> bool {
+    draft_family_prefix(path).is_some_and(|prefix| prefix.contains("bonsai-27b"))
+}
+
 /// Length of a `-00001-of-00003` shard suffix (llama.cpp split naming).
 const SHARD_SUFFIX_LEN: usize = 15;
+
+/// Filename markers for GGUF files in a model repository that are not the model
+/// weights — a vision projector, a speculative-decoding drafter, or similar.
+///
+/// `dspark` covers PrismML's DSpark speculative-decoding drafter layer shipped
+/// alongside the Bonsai weights; at ~7 GB the bf16 reference is large enough to
+/// fool a size-based fallback otherwise.
+pub const COMPANION_MARKERS: [&str; 6] =
+    ["mmproj", "mtp-", "-draft", "projector", "dspark", "dflash"];
+
+/// Whether a GGUF filename is a companion (projector, drafter, …) rather than
+/// the model itself.
+pub fn is_companion_filename(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    COMPANION_MARKERS
+        .iter()
+        .any(|marker| name.starts_with(marker) || name.contains(marker))
+}
 
 /// Strip a `-NNNNN-of-NNNNN` suffix from a GGUF filename stem so shards of one
 /// quant group together.
@@ -576,6 +607,7 @@ pub fn draft_model_for_model(model_path: &Path) -> Option<PathBuf> {
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
                 && !is_projector(path)
                 && is_speculative_draft_file(path)
+                && !is_mainline_incompatible_draft(path)
                 && same_draft_family(model_path, path)
         })
         .collect();
@@ -1331,16 +1363,23 @@ fn prune_empty_parents(mut directory: Option<&Path>, root: &Path) {
 }
 
 /// Prefer a practical default quant from a list of GGUF filenames.
+///
+/// Companion files (projectors, speculative drafters) are never the model and
+/// are skipped, so a repository that ships one does not get it pre-selected as
+/// the download. `q1_0` and `q2_g64` name the mainline-compatible PrismML
+/// Bonsai packs, whose ternary quants are otherwise unrecognised.
 pub fn prefer_gguf_filename(filenames: &[String]) -> Option<String> {
     let ggufs: Vec<&String> = filenames
         .iter()
         .filter(|name| name.to_ascii_lowercase().ends_with(".gguf"))
+        .filter(|name| !is_companion_filename(name))
         .collect();
     if ggufs.is_empty() {
         return None;
     }
     const PREFERRED: &[&str] = &[
-        "q4_k_m", "q4_k_s", "q5_k_m", "q5_k_s", "q4_0", "q5_0", "q3_k_m", "q6_k", "q8_0",
+        "q4_k_m", "q4_k_s", "q5_k_m", "q5_k_s", "q4_0", "q5_0", "q3_k_m", "q6_k", "q8_0", "q1_0",
+        "q2_g64",
     ];
     for quant in PREFERRED {
         if let Some(name) = ggufs
@@ -1619,9 +1658,9 @@ mod tests {
     #[test]
     fn auto_detects_the_smallest_same_family_speculative_draft() {
         let dir = tempdir().unwrap();
-        let model = dir.path().join("Ternary-Bonsai-27B-Q2_0.gguf");
-        let dspark_bf16 = dir.path().join("Ternary-Bonsai-27B-dspark-bf16.gguf");
-        let dspark_q4 = dir.path().join("Ternary-Bonsai-27B-dspark-Q4_1.gguf");
+        let model = dir.path().join("Acme-27B-Q2_0.gguf");
+        let dspark_bf16 = dir.path().join("Acme-27B-dspark-bf16.gguf");
+        let dspark_q4 = dir.path().join("Acme-27B-dspark-Q4_1.gguf");
         let unrelated = dir.path().join("Other-Model-dflash-Q4.gguf");
         std::fs::write(&model, b"model").unwrap();
         std::fs::write(&dspark_bf16, vec![0_u8; 16]).unwrap();
@@ -1632,6 +1671,34 @@ mod tests {
         assert_eq!(draft_model_for_model(&model), Some(dspark_q4));
         assert!(is_speculative_draft_file(&dspark_bf16));
         assert!(!is_speculative_draft_file(&model));
+    }
+
+    /// PrismML's Bonsai dspark drafter embeds the target's legacy group-128
+    /// embedding, which mainline llama.cpp cannot read. A leftover drafter in
+    /// the model directory must not be auto-attached, or every load fails with
+    /// "tensor data is inconsistent" before the server even starts.
+    #[test]
+    fn the_bonsai_dspark_drafter_is_never_auto_attached() {
+        for (model_name, drafter_name) in [
+            (
+                "Ternary-Bonsai-27B-Q2_g64.gguf",
+                "Ternary-Bonsai-27B-dspark-Q4_1.gguf",
+            ),
+            ("Bonsai-27B-Q1_0.gguf", "Bonsai-27B-dspark-Q4_1.gguf"),
+        ] {
+            let dir = tempdir().unwrap();
+            let model = dir.path().join(model_name);
+            let dspark_q4 = dir.path().join(drafter_name);
+            let mmproj = dir.path().join("Ternary-Bonsai-27B-mmproj-Q8_0.gguf");
+            std::fs::write(&model, b"model").unwrap();
+            std::fs::write(&dspark_q4, b"draft").unwrap();
+            std::fs::write(&mmproj, b"projector").unwrap();
+            assert_eq!(
+                draft_model_for_model(&model),
+                None,
+                "auto-attached incompatible drafter for {model_name}"
+            );
+        }
     }
 
     #[test]
@@ -1693,6 +1760,52 @@ mod tests {
             prefer_gguf_filename(&names).as_deref(),
             Some("model-q4_k_m.gguf")
         );
+    }
+
+    /// A projector or drafter is not the model; the default download must never
+    /// be one, even when its quant matches a preferred marker like `q8_0`.
+    #[test]
+    fn companions_are_never_the_preferred_download() {
+        let names = vec![
+            "Ternary-Bonsai-27B-mmproj-Q8_0.gguf".into(),
+            "Ternary-Bonsai-27B-dspark-Q4_1.gguf".into(),
+            "Ternary-Bonsai-27B-Q2_0.gguf".into(),
+            "Ternary-Bonsai-27B-Q2_g64.gguf".into(),
+            "Ternary-Bonsai-27B-F16.gguf".into(),
+            "Ternary-Bonsai-27B-PQ2_0.gguf".into(),
+        ];
+        assert_eq!(
+            prefer_gguf_filename(&names).as_deref(),
+            Some("Ternary-Bonsai-27B-Q2_g64.gguf")
+        );
+    }
+
+    /// The 1-bit Bonsai pack uses PrismML's `q1_0` name; without an entry in
+    /// the preferred list the shortest-name fallback would pick the 53.8GB F16.
+    #[test]
+    fn one_bit_bonsai_prefers_the_mainline_pack() {
+        let names = vec![
+            "Bonsai-27B-mmproj-Q8_0.gguf".into(),
+            "Bonsai-27B-dspark-Q4_1.gguf".into(),
+            "Bonsai-27B-F16.gguf".into(),
+            "Bonsai-27B-Q1_0.gguf".into(),
+        ];
+        assert_eq!(
+            prefer_gguf_filename(&names).as_deref(),
+            Some("Bonsai-27B-Q1_0.gguf")
+        );
+    }
+
+    #[test]
+    fn companion_markers_cover_projectors_and_drafters() {
+        assert!(is_companion_filename("mmproj-F16.gguf"));
+        assert!(is_companion_filename(
+            "nested/path/Bonsai-27B-dspark-Q4_1.gguf"
+        ));
+        assert!(is_companion_filename("model-mtp-draft.gguf"));
+        assert!(!is_companion_filename("model-Q2_g64.gguf"));
+        assert!(!is_companion_filename("model-Q1_0.gguf"));
+        assert!(!is_companion_filename("model-Q4_K_M.gguf"));
     }
 
     #[test]

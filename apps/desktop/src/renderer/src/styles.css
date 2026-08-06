@@ -3467,6 +3467,25 @@ a.inline-link {
   border-color: #964916;
 }
 
+.settings-grid label > .dream-interval-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+.dream-interval-field input {
+  width: 76px;
+  flex: none;
+}
+
+.dream-interval-field small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .toggle-list {
   display: flex;
   flex-direction: column;

@@ -62,19 +62,6 @@ const QUANT_LADDER: [(&str, &[&str]); 6] = [
     ("Q2_K", &["q2_k"]),
 ];
 
-/// Filename markers for GGUF files in a model repository that are not the model.
-///
-/// Repositories ship companions next to the weights — a vision projector, a
-/// draft model for speculative decoding — and they are much smaller than any
-/// real quant. Without this, "the smallest file that fits" reliably picks a
-/// 500MB projector and calls it a 26B model.
-///
-/// `dspark` covers PrismML's DSpark speculative-decoding drafter layer, shipped
-/// alongside the Bonsai weights — at ~7 GB the bf16 reference is large enough
-/// to fool the size-based fallback otherwise, and would be picked as "the
-/// model" on a 16 GB machine.
-const COMPANION_MARKERS: [&str; 6] = ["mmproj", "mtp-", "-draft", "projector", "dspark", "dflash"];
-
 // ---------------------------------------------------------------------------
 // Catalogue
 // ---------------------------------------------------------------------------
@@ -108,6 +95,14 @@ pub struct RepoRecommendation {
     /// weights, e.g. a nonstandard dspark/dflash filename.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draft_files: Vec<String>,
+    /// Do not offer a speculative-decoding drafter for this recommendation,
+    /// not even one auto-discovered from the repository's file list. A
+    /// publisher occasionally ships a drafter packed in a format mainline
+    /// llama.cpp cannot load (PrismML's dspark layer embeds the legacy
+    /// group-128 embedding, which only their fork reads), so a broken optional
+    /// draft must not be recommended to every installer.
+    #[serde(default)]
+    pub skip_drafts: bool,
     /// A mainline-compatible recommendation to use when this model requires a
     /// source-built runtime fork whose local toolchain is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -302,12 +297,15 @@ fn shard_group(path: &str) -> String {
     crate::models_store::shard_group(path)
 }
 
+/// Whether a GGUF filename is a companion (projector, drafter, …) rather than
+/// the model weights. Repositories ship companions next to the weights — a
+/// vision projector, a draft model for speculative decoding — and they are much
+/// smaller than any real quant, so without this "the smallest file that fits"
+/// reliably picks a 500MB projector and calls it a 26B model. The marker list
+/// lives in `models_store` so the Discover file picker and the recommendation
+/// resolver agree on what is a companion.
 fn is_companion(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    let name = lower.rsplit('/').next().unwrap_or(&lower).to_owned();
-    COMPANION_MARKERS
-        .iter()
-        .any(|marker| name.starts_with(marker) || name.contains(marker))
+    crate::models_store::is_companion_filename(path)
 }
 
 /// One candidate build of a model: every shard of one quantisation.
@@ -956,6 +954,29 @@ mod tests {
 
         let choice = find_quant(&files, "Q2_g64").unwrap();
         assert_eq!(choice.files, vec!["Ternary-Bonsai-27B-Q2_g64.gguf"]);
+    }
+
+    /// The Bonsai recommendations pin the mainline-compatible packs and skip
+    /// the PrismML drafter, whose legacy group-128 embedding mainline llama.cpp
+    /// cannot read. A recommendation that forgets the skip would offer an
+    /// optional download that can never load.
+    #[test]
+    fn bonsai_recommendations_are_mainline_only() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        let one_bit = catalog.tier_for(gb(8)).unwrap().text.as_ref().unwrap();
+        let ternary = catalog.tier_for(gb(16)).unwrap().text.as_ref().unwrap();
+        assert_eq!(one_bit.repo_id, "prism-ml/Bonsai-27B-gguf");
+        assert_eq!(one_bit.quant.as_deref(), Some("Q1_0"));
+        assert!(
+            one_bit.skip_drafts,
+            "1-bit Bonsai must not offer the dspark drafter"
+        );
+        assert_eq!(ternary.repo_id, "prism-ml/Ternary-Bonsai-27B-gguf");
+        assert_eq!(ternary.quant.as_deref(), Some("Q2_g64"));
+        assert!(
+            ternary.skip_drafts,
+            "ternary Bonsai must not offer the dspark drafter"
+        );
     }
 
     /// Nothing fitting is a fact worth stating, not a reason to show no model.
