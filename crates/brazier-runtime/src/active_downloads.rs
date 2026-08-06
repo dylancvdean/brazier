@@ -12,12 +12,6 @@ use std::{
     },
 };
 
-fn lock<'a>(
-    mutex: &'a Mutex<HashMap<String, Entry>>,
-) -> std::sync::MutexGuard<'a, HashMap<String, Entry>> {
-    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
-}
-
 /// Why a download was asked to stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
