@@ -31,13 +31,12 @@ export class WorkerAgentAdapter implements AgentAdapter {
   /**
    * The correlation id of the run in flight. The worker reports events per
    * session and run, not per turn, and a session runs one turn at a time, so
-   * this mapping is exact rather than a guess. `currentRunId` is the worker's
+   * this mapping is exact rather than a guess. `activeRunId` is the worker's
    * run identifier for the active turn; events whose `runId` does not match
    * are late arrivals from a previous run and are discarded.
    */
   private activeCorrelationId: string | null = null
   private activeRunId: string | null = null
-  private currentRunId: string | null = null
   private lastRunId: string | null = null
   private readonly statuses = new Map<string, AgentRunStatusReport>()
   private readonly listeners = new Set<(event: AgentAdapterEvent) => void>()
@@ -180,6 +179,10 @@ export class WorkerAgentAdapter implements AgentAdapter {
     const correlationId = this.activeCorrelationId
     if (!correlationId) return
     switch (event.type) {
+      case 'run-started':
+        this.setStatus(correlationId, 'running')
+        this.publish({ type: 'runStarted', correlationId })
+        return
       case 'prefill-progress':
         this.publish({
           type: 'statusUpdated',
@@ -265,7 +268,6 @@ export class WorkerAgentAdapter implements AgentAdapter {
         this.lastRunId = event.runId
         this.activeRunId = null
         this.activeCorrelationId = null
-        this.currentRunId = null
         this.streamed = ''
         return
       }
@@ -275,7 +277,6 @@ export class WorkerAgentAdapter implements AgentAdapter {
         this.lastRunId = event.runId
         this.activeRunId = null
         this.activeCorrelationId = null
-        this.currentRunId = null
         this.streamed = ''
         return
       case 'run-failed':
@@ -284,7 +285,6 @@ export class WorkerAgentAdapter implements AgentAdapter {
         this.lastRunId = event.runId
         this.activeRunId = null
         this.activeCorrelationId = null
-        this.currentRunId = null
         this.streamed = ''
         return
       default:
