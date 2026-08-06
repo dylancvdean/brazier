@@ -104,7 +104,11 @@ impl RateGate {
     /// surfaces the wait so the model can retry instead of hanging the loop.
     async fn acquire(&mut self) -> anyhow::Result<()> {
         let now = Instant::now();
-        while self.hits.front().is_some_and(|hit| now.duration_since(*hit) >= self.window) {
+        while self
+            .hits
+            .front()
+            .is_some_and(|hit| now.duration_since(*hit) >= self.window)
+        {
             self.hits.pop_front();
         }
         if self.hits.len() >= self.max {
@@ -129,11 +133,7 @@ impl RateGate {
 static SEARCH_GATE: Mutex<Option<RateGate>> = Mutex::const_new(None);
 static FETCH_GATE: Mutex<Option<RateGate>> = Mutex::const_new(None);
 
-async fn gate(
-    cell: &Mutex<Option<RateGate>>,
-    max: usize,
-    window: Duration,
-) -> anyhow::Result<()> {
+async fn gate(cell: &Mutex<Option<RateGate>>, max: usize, window: Duration) -> anyhow::Result<()> {
     let mut guard = cell.lock().await;
     let inner = guard.get_or_insert_with(|| RateGate::new(max, window));
     inner.acquire().await
@@ -218,8 +218,14 @@ async fn ddg_lite(
     region: Option<&str>,
     safesearch: &str,
 ) -> anyhow::Result<Vec<WebResult>> {
-    let (status, html) =
-        ddg_get(client, "https://lite.duckduckgo.com/lite/", query, region, safesearch).await?;
+    let (status, html) = ddg_get(
+        client,
+        "https://lite.duckduckgo.com/lite/",
+        query,
+        region,
+        safesearch,
+    )
+    .await?;
     if is_ddg_block(status, &html) {
         return Err(blocked_error(query));
     }
@@ -233,8 +239,14 @@ async fn ddg_html(
     region: Option<&str>,
     safesearch: &str,
 ) -> anyhow::Result<Vec<WebResult>> {
-    let (status, html) =
-        ddg_get(client, "https://html.duckduckgo.com/html", query, region, safesearch).await?;
+    let (status, html) = ddg_get(
+        client,
+        "https://html.duckduckgo.com/html",
+        query,
+        region,
+        safesearch,
+    )
+    .await?;
     if is_ddg_block(status, &html) {
         return Err(blocked_error(query));
     }
@@ -270,7 +282,9 @@ fn is_ddg_block(status: reqwest::StatusCode, html: &str) -> bool {
         "Checking your browser before accessing",
     ];
     let sample = &html[..html.len().min(4096)];
-    CLOUDFLARE_SIGNALS.iter().any(|signal| sample.contains(signal))
+    CLOUDFLARE_SIGNALS
+        .iter()
+        .any(|signal| sample.contains(signal))
 }
 
 async fn ddg_get(
@@ -366,7 +380,10 @@ async fn brave_search(
         .await
         .with_context(|| format!("Brave search request failed for `{query}`"))?;
     let status = response.status();
-    let body = response.text().await.context("read Brave search response")?;
+    let body = response
+        .text()
+        .await
+        .context("read Brave search response")?;
     anyhow::ensure!(
         status.is_success(),
         "Brave search returned HTTP {status}: {}",
@@ -375,12 +392,13 @@ async fn brave_search(
     let parsed: Value = serde_json::from_str(&body).context("Brave returned invalid JSON")?;
     let mut results = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    if let Some(items) = parsed
-        .pointer("/web/results")
-        .and_then(Value::as_array)
-    {
+    if let Some(items) = parsed.pointer("/web/results").and_then(Value::as_array) {
         for item in items {
-            let title = item.get("title").and_then(Value::as_str).unwrap_or("").trim();
+            let title = item
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
             let url = item.get("url").and_then(Value::as_str).unwrap_or("").trim();
             let snippet = item
                 .get("description")
@@ -426,12 +444,10 @@ pub fn parse_lite_results(html: &str, max: usize) -> Vec<WebResult> {
     // Lite packs each hit into one cell: the first `rel=nofollow` link is the
     // title, and the snippet follows in the same cell. Drop the title again so
     // it is not repeated inside the snippet.
-    let title_re =
-        Regex::new(r#"(?is)<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
-            .expect("valid regex");
+    let title_re = Regex::new(r#"(?is)<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
+        .expect("valid regex");
     let snippet_re =
-        Regex::new(r#"(?is)<td[^>]*class="result-snippet"[^>]*>(.*?)</td>"#)
-            .expect("valid regex");
+        Regex::new(r#"(?is)<td[^>]*class="result-snippet"[^>]*>(.*?)</td>"#).expect("valid regex");
     let links: Vec<(String, String)> = title_re
         .captures_iter(html)
         .map(|captures| {
@@ -457,7 +473,11 @@ pub fn parse_lite_results(html: &str, max: usize) -> Vec<WebResult> {
                     snippet = trimmed.to_owned();
                 }
             }
-            Some(WebResult { title, url, snippet })
+            Some(WebResult {
+                title,
+                url,
+                snippet,
+            })
         })
         .take(max)
         .collect()
@@ -483,12 +503,20 @@ pub fn parse_html_results(html: &str, max: usize) -> Vec<WebResult> {
         .collect();
     titles
         .into_iter()
-        .zip(snippets.into_iter().chain(std::iter::repeat_with(String::new)))
+        .zip(
+            snippets
+                .into_iter()
+                .chain(std::iter::repeat_with(String::new)),
+        )
         .filter_map(|((url, title), snippet)| {
             if url.is_empty() || title.is_empty() || url.contains("y.js") {
                 return None;
             }
-            Some(WebResult { title, url, snippet })
+            Some(WebResult {
+                title,
+                url,
+                snippet,
+            })
         })
         .take(max)
         .collect()
@@ -684,10 +712,7 @@ pub async fn resolve_public_host(
         );
         public.push(address);
     }
-    anyhow::ensure!(
-        !public.is_empty(),
-        "host {host} resolved to no addresses"
-    );
+    anyhow::ensure!(!public.is_empty(), "host {host} resolved to no addresses");
     Ok(public)
 }
 
@@ -791,9 +816,7 @@ pub async fn download_url(url: &str) -> anyhow::Result<DownloadedUrl> {
             .trim_start_matches('[')
             .trim_end_matches(']')
             .to_owned();
-        let port = parsed
-            .port_or_known_default()
-            .context("URL has no port")?;
+        let port = parsed.port_or_known_default().context("URL has no port")?;
         let addresses = resolve_public_host(&host, port).await?;
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -1005,7 +1028,11 @@ mod tests {
         ];
         let formatted = format_results(&results);
         assert!(formatted.starts_with("Found 2 search results:"));
-        assert!(formatted.contains("1. Rust docs\n   URL: https://example.com/docs\n   Summary: Learn Rust."));
+        assert!(
+            formatted.contains(
+                "1. Rust docs\n   URL: https://example.com/docs\n   Summary: Learn Rust."
+            )
+        );
         assert!(formatted.contains("2. crates.io"));
         assert!(format_results(&[]).starts_with("No results were found"));
     }

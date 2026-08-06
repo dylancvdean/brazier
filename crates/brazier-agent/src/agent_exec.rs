@@ -657,23 +657,33 @@ async fn run_tool(
         "git_show" => git_show(context, plan, workspace, arguments).await,
         "git_blame" => git_blame(context, plan, workspace, arguments).await,
         "git_grep" => git_grep(context, plan, workspace, arguments).await,
-        "git_branch" => git(context, plan, workspace, arguments, &[
-            "--no-pager", "branch", "--all", "--verbose", "--no-color",
-        ])
-        .await,
+        "git_branch" => {
+            git(
+                context,
+                plan,
+                workspace,
+                arguments,
+                &["--no-pager", "branch", "--all", "--verbose", "--no-color"],
+            )
+            .await
+        }
         "git_tags" => git_tags(context, plan, workspace, arguments).await,
-        "git_worktree" => git(
-            context,
-            plan,
-            workspace,
-            arguments,
-            &["--no-pager", "worktree", "list", "--porcelain"],
-        )
-        .await,
+        "git_worktree" => {
+            git(
+                context,
+                plan,
+                workspace,
+                arguments,
+                &["--no-pager", "worktree", "list", "--porcelain"],
+            )
+            .await
+        }
         "git_diff_check" => git_diff_check(context, plan, workspace, arguments).await,
         "git_remote" => git_remote(context, plan, workspace, arguments).await,
         "project_test" | "project_build" | "project_lint" | "project_typecheck"
-        | "project_format" => project_check(context, plan, workspace, request.tool.as_str(), arguments).await,
+        | "project_format" => {
+            project_check(context, plan, workspace, request.tool.as_str(), arguments).await
+        }
         "env_info" => env_info(context, plan, workspace, arguments).await,
         "process_list" => process_list(context, plan, arguments).await,
         "code_symbols" => code_symbols(context, plan, workspace, arguments).await,
@@ -2288,7 +2298,7 @@ async fn git_remote(
     let output = std::mem::take(&mut outcome.output);
     outcome.output = output
         .lines()
-        .map(|line| redact_remote_credentials(line))
+        .map(redact_remote_credentials)
         .collect::<Vec<_>>()
         .join("\n");
     Ok(outcome)
@@ -2357,22 +2367,19 @@ async fn project_command(cwd: &Path, tool: &str) -> anyhow::Result<String> {
         let contents = tokio::fs::read_to_string(cwd.join("package.json"))
             .await
             .context("read package.json")?;
-        let package: Value =
-            serde_json::from_str(&contents).context("parse package.json")?;
+        let package: Value = serde_json::from_str(&contents).context("parse package.json")?;
         let scripts = package.get("scripts").and_then(Value::as_object);
         let script = match tool {
             "project_format" if scripts.is_some_and(|s| s.contains_key("format:check")) => {
                 Some("format:check")
             }
             "project_format" => None,
-            "project_typecheck" => scripts
-                .and_then(|s| s.contains_key("typecheck").then_some("typecheck")),
-            "project_lint" => scripts
-                .and_then(|s| s.contains_key("lint").then_some("lint")),
-            "project_build" => scripts
-                .and_then(|s| s.contains_key("build").then_some("build")),
-            "project_test" => scripts
-                .and_then(|s| s.contains_key("test").then_some("test")),
+            "project_typecheck" => {
+                scripts.and_then(|s| s.contains_key("typecheck").then_some("typecheck"))
+            }
+            "project_lint" => scripts.and_then(|s| s.contains_key("lint").then_some("lint")),
+            "project_build" => scripts.and_then(|s| s.contains_key("build").then_some("build")),
+            "project_test" => scripts.and_then(|s| s.contains_key("test").then_some("test")),
             _ => None,
         };
         let Some(script) = script else {
@@ -2661,7 +2668,9 @@ async fn web_search(
         &settings,
     )
     .await?;
-    Ok(ToolOutcome::text(brazier_runtime::web::format_results(&results)))
+    Ok(ToolOutcome::text(brazier_runtime::web::format_results(
+        &results,
+    )))
 }
 
 async fn web_fetch(
@@ -2684,10 +2693,7 @@ async fn web_fetch(
         .and_then(Value::as_u64)
         .unwrap_or(12_000)
         .clamp(500, 50_000) as usize;
-    let start = arguments
-        .get("start")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+    let start = arguments.get("start").and_then(Value::as_u64).unwrap_or(0) as usize;
     // Same guarded downloader as the chat `fetch_url` tool: private and local
     // addresses are refused, every redirect hop is re-vetted, and the shared
     // fetch rate budget is consumed here too.
@@ -2695,9 +2701,9 @@ async fn web_fetch(
     if brazier_runtime::web::downloaded_is_pdf(&download) {
         return web_fetch_pdf(context, download).await;
     }
-    Ok(ToolOutcome::text(
-        brazier_runtime::web::fetch_content_text(&download, start, max_chars)?,
-    ))
+    Ok(ToolOutcome::text(brazier_runtime::web::fetch_content_text(
+        &download, start, max_chars,
+    )?))
 }
 
 /// Store a fetched PDF as a blob and hand the model a `doc_read` document id
@@ -2724,7 +2730,9 @@ async fn web_fetch_pdf(
     .context("store fetched PDF")?;
     let path = brazier_runtime::blob_store::blob_path(context.data_dir, &blob.sha256)?;
     let pages = if brazier_runtime::documents::missing_poppler_tools().is_empty() {
-        brazier_runtime::documents::page_count(&path).await.unwrap_or(None)
+        brazier_runtime::documents::page_count(&path)
+            .await
+            .unwrap_or(None)
     } else {
         None
     };
@@ -2751,7 +2759,9 @@ const LSP_MAX_DIAGNOSTICS: usize = 200;
 
 /// Which language server to run for a file extension:
 /// `(binary, extra args, languageId)`.
-fn lsp_server_for(extension: &str) -> Option<(&'static str, &'static [&'static str], &'static str)> {
+fn lsp_server_for(
+    extension: &str,
+) -> Option<(&'static str, &'static [&'static str], &'static str)> {
     match extension {
         "ts" | "tsx" => Some(("typescript-language-server", &["--stdio"][..], "typescript")),
         "js" | "jsx" | "mjs" | "cjs" => {
@@ -2942,13 +2952,16 @@ async fn lsp_diagnostics(
     if shown == 0 {
         return Ok(ToolOutcome::text(format!(
             "`{binary}` reported no {}-level diagnostics for `{label}`.",
-            if include_warnings { "error or warning" } else { "error" }
+            if include_warnings {
+                "error or warning"
+            } else {
+                "error"
+            }
         )));
     }
     output.push_str(&format!("\n{shown} diagnostic(s) for `{label}`."));
     Ok(ToolOutcome::text(output))
 }
-
 
 /// Drive a language server over stdio: initialize, open the file, collect
 /// `textDocument/publishDiagnostics` until the first batch for `uri` or the
@@ -3281,11 +3294,7 @@ startxref
             .call("doc_read", json!({ "document": blob.sha256 }))
             .await;
         assert!(response.is_error, "{}", response.output);
-        assert!(
-            response.output.contains("not a PDF"),
-            "{}",
-            response.output
-        );
+        assert!(response.output.contains("not a PDF"), "{}", response.output);
     }
 
     #[tokio::test]
@@ -3295,13 +3304,14 @@ startxref
             .call("doc_read", json!({ "document": "not-a-sha" }))
             .await;
         assert!(invalid.is_error, "{}", invalid.output);
-        assert!(invalid.output.contains("invalid `document` id"), "{}", invalid.output);
+        assert!(
+            invalid.output.contains("invalid `document` id"),
+            "{}",
+            invalid.output
+        );
 
         let missing = harness
-            .call(
-                "doc_read",
-                json!({ "document": "ab".repeat(32) }),
-            )
+            .call("doc_read", json!({ "document": "ab".repeat(32) }))
             .await;
         assert!(missing.is_error, "{}", missing.output);
         assert!(
@@ -3386,12 +3396,14 @@ startxref
         return;
 
         let response = harness
-            .call(
-                "fs_search",
-                json!({ "query": "classified-search-marker" }),
-            )
+            .call("fs_search", json!({ "query": "classified-search-marker" }))
             .await;
-        assert_eq!(response.status, ToolExecStatus::Completed, "{}", response.output);
+        assert_eq!(
+            response.status,
+            ToolExecStatus::Completed,
+            "{}",
+            response.output
+        );
         assert!(
             response.output.starts_with("No matches for"),
             "fs_search must not read through an escaping symlink: {}",
@@ -3422,7 +3434,12 @@ startxref
         let response = harness
             .call("fs_list", json!({ "path": ".", "depth": 3 }))
             .await;
-        assert_eq!(response.status, ToolExecStatus::Completed, "{}", response.output);
+        assert_eq!(
+            response.status,
+            ToolExecStatus::Completed,
+            "{}",
+            response.output
+        );
         assert!(
             response.output.contains("symlink outside workspace"),
             "escaping symlink should be named without following: {}",
@@ -3453,7 +3470,12 @@ startxref
         let response = harness
             .call("fs_search", json!({ "query": "workspace-link-marker" }))
             .await;
-        assert_eq!(response.status, ToolExecStatus::Completed, "{}", response.output);
+        assert_eq!(
+            response.status,
+            ToolExecStatus::Completed,
+            "{}",
+            response.output
+        );
         assert!(
             response.output.contains("workspace-link-marker"),
             "in-workspace symlinks should still be searchable: {}",
@@ -3940,9 +3962,15 @@ startxref
 
     #[test]
     fn lsp_server_for_maps_extensions() {
-        assert_eq!(lsp_server_for("ts").map(|entry| entry.0), Some("typescript-language-server"));
+        assert_eq!(
+            lsp_server_for("ts").map(|entry| entry.0),
+            Some("typescript-language-server")
+        );
         assert_eq!(lsp_server_for("py").map(|entry| entry.0), Some("pylsp"));
-        assert_eq!(lsp_server_for("rs").map(|entry| entry.0), Some("rust-analyzer"));
+        assert_eq!(
+            lsp_server_for("rs").map(|entry| entry.0),
+            Some("rust-analyzer")
+        );
         assert_eq!(lsp_server_for("c").map(|entry| entry.0), Some("clangd"));
         assert_eq!(lsp_server_for("cpp").map(|entry| entry.0), Some("clangd"));
         assert_eq!(lsp_server_for("go").map(|entry| entry.0), Some("gopls"));
@@ -3967,8 +3995,7 @@ startxref
     #[tokio::test]
     async fn lsp_diagnostics_refuses_unknown_extensions() {
         let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
-        std::fs::write(harness.workspace.path().join("script.rb"), "puts 1\n")
-            .expect("write file");
+        std::fs::write(harness.workspace.path().join("script.rb"), "puts 1\n").expect("write file");
         let response = harness
             .call("lsp_diagnostics", json!({ "path": "script.rb" }))
             .await;

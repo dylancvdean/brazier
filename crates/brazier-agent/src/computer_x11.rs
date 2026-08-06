@@ -1,7 +1,5 @@
 //! Direct X11 capture and XTEST input. No xdotool or ImageMagick process.
 
-#![cfg(target_os = "linux")]
-
 use x11rb::{
     connection::Connection,
     protocol::{

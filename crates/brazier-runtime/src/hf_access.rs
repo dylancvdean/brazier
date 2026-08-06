@@ -70,7 +70,10 @@ pub fn now_seconds() -> u64 {
 pub async fn add(data_dir: &Path, repo_id: &str) -> anyhow::Result<Vec<AccessRequest>> {
     let mut requests = load(data_dir);
     let now = now_seconds();
-    match requests.iter_mut().find(|request| request.repo_id == repo_id) {
+    match requests
+        .iter_mut()
+        .find(|request| request.repo_id == repo_id)
+    {
         Some(request) => {
             request.requested_at = now;
             request.checks = 0;
@@ -116,11 +119,7 @@ pub fn due(request: &AccessRequest, now: u64) -> bool {
 /// The Hub's model API is itself gated: it returns 401 for a gated repository
 /// the authenticated account has not been granted, and 200 once access lands.
 /// A 200 therefore means granted (or the repository was never gated).
-pub async fn access_granted(
-    client: &reqwest::Client,
-    data_dir: &Path,
-    repo_id: &str,
-) -> bool {
+pub async fn access_granted(client: &reqwest::Client, data_dir: &Path, repo_id: &str) -> bool {
     crate::hf::model_trust(client, data_dir, repo_id)
         .await
         .is_ok()
@@ -185,4 +184,3 @@ mod tests {
         assert_eq!(kept[0].repo_id, "org/two");
     }
 }
-

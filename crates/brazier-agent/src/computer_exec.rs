@@ -665,9 +665,9 @@ impl ComputerBroker {
                             .execute(
                                 &id,
                                 &driver_action,
-                                request.settle_delay_ms.unwrap_or_else(|| {
-                                    self.action_settle_delay_ms()
-                                }),
+                                request
+                                    .settle_delay_ms
+                                    .unwrap_or_else(|| self.action_settle_delay_ms()),
                                 Some(cancel.as_ref()),
                             )
                             .await
@@ -787,9 +787,7 @@ impl ComputerBroker {
         let id = self.ensure_browser(session_id).await?;
         let cancel = {
             let sessions = self.sessions.lock().await;
-            let session = sessions
-                .get(session_id)
-                .context("session disappeared")?;
+            let session = sessions.get(session_id).context("session disappeared")?;
             session.cancel.reset();
             session.cancel.clone()
         };
@@ -877,7 +875,10 @@ pub fn write_safety_overlay_marker(data_dir: &Path) -> Result<()> {
     let path = safety_overlay_marker_path(data_dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
-            format!("create safety overlay marker directory {}", parent.display())
+            format!(
+                "create safety overlay marker directory {}",
+                parent.display()
+            )
         })?;
     }
     std::fs::write(&path, b"ready\n")
@@ -1055,10 +1056,7 @@ mod tests {
             )
             .await
             .unwrap();
-        broker
-            .set_desktop_authority(&first.id, true)
-            .await
-            .unwrap();
+        broker.set_desktop_authority(&first.id, true).await.unwrap();
         broker
             .set_desktop_authority(&second.id, true)
             .await

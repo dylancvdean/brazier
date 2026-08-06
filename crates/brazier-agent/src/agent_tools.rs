@@ -452,70 +452,106 @@ fn raw_definitions() -> Vec<RawDefinition> {
         (
             "git_branch",
             "List local and remote branches with their upstream and latest commit.",
-            object(json!({ "cwd": path_property("Repository directory. Defaults to the workspace root.") }), vec![]),
+            object(
+                json!({ "cwd": path_property("Repository directory. Defaults to the workspace root.") }),
+                vec![],
+            ),
         ),
         (
             "git_tags",
             "List tags sorted by creation date, with the referenced object and subject.",
-            object(json!({ "max_count": { "type": "integer", "minimum": 1, "maximum": 200 }, "cwd": path_property("Repository directory. Defaults to the workspace root.") }), vec![]),
+            object(
+                json!({ "max_count": { "type": "integer", "minimum": 1, "maximum": 200 }, "cwd": path_property("Repository directory. Defaults to the workspace root.") }),
+                vec![],
+            ),
         ),
         (
             "git_worktree",
             "List worktrees and their branch or detached commit state.",
-            object(json!({ "cwd": path_property("Repository directory. Defaults to the workspace root.") }), vec![]),
+            object(
+                json!({ "cwd": path_property("Repository directory. Defaults to the workspace root.") }),
+                vec![],
+            ),
         ),
         (
             "git_diff_check",
             "Check the working tree or index for whitespace errors and malformed patches.",
-            object(json!({ "staged": { "type": "boolean", "description": "Check the index instead of the working tree." }, "cwd": path_property("Repository directory. Defaults to the workspace root.") }), vec![]),
+            object(
+                json!({ "staged": { "type": "boolean", "description": "Check the index instead of the working tree." }, "cwd": path_property("Repository directory. Defaults to the workspace root.") }),
+                vec![],
+            ),
         ),
         (
             "git_remote",
             "List configured Git remotes and their fetch/push URLs without exposing credentials \
              embedded in URLs.",
-            object(json!({ "cwd": path_property("Repository directory. Defaults to the workspace root.") }), vec![]),
+            object(
+                json!({ "cwd": path_property("Repository directory. Defaults to the workspace root.") }),
+                vec![],
+            ),
         ),
         (
             "project_test",
             "Run the repository's conventional test command, detected from Cargo, Node, Python, \
              or Go project files. This never installs dependencies.",
-            object_with_reason(json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }), vec![]),
+            object_with_reason(
+                json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }),
+                vec![],
+            ),
         ),
         (
             "project_build",
             "Run the repository's conventional build or compile check, detected from Cargo, \
              Node, Python, or Go project files. This never installs dependencies.",
-            object_with_reason(json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }), vec![]),
+            object_with_reason(
+                json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }),
+                vec![],
+            ),
         ),
         (
             "project_lint",
             "Run the repository's configured lint command when it can be detected from Cargo, \
              Node, Python, or Go project files. Missing linters are reported clearly.",
-            object_with_reason(json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }), vec![]),
+            object_with_reason(
+                json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }),
+                vec![],
+            ),
         ),
         (
             "project_typecheck",
             "Run a non-mutating type-check or compiler check detected from the project files.",
-            object_with_reason(json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }), vec![]),
+            object_with_reason(
+                json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }),
+                vec![],
+            ),
         ),
         (
             "project_format",
             "Check formatting without changing files, using the repository's conventional \
              formatter for Rust, Node, Python, or Go.",
-            object_with_reason(json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }), vec![]),
+            object_with_reason(
+                json!({ "cwd": path_property("Project directory. Defaults to the workspace root."), "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 } }),
+                vec![],
+            ),
         ),
         (
             "env_info",
             "Report non-secret host and workspace facts useful for choosing a build command: \
              platform, architecture, shell, tool versions, and detected project manifests. \
              Credential values are never returned.",
-            object(json!({ "cwd": path_property("Project directory. Defaults to the workspace root.") }), vec![]),
+            object(
+                json!({ "cwd": path_property("Project directory. Defaults to the workspace root.") }),
+                vec![],
+            ),
         ),
         (
             "process_list",
             "List processes owned by the current user with pid, parent pid, CPU, memory, and \
              command. Use this to diagnose a stuck build or server.",
-            object_with_reason(json!({ "match": { "type": "string", "description": "Optional case-insensitive substring filter." } }), vec![]),
+            object_with_reason(
+                json!({ "match": { "type": "string", "description": "Optional case-insensitive substring filter." } }),
+                vec![],
+            ),
         ),
         (
             "code_symbols",

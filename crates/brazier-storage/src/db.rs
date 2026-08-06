@@ -284,8 +284,7 @@ impl Database {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
             for suffix in ["-wal", "-shm"] {
-                let sibling: std::path::PathBuf =
-                    format!("{}{suffix}", path.display()).into();
+                let sibling: std::path::PathBuf = format!("{}{suffix}", path.display()).into();
                 if sibling.exists() {
                     let _ =
                         std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o600));

@@ -215,9 +215,8 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
     // connections. Treat that capability as requested even if a particular
     // tool schema has no `network` argument.
     let mcp_tool = is_mcp_tool_name(request.tool);
-    let wants_network = mcp_tool
-        || is_network_tool(request.tool)
-        || argument_bool(request.arguments, "network");
+    let wants_network =
+        mcp_tool || is_network_tool(request.tool) || argument_bool(request.arguments, "network");
     let paths = requested_paths(
         request.tool,
         request.arguments,
@@ -613,12 +612,16 @@ pub fn requested_paths(
     data_dir: &Path,
 ) -> Vec<RequestedPath> {
     let fields: &[(&str, bool)] = match tool {
-        "fs_read" | "doc_read" | "fs_list" | "fs_stat" | "fs_search" | "fs_find" | "fs_tree" | "code_symbols" => &[("path", false)],
+        "fs_read" | "doc_read" | "fs_list" | "fs_stat" | "fs_search" | "fs_find" | "fs_tree"
+        | "code_symbols" => &[("path", false)],
         "fs_write" | "fs_patch" | "fs_mkdir" => &[("path", true)],
         "fs_delete" => &[("path", true)],
         "fs_move" => &[("from", true), ("to", true)],
         "fs_copy" => &[("from", false), ("to", true)],
-        "shell_run" | "shell_start" | "git_status" | "git_diff" | "git_log" | "git_show" | "git_blame" | "git_grep" | "git_branch" | "git_tags" | "git_worktree" | "git_diff_check" | "git_remote" | "project_test" | "project_build" | "project_lint" | "project_typecheck" | "project_format" | "env_info" => &[("cwd", false)],
+        "shell_run" | "shell_start" | "git_status" | "git_diff" | "git_log" | "git_show"
+        | "git_blame" | "git_grep" | "git_branch" | "git_tags" | "git_worktree"
+        | "git_diff_check" | "git_remote" | "project_test" | "project_build" | "project_lint"
+        | "project_typecheck" | "project_format" | "env_info" => &[("cwd", false)],
         _ => &[],
     };
     let secrets = secret_paths(Some(data_dir));

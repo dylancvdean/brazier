@@ -1212,10 +1212,8 @@ pub async fn check_hf_access(state: &AppState) {
         request.last_checked_at = now;
         changed = true;
     }
-    if changed {
-        if let Err(error) = crate::hf_access::save(&state.data_dir, &requests).await {
-            tracing::warn!(%error, "failed to persist HF access checks");
-        }
+    if changed && let Err(error) = crate::hf_access::save(&state.data_dir, &requests).await {
+        tracing::warn!(%error, "failed to persist HF access checks");
     }
 }
 
@@ -3321,7 +3319,12 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
             .map(|part| part.bundle_id.as_str())
             .chain(entry.bundle_id.as_deref())
             .filter_map(|id| sdcpp_catalog::find(&state.data_dir, id))
-            .flat_map(|bundle| bundle.components.into_iter().map(|component| component.repo_id))
+            .flat_map(|bundle| {
+                bundle
+                    .components
+                    .into_iter()
+                    .map(|component| component.repo_id)
+            })
             .collect();
         if !gated_repos.is_empty() {
             resolved["gated_repos"] = json!(gated_repos);
@@ -3499,9 +3502,7 @@ async fn start_recommendation_setup(
 /// first completed llama.cpp download step. Repo setups persist each file as
 /// `QueuedWork`, so the model id is `gguf:{repo_id}/{filename}` — the same id
 /// `listModels` reports for the download.
-fn installed_model_id_for_setup(
-    setup: &recommendations::RecommendationSetup,
-) -> Option<String> {
+fn installed_model_id_for_setup(setup: &recommendations::RecommendationSetup) -> Option<String> {
     for step in &setup.steps {
         if step.kind == "runtime-build" || step.status != "completed" {
             continue;
@@ -5492,7 +5493,7 @@ async fn queue_sdcpp_install(
         .map_err(ApiError::bad_request)?;
     let body = enqueue_work(
         &state,
-        crate::download_queue::QueuedWork::SdcppBundle(bundle),
+        crate::download_queue::QueuedWork::SdcppBundle(Box::new(bundle)),
     )
     .await?;
     Ok((StatusCode::ACCEPTED, body))
@@ -6289,7 +6290,7 @@ async fn install_sdcpp_bundle(
     let data_dir = state.data_dir.clone();
     let tracked = match track_resumable_download(
         &state,
-        &crate::download_queue::QueuedWork::SdcppBundle(bundle.clone()),
+        &crate::download_queue::QueuedWork::SdcppBundle(Box::new(bundle.clone())),
     )
     .await
     {
@@ -9415,7 +9416,8 @@ done
         .await;
         assert_eq!(status, StatusCode::OK);
 
-        let (status, body) = json_request(&app, "GET", "/api/v1/huggingface/access", json!({})).await;
+        let (status, body) =
+            json_request(&app, "GET", "/api/v1/huggingface/access", json!({})).await;
         assert_eq!(status, StatusCode::OK);
         let data = body["data"].as_array().unwrap();
         assert_eq!(data.len(), 1);

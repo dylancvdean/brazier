@@ -177,10 +177,13 @@ impl CdpPipe {
         self.pending.lock().await.insert(request_id, tx);
         let mut bytes = message.to_string().into_bytes();
         bytes.push(0);
-        timeout(Duration::from_secs(10), self.writer.lock().await.write_all(&bytes))
-            .await
-            .context("timed out sending Chromium command")?
-            .context("send Chromium command")?;
+        timeout(
+            Duration::from_secs(10),
+            self.writer.lock().await.write_all(&bytes),
+        )
+        .await
+        .context("timed out sending Chromium command")?
+        .context("send Chromium command")?;
         match timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(result)) => result,
             Ok(None) => {
@@ -307,19 +310,18 @@ impl CdpBrowserSession {
             OwnedFd::from_raw_fd(to_chrome_write.into_raw_fd())
         }));
         let mut pipe = CdpPipe::new(reader, writer);
-        let page_session_id = match timeout(Duration::from_secs(5), attach_page_session(&mut pipe))
-            .await
-        {
-            Ok(Ok(session_id)) => session_id,
-            Ok(Err(error)) => {
-                let _ = std::fs::remove_dir_all(&profile_dir);
-                return Err(error).context("attach Chromium page session");
-            }
-            Err(_) => {
-                let _ = std::fs::remove_dir_all(&profile_dir);
-                bail!("Chromium did not expose a page target over the DevTools pipe");
-            }
-        };
+        let page_session_id =
+            match timeout(Duration::from_secs(5), attach_page_session(&mut pipe)).await {
+                Ok(Ok(session_id)) => session_id,
+                Ok(Err(error)) => {
+                    let _ = std::fs::remove_dir_all(&profile_dir);
+                    return Err(error).context("attach Chromium page session");
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_dir_all(&profile_dir);
+                    bail!("Chromium did not expose a page target over the DevTools pipe");
+                }
+            };
         pipe.page_session_id = page_session_id;
         Ok(Self {
             id: Uuid::new_v4().to_string(),
@@ -403,17 +405,13 @@ impl CdpBrowserSession {
             ComputerAction::Screenshot => "Captured browser viewport.".to_owned(),
             ComputerAction::VisitUrl { url } => {
                 ensure_public_navigation_url(url).await?;
-                self.pipe
-                    .call("Page.navigate", json!({"url": url}))
-                    .await?;
+                self.pipe.call("Page.navigate", json!({"url": url})).await?;
                 wait_for_page_ready(&mut self.pipe).await?;
                 format!("Navigated to {url}")
             }
             ComputerAction::WebSearch { query } => {
                 let url = format!("https://duckduckgo.com/?q={}", urlencoding_lite(query));
-                self.pipe
-                    .call("Page.navigate", json!({"url": url}))
-                    .await?;
+                self.pipe.call("Page.navigate", json!({"url": url})).await?;
                 wait_for_page_ready(&mut self.pipe).await?;
                 format!("Opened search for {query}")
             }
@@ -602,9 +600,7 @@ impl Drop for CdpBrowserSession {
 async fn attach_page_session(pipe: &mut CdpPipe) -> Result<String> {
     // Poll Target.getTargets until the initial about:blank page appears.
     for _ in 0..50 {
-        let targets = pipe
-            .call_browser("Target.getTargets", json!({}))
-            .await?;
+        let targets = pipe.call_browser("Target.getTargets", json!({})).await?;
         let page = targets
             .get("targetInfos")
             .and_then(Value::as_array)
@@ -644,13 +640,7 @@ async fn cancellable_sleep(duration: Duration, cancel: Option<&ActionCancel>) ->
     }
 }
 
-async fn mouse_click(
-    pipe: &mut CdpPipe,
-    x: f64,
-    y: f64,
-    count: u8,
-    button: &str,
-) -> Result<()> {
+async fn mouse_click(pipe: &mut CdpPipe, x: f64, y: f64, count: u8, button: &str) -> Result<()> {
     pipe.call(
         "Input.dispatchMouseEvent",
         json!({"type":"mousePressed","x":x,"y":y,"button":button,"clickCount":count}),
@@ -969,7 +959,11 @@ impl BrowserSessionRegistry {
     }
     /// Start streaming live frames for a browser session. Re-entrant: calling
     /// again for a browser already screencasting simply subscribes more senders.
-    pub async fn start_screencast(&self, id: &str, frames: broadcast::Sender<String>) -> Result<()> {
+    pub async fn start_screencast(
+        &self,
+        id: &str,
+        frames: broadcast::Sender<String>,
+    ) -> Result<()> {
         self.session(id)
             .await?
             .lock()
@@ -1052,7 +1046,9 @@ mod tests {
                 .expect_err(url)
                 .to_string();
             assert!(
-                error.contains("Refusing") || error.contains("non-public") || error.contains("local"),
+                error.contains("Refusing")
+                    || error.contains("non-public")
+                    || error.contains("local"),
                 "{url} => {error}"
             );
         }
@@ -1134,7 +1130,12 @@ mod tests {
             .unwrap();
         assert_eq!(navigated.title.as_deref(), Some("ready"));
         registry
-            .execute(&id, &ComputerAction::LeftClick { x: 20.0, y: 20.0 }, 0, None)
+            .execute(
+                &id,
+                &ComputerAction::LeftClick { x: 20.0, y: 20.0 },
+                0,
+                None,
+            )
             .await
             .unwrap();
         let typed = registry
@@ -1173,7 +1174,12 @@ mod tests {
             .unwrap();
         assert_eq!(replaced.title.as_deref(), Some("typed:replaced"));
         let clicked = registry
-            .execute(&id, &ComputerAction::LeftClick { x: 25.0, y: 75.0 }, 0, None)
+            .execute(
+                &id,
+                &ComputerAction::LeftClick { x: 25.0, y: 75.0 },
+                0,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(clicked.title.as_deref(), Some("clicked"));
@@ -1206,7 +1212,11 @@ mod tests {
         let jpeg = base64::engine::general_purpose::STANDARD
             .decode(frame)
             .unwrap();
-        assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF], "expected a JPEG screencast frame");
+        assert_eq!(
+            &jpeg[..3],
+            &[0xFF, 0xD8, 0xFF],
+            "expected a JPEG screencast frame"
+        );
         registry.close(&id).await;
     }
 }

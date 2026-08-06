@@ -174,10 +174,8 @@ async fn main() -> anyhow::Result<()> {
     // to twenty-four checks) rather than on the settings page poll, so a grant
     // is noticed even when nobody is looking at the queue.
     let hf_access_shutdown = Arc::new(tokio::sync::Notify::new());
-    let hf_access_checker = brazierd::api::spawn_hf_access_checker(
-        state.clone(),
-        Arc::clone(&hf_access_shutdown),
-    );
+    let hf_access_checker =
+        brazierd::api::spawn_hf_access_checker(state.clone(), Arc::clone(&hf_access_shutdown));
 
     let port = args.port.unwrap_or(if args.service {
         brazierd::service::DEFAULT_SERVICE_PORT
@@ -223,9 +221,13 @@ async fn main() -> anyhow::Result<()> {
         api::router_with_origins(state, allowed_origins)
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
-        .with_graceful_shutdown(shutdown_signal(runtime, hf_access_shutdown, hf_access_checker))
-        .await
-        .context("serve daemon")
+    .with_graceful_shutdown(shutdown_signal(
+        runtime,
+        hf_access_shutdown,
+        hf_access_checker,
+    ))
+    .await
+    .context("serve daemon")
 }
 
 async fn shutdown_signal(
@@ -253,10 +255,10 @@ async fn shutdown_signal(
     }
     hf_access_shutdown.notify_one();
     hf_access_checker.abort();
-    if let Err(error) = hf_access_checker.await {
-        if error.is_panic() {
-            tracing::warn!(%error, "HF access checker task panicked during shutdown");
-        }
+    if let Err(error) = hf_access_checker.await
+        && error.is_panic()
+    {
+        tracing::warn!(%error, "HF access checker task panicked during shutdown");
     }
     runtime.shutdown().await;
 }

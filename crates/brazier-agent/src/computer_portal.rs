@@ -2,8 +2,6 @@
 //!
 //! It talks D-Bus directly: no `grim`, `ydotool`, `gdbus`, or privileged helper.
 
-#![cfg(target_os = "linux")]
-
 use std::{collections::HashMap, sync::OnceLock};
 
 use futures::StreamExt;
@@ -262,7 +260,7 @@ async fn create_session_attempt(restore_token: Option<&str>) -> Result<PortalSes
     device_options.insert("types".into(), OwnedValue::from(3_u32));
     device_options.insert("persist_mode".into(), OwnedValue::from(2_u32));
     if let Some(restore_token) = restore_token {
-        device_options.insert("restore_token".into(), string_value(&restore_token));
+        device_options.insert("restore_token".into(), string_value(restore_token));
     }
     let device_response = response_listener(&connection, &device_token).await?;
     let request: OwnedObjectPath = remote

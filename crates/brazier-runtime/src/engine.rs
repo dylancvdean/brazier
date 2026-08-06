@@ -461,12 +461,23 @@ impl Runtime {
         status.insert("llama_binary".to_owned(), serde_json::json!(binary));
         status.insert("llama_server".to_owned(), serde_json::json!(running));
         status.insert("llama_probe".to_owned(), serde_json::json!(llama_probe));
-        status.insert("managed_binary_path".to_owned(), serde_json::json!(
-            llama::managed_binary_path(&self.data_dir).display().to_string()
-        ));
-        status.insert("platform_asset_tag".to_owned(), serde_json::json!(llama::platform_asset_tag()));
+        status.insert(
+            "managed_binary_path".to_owned(),
+            serde_json::json!(
+                llama::managed_binary_path(&self.data_dir)
+                    .display()
+                    .to_string()
+            ),
+        );
+        status.insert(
+            "platform_asset_tag".to_owned(),
+            serde_json::json!(llama::platform_asset_tag()),
+        );
         status.insert("settings".to_owned(), serde_json::json!(settings));
-        status.insert("hardware".to_owned(), serde_json::json!(crate::hardware::detect()));
+        status.insert(
+            "hardware".to_owned(),
+            serde_json::json!(crate::hardware::detect()),
+        );
         #[cfg(target_os = "macos")]
         {
             let mlx_probe = if options.probe {
@@ -474,26 +485,56 @@ impl Runtime {
             } else {
                 None
             };
-            status.insert("mlx_lm_python".to_owned(), serde_json::json!(
-                self.mlx.lock().await.lm_python.as_ref().map(|path| path.display().to_string())
-            ));
-            status.insert("mlx_vlm_python".to_owned(), serde_json::json!(
-                self.mlx.lock().await.vlm_python.as_ref().map(|path| path.display().to_string())
-            ));
-            status.insert("mlx_server".to_owned(), serde_json::json!(self.mlx_server_summary().await));
+            status.insert(
+                "mlx_lm_python".to_owned(),
+                serde_json::json!(
+                    self.mlx
+                        .lock()
+                        .await
+                        .lm_python
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                ),
+            );
+            status.insert(
+                "mlx_vlm_python".to_owned(),
+                serde_json::json!(
+                    self.mlx
+                        .lock()
+                        .await
+                        .vlm_python
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                ),
+            );
+            status.insert(
+                "mlx_server".to_owned(),
+                serde_json::json!(self.mlx_server_summary().await),
+            );
             status.insert("mlx_probe".to_owned(), serde_json::json!(mlx_probe));
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            status.insert("vllm_python".to_owned(), serde_json::json!(
-                self.vllm.lock().await.python.as_ref().map(|path| path.display().to_string())
-            ));
-            status.insert("vllm_server".to_owned(), serde_json::json!(
-                self.vllm.lock().await.server.as_ref().map(|server| serde_json::json!({
-                    "base_url": server.base_url,
-                    "model": server.model_ref,
-                }))
-            ));
+            status.insert(
+                "vllm_python".to_owned(),
+                serde_json::json!(
+                    self.vllm
+                        .lock()
+                        .await
+                        .python
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                ),
+            );
+            status.insert(
+                "vllm_server".to_owned(),
+                serde_json::json!(self.vllm.lock().await.server.as_ref().map(
+                    |server| serde_json::json!({
+                        "base_url": server.base_url,
+                        "model": server.model_ref,
+                    })
+                )),
+            );
         }
         serde_json::Value::Object(status)
     }
@@ -1902,7 +1943,7 @@ impl Runtime {
         let effective_profile = if crate::models_store::looks_like_computer_use_model(&model_id)
             && effective_profile
                 .as_ref()
-                .map_or(true, |profile| profile.context_size.is_none())
+                .is_none_or(|profile| profile.context_size.is_none())
         {
             let memory = crate::hardware::recommendation_memory_bytes(&crate::hardware::detect())
                 .unwrap_or(u64::MAX);
@@ -2662,11 +2703,12 @@ fn register_invocation_documents(ctx: &mut ToolContext<'_>, invocation: &tools::
                 .iter()
                 .any(|existing| existing.sha256 == media.sha256)
         {
-            ctx.documents.push(crate::tool_registry::ConversationDocument {
-                sha256: media.sha256.clone(),
-                mime_type: media.mime_type.clone(),
-                name: name.to_owned(),
-            });
+            ctx.documents
+                .push(crate::tool_registry::ConversationDocument {
+                    sha256: media.sha256.clone(),
+                    mime_type: media.mime_type.clone(),
+                    name: name.to_owned(),
+                });
         }
     }
 }
@@ -2729,9 +2771,7 @@ async fn generated_media_context_messages(
     let mut persisted_parts = Vec::new();
     let mut live_parts = Vec::new();
     for media in &invocation.media {
-        let allowed = if from_document && media.mime_type == "application/pdf" {
-            true
-        } else if from_document {
+        let allowed = if from_document {
             true
         } else if media.mime_type.starts_with("video/") {
             settings.show_generated_video_to_model
@@ -2761,12 +2801,8 @@ async fn generated_media_context_messages(
             // survive into the transcript, not only the immediate live message,
             // or neither the user nor the model on a later turn ever sees the
             // id — the blob alone renders as a bare attachment.
-            let notice = crate::documents::attachment_notice(
-                name,
-                &media.mime_type,
-                &media.sha256,
-                pages,
-            );
+            let notice =
+                crate::documents::attachment_notice(name, &media.mime_type, &media.sha256, pages);
             live_parts.push(notice.clone());
             persisted_parts.push(notice);
         }
@@ -3134,8 +3170,7 @@ mod tests {
             images: Vec::new(),
             documents: Vec::new(),
         };
-        let sha256 =
-            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned();
+        let sha256 = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned();
         let invocation = tools::ToolInvocation {
             call_id: "call-fetch".into(),
             name: "fetch_url".into(),

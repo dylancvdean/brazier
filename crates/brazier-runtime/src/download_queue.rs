@@ -34,7 +34,7 @@ pub enum QueuedWork {
     /// A streaming-ASR snapshot.
     StreamingAsr(MlxDownloadRequest),
     /// A curated or custom stable-diffusion.cpp bundle.
-    SdcppBundle(crate::sdcpp_catalog::Bundle),
+    SdcppBundle(Box<crate::sdcpp_catalog::Bundle>),
 }
 
 impl QueuedWork {

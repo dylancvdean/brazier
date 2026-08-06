@@ -274,7 +274,7 @@ fn png_device_pixel_ratio(bytes: &[u8]) -> Option<f32> {
 async fn screenshot() -> Result<ComputerActionResult, String> {
     #[cfg(target_os = "macos")]
     let bytes = mac_screenshot_bytes().await?;
-    #[cfg(all(target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     let bytes = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         crate::computer_portal::screenshot().await?
     } else {
@@ -530,11 +530,8 @@ async fn wayland_action(
     cancel: Option<&crate::computer_browser::ActionCancel>,
 ) -> Result<(), String> {
     if let ComputerAction::Wait { milliseconds } = action {
-        return cancellable_desktop_sleep(
-            std::time::Duration::from_millis(*milliseconds),
-            cancel,
-        )
-        .await;
+        return cancellable_desktop_sleep(std::time::Duration::from_millis(*milliseconds), cancel)
+            .await;
     }
     match action {
         ComputerAction::MouseMove { x, y } => crate::computer_portal::pointer_motion(*x, *y).await,
@@ -611,11 +608,8 @@ pub async fn execute_desktop_action(
         });
     }
     if let ComputerAction::Wait { milliseconds } = action {
-        if let Err(error) = cancellable_desktop_sleep(
-            std::time::Duration::from_millis(*milliseconds),
-            cancel,
-        )
-        .await
+        if let Err(error) =
+            cancellable_desktop_sleep(std::time::Duration::from_millis(*milliseconds), cancel).await
         {
             return result(ComputerActionStatus::Error, Some(error));
         }
