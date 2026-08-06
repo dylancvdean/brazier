@@ -213,6 +213,7 @@ export type ComputerAction =
   | { type: 'memorize'; fact: string }
   | { type: 'ask_user'; question: string }
   | { type: 'terminate'; response?: string | null }
+  | { type: 'error'; error: string; raw?: string }
 
 export type ComputerActionStatus =
   | 'ok'

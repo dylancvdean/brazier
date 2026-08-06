@@ -259,6 +259,11 @@ export class BrokerClient {
     })
   }
 
+  /** Delete a session record (transcript, tool executions, sandbox) from the daemon. */
+  async deleteSession(id: string): Promise<void> {
+    return this.request(`/api/v1/agent/sessions/${id}`, { method: 'DELETE' })
+  }
+
   /** Text-profile overrides for a model, used when resolving subagent defaults. */
   async textProfile(modelId: string): Promise<{
     subagent_model?: string | null

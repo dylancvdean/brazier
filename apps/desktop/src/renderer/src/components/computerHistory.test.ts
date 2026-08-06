@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { ComputerActionResult, ComputerSession, ComputerStep } from '../api'
 import {
   buildComputerHistory,
+  computerActionLabel,
   computerModelOutput,
   computerSystemPrompt,
   continuationForResult,
@@ -52,6 +53,12 @@ function imagePayloads(history: ReturnType<typeof buildComputerHistory>): string
 }
 
 describe('computer history', () => {
+  it('describes parser diagnostics without treating them as executable actions', () => {
+    expect(
+      computerActionLabel({ type: 'error', error: 'parse_error', raw: '{ malformed' })
+    ).toContain('Parse error: parse_error')
+  })
+
   it('uses reasoning output only as a compatibility fallback for old Fara sessions', () => {
     expect(computerModelOutput('<tool_call>content</tool_call>', '<tool_call>reasoning</tool_call>')).toBe(
       '<tool_call>content</tool_call>'

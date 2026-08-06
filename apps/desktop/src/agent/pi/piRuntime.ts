@@ -993,15 +993,10 @@ export class PiAgentRuntime implements AgentRuntime {
 
   /**
    * Delete a child session from the daemon so its transcript, tool executions,
-   * and sandbox record do not accumulate across a long parent run. The broker
-   * client has no public delete method, so reach the daemon's DELETE route
-   * through the same request helper its other calls use.
+   * and sandbox record do not accumulate across a long parent run.
    */
   private async deleteDaemonSession(sessionId: string): Promise<void> {
-    const broker = this.broker as unknown as {
-      request: <T>(path: string, init?: RequestInit) => Promise<T>
-    }
-    await broker.request<void>(`/api/v1/agent/sessions/${sessionId}`, { method: 'DELETE' })
+    await this.broker.deleteSession(sessionId)
   }
 
   async cancelChildren(parentId: string): Promise<void> {

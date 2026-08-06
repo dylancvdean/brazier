@@ -485,6 +485,11 @@ export function ComputerMode(props: Props): React.JSX.Element {
         onError('The computer-use model returned no executable action. Try again or choose another model.')
         return
       }
+      const parseError = parsed.actions.find((action) => action.type === 'error')
+      if (parseError) {
+        onError(computerActionLabel(parseError))
+        return
+      }
       for (const action of parsed.actions) {
         if (controller.signal.aborted) return
         const result = await computerExec({ session_id: active.id, action })

@@ -29,6 +29,8 @@ export function computerActionLabel(action: ComputerAction | null | undefined): 
       return action.response ? `Done — ${action.response}` : 'Terminate'
     case 'memorize':
       return `Remember: ${action.fact}`
+    case 'error':
+      return `Parse error: ${action.error}${action.raw ? ` (${action.raw.slice(0, 48)}${action.raw.length > 48 ? '…' : ''})` : ''}`
     default:
       return action.type.replaceAll('_', ' ')
   }

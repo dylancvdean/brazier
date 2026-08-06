@@ -46,4 +46,22 @@ describe('parseFaraOutput', () => {
       { type: 'memorize', fact: 'The account is #88321' }
     ])
   })
+
+  it('surfaces an error action when an XML tool call block is malformed', () => {
+    const parsed = parseFaraOutput(`<tool_call>
+{"not valid json"}
+</tool_call>`)
+    expect(parsed.actions).toHaveLength(1)
+    expect(parsed.actions[0].type).toBe('error')
+  })
+
+  it('surfaces an error action when bare JSON is malformed', () => {
+    const parsed = parseFaraOutput('{ this is not json')
+    expect(parsed.actions).toHaveLength(1)
+    expect(parsed.actions[0].type).toBe('error')
+    if (parsed.actions[0].type === 'error') {
+      expect(parsed.actions[0].error).toBe('parse_error')
+      expect(typeof parsed.actions[0].raw).toBe('string')
+    }
+  })
 })

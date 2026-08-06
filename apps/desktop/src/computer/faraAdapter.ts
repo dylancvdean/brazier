@@ -28,6 +28,7 @@ export type ComputerAction =
   | { type: 'memorize'; fact: string }
   | { type: 'ask_user'; question: string }
   | { type: 'terminate'; response?: string | null }
+  | { type: 'error'; error: string; raw?: string }
 
 export type FaraParseResult = {
   thought: string | null
@@ -43,7 +44,13 @@ export function parseFaraOutput(text: string): FaraParseResult {
 
   for (const block of extractToolCallBlocks(text)) {
     raw_tool_calls.push(block)
-    actions.push(parseToolCallJson(block))
+    try {
+      actions.push(parseToolCallJson(block))
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[fara] failed to parse tool call: ${message}`, block)
+      actions.push({ type: 'error', error: 'parse_error', raw: block.slice(0, 500) })
+    }
   }
 
   // Some servers wrap a single JSON object without XML.
@@ -56,10 +63,7 @@ export function parseFaraOutput(text: string): FaraParseResult {
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
         console.error(`[fara] failed to parse model output: ${message}`, trimmed)
-        actions.push({
-          type: 'ask_user',
-          question: `parse_error: ${message} (raw: ${trimmed.slice(0, 500)})`
-        })
+        actions.push({ type: 'error', error: 'parse_error', raw: trimmed.slice(0, 500) })
         raw_tool_calls.push(trimmed)
       }
     }

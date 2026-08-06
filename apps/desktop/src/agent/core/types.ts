@@ -35,7 +35,13 @@ export type AgentElevationRequest = {
 
 export type ApprovalScope = 'once' | 'session'
 
-export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'consumed'
+export type ApprovalStatus =
+  | 'pending'
+  | 'approved'
+  | 'denied'
+  | 'expired'
+  | 'consumed'
+  | 'cancelled'
 
 /** Honest description of the isolation a call received. Never embellish this. */
 export type SandboxDescription = {
