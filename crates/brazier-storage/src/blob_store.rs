@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 
 pub const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 pub const MAX_AUDIO_BYTES: u64 = 20 * 1024 * 1024;
@@ -129,9 +130,22 @@ async fn publish_blob(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("blob path has no parent"))?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .context("create blob directory")?;
+    #[cfg(unix)]
+    {
+        let mut builder = tokio::fs::DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder
+            .create(parent)
+            .await
+            .context("create blob directory")?;
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("create blob directory")?;
+    }
     let temporary = parent.join(format!(
         ".{}.{}.tmp",
         path.file_name()
@@ -139,15 +153,34 @@ async fn publish_blob(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
             .unwrap_or("blob"),
         uuid::Uuid::new_v4()
     ));
-    tokio::fs::write(&temporary, bytes)
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
         .await
         .context("write temporary blob")?;
+    file.write_all(bytes)
+        .await
+        .context("write temporary blob")?;
+    file.flush().await.context("flush temporary blob")?;
+    file.sync_all().await.context("sync temporary blob")?;
+    drop(file);
     if let Err(error) = tokio::fs::rename(&temporary, path).await {
         if !path.is_file() {
             let _ = tokio::fs::remove_file(&temporary).await;
             return Err(error).context("publish blob");
         }
         let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    #[cfg(unix)]
+    {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
     }
     Ok(())
 }

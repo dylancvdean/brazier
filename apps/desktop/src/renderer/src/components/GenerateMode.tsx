@@ -681,7 +681,10 @@ export function GenerateMode(props: Props) {
                 min={64}
                 max={2048}
                 value={width}
-                onChange={(event) => setWidth(Number(event.target.value))}
+                onChange={(event) => {
+                  const v = Number(event.target.value)
+                  if (Number.isFinite(v)) setWidth(v)
+                }}
               />
             </label>
             <label>
@@ -691,7 +694,10 @@ export function GenerateMode(props: Props) {
                 min={64}
                 max={2048}
                 value={height}
-                onChange={(event) => setHeight(Number(event.target.value))}
+                onChange={(event) => {
+                  const v = Number(event.target.value)
+                  if (Number.isFinite(v)) setHeight(v)
+                }}
               />
             </label>
             <label>
@@ -701,7 +707,10 @@ export function GenerateMode(props: Props) {
                 min={1}
                 max={150}
                 value={steps}
-                onChange={(event) => setSteps(Number(event.target.value))}
+                onChange={(event) => {
+                  const v = Number(event.target.value)
+                  if (Number.isFinite(v)) setSteps(v)
+                }}
               />
             </label>
             <label title="Classifier-free guidance. Distilled models (Flux schnell, 4-step Wan) need 1.0; SDXL likes 5–8.">
@@ -712,7 +721,10 @@ export function GenerateMode(props: Props) {
                 max={30}
                 step={0.5}
                 value={cfgScale}
-                onChange={(event) => setCfgScale(Number(event.target.value))}
+                onChange={(event) => {
+                  const v = Number(event.target.value)
+                  if (Number.isFinite(v)) setCfgScale(v)
+                }}
               />
             </label>
             <label title="Distilled guidance, used by Flux-family models instead of CFG. Leave blank for other architectures.">
@@ -732,7 +744,10 @@ export function GenerateMode(props: Props) {
                     min={1}
                     max={241}
                     value={frames}
-                    onChange={(event) => setFrames(Number(event.target.value))}
+                    onChange={(event) => {
+                      const v = Number(event.target.value)
+                      if (Number.isFinite(v)) setFrames(v)
+                    }}
                   />
                 </label>
                 <label title="Playback rate written into the clip.">
@@ -742,7 +757,10 @@ export function GenerateMode(props: Props) {
                     min={1}
                     max={60}
                     value={fps}
-                    onChange={(event) => setFps(Number(event.target.value))}
+                    onChange={(event) => {
+                      const v = Number(event.target.value)
+                      if (Number.isFinite(v)) setFps(v)
+                    }}
                   />
                 </label>
               </>

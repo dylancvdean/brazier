@@ -114,9 +114,9 @@ function Card(props: {
         </p>
         {props.summary ? <p className="recommendation-summary">{props.summary}</p> : null}
         {props.meta ? <p className="recommendation-meta">{props.meta}</p> : null}
-        {(props.notes ?? []).map((note) => (
+        {(props.notes ?? []).map((note, index) => (
           <p
-            key={note.text}
+            key={`${note.tone}-${index}`}
             className={note.tone === 'warn' ? 'recommendation-note warn' : 'recommendation-note'}
           >
             {note.tone === 'warn' ? <AlertTriangle size={12} /> : null}

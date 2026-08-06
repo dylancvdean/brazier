@@ -86,12 +86,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     anyhow::ensure!(
-        args.host.is_loopback() || !args.no_auth || args.allow_insecure_remote,
-        "keyless access on a non-loopback interface requires --allow-insecure-remote"
+        args.host.is_loopback() || !args.no_auth,
+        "keyless access (--no-auth) is not permitted on a non-loopback interface; bind to loopback or supply an API key"
     );
-    if !args.host.is_loopback() && args.no_auth {
-        tracing::warn!("daemon is exposed beyond loopback without authentication");
-    }
 
     // Parsed before anything is opened: a typo in an origin should fail at the
     // command line, not after a database and a model cache are warm.
@@ -176,7 +173,11 @@ async fn main() -> anyhow::Result<()> {
     // Gated-model access is watched on a daemon timer (every five minutes, up
     // to twenty-four checks) rather than on the settings page poll, so a grant
     // is noticed even when nobody is looking at the queue.
-    brazierd::api::spawn_hf_access_checker(state.clone());
+    let hf_access_shutdown = Arc::new(tokio::sync::Notify::new());
+    let hf_access_checker = brazierd::api::spawn_hf_access_checker(
+        state.clone(),
+        Arc::clone(&hf_access_shutdown),
+    );
 
     let port = args.port.unwrap_or(if args.service {
         brazierd::service::DEFAULT_SERVICE_PORT
@@ -195,27 +196,43 @@ async fn main() -> anyhow::Result<()> {
         brazierd::service::write_ready_descriptor(&ready_path, &address_url)?;
         tracing::info!(ready_file = %ready_path.display(), "wrote service readiness descriptor");
     }
-    println!(
-        "BRAZIER_READY {}",
-        serde_json::to_string(&serde_json::json!({
-            "address": address_url,
-            // The desktop's internal connection uses the first key; extra keys
-            // are passed for its configured clients, not reported here.
-            "api_key": api_keys.first()
-        }))?
-    );
+    if args.service {
+        // Service mode never emits the bearer to stdout: the readiness
+        // descriptor on disk deliberately omits it, and the daemon's stdout is
+        // often captured by a journal or pipe that should not see credentials.
+        eprintln!(
+            "BRAZIER_READY {}",
+            serde_json::to_string(&serde_json::json!({ "address": address_url }))?
+        );
+    } else {
+        // Non-service mode runs bound to loopback; the desktop launcher reads
+        // the first key from stdout to authenticate its loopback connection.
+        println!(
+            "BRAZIER_READY {}",
+            serde_json::to_string(&serde_json::json!({
+                "address": address_url,
+                // The desktop's internal connection uses the first key; extra keys
+                // are passed for its configured clients, not reported here.
+                "api_key": api_keys.first()
+            }))?
+        );
+    }
     tracing::info!(%address, data_dir = %data_dir.display(), "brazier daemon ready");
     axum::serve(
         listener,
         api::router_with_origins(state, allowed_origins)
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
-        .with_graceful_shutdown(shutdown_signal(runtime))
+        .with_graceful_shutdown(shutdown_signal(runtime, hf_access_shutdown, hf_access_checker))
         .await
         .context("serve daemon")
 }
 
-async fn shutdown_signal(runtime: Arc<Runtime>) {
+async fn shutdown_signal(
+    runtime: Arc<Runtime>,
+    hf_access_shutdown: Arc<tokio::sync::Notify>,
+    hf_access_checker: tokio::task::JoinHandle<()>,
+) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -233,6 +250,13 @@ async fn shutdown_signal(runtime: Arc<Runtime>) {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+    hf_access_shutdown.notify_one();
+    hf_access_checker.abort();
+    if let Err(error) = hf_access_checker.await {
+        if error.is_panic() {
+            tracing::warn!(%error, "HF access checker task panicked during shutdown");
+        }
     }
     runtime.shutdown().await;
 }

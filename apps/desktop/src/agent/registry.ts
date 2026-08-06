@@ -35,5 +35,12 @@ export function createRuntime(id: string, broker: BrokerClient): AgentRuntime {
 }
 
 export function availableRuntimes(broker: BrokerClient): AgentRuntimeDescriptor[] {
-  return [...FACTORIES.values()].map((factory) => factory(broker).descriptor)
+  return [...FACTORIES.values()].map((factory) => {
+    const runtime = factory(broker)
+    try {
+      return runtime.descriptor
+    } finally {
+      void runtime.dispose().catch(() => undefined)
+    }
+  })
 }

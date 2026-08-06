@@ -96,6 +96,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
   const { snapshot, config } = session
   const [muted, setMuted] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [resolvingApproval, setResolvingApproval] = useState(false)
   const scrollAnchor = useRef<HTMLDivElement>(null)
 
   const needsTranscripts = config.voiceSessionTarget !== 'neither'
@@ -126,6 +127,10 @@ export function VoiceMode(props: Props): React.JSX.Element {
   useEffect(() => {
     scrollAnchor.current?.scrollIntoView({ behavior: 'smooth' })
   }, [snapshot.messages.length, snapshot.streamingText])
+
+  useEffect(() => {
+    setResolvingApproval(false)
+  }, [snapshot.pendingApproval])
 
   async function guard(action: () => Promise<void>): Promise<void> {
     setBusy(true)
@@ -289,14 +294,34 @@ export function VoiceMode(props: Props): React.JSX.Element {
               leaves it held.
             </span>
           </div>
-          <button type="button" onClick={() => void guard(() => session.resolveApproval('deny'))}>
+          <button
+            type="button"
+            className="danger"
+            disabled={resolvingApproval}
+            onClick={() => {
+              if (resolvingApproval) return
+              setResolvingApproval(true)
+              void guard(() => session.resolveApproval('deny')).finally(() =>
+                setResolvingApproval(false)
+              )
+            }}
+          >
+            {resolvingApproval ? <LoaderCircle className="spin" size={14} /> : null}
             Refuse
           </button>
           <button
             type="button"
-            className="danger"
-            onClick={() => void guard(() => session.resolveApproval('approve'))}
+            className="primary"
+            disabled={resolvingApproval}
+            onClick={() => {
+              if (resolvingApproval) return
+              setResolvingApproval(true)
+              void guard(() => session.resolveApproval('approve')).finally(() =>
+                setResolvingApproval(false)
+              )
+            }}
           >
+            {resolvingApproval ? <LoaderCircle className="spin" size={14} /> : null}
             Allow once
           </button>
         </div>

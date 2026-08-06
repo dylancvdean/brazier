@@ -259,6 +259,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
   // records these as steps too, keeping the model's next turn honest about
   // what actually changed on the page.
   const [interacting, setInteracting] = useState(false)
+  const [resolvingApproval, setResolvingApproval] = useState(false)
   const lastScrollRef = useRef(0)
 
   async function interact(action: ComputerAction): Promise<void> {
@@ -585,7 +586,8 @@ export function ComputerMode(props: Props): React.JSX.Element {
   }
 
   async function resolveApproval(approve: boolean): Promise<void> {
-    if (!pendingApproval || !session) return
+    if (resolvingApproval || !pendingApproval || !session) return
+    setResolvingApproval(true)
     onError(null)
     let safetyActive = false
     try {
@@ -630,6 +632,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
         void setComputerSafetyAuthority(session.id, false).catch(() => undefined)
         void window.brazier.computer.setActive(false)
       }
+      setResolvingApproval(false)
     }
   }
 
@@ -690,7 +693,14 @@ export function ComputerMode(props: Props): React.JSX.Element {
     return () => onSidebarChange?.(null)
   }, [onSidebarChange, sessions, session?.id, onError])
 
-  useEffect(() => window.brazier.computer.onEscape(() => { void stop() }), [stop])
+  useEffect(() => {
+    const unsub = window.brazier.computer.onEscape(() => {
+      void stop()
+    })
+    return () => {
+      unsub?.()
+    }
+  }, [stop])
 
   return (
     <div className="computer-mode" ref={setFullscreenRef}>
@@ -789,16 +799,21 @@ export function ComputerMode(props: Props): React.JSX.Element {
                 <p>{pendingApproval.message || computerActionLabel(pendingApproval.action)}</p>
               </div>
               <div className="computer-approval-actions">
-                <button type="button" onClick={() => void resolveApproval(false)}>
-                  <X size={14} />
+                <button
+                  type="button"
+                  disabled={resolvingApproval}
+                  onClick={() => void resolveApproval(false)}
+                >
+                  {resolvingApproval ? <LoaderCircle className="spin" size={14} /> : <X size={14} />}
                   Deny
                 </button>
                 <button
                   type="button"
                   className="primary"
+                  disabled={resolvingApproval}
                   onClick={() => void resolveApproval(true)}
                 >
-                  <Check size={14} />
+                  {resolvingApproval ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}
                   Approve
                 </button>
               </div>

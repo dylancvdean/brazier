@@ -71,7 +71,7 @@ impl ActiveDownloads {
         let flag = Arc::new(StopFlag::default());
         self.jobs
             .lock()
-            .expect("active downloads lock")
+            .unwrap_or_else(|poison| poison.into_inner())
             .insert(job_id.to_owned(), Entry { flag: flag.clone() });
         flag
     }
@@ -79,7 +79,10 @@ impl ActiveDownloads {
     /// Ask a running download to stop. Returns false when it is not running,
     /// in which case the caller updates the job row directly.
     pub fn stop(&self, job_id: &str, reason: StopReason) -> bool {
-        let jobs = self.jobs.lock().expect("active downloads lock");
+        let jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if let Some(entry) = jobs.get(job_id) {
             entry.flag.request(reason);
             true
@@ -95,7 +98,7 @@ impl ActiveDownloads {
     pub fn stop_reason(&self, job_id: &str) -> Option<StopReason> {
         self.jobs
             .lock()
-            .expect("active downloads lock")
+            .unwrap_or_else(|poison| poison.into_inner())
             .get(job_id)
             .and_then(|entry| entry.flag.reason())
     }
@@ -103,14 +106,14 @@ impl ActiveDownloads {
     pub fn is_running(&self, job_id: &str) -> bool {
         self.jobs
             .lock()
-            .expect("active downloads lock")
+            .unwrap_or_else(|poison| poison.into_inner())
             .contains_key(job_id)
     }
 
     pub fn finish(&self, job_id: &str) {
         self.jobs
             .lock()
-            .expect("active downloads lock")
+            .unwrap_or_else(|poison| poison.into_inner())
             .remove(job_id);
     }
 }

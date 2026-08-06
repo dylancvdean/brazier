@@ -34,6 +34,8 @@ export class WorkerAgentAdapter implements AgentAdapter {
    * this mapping is exact rather than a guess.
    */
   private activeCorrelationId: string | null = null
+  private activeRunId: string | null = null
+  private lastRunId: string | null = null
   private readonly statuses = new Map<string, AgentRunStatusReport>()
   private readonly listeners = new Set<(event: AgentAdapterEvent) => void>()
   /** Attached while anyone is listening; see `subscribe`. */
@@ -93,6 +95,7 @@ export class WorkerAgentAdapter implements AgentAdapter {
       await updateAgentSession(sessionId, { model }).catch(() => undefined)
     }
     this.activeCorrelationId = request.correlationId
+    this.activeRunId = null
     this.streamed = ''
     this.statuses.set(request.correlationId, {
       correlationId: request.correlationId,
@@ -130,6 +133,7 @@ export class WorkerAgentAdapter implements AgentAdapter {
   async cancelRun(correlationId: string): Promise<void> {
     if (!this.sessionId) return
     if (this.activeCorrelationId && this.activeCorrelationId !== correlationId) return
+    if (this.activeRunId !== null) this.lastRunId = this.activeRunId
     await window.brazier.agent.cancel(this.sessionId)
   }
 
@@ -168,6 +172,8 @@ export class WorkerAgentAdapter implements AgentAdapter {
   }
 
   private onWorkerEvent(event: AgentEvent): void {
+    if (this.lastRunId !== null && event.runId === this.lastRunId) return
+    if (this.activeRunId === null) this.activeRunId = event.runId
     const correlationId = this.activeCorrelationId
     if (!correlationId) return
     switch (event.type) {
@@ -257,17 +263,23 @@ export class WorkerAgentAdapter implements AgentAdapter {
         // summary text as a fallback cannot produce a second answer.
         const text = event.summary.text.trim() || this.streamed.trim()
         if (text) this.publish({ type: 'responseFinal', correlationId, text, runId: event.runId })
+        this.lastRunId = event.runId
+        this.activeRunId = null
         this.activeCorrelationId = null
         return
       }
       case 'run-cancelled':
         this.setStatus(correlationId, 'cancelled')
         this.publish({ type: 'runCancelled', correlationId })
+        this.lastRunId = event.runId
+        this.activeRunId = null
         this.activeCorrelationId = null
         return
       case 'run-failed':
         this.setStatus(correlationId, 'failed')
         this.publish({ type: 'runFailed', correlationId, error: event.error })
+        this.lastRunId = event.runId
+        this.activeRunId = null
         this.activeCorrelationId = null
         return
       default:

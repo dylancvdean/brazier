@@ -198,6 +198,7 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
   return (
     <div className="download-tray" role="status" aria-live="polite">
       <button
+        type="button"
         className="download-tray-head"
         onClick={() => setCollapsed((value) => !value)}
         title={collapsed ? 'Show downloads' : 'Hide downloads'}
@@ -243,6 +244,7 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
                   <div className="download-tray-actions">
                     {!runtimeBuild && (running || pending) && (
                       <button
+                        type="button"
                         title="Pause"
                         disabled={busy === job.id}
                         onClick={() => void act(job, pauseDownloadJob)}
@@ -252,6 +254,7 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
                     )}
                     {!runtimeBuild && (paused || job.status === 'failed') && (
                       <button
+                        type="button"
                         title="Resume"
                         disabled={busy === job.id}
                         onClick={() => void act(job, resumeDownloadJob)}
@@ -260,6 +263,7 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
                       </button>
                     )}
                     <button
+                      type="button"
                       title={finished ? 'Dismiss' : 'Cancel'}
                       disabled={busy === job.id}
                       onClick={() =>

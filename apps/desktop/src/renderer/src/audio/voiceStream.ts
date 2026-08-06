@@ -8,7 +8,7 @@
  * class glues them together so the UI only sees levels, text, and state.
  */
 import captureWorkletUrl from './captureWorklet.js?url'
-import { OggOpusDemuxer, OggOpusMuxer } from './oggOpus'
+import { OggOpusDemuxer, OggOpusMuxer, parseOpusHead } from './oggOpus'
 import playbackWorkletUrl from './playbackWorklet.js?url'
 import { resampleFrame } from './sileroVad'
 
@@ -19,6 +19,9 @@ const TAG_TEXT = 0x02
 /** Server sample rate; frames are 20 ms, matching the reference web client. */
 const SAMPLE_RATE = 24000
 const FRAME_SAMPLES = 480
+
+/** How long to wait for OpusHead before deciding the stream is malformed. */
+const OPUS_HEAD_WAIT_MS = 2000
 
 export type VoiceStreamState = 'connecting' | 'live' | 'closed'
 
@@ -34,6 +37,13 @@ export type VoiceStreamHandlers = {
    * speech, not the user's.
    */
   onCaptureFrame?: (samples: Float32Array, sampleRate: number) => void
+  /**
+   * A fatal session-level error originating from the transport itself, such
+   * as the capture device going away mid-stream. Distinct from `onError`,
+   * which stays non-fatal so the coordinator can surface it without tearing
+   * the session down.
+   */
+  onFatalError?: (message: string) => void
 }
 
 /** Whether this runtime can encode and decode Opus (WebCodecs + worklets). */
@@ -84,6 +94,11 @@ export class VoiceStream {
   private muted = false
   private stopped = false
   private outputOpen = true
+  // Audio packets that arrived before OpusHead: held until the demuxer surfaces
+  // the identification packet, then decoded in order. A bounded timer keeps a
+  // silent stream from holding them forever.
+  private pendingAudioPackets: Uint8Array[] = []
+  private opusHeadTimer: number | null = null
 
   constructor(handlers: VoiceStreamHandlers = {}) {
     this.handlers = handlers
@@ -123,7 +138,10 @@ export class VoiceStream {
       }
       socket.onerror = () => {
         if (socket.readyState === WebSocket.CONNECTING) failed('Could not reach the voice server.')
-        else this.handlers.onError?.('Voice connection error.')
+        else {
+          this.handlers.onError?.('Voice connection error.')
+          socket.close()
+        }
       }
       socket.onclose = (event) => {
         if (socket.readyState === WebSocket.CONNECTING) failed('The voice server closed the connection.')
@@ -161,8 +179,37 @@ export class VoiceStream {
   }
 
   private decodePacket(packet: Uint8Array): void {
+    // OpusHead must configure the decoder before any audio is decoded; without
+    // it the channel mapping is unknown and we would silently downmix stereo
+    // or accept a malformed stream. Buffer pages until it arrives, with a
+    // bounded wait so the failure is loud rather than a permanent stall.
+    if (!this.decoder && !this.demuxer.opusHead) {
+      this.pendingAudioPackets.push(packet)
+      if (this.opusHeadTimer === null) {
+        this.opusHeadTimer = window.setTimeout(() => {
+          this.opusHeadTimer = null
+          if (!this.decoder && !this.demuxer.opusHead) {
+            this.handlers.onFatalError?.(
+              'The voice server did not send the Opus header within ' +
+                `${OPUS_HEAD_WAIT_MS / 1000}s; cannot decode the audio stream.`
+            )
+            this.pendingAudioPackets = []
+          }
+        }, OPUS_HEAD_WAIT_MS)
+      }
+      return
+    }
     const decoder = this.ensureDecoder()
     if (!decoder || decoder.state !== 'configured') return
+    if (this.pendingAudioPackets.length > 0) {
+      const queued = this.pendingAudioPackets
+      this.pendingAudioPackets = []
+      for (const queuedPacket of queued) this.decodeOne(decoder, queuedPacket)
+    }
+    this.decodeOne(decoder, packet)
+  }
+
+  private decodeOne(decoder: AudioDecoder, packet: Uint8Array): void {
     decoder.decode(
       new EncodedAudioChunk({
         type: 'key',
@@ -182,11 +229,12 @@ export class VoiceStream {
       error: (cause) => this.handlers.onError?.(`Audio decode failed: ${cause.message}`)
     })
     const head = this.demuxer.opusHead
+    const info = head ? parseOpusHead(head) : null
     try {
       decoder.configure({
         codec: 'opus',
-        sampleRate: 48000,
-        numberOfChannels: 1,
+        sampleRate: info?.inputSampleRate ?? 48000,
+        numberOfChannels: info?.channelCount ?? 1,
         ...(head ? { description: head } : {})
       })
     } catch (cause) {
@@ -275,6 +323,23 @@ export class VoiceStream {
     sink.gain.value = 0
     node.connect(sink)
     sink.connect(context.destination)
+
+    // The capture track can end mid-session: the user unplugs the mic, revokes
+    // the permission, or the device is yanked from under the system. Without
+    // these listeners `readyState` flips to 'ended', frames stop arriving, and
+    // the session sits 'live' while the model talks to an empty room.
+    const captureTrack = this.media?.getAudioTracks()[0]
+    if (captureTrack) {
+      captureTrack.addEventListener('ended', () => {
+        if (this.stopped) return
+        this.handlers.onFatalError?.('The microphone was disconnected mid-session.')
+        void this.stop()
+      })
+      captureTrack.addEventListener('mute', () => {
+        if (this.stopped) return
+        this.handlers.onError?.('The microphone was muted by the system.')
+      })
+    }
 
     // A suspended context renders nothing: no frames, no meter, and no audio
     // reaching the model, which looks exactly like a microphone that works
@@ -409,13 +474,38 @@ export class VoiceStream {
   async stop(): Promise<void> {
     if (this.stopped) return
     this.stopped = true
+    // Flush the encoder and emit the terminating Ogg page (EOS) while the
+    // socket is still OPEN, mirroring `replayAudio`. Closing the encoder
+    // without flushing drops the last frames; without a final page the server
+    // sees a truncated, unterminated stream with no last-page granule.
+    const encoder = this.encoder
+    this.encoder = null
+    if (encoder && encoder.state === 'configured') {
+      try {
+        await encoder.flush()
+      } catch {
+        // A flush failure should not block teardown; the stream is ending anyway.
+      }
+      const finalPage = this.muxer.flush({ last: true })
+      if (finalPage && this.socket && this.socket.readyState === WebSocket.OPEN) {
+        try {
+          this.socket.send(withTag(TAG_AUDIO, finalPage))
+        } catch {
+          // The socket can close between flush and send; nothing more to do.
+        }
+      }
+    }
+    if (this.opusHeadTimer !== null) {
+      window.clearTimeout(this.opusHeadTimer)
+      this.opusHeadTimer = null
+    }
+    this.pendingAudioPackets = []
     const socket = this.socket
     this.socket = null
     if (socket && socket.readyState <= WebSocket.OPEN) socket.close()
     for (const track of this.media?.getAudioTracks() ?? []) track.stop()
     this.media = null
-    if (this.encoder && this.encoder.state !== 'closed') this.encoder.close()
-    this.encoder = null
+    if (encoder && encoder.state !== 'closed') encoder.close()
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
     this.decoder = null
     this.playbackNode?.port.postMessage('flush')

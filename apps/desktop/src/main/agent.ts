@@ -31,10 +31,22 @@ const SHORT_REQUEST_TIMEOUT_MS = 60_000
 const CANCEL_GRACE_MS = 2_000
 const DAEMON_CANCEL_TIMEOUT_MS = 5_000
 
+const ALLOWED_COMMAND_TYPES = new Set<WorkerCommandInput['type']>([
+  'open-session',
+  'run',
+  'cancel',
+  'compact',
+  'set-model',
+  'set-tools',
+  'set-permission-mode',
+  'close-session'
+])
+
 export class AgentSupervisor {
   private worker?: UtilityProcess
   private connection?: WorkerConnection
   private readonly pending = new Map<string, Pending>()
+  private readonly sessions = new Set<string>()
   private nextId = 0
   private ready?: Promise<void>
   private crashes = 0
@@ -144,8 +156,10 @@ export class AgentSupervisor {
           pending.reject(new Error(`The agent worker exited (code ${code}).`))
         }
         this.pending.clear()
+        const known = [...this.sessions]
         this.worker = undefined
         this.ready = undefined
+        void this.markSessionsFailed(known, code)
         console.error(`[agent-worker] exited with code ${code}`)
       })
       await new Promise<void>((resolve, reject) => {
@@ -210,6 +224,40 @@ export class AgentSupervisor {
     }
   }
 
+  private async patchSession(
+    sessionId: string,
+    update: Record<string, unknown>
+  ): Promise<void> {
+    const connection = this.connection
+    if (!connection) return
+    const headers = new Headers({ 'content-type': 'application/json' })
+    if (connection.apiKey) headers.set('authorization', `Bearer ${connection.apiKey}`)
+    const response = await fetch(
+      `${connection.address}/api/v1/agent/sessions/${encodeURIComponent(sessionId)}`,
+      {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify(update),
+        signal: AbortSignal.timeout(DAEMON_CANCEL_TIMEOUT_MS)
+      }
+    ).catch(() => null)
+    if (!response || !response.ok) {
+      console.error(`[agent-worker] could not reconcile session ${sessionId} after exit.`)
+    }
+  }
+
+  private async markSessionsFailed(sessionIds: string[], code: number): Promise<void> {
+    if (sessionIds.length === 0) return
+    await Promise.all(
+      sessionIds.map((sessionId) =>
+        this.patchSession(sessionId, {
+          last_run_status: 'failed',
+          agent_note: `The agent worker exited (code ${code}).`
+        })
+      )
+    )
+  }
+
   /** Kill a worker that did not acknowledge cancellation and reject its run. */
   private killUnresponsiveWorker(): void {
     const worker = this.worker
@@ -223,6 +271,12 @@ export class AgentSupervisor {
   }
 
   private async cancel(sessionId: string): Promise<{ cancelled: true }> {
+    if (!this.sessions.has(sessionId)) {
+      throw new Error('Refusing to cancel a session the agent worker does not know about.')
+    }
+    if (!this.worker) {
+      throw new Error('The agent worker is not running; nothing to cancel.')
+    }
     // Start both cancellation paths immediately. In particular, do not queue
     // daemon cleanup behind a runtime that may be precisely what is wedged.
     const daemonCancellation = this.cancelDaemon(sessionId)
@@ -265,6 +319,12 @@ export class AgentSupervisor {
 
   /** Renderer entry point: run one command against the worker. */
   async invoke(command: WorkerCommandInput): Promise<unknown> {
+    if (!ALLOWED_COMMAND_TYPES.has(command.type)) {
+      throw new Error(`Unknown agent command type \`${command.type}\`.`)
+    }
+    if ('sessionId' in command && typeof command.sessionId === 'string') {
+      this.sessions.add(command.sessionId)
+    }
     if (command.type === 'cancel') return this.cancel(command.sessionId)
     await this.ensureWorker()
     return this.send({ ...command, requestId: this.requestId() } as WorkerCommand)
@@ -296,4 +356,5 @@ export function registerAgentIpc(supervisor: AgentSupervisor): void {
     }
     return supervisor.invoke(payload)
   })
+  ipcMain.handle('brazil:agent:status', () => supervisor.status())
 }

@@ -224,11 +224,6 @@ struct Endpoint {
 /// What a locally launched server calls whichever model it has loaded.
 const LOCAL_MODEL_ALIAS: &str = "local";
 
-/// Fraction of total RAM treated as usable for model residency in `auto`
-/// memory arbitration. The remainder absorbs the OS, other apps, and runtime
-/// overhead beyond raw weight size.
-const USABLE_MEMORY_FRACTION: f64 = 0.85;
-
 /// Outcome of pre-generation memory arbitration, returned so the caller can
 /// restore the evicted chat model after the generation finishes.
 pub struct GenerationMemoryPlan {
@@ -266,6 +261,7 @@ pub struct Runtime {
     voice: Mutex<VoiceState>,
     settings: Mutex<RuntimeSettings>,
     models_cache: Mutex<Option<Vec<ModelDescriptor>>>,
+    llama_op: Mutex<()>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -339,6 +335,7 @@ impl Runtime {
             }),
             settings: Mutex::new(settings),
             models_cache: Mutex::new(None),
+            llama_op: Mutex::new(()),
         })
     }
 
@@ -459,27 +456,46 @@ impl Runtime {
         } else {
             None
         };
-        let mlx_probe = if options.probe {
-            self.mlx_diagnostics().await
-        } else {
-            None
-        };
-        serde_json::json!({
-            "id": self.id(),
-            "llama_binary": binary,
-            "llama_server": running,
-            "llama_probe": llama_probe,
-            "mlx_lm_python": self.mlx.lock().await.lm_python.as_ref().map(|path| path.display().to_string()),
-            "mlx_vlm_python": self.mlx.lock().await.vlm_python.as_ref().map(|path| path.display().to_string()),
-            "vllm_python": self.vllm.lock().await.python.as_ref().map(|path| path.display().to_string()),
-            "vllm_server": self.vllm.lock().await.server.as_ref().map(|server| serde_json::json!({"base_url": server.base_url, "model": server.model_ref})),
-            "mlx_server": self.mlx_server_summary().await,
-            "mlx_probe": mlx_probe,
-            "managed_binary_path": llama::managed_binary_path(&self.data_dir).display().to_string(),
-            "platform_asset_tag": llama::platform_asset_tag(),
-            "settings": settings,
-            "hardware": crate::hardware::detect(),
-        })
+        let mut status = serde_json::Map::new();
+        status.insert("id".to_owned(), serde_json::json!(self.id()));
+        status.insert("llama_binary".to_owned(), serde_json::json!(binary));
+        status.insert("llama_server".to_owned(), serde_json::json!(running));
+        status.insert("llama_probe".to_owned(), serde_json::json!(llama_probe));
+        status.insert("managed_binary_path".to_owned(), serde_json::json!(
+            llama::managed_binary_path(&self.data_dir).display().to_string()
+        ));
+        status.insert("platform_asset_tag".to_owned(), serde_json::json!(llama::platform_asset_tag()));
+        status.insert("settings".to_owned(), serde_json::json!(settings));
+        status.insert("hardware".to_owned(), serde_json::json!(crate::hardware::detect()));
+        #[cfg(target_os = "macos")]
+        {
+            let mlx_probe = if options.probe {
+                self.mlx_diagnostics().await
+            } else {
+                None
+            };
+            status.insert("mlx_lm_python".to_owned(), serde_json::json!(
+                self.mlx.lock().await.lm_python.as_ref().map(|path| path.display().to_string())
+            ));
+            status.insert("mlx_vlm_python".to_owned(), serde_json::json!(
+                self.mlx.lock().await.vlm_python.as_ref().map(|path| path.display().to_string())
+            ));
+            status.insert("mlx_server".to_owned(), serde_json::json!(self.mlx_server_summary().await));
+            status.insert("mlx_probe".to_owned(), serde_json::json!(mlx_probe));
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            status.insert("vllm_python".to_owned(), serde_json::json!(
+                self.vllm.lock().await.python.as_ref().map(|path| path.display().to_string())
+            ));
+            status.insert("vllm_server".to_owned(), serde_json::json!(
+                self.vllm.lock().await.server.as_ref().map(|server| serde_json::json!({
+                    "base_url": server.base_url,
+                    "model": server.model_ref,
+                }))
+            ));
+        }
+        serde_json::Value::Object(status)
     }
 
     /// Lightweight server summary without an HTTP probe (for frequent health checks).
@@ -727,6 +743,7 @@ impl Runtime {
         settings.validate()?;
         runtime_settings::save(&self.data_dir, &settings).await?;
         *self.settings.lock().await = settings;
+        self.invalidate_models_cache().await;
         Ok(true)
     }
 
@@ -743,11 +760,15 @@ impl Runtime {
             crate::model_library::normalize_library_paths(&settings.extra_model_library_paths)?;
         settings.validate()?;
         runtime_settings::save(&self.data_dir, &settings).await?;
-        let mut current = self.settings.lock().await;
-        let target_changed = current.target != settings.target;
-        let library_paths_changed =
-            current.extra_model_library_paths != settings.extra_model_library_paths;
-        if *current != settings {
+        let (target_changed, library_paths_changed, needs_restart) = {
+            let current = self.settings.lock().await;
+            (
+                current.target != settings.target,
+                current.extra_model_library_paths != settings.extra_model_library_paths,
+                *current != settings,
+            )
+        };
+        if needs_restart {
             let mut llama = self.llama.lock().await;
             if let Some(mut server) = llama.server.take() {
                 let _ = server.stop().await;
@@ -756,7 +777,6 @@ impl Runtime {
             if let Some(mut server) = mlx.server.take() {
                 let _ = server.stop().await;
             }
-            // A pinned binary survives target changes; otherwise re-resolve.
             if target_changed && settings.binary_override.is_none() {
                 llama.binary = None;
             }
@@ -780,7 +800,6 @@ impl Runtime {
                 .map(PathBuf::from)
                 .or_else(|| streaming_asr::resolve_python(&self.data_dir, None));
             if streaming_asr.python != next_python {
-                // The resident worker belongs to the old interpreter.
                 streaming_asr.worker = None;
             }
             streaming_asr.python = next_python;
@@ -797,8 +816,10 @@ impl Runtime {
                 .map(PathBuf::from)
                 .or_else(|| voice::resolve_python(&self.data_dir, None));
         }
-        *current = settings.clone();
-        drop(current);
+        {
+            let mut current = self.settings.lock().await;
+            *current = settings.clone();
+        }
         if library_paths_changed {
             self.invalidate_models_cache().await;
         }
@@ -835,6 +856,7 @@ impl Runtime {
             "{} failed a smoke test (missing shared libraries or incompatible build)",
             path.display()
         );
+        let _op_guard = self.llama_op.lock().await;
         let mut settings = self.settings.lock().await;
         settings.binary_override = Some(path.display().to_string());
         runtime_settings::save(&self.data_dir, &settings).await?;
@@ -1183,13 +1205,20 @@ impl Runtime {
             GenerationMemoryPolicy::Exclusive => true,
             GenerationMemoryPolicy::Coresident => false,
             GenerationMemoryPolicy::Auto => {
-                let total = crate::hardware::detect().memory_bytes.unwrap_or(0);
+                const MAX_PLAUSIBLE_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024 * 1024;
+                let detected = crate::hardware::detect().memory_bytes.unwrap_or(0);
+                let total = if detected == 0 || detected > MAX_PLAUSIBLE_MEMORY_BYTES {
+                    0
+                } else {
+                    detected
+                };
                 if total == 0 {
                     // Unknown system memory: keep the chat model to avoid churn.
                     false
                 } else {
-                    let headroom = u64::from(settings.generation_memory_headroom_mb) * 1024 * 1024;
-                    let budget = (total as f64 * USABLE_MEMORY_FRACTION) as u64;
+                    let headroom =
+                        (settings.generation_memory_headroom_mb as u64).saturating_mul(1024 * 1024);
+                    let budget = (total as u128 * 85 / 100) as u64;
                     resident_bytes
                         .saturating_add(gen_bytes)
                         .saturating_add(headroom)
@@ -1613,6 +1642,7 @@ impl Runtime {
         profile: Option<&crate::model_settings::TextProfile>,
         model_id: Option<&str>,
     ) -> anyhow::Result<()> {
+        let _op_guard = self.llama_op.lock().await;
         let settings = self.settings.lock().await.clone();
         let harmony = model_id
             .map(crate::harmony::is_harmony_model)

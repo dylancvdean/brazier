@@ -1985,6 +1985,7 @@ async fn finalize_video_output(requested_output: &Path) -> anyhow::Result<PathBu
         )
     })?;
     let output = Command::new(ffmpeg)
+        .kill_on_drop(true)
         .arg("-y")
         .arg("-i")
         .arg(&avi_output)

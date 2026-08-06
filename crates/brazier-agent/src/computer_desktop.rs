@@ -197,7 +197,7 @@ pub async fn request_os_permissions() -> Result<OsPermissionStatus, String> {
 #[cfg(target_os = "macos")]
 async fn command(program: &str, args: &[String]) -> Result<Vec<u8>, String> {
     let mut command = Command::new(program);
-    command.args(args);
+    command.args(args).kill_on_drop(true);
     let output = command
         .output()
         .await

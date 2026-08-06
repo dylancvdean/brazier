@@ -41,6 +41,30 @@ export type BrazierInputGuardStatus = {
 const invokeAgent = (command: WorkerCommandInput): Promise<unknown> =>
   ipcRenderer.invoke(AGENT_IPC.invoke, command)
 
+const agentMessageListeners = new Set<(message: WorkerMessage) => void>()
+let agentMessageDispatcher:
+  | ((_event: unknown, message: WorkerMessage) => void)
+  | null = null
+
+function ensureAgentMessageDispatcher(): void {
+  if (agentMessageDispatcher) return
+  const handler = (_event: unknown, message: WorkerMessage): void => {
+    for (const listener of [...agentMessageListeners]) listener(message)
+  }
+  agentMessageDispatcher = handler
+  ipcRenderer.on(AGENT_IPC.event, handler)
+}
+
+function removeAgentMessageListener(
+  listener: (message: WorkerMessage) => void
+): void {
+  agentMessageListeners.delete(listener)
+  if (agentMessageListeners.size === 0 && agentMessageDispatcher) {
+    ipcRenderer.removeListener(AGENT_IPC.event, agentMessageDispatcher)
+    agentMessageDispatcher = null
+  }
+}
+
 /**
  * Agent bridge. The renderer stays sandboxed with no Node integration: it can
  * only send these named commands and listen for events. It cannot fork the
@@ -65,9 +89,14 @@ const agent = {
     ipcRenderer.invoke('brazier:agent:status'),
   /** Subscribe to worker events. Returns an unsubscribe function. */
   onMessage: (listener: (message: WorkerMessage) => void): (() => void) => {
-    const handler = (_event: unknown, message: WorkerMessage): void => listener(message)
-    ipcRenderer.on(AGENT_IPC.event, handler)
-    return () => ipcRenderer.removeListener(AGENT_IPC.event, handler)
+    agentMessageListeners.add(listener)
+    ensureAgentMessageDispatcher()
+    let removed = false
+    return () => {
+      if (removed) return
+      removed = true
+      removeAgentMessageListener(listener)
+    }
   }
 }
 

@@ -41,6 +41,8 @@ export type SummaryRequest = {
   facts: string
   fetchImpl?: typeof fetch
   timeoutMs?: number
+  /** Optional parent cancel signal; aborting it aborts the summary request. */
+  signal?: AbortSignal
 }
 
 const INSTRUCTIONS = [
@@ -63,6 +65,10 @@ export async function requestModelSummary(request: SummaryRequest): Promise<stri
   const fetchImpl = request.fetchImpl ?? fetch
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), request.timeoutMs ?? SUMMARY_TIMEOUT_MS)
+  const signal =
+    request.signal !== undefined
+      ? (AbortSignal.any([controller.signal, request.signal]) as AbortSignal)
+      : controller.signal
   try {
     const response = await fetchImpl(`${request.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -72,7 +78,7 @@ export async function requestModelSummary(request: SummaryRequest): Promise<stri
           'x-brazier-mode': 'agent',
           'x-brazier-slot': '0'
         },
-      signal: controller.signal,
+      signal,
       body: JSON.stringify({
         model: request.model,
         stream: false,

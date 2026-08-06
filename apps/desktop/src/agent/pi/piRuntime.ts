@@ -372,6 +372,8 @@ class PiAgentSession implements AgentSession {
   private queue?: EventQueue
   private currentRunId?: string
   private disposed = false
+  /** Set from run start until the run loop's finally settles. See isBusy(). */
+  private completing = false
   /**
    * Pi can emit several message_end events back-to-back. SQLite append uses a
    * read-then-write transaction to allocate sequence numbers, so overlapping
@@ -678,6 +680,7 @@ class PiAgentSession implements AgentSession {
   run(input: AgentUserInput): AsyncIterable<AgentEvent> {
     const runId = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
     this.currentRunId = runId
+    this.completing = true
     const queue = new EventQueue()
     this.queue = queue
     this.executor.approvalsRequested = 0
@@ -726,6 +729,7 @@ class PiAgentSession implements AgentSession {
     void promise.finally(() => {
       queue.close()
       if (this.queue === queue) this.queue = undefined
+      this.completing = false
     })
 
     return queue.iterator()
@@ -762,8 +766,12 @@ class PiAgentSession implements AgentSession {
    */
   async compact(): Promise<AgentCompactionState> {
     const messages = this.state.messages
-    const keep = messages.slice(-COMPACTION_KEEP_TAIL)
-    const dropped = messages.slice(0, Math.max(0, messages.length - COMPACTION_KEEP_TAIL))
+    let splitIndex = Math.max(0, messages.length - COMPACTION_KEEP_TAIL)
+    while (splitIndex < messages.length && messages[splitIndex]?.role === 'tool') {
+      splitIndex += 1
+    }
+    const keep = messages.slice(splitIndex)
+    const dropped = messages.slice(0, splitIndex)
     const facts = buildCompactionSummary(dropped, this.state)
     // The model writes what the digest cannot: what was being attempted, and
     // why an approach was abandoned. Its failure is not compaction's failure —
@@ -785,32 +793,36 @@ class PiAgentSession implements AgentSession {
       timestamp: new Date().toISOString()
     }
     const next = dropped.length > 0 ? [summaryMessage, ...keep] : messages
-    this.state = { ...this.state, messages: next }
-    const modelId = this.state.model.id
-    this.agent.state.messages = next
-      .map((message) => toPiMessage(message, modelId))
-      .filter((message): message is PiMessage => Boolean(message))
-    await this.enqueuePersistence(() => this.broker.appendMessages(this.id, next, true))
-
     const compaction: AgentCompactionState = {
       compactedAt: new Date().toISOString(),
       removedMessages: dropped.length,
       summary: summaryText,
       summarySource: prose ? 'model' : 'deterministic'
     }
-    this.state = { ...this.state, compactionState: compaction }
+
+    if (dropped.length > 0) {
+      // Persist (replace) the transcript before touching in-memory state so a
+      // daemon failure cannot leave worker and daemon on different transcripts.
+      await this.enqueuePersistence(() => this.broker.appendMessages(this.id, next, true))
+      this.state = { ...this.state, messages: next }
+      const modelId = this.state.model.id
+      this.agent.state.messages = next
+        .map((message) => toPiMessage(message, modelId))
+        .filter((message): message is PiMessage => Boolean(message))
+    }
+
     await this.enqueuePersistence(() =>
       this.broker.updateSession(this.id, {
         compaction: compaction as unknown as Record<string, unknown>
       })
     )
-      .catch(() => undefined)
+    this.state = { ...this.state, compactionState: compaction }
     this.emit({ ...this.base('compacted'), state: compaction } as AgentEvent)
     return compaction
   }
 
   async setModel(model: AgentModelReference): Promise<void> {
-    if (this.agent.state.isStreaming) {
+    if (this.isBusy()) {
       throw new Error('The model can only be changed between runs.')
     }
     this.state = { ...this.state, model }
@@ -820,6 +832,11 @@ class PiAgentSession implements AgentSession {
   }
 
   async setEnabledTools(toolNames: string[]): Promise<void> {
+    if (this.isBusy()) {
+      throw new Error('Tools can only be changed between runs.')
+    }
+    const catalog = await this.broker.tools()
+    this.definitions = catalog.filter((tool) => toolNames.includes(tool.name))
     this.enabledTools = toolNames
     this.state = { ...this.state, enabledTools: toolNames }
     this.executor.setDefinitions(this.definitions)
@@ -828,11 +845,22 @@ class PiAgentSession implements AgentSession {
   }
 
   async setPermissionMode(mode: AgentPermissionMode): Promise<void> {
-    if (this.agent.state.isStreaming) {
+    if (this.isBusy()) {
       throw new Error('The permission mode can only be changed between runs.')
     }
     this.state = { ...this.state, permissionMode: mode }
     await this.broker.updateSession(this.id, { permission_mode: mode })
+  }
+
+  /**
+   * True while a run is producing or wrapping up. `isStreaming` covers active
+   * generation; `completing` covers the window between the model finishing and
+   * the run loop's `finally` clearing the supervisor's running flag, where a
+   * setter would otherwise slip in mid-compaction or before the final
+   * `session-state` event.
+   */
+  private isBusy(): boolean {
+    return Boolean(this.agent.state.isStreaming) || this.completing
   }
 
   getState(): AgentSessionState {
@@ -949,16 +977,31 @@ export class PiAgentRuntime implements AgentRuntime {
 
   /** Pick a free llama slot in 1..maxExclusive-1 for a new subagent session. */
   private allocateChildLlamaSlot(maxExclusive: number): number {
-    if (maxExclusive <= 1) return 0
+    if (maxExclusive <= 1) {
+      throw new Error('No child llama slots available; reduce concurrency')
+    }
     const used = new Set(this.childLlamaSlots.values())
     for (let slot = 1; slot < maxExclusive; slot += 1) {
       if (!used.has(slot)) return slot
     }
-    return 0
+    throw new Error('No free llama slot; reduce concurrency')
   }
 
   private releaseChildLlamaSlot(childId: string): void {
     this.childLlamaSlots.delete(childId)
+  }
+
+  /**
+   * Delete a child session from the daemon so its transcript, tool executions,
+   * and sandbox record do not accumulate across a long parent run. The broker
+   * client has no public delete method, so reach the daemon's DELETE route
+   * through the same request helper its other calls use.
+   */
+  private async deleteDaemonSession(sessionId: string): Promise<void> {
+    const broker = this.broker as unknown as {
+      request: <T>(path: string, init?: RequestInit) => Promise<T>
+    }
+    await broker.request<void>(`/api/v1/agent/sessions/${sessionId}`, { method: 'DELETE' })
   }
 
   async cancelChildren(parentId: string): Promise<void> {
@@ -1116,7 +1159,21 @@ export class PiAgentRuntime implements AgentRuntime {
       }
     }
 
-    const llamaSlot = this.allocateChildLlamaSlot(options.parallelSlots)
+    const llamaSlot = (() => {
+      try {
+        return this.allocateChildLlamaSlot(options.parallelSlots)
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause)
+        void this.deleteDaemonSession(childRecord.id).catch(() => undefined)
+        return { failed: true, message } as const
+      }
+    })()
+    if (typeof llamaSlot !== 'number') {
+      return {
+        status: 'failed',
+        summary: summarizeSubagentResult([], { failed: true, error: llamaSlot.message })
+      }
+    }
     this.childLlamaSlots.set(childRecord.id, llamaSlot)
     this.trackChild(parent.id, childRecord.id)
     parent.forwardEvent({
@@ -1133,6 +1190,7 @@ export class PiAgentRuntime implements AgentRuntime {
 
     let status: 'completed' | 'failed' | 'cancelled' = 'completed'
     let summary = ''
+    let childFinished = false
     try {
       if (request.signal?.aborted) {
         status = 'cancelled'
@@ -1156,6 +1214,7 @@ export class PiAgentRuntime implements AgentRuntime {
         request.signal?.addEventListener('abort', abortChild, { once: true })
         try {
           for await (const event of childSession.run({ text: prompt })) {
+            if (childFinished) continue
             if (event.type === 'approval-required' || event.type === 'elevation-requested') {
               parent.forwardEvent(event)
             }
@@ -1167,8 +1226,10 @@ export class PiAgentRuntime implements AgentRuntime {
             )
             if (progress) parent.forwardEvent(progress)
           }
+          childFinished = true
         } finally {
           request.signal?.removeEventListener('abort', abortChild)
+          childFinished = true
         }
 
         const childState = childSession.getState()
@@ -1194,6 +1255,7 @@ export class PiAgentRuntime implements AgentRuntime {
     } finally {
       this.untrackChild(parent.id, childRecord.id)
       this.releaseChildLlamaSlot(childRecord.id)
+      await this.deleteDaemonSession(childRecord.id).catch(() => undefined)
     }
 
     parent.forwardEvent({

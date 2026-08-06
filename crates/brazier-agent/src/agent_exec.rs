@@ -8,6 +8,8 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
+    fs::OpenOptions,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -945,17 +947,49 @@ async fn fs_read(
     arguments: &Value,
 ) -> anyhow::Result<ToolOutcome> {
     let path = checked_path(context, plan, workspace, arguments, "path", false)?;
-    let bytes = tokio::fs::read(&path)
+    let size = tokio::fs::metadata(&path)
         .await
-        .with_context(|| format!("cannot read {}", path.display()))?;
-    if bytes.len() > MAX_READ_BYTES && arguments.get("start_line").is_none() {
-        anyhow::bail!(
-            "{} is {} bytes, larger than the {MAX_READ_BYTES}-byte read limit. Pass \
-             `start_line` and `line_count` to read a range.",
-            path.display(),
-            bytes.len()
+        .with_context(|| format!("cannot read {}", path.display()))?
+        .len();
+    anyhow::ensure!(
+        size <= MAX_READ_BYTES as u64,
+        "{} is {} bytes, larger than the {MAX_READ_BYTES}-byte read limit. Pass \
+         `start_line` and `line_count` to read a smaller range of a file that fits.",
+        path.display(),
+        size
+    );
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    let canonical_parent = std::fs::canonicalize(parent)
+        .with_context(|| format!("cannot canonicalize {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("{} has no file name", path.display()))?;
+    let opened_path = canonical_parent.join(file_name);
+    for secret in secret_paths(Some(context.data_dir)) {
+        anyhow::ensure!(
+            !is_inside(&opened_path, &secret),
+            "`{}` resolves into a credential or Brazier-owned path",
+            path.display()
         );
     }
+    if plan.environment == AgentEnvironment::Sandbox {
+        let root = workspace.context("this session has no workspace")?;
+        anyhow::ensure!(
+            is_inside(&opened_path, root),
+            "`{}` is outside the workspace; request host access for it",
+            path.display()
+        );
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&opened_path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    let mut file = tokio::fs::File::from_std(file);
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.read_to_end(&mut bytes).await?;
     let text = String::from_utf8_lossy(&bytes);
     let start_line = arguments
         .get("start_line")
@@ -1660,13 +1694,13 @@ async fn build_command(
             context
                 .broker
                 .backend()
-                .wrap(&sandbox_request, shell, &args, &extra_env)
+                .wrap(&sandbox_request, shell, &args, &extra_env)?
         }
         AgentEnvironment::Host => {
             context
                 .broker
                 .backend()
-                .wrap_host(&sandbox_request, shell, &args, &extra_env)
+                .wrap_host(&sandbox_request, shell, &args, &extra_env)?
         }
     };
     let mut command = Command::new(&wrapped.program);

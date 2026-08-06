@@ -3419,8 +3419,11 @@ a.inline-link {
   text-transform: uppercase;
 }
 
-.tool-chip-body code {
+.tool-chip-body code,
+.tool-chip-body pre {
   display: block;
+  max-height: 320px;
+  overflow: auto;
   overflow-wrap: anywhere;
   color: #b7b7b7;
   font-family: ui-monospace, monospace;

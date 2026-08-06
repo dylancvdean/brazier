@@ -6,6 +6,16 @@ import {
   type AgentSidebarControls
 } from './AgentMode'
 
+const RUNTIME_LABELS: Record<string, string> = {
+  powerful: 'Powerful',
+  balanced: 'Balanced'
+}
+
+function runtimeLabel(runtimeId: string | null | undefined): string {
+  if (!runtimeId) return 'Simple'
+  return RUNTIME_LABELS[runtimeId] ?? 'Simple'
+}
+
 type Props = {
   controls: AgentSidebarControls | null
 }
@@ -28,7 +38,7 @@ export function AgentSessionSidebar({ controls }: Props): React.JSX.Element {
             session.runtime_id ?? '',
             session.runtime_metadata?.worktree?.source_path ?? '',
             session.runtime_metadata?.worktree?.branch ?? '',
-            session.last_run_status
+            session.last_run_status ?? ''
           ]
             .join(' ')
             .toLowerCase()
@@ -91,10 +101,10 @@ export function AgentSessionSidebar({ controls }: Props): React.JSX.Element {
                   <button type="button" onClick={() => controls.select(entry.id)}>
                     <strong>{entry.title}</strong>
                     <span>
-                      {entry.runtime_id === 'powerful' ? 'Powerful · ' : 'Simple · '}
+                      {runtimeLabel(entry.runtime_id)} ·{' '}
                       {worktree
-                        ? `Worktree · ${worktree.branch} · ${entry.last_run_status}`
-                        : entry.last_run_status}
+                        ? `Worktree · ${worktree.branch} · ${entry.last_run_status ?? '—'}`
+                        : entry.last_run_status ?? '—'}
                     </span>
                   </button>
                   <button

@@ -10,10 +10,10 @@ export function ReasoningDisclosure({
   text: string
   defaultOpen?: boolean
 }): React.JSX.Element | null {
+  const [open, setOpen] = useState(defaultOpen)
   const trimmed = text.trim()
   if (!trimmed) return null
 
-  const [open, setOpen] = useState(defaultOpen)
   const needsCollapse = trimmed.length > PREVIEW_CHARS || trimmed.includes('\n')
   const preview = needsCollapse
     ? trimmed.replace(/\s+/g, ' ').slice(0, PREVIEW_CHARS).trimEnd() +

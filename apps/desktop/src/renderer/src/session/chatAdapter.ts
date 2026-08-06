@@ -138,6 +138,7 @@ export class DaemonChatAdapter implements ChatAdapter {
  */
 export class InMemoryChatAdapter implements ChatAdapter {
   private lastMessageId: string | null = null
+  private readonly messagesById = new Map<string, ConversationMessage>()
 
   constructor(private readonly hooks: ChatAdapterHooks = {}) {}
 
@@ -158,21 +159,34 @@ export class InMemoryChatAdapter implements ChatAdapter {
     }
     this.lastMessageId = stored.id
     this.hooks.onMessage?.(stored)
-    return toConversationMessage(stored)
+    const conversationMessage = toConversationMessage(stored)
+    this.messagesById.set(conversationMessage.id, conversationMessage)
+    return conversationMessage
   }
 
   async updateMessage(messageId: string, patch: MessagePatch): Promise<ConversationMessage> {
-    this.hooks.onStatus?.(null)
-    return {
-      id: messageId,
-      conversationId: 'incognito',
-      role: 'assistant',
-      source: 'assistant_chat',
-      content: patch.content ?? '',
-      createdAt: new Date().toISOString(),
-      status: patch.status ?? 'final',
-      metadata: patch.metadata
+    const match = this.messagesById.get(messageId)
+    const base: ConversationMessage =
+      match ??
+      ({
+        id: messageId,
+        conversationId: 'incognito',
+        role: 'assistant',
+        source: 'assistant_chat',
+        content: '',
+        createdAt: new Date().toISOString(),
+        status: 'final',
+        metadata: undefined
+      } as ConversationMessage)
+    const next: ConversationMessage = {
+      ...base,
+      content: patch.content ?? base.content,
+      status: patch.status ?? base.status,
+      metadata: patch.metadata ?? base.metadata
     }
+    this.messagesById.set(messageId, next)
+    this.hooks.onStatus?.(null)
+    return next
   }
 
   showStatus(status: string | null): void {

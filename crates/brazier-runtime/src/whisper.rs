@@ -833,6 +833,7 @@ pub async fn transcribe_with_context(
     // Fallback: some builds print the transcript to stdout.
     let mut command = Command::new(request.binary);
     command
+        .kill_on_drop(true)
         .arg("-m")
         .arg(request.model)
         .arg("-f")

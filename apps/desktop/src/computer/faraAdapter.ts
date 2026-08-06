@@ -53,8 +53,14 @@ export function parseFaraOutput(text: string): FaraParseResult {
       try {
         actions.push(parseToolCallJson(trimmed))
         raw_tool_calls.push(trimmed)
-      } catch {
-        // Leave empty; caller decides how to surface unparseable output.
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.error(`[fara] failed to parse model output: ${message}`, trimmed)
+        actions.push({
+          type: 'ask_user',
+          question: `parse_error: ${message} (raw: ${trimmed.slice(0, 500)})`
+        })
+        raw_tool_calls.push(trimmed)
       }
     }
   }

@@ -229,6 +229,7 @@ async fn run_with_timeout(
     timeout: Duration,
     what: &str,
 ) -> anyhow::Result<std::process::Output> {
+    command.kill_on_drop(true);
     let output = tokio::time::timeout(timeout, command.output())
         .await
         .with_context(|| format!("{what} timed out after {}s", timeout.as_secs()))?

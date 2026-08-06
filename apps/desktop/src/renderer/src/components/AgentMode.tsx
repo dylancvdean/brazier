@@ -648,6 +648,55 @@ function shortModelLabel(modelId: string): string {
   return leaf.length > 28 ? `${leaf.slice(0, 28)}…` : leaf
 }
 
+function focusableElements(root: HTMLElement): HTMLElement[] {
+  return Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((el) => !el.hasAttribute('disabled'))
+}
+
+function useDialogOverlay(
+  open: boolean,
+  onClose: () => void
+): React.RefObject<HTMLDivElement | null> {
+  const overlayRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const root = overlayRef.current
+    if (!root) return
+    const previouslyFocused = document.activeElement as HTMLElement | null
+    const items = focusableElements(root)
+    items[0]?.focus()
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onClose()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const current = focusableElements(root)
+      if (current.length === 0) return
+      const first = current[0]
+      const last = current[current.length - 1]
+      const active = document.activeElement
+      if (event.shiftKey && active === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    root.addEventListener('keydown', onKeyDown)
+    return () => {
+      root.removeEventListener('keydown', onKeyDown)
+      previouslyFocused?.focus?.()
+    }
+  }, [open, onClose])
+  return overlayRef
+}
+
 export function AgentMode(props: Props): React.JSX.Element {
   const { onError, onSessionBound } = props
   const [capabilities, setCapabilities] = useState<AgentCapabilities | null>(null)
@@ -686,6 +735,10 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [deciding, setDeciding] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [artifact, setArtifact] = useState<{ id: string; text: string } | null>(null)
+  const artifactOverlayRef = useDialogOverlay(Boolean(artifact), () => setArtifact(null))
+  const promptEditorOverlayRef = useDialogOverlay(promptEditorOpen, () =>
+    setPromptEditorOpen(false)
+  )
   const scrollAnchor = useRef<HTMLDivElement>(null)
   const sessionIdRef = useRef<string | null>(null)
 
@@ -1832,7 +1885,9 @@ export function AgentMode(props: Props): React.JSX.Element {
               )}
               {summary.commandsRun.length > 0 && (
                 <li>
-                  Commands: {summary.commandsRun.map((command) => <code key={command}>{command}</code>)}
+                  Commands: {summary.commandsRun.map((command, index) => (
+                  <code key={`${command}-${index}`}>{command}</code>
+                ))}
                 </li>
               )}
               {summary.approvalsRequested > 0 && (
@@ -1855,7 +1910,12 @@ export function AgentMode(props: Props): React.JSX.Element {
       {/* No composer here: the window has one, at the bottom, for every mode. */}
 
       {artifact && (
-        <div className="agent-artifact-overlay" role="dialog">
+        <div
+          className="agent-artifact-overlay"
+          role="dialog"
+          aria-modal="true"
+          ref={artifactOverlayRef}
+        >
           <div className="agent-artifact">
             <header>
               <strong>Full tool output</strong>
@@ -1869,7 +1929,12 @@ export function AgentMode(props: Props): React.JSX.Element {
       )}
 
       {promptEditorOpen && (
-        <div className="agent-artifact-overlay" role="dialog" aria-modal="true">
+        <div
+          className="agent-artifact-overlay"
+          role="dialog"
+          aria-modal="true"
+          ref={promptEditorOverlayRef}
+        >
           <div className="agent-artifact agent-prompt-editor">
             <header>
               <div>
@@ -1906,8 +1971,8 @@ export function AgentMode(props: Props): React.JSX.Element {
                   <strong>Generated shortcuts</strong>
                   <span>Use these anywhere in the prompt. Expand one to inspect its current value.</span>
                   <div>
-                    {promptComponents.map((component) => (
-                      <details key={component.name}>
+                    {promptComponents.map((component, index) => (
+                      <details key={`${component.name}-${component.placeholder ?? index}`}>
                         <summary>
                           <code>{component.placeholder}</code>
                         </summary>

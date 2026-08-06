@@ -207,9 +207,25 @@ impl ComputerBroker {
                 .context("create computer session store directory")?;
         }
         let temporary = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
-        tokio::fs::write(&temporary, bytes)
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
             .await
             .context("write computer session store")?;
+        use tokio::io::AsyncWriteExt as _;
+        file.write_all(&bytes)
+            .await
+            .context("write computer session store")?;
+        file.flush().await.context("write computer session store")?;
+        file.sync_all()
+            .await
+            .context("sync computer session store")?;
+        drop(file);
         tokio::fs::rename(&temporary, path)
             .await
             .context("commit computer session store")?;

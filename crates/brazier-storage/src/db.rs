@@ -254,6 +254,19 @@ impl Database {
                 .await
                 .context("create data directory")?;
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            if !path.exists() {
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(path)
+                    .context("create sqlite database file")?;
+            }
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -266,6 +279,19 @@ impl Database {
             .connect_with(options)
             .await
             .context("open sqlite database")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            for suffix in ["-wal", "-shm"] {
+                let sibling: std::path::PathBuf =
+                    format!("{}{suffix}", path.display()).into();
+                if sibling.exists() {
+                    let _ =
+                        std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
         let db = Self { pool };
         db.migrate().await?;
         Ok(db)
@@ -290,6 +316,7 @@ impl Database {
         let existing_installation = version > 0;
 
         if version < 1 {
+            let mut tx = self.pool.begin().await?;
             sqlx::query(
                 r#"
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -300,7 +327,7 @@ impl Database {
                 );
                 "#,
             )
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
             sqlx::query(
                 r#"
@@ -315,20 +342,22 @@ impl Database {
                 );
                 "#,
             )
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
             sqlx::query(
                 "CREATE INDEX IF NOT EXISTS messages_conversation_created ON messages(conversation_id, created_at)",
             )
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (1)")
-                .execute(&self.pool)
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (1)")
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
             version = 1;
         }
 
         if version < 2 {
+            let mut tx = self.pool.begin().await?;
             sqlx::query(
                 r#"
                 CREATE TABLE IF NOT EXISTS attachments (
@@ -340,7 +369,7 @@ impl Database {
                 );
                 "#,
             )
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
             sqlx::query(
                 r#"
@@ -351,15 +380,17 @@ impl Database {
                 );
                 "#,
             )
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (2)")
-                .execute(&self.pool)
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)")
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
             version = 2;
         }
 
         if version < 3 {
+            let mut tx = self.pool.begin().await?;
             sqlx::query(
                 r#"
                 CREATE TABLE IF NOT EXISTS run_snapshots (
@@ -376,20 +407,22 @@ impl Database {
                 );
                 "#,
             )
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
             sqlx::query(
                 "CREATE INDEX IF NOT EXISTS run_snapshots_conversation_created ON run_snapshots(conversation_id, created_at DESC)",
             )
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (3)")
-                .execute(&self.pool)
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (3)")
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
             version = 3;
         }
 
         if version < 4 {
+            let mut tx = self.pool.begin().await?;
             sqlx::query(
                 r#"
                 CREATE TABLE IF NOT EXISTS download_jobs (
@@ -407,29 +440,32 @@ impl Database {
                 );
                 "#,
             )
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
             sqlx::query(
                 "CREATE INDEX IF NOT EXISTS download_jobs_updated ON download_jobs(updated_at DESC)",
             )
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (4)")
-                .execute(&self.pool)
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)")
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
             version = 4;
         }
 
         if version < 5 {
+            let mut tx = self.pool.begin().await?;
             sqlx::query("ALTER TABLE messages ADD COLUMN tool_calls_json TEXT")
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             sqlx::query("ALTER TABLE messages ADD COLUMN tool_call_id TEXT")
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (5)")
-                .execute(&self.pool)
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (5)")
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
         }
 
         if version < 6 {
@@ -495,7 +531,7 @@ impl Database {
             )
             .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (6)")
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -640,7 +676,7 @@ impl Database {
             )
             .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (7)")
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -672,7 +708,7 @@ impl Database {
             )
             .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (8)")
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (8)")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -704,7 +740,7 @@ impl Database {
             )
             .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (9)")
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -738,7 +774,7 @@ impl Database {
                 .execute(&mut *tx)
                 .await?;
             }
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (10)")
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (10)")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -762,7 +798,7 @@ impl Database {
             )
             .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (11)")
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (11)")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -799,7 +835,7 @@ impl Database {
             )
             .execute(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO schema_migrations(version) VALUES (12)")
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (12)")
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -883,6 +919,7 @@ impl Database {
     ) -> anyhow::Result<Conversation> {
         // Confirm the conversation exists so an unknown id is not a silent no-op.
         self.get_conversation(id).await?;
+        let mut tx = self.pool.begin().await?;
         if let Some(title) = update
             .title
             .as_deref()
@@ -892,14 +929,14 @@ impl Database {
             sqlx::query("UPDATE conversations SET title = ? WHERE id = ?")
                 .bind(title)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
         if let Some(agent_session_id) = update.agent_session_id {
             sqlx::query("UPDATE conversations SET agent_session_id = ? WHERE id = ?")
                 .bind(&agent_session_id)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
         if let Some(summary) = update.summary {
@@ -910,9 +947,10 @@ impl Database {
             )
             .bind(&summary)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
+        tx.commit().await?;
         self.get_conversation(id).await
     }
 
@@ -924,7 +962,20 @@ impl Database {
         .bind(conversation_id)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(TryInto::try_into).collect()
+        let mut messages = Vec::with_capacity(rows.len());
+        for row in rows {
+            let message_id = row.id.clone();
+            match Message::try_from(row) {
+                Ok(message) => messages.push(message),
+                Err(error) => tracing::warn!(
+                    conversation_id = conversation_id,
+                    message_id = %message_id,
+                    error = %error,
+                    "dropping malformed message row from conversation"
+                ),
+            }
+        }
+        Ok(messages)
     }
 
     pub async fn create_message(
@@ -1463,21 +1514,23 @@ impl Database {
     /// paused and resumed from their partial files; source builds cannot, so
     /// their tray rows become failed rather than appearing stuck forever.
     pub async fn interrupt_running_download_jobs(&self) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'failed', error = 'Brazier restarted before this build completed',
                    updated_at = datetime('now')
                WHERE kind = 'runtime-build' AND status = 'downloading'"#,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'paused', updated_at = datetime('now')
                WHERE kind != 'runtime-build' AND status IN ('pending', 'downloading')"#,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1789,7 +1842,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO schema_migrations(version) VALUES (9)")
+        sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)")
             .execute(&pool)
             .await
             .unwrap();

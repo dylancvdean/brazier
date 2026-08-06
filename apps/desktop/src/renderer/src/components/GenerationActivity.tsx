@@ -32,21 +32,35 @@ export function GenerationActivity({
 
   useEffect(() => {
     let cancelled = false
-    const poll = async (): Promise<void> => {
-      try {
-        const current = await fetchActiveGeneration()
+    void fetchActiveGeneration()
+      .then((current) => {
         if (!cancelled) setActive(current)
-      } catch {
+      })
+      .catch(() => {
         // Daemon may be restarting; the next tick retries.
-      }
+      })
+    return () => {
+      cancelled = true
     }
-    void poll()
-    const timer = window.setInterval(() => void poll(), 1000)
+  }, [])
+
+  useEffect(() => {
+    if (!active) return
+    let cancelled = false
+    const timer = window.setInterval(() => {
+      void fetchActiveGeneration()
+        .then((current) => {
+          if (!cancelled) setActive(current)
+        })
+        .catch(() => {
+          // Daemon may be restarting; the next tick retries.
+        })
+    }, 1000)
     return () => {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [])
+  }, [active])
 
   const initBlob = active?.init_image_blob ?? null
   useEffect(() => {

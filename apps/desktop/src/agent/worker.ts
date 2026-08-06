@@ -34,7 +34,7 @@ parentPort.on('message', (event) => {
   if (!command || typeof command !== 'object' || typeof command.type !== 'string') {
     return
   }
-  commandChain = commandChain.then(() => core.handle(command))
+  commandChain = commandChain.then(() => core.handle(command)).catch(() => undefined)
 })
 
 process.on('uncaughtException', (error: Error) => {

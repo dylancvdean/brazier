@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use anyhow::bail;
 use brazier_protocol::agent_types::SandboxDescription;
 
 /// Isolation profiles a session can run under.
@@ -321,8 +322,8 @@ impl SandboxBackend {
         program: &str,
         args: &[String],
         extra_env: &BTreeMap<String, String>,
-    ) -> WrappedCommand {
-        let env = filtered_env(extra_env, request);
+    ) -> anyhow::Result<WrappedCommand> {
+        let env = filtered_env(extra_env, request)?;
         let description = self.describe(request.profile, Some(request.workspace));
         match (self.kind, self.program.as_ref()) {
             (SandboxBackendKind::Seatbelt, Some(sandbox_exec)) => {
@@ -332,12 +333,12 @@ impl SandboxBackend {
                     OsString::from(program),
                 ];
                 wrapped.extend(args.iter().map(OsString::from));
-                WrappedCommand {
+                Ok(WrappedCommand {
                     program: sandbox_exec.clone().into_os_string(),
                     args: wrapped,
                     env,
                     description,
-                }
+                })
             }
             (SandboxBackendKind::Bubblewrap, Some(bwrap)) => {
                 let mut wrapped: Vec<OsString> = bubblewrap_args(request, self.unshare_net)
@@ -347,19 +348,19 @@ impl SandboxBackend {
                 wrapped.push(OsString::from("--"));
                 wrapped.push(OsString::from(program));
                 wrapped.extend(args.iter().map(OsString::from));
-                WrappedCommand {
+                Ok(WrappedCommand {
                     program: bwrap.clone().into_os_string(),
                     args: wrapped,
                     env,
                     description,
-                }
+                })
             }
-            _ => WrappedCommand {
+            _ => Ok(WrappedCommand {
                 program: OsString::from(program),
                 args: args.iter().map(OsString::from).collect(),
                 env,
                 description,
-            },
+            }),
         }
     }
 
@@ -370,13 +371,13 @@ impl SandboxBackend {
         program: &str,
         args: &[String],
         extra_env: &BTreeMap<String, String>,
-    ) -> WrappedCommand {
-        WrappedCommand {
+    ) -> anyhow::Result<WrappedCommand> {
+        Ok(WrappedCommand {
             program: OsString::from(program),
             args: args.iter().map(OsString::from).collect(),
-            env: filtered_env(extra_env, request),
+            env: filtered_env(extra_env, request)?,
             description: self.describe_host(Some(request.workspace)),
-        }
+        })
     }
 }
 
@@ -389,12 +390,13 @@ fn which(program: &str) -> Option<PathBuf> {
 }
 
 /// Build the child environment: inherit, drop secrets, then apply the caller's
-/// explicit additions. Explicit additions are the only way a secret-looking
-/// name can reach a tool.
+/// explicit additions. The secret filter also rejects names supplied via
+/// `extra`: callers cannot smuggle credentials past [`is_secret_env`] or the
+/// daemon-private `BRAZIER_` prefix.
 pub fn filtered_env(
     extra: &BTreeMap<String, String>,
     request: &SandboxRequest<'_>,
-) -> BTreeMap<String, String> {
+) -> anyhow::Result<BTreeMap<String, String>> {
     let mut env = BTreeMap::new();
     for (key, value) in std::env::vars() {
         if is_secret_env(&key) {
@@ -418,9 +420,12 @@ pub fn filtered_env(
     env.insert("TERM".to_owned(), "dumb".to_owned());
     env.insert("BRAZIER_AGENT".to_owned(), "1".to_owned());
     for (key, value) in extra {
+        if key.starts_with("BRAZIER_") || is_secret_env(key) {
+            bail!("refusing to inject secret-looking env var `{key}`");
+        }
         env.insert(key.clone(), value.clone());
     }
-    env
+    Ok(env)
 }
 
 /// True when a variable name looks like it carries a credential.
@@ -719,7 +724,8 @@ mod tests {
         let env = filtered_env(
             &BTreeMap::new(),
             &request(SandboxProfile::Workspace, &workspace, &scratch),
-        );
+        )
+        .expect("plain env filters");
         assert!(!env.contains_key("BRAZIER_TEST_MARKER"));
         assert!(!env.contains_key("TEST_ACCESS_KEY"));
         assert_eq!(
@@ -740,16 +746,37 @@ mod tests {
     }
 
     #[test]
-    fn explicit_env_overrides_the_secret_filter() {
+    fn explicit_env_cannot_override_the_secret_filter() {
         let workspace = PathBuf::from("/tmp/ws");
         let scratch = PathBuf::from("/tmp/scratch");
         let mut extra = BTreeMap::new();
         extra.insert("GITHUB_TOKEN".to_owned(), "granted".to_owned());
-        let env = filtered_env(
+        let err = filtered_env(
             &extra,
             &request(SandboxProfile::Workspace, &workspace, &scratch),
+        )
+        .expect_err("secret-looking extra env must be rejected");
+        assert!(
+            err.to_string().contains("GITHUB_TOKEN"),
+            "error should name the offending key"
         );
-        assert_eq!(env.get("GITHUB_TOKEN").map(String::as_str), Some("granted"));
+
+        let mut brazier = BTreeMap::new();
+        brazier.insert("BRAZIER_INTERNAL".to_owned(), "leak".to_owned());
+        filtered_env(
+            &brazier,
+            &request(SandboxProfile::Workspace, &workspace, &scratch),
+        )
+        .expect_err("BRAZIER_-prefixed extra env must be rejected");
+
+        let mut plain = BTreeMap::new();
+        plain.insert("AGENT_TOOL_FLAG".to_owned(), "ok".to_owned());
+        let env = filtered_env(
+            &plain,
+            &request(SandboxProfile::Workspace, &workspace, &scratch),
+        )
+        .expect("non-secret extra env is allowed");
+        assert_eq!(env.get("AGENT_TOOL_FLAG").map(String::as_str), Some("ok"));
     }
 
     #[test]
@@ -932,12 +959,14 @@ mod tests {
         let backend = SandboxBackend::unavailable("no backend");
         let workspace = PathBuf::from("/tmp/ws");
         let scratch = PathBuf::from("/tmp/scratch");
-        let wrapped = backend.wrap(
-            &request(SandboxProfile::Workspace, &workspace, &scratch),
-            "echo",
-            &["hello".to_owned()],
-            &BTreeMap::new(),
-        );
+        let wrapped = backend
+            .wrap(
+                &request(SandboxProfile::Workspace, &workspace, &scratch),
+                "echo",
+                &["hello".to_owned()],
+                &BTreeMap::new(),
+            )
+            .expect("wrap with empty extra env");
         assert_eq!(wrapped.program, OsString::from("echo"));
         assert_eq!(wrapped.args, vec![OsString::from("hello")]);
         assert!(!wrapped.description.isolated);

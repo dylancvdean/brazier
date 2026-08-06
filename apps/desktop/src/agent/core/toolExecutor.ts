@@ -308,12 +308,15 @@ export class AgentToolExecutor {
           request.signal
         )
       } catch {
+        if (request.signal?.aborted) {
+          return { ...approval, status: 'cancelled' } as unknown as AgentApproval
+        }
         // A transport hiccup must never silently authorize anything.
         return { ...approval, status: 'expired' }
       }
       if (current.status !== 'pending') return current
     }
-    return { ...approval, status: 'expired' }
+    return { ...approval, status: 'cancelled' } as unknown as AgentApproval
   }
 
   private fail(

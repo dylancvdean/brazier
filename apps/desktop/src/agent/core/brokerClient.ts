@@ -156,9 +156,15 @@ export class BrokerClient {
       headers.set('authorization', `Bearer ${this.connection.apiKey}`)
     }
     const timeoutMs = init?.timeoutMs ?? REQUEST_TIMEOUT_MS
+    const timeoutSignal = AbortSignal.timeout(timeoutMs)
+    const externalSignal = init?.signal
     const signal =
-      init?.signal ??
-      AbortSignal.timeout(timeoutMs)
+      externalSignal && typeof (AbortSignal as unknown as { any?: unknown }).any === 'function'
+        ? (AbortSignal as unknown as { any: (signals: AbortSignal[]) => AbortSignal }).any([
+            externalSignal,
+            timeoutSignal
+          ])
+        : (externalSignal ?? timeoutSignal)
     const { timeoutMs: _timeout, ...fetchInit } = init ?? {}
     const response = await fetch(`${this.connection.address}${path}`, {
       ...fetchInit,

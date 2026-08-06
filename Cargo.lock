@@ -365,6 +365,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -387,6 +388,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "tokio",
  "tower",

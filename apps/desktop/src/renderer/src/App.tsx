@@ -390,7 +390,10 @@ function ToolChips({
     <>
       <div className="tool-chip-row">
         {records.map((record, index) => (
-          <details className={record.is_error ? 'tool-chip error' : 'tool-chip'} key={index}>
+          <details
+            className={record.is_error ? 'tool-chip error' : 'tool-chip'}
+            key={record.call_id ?? record.name ?? index}
+          >
             <summary>
               <Wrench size={12} />
               {record.name}
@@ -2058,9 +2061,13 @@ export function App(): React.JSX.Element {
           <ComputerSessionSidebar controls={computerSidebar} />
         ) : (
           <>
-            <button className="new-chat" onClick={() => void newConversation()}>
+            <button
+              type="button"
+              className="new-chat"
+              onClick={() => void newConversation()}
+            >
               <MessageSquarePlus size={17} />
-              New conversation
+              New chat
             </button>
             <label className="conversation-search">
               <Search size={14} />

@@ -324,10 +324,14 @@ export function InferenceMenu({
                     <input
                       type="number"
                       min={128}
+                      max={131072}
                       step={128}
                       value={reasoningBudget}
                       onChange={(event) => {
-                        const next = Number(event.target.value)
+                        const parsed = Number(event.target.value)
+                        const next = Number.isFinite(parsed)
+                          ? Math.max(128, Math.round(parsed))
+                          : (draft.reasoning_budget_tokens ?? 1024)
                         setReasoningBudget(next)
                         setDraft(applyReasoningMode(draft, 'budget', next))
                       }}
@@ -464,6 +468,8 @@ export function InferenceMenu({
                   </>
                 ) : null}
               </div>
+            ) : advancedModel && !advancedEntry ? (
+              <p className="inference-help">Waiting for model library…</p>
             ) : null}
           </>
         )}

@@ -623,7 +623,16 @@ async fn require_auth(
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if supplied.is_some_and(|key| state.api_keys.iter().any(|expected| expected == key)) {
+    use subtle::{Choice, ConstantTimeEq};
+    let matched = match supplied {
+        Some(key_bytes) => state
+            .api_keys
+            .iter()
+            .map(|expected| expected.as_bytes().ct_eq(key_bytes.as_bytes()))
+            .fold(Choice::from(0), |acc, eq| acc | eq),
+        None => Choice::from(0),
+    };
+    if bool::from(matched) {
         next.run(request).await
     } else {
         (
@@ -1213,14 +1222,20 @@ pub async fn check_hf_access(state: &AppState) {
 /// Background task that re-checks pending gated-model access every
 /// [`crate::hf_access::CHECK_INTERVAL_SECS`]. The interval's first tick fires
 /// immediately, so anything waiting across a restart is checked right away.
-pub fn spawn_hf_access_checker(state: AppState) -> tokio::task::JoinHandle<()> {
+pub fn spawn_hf_access_checker(
+    state: AppState,
+    shutdown: std::sync::Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
             crate::hf_access::CHECK_INTERVAL_SECS,
         ));
         loop {
-            ticker.tick().await;
-            check_hf_access(&state).await;
+            tokio::select! {
+                biased;
+                () = shutdown.notified() => break,
+                _ = ticker.tick() => check_hf_access(&state).await,
+            }
         }
     })
 }
@@ -3629,6 +3644,7 @@ async fn list_recommendation_setups(State(state): State<AppState>) -> ApiResult<
                 .map_err(ApiError::internal)?;
         }
     }
+    state.invalidate_runtimes_cache().await;
     if changed {
         recommendations::save_state(&state.data_dir, &recorded)
             .await
@@ -3848,6 +3864,7 @@ async fn record_recommendation_install(
         .apply_recommended_default(&request.category, request.model_id.as_deref())
         .await
         .map_err(ApiError::internal)?;
+    state.invalidate_runtimes_cache().await;
     Ok(Json(json!(recorded)))
 }
 
@@ -4894,6 +4911,17 @@ async fn end_voice_session(
     Ok(Json(json!({ "ended": id })))
 }
 
+async fn activate_newly_built_runtime(state: &AppState, binary: &std::path::Path) {
+    let active = state.runtime.active_runtimes().await;
+    if let Some(entry) = runtimes::list(&state.data_dir, &active, None, false)
+        .into_iter()
+        .find(|entry| entry.path == binary.display().to_string())
+    {
+        let _ = state.runtime.activate_runtime_entry(&entry).await;
+        state.invalidate_runtimes_cache().await;
+    }
+}
+
 async fn build_runtime(
     State(state): State<AppState>,
     Query(query): Query<StreamQuery>,
@@ -4910,6 +4938,7 @@ async fn build_runtime(
         {
             Ok(binary) => {
                 state.invalidate_runtimes_cache().await;
+                activate_newly_built_runtime(&state, &binary).await;
                 (
                     StatusCode::OK,
                     Json(json!({
@@ -5031,6 +5060,7 @@ async fn build_runtime(
                     return;
                 }
                 cache_state.invalidate_runtimes_cache().await;
+                activate_newly_built_runtime(&cache_state, &binary).await;
                 push_progress(
                     &tx,
                     ProgressEvent::done(json!({
@@ -7595,9 +7625,24 @@ async fn agent_exec_tool_stream(
             data_dir: &state.data_dir,
             session: &session,
         };
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let (bounded_tx, mut output_rx) = mpsc::channel::<String>(64);
+        let (output_tx, mut forward_rx) = mpsc::unbounded_channel::<String>();
         let execution = crate::agent_exec::execute_streaming(&context, &request, output_tx);
         tokio::pin!(execution);
+        let forwarder = tokio::spawn(async move {
+            while let Some(chunk) = forward_rx.recv().await {
+                match bounded_tx.try_send(chunk) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(chunk)) => {
+                        tracing::warn!(
+                            chunk_bytes = chunk.len(),
+                            "stream output channel full; dropping chunk"
+                        );
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                }
+            }
+        });
         loop {
             tokio::select! {
                 biased;
@@ -7621,6 +7666,7 @@ async fn agent_exec_tool_stream(
                                 .data(json!({ "message": error.to_string() }).to_string()));
                         }
                     }
+                    forwarder.abort();
                     break;
                 }
             }
