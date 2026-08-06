@@ -555,6 +555,11 @@ export function App(): React.JSX.Element {
   // conversation, but every write is intercepted before it reaches the daemon.
   const [incognito, setIncognito] = useState(false)
   const INCOGNITO_ID = 'incognito'
+  // In-app confirmation before discarding a non-empty incognito session. A
+  // native `window.confirm` blocks the renderer main loop and trips Chromium's
+  // GLib signal handling on Linux, so destructive actions use an inline banner
+  // instead.
+  const [incognitoDiscardOpen, setIncognitoDiscardOpen] = useState(false)
   // Agent / Computer modes have no composer of their own; they publish these
   // so the one at the bottom of the window can drive them.
   const [agentComposer, setAgentComposer] = useState<AgentComposerControls | null>(null)
@@ -1261,6 +1266,7 @@ export function App(): React.JSX.Element {
 
   async function newConversation(): Promise<void> {
     if (incognito) setIncognito(false)
+    setIncognitoDiscardOpen(false)
     const conversation = await createConversation()
     await refreshConversations()
     // Invalidate in-flight loads for the previous chat before clearing its
@@ -1277,6 +1283,7 @@ export function App(): React.JSX.Element {
   function startIncognito(): void {
     if (busy || dreamAbortRef.current) return
     setIncognito(true)
+    setIncognitoDiscardOpen(false)
     messageRefreshRef.current += 1
     setConversationId(INCOGNITO_ID)
     setMessages([])
@@ -1292,6 +1299,7 @@ export function App(): React.JSX.Element {
   function leaveIncognito(): void {
     if (busy) return
     setIncognito(false)
+    setIncognitoDiscardOpen(false)
     messageRefreshRef.current += 1
     setConversationId(null)
     setMessages([])
@@ -1304,15 +1312,17 @@ export function App(): React.JSX.Element {
 
   function toggleIncognito(): void {
     if (incognito) {
-      if (messages.length > 0 && !window.confirm('Leave incognito chat? This conversation will be discarded.')) {
+      // Discarding a non-empty session is destructive; arm the inline confirm
+      // rather than popping a native dialog.
+      if (messages.length > 0) {
+        setIncognitoDiscardOpen(true)
         return
       }
       leaveIncognito()
       return
     }
-    if (messages.length > 0 && !window.confirm('Start an incognito chat? The current conversation will be left as-is.')) {
-      return
-    }
+    // Starting incognito loses nothing: the current conversation stays in the
+    // sidebar untouched, so no confirmation is needed.
     startIncognito()
   }
 
@@ -1652,6 +1662,7 @@ export function App(): React.JSX.Element {
     // a pending "ask" prompt is withdrawn rather than nagging mid-conversation.
     clearDreamTimer()
     setDreamPromptOpen(false)
+    setIncognitoDiscardOpen(false)
     const controller = new AbortController()
     abortRef.current = controller
     const shouldGenerateTitle =
@@ -2233,6 +2244,27 @@ export function App(): React.JSX.Element {
               Incognito chat: this conversation is ephemeral and uses no memory. It will be
               discarded when you leave.
             </span>
+            {incognitoDiscardOpen && (
+              <>
+                <span className="incognito-discard-label">Discard it now?</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    leaveIncognito()
+                    setIncognitoDiscardOpen(false)
+                  }}
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIncognitoDiscardOpen(false)}
+                  className="incognito-keep"
+                >
+                  Keep
+                </button>
+              </>
+            )}
           </div>
         )}
 

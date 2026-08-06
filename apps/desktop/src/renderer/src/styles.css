@@ -2440,6 +2440,19 @@ a.inline-link {
   border-color: #343d52;
 }
 
+.incognito-notice .incognito-discard-label {
+  color: #e5534b;
+  font-weight: 600;
+}
+
+.incognito-notice .incognito-keep {
+  margin-left: 0;
+}
+
+.incognito-notice button {
+  margin-left: auto;
+}
+
 .topbar > .icon-button.incognito-toggle.active {
   color: #f78438;
   background: rgba(247, 132, 56, 0.14);

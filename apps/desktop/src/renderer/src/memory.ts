@@ -32,7 +32,9 @@ export function memoryToolDefinitions(): OpenAiFunctionTool[] {
           'Save a durable fact, preference, or relationship about the user so it is ' +
           'remembered across future conversations. Use for information the user states ' +
           'about themselves or asks you to remember; do not use for one-off trivia of the ' +
-          'current conversation. Prefer a specific, self-contained sentence.',
+          'current conversation. Prefer a specific, self-contained sentence. When the fact ' +
+          'is time-sensitive, include the date or time frame it applies to (for example ' +
+          '"As of June 2026, ...") so dreaming can judge how fresh it is later.',
         parameters: {
           type: 'object',
           properties: {
@@ -140,7 +142,12 @@ export async function executeMemoryClientTool(
       }
       const lines = memories
         .slice(0, 10)
-        .map((memory) => `- ${memory.text}`)
+        .map(
+          (memory) =>
+            `- ${memory.text} (saved ${memoryDay(memory.created_at)}${
+              memory.updated_at ? `, updated ${memoryDay(memory.updated_at)}` : ''
+            })`
+        )
         .join('\n')
       return {
         output: `Matching memories:\n${lines}`,
@@ -172,23 +179,40 @@ export async function loadRelevantMemories(
   }
 }
 
+/** Short day for a SQLite timestamp or JS date: `YYYY-MM-DD`. */
+export function formatDay(value: string | Date): string {
+  if (typeof value === 'string') {
+    const match = /^(\d{4}-\d{2}-\d{2})/.exec(value.trim())
+    if (match) return match[1]
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10)
+  }
+  return 'unknown'
+}
+
+function memoryDay(value: string | undefined): string {
+  return value ? formatDay(value) : 'unknown'
+}
+
 /** Render a memory store into the system message a turn is prefixed with. */
 export function buildMemoryContext(
   memories: Memory[],
   budgetChars: number
 ): string | null {
   if (memories.length === 0) return null
+  const today = formatDay(new Date())
   const lines: string[] = []
   let used = 0
   for (const memory of memories) {
-    const line = `- ${memory.text}`
+    const line = `- ${memory.text} (updated ${memoryDay(memory.updated_at)})`
     if (used + line.length + 1 > budgetChars) break
     lines.push(line)
     used += line.length + 1
   }
   if (lines.length === 0) return null
   return [
-    'The user has a long-term memory of the following facts, drawn from past conversations.',
+    `The user has a long-term memory of the following facts, drawn from past conversations (today is ${today}).`,
     'Use them when they are relevant, and update them when the user corrects one.',
     ...lines
   ].join('\n')
@@ -217,9 +241,9 @@ export type DreamResult = {
   deleted: number
 }
 
-const DREAM_SYSTEM_PROMPT = `You are consolidating the user's long-term memory. Below are the current saved
-memories and recent conversation summaries. Produce a single JSON object with
-exactly these fields:
+const DREAM_SYSTEM_PROMPT = `You are consolidating the user's long-term memory. Below are TODAY's date, the
+current saved memories with their created/updated dates, and recent conversation
+summaries. Produce a single JSON object with exactly these fields:
 {
   "new_memories": [{"text": "sentence", "tags": ["tag"]}],
   "updates": [{"id": "existing-id", "text": "rewritten sentence"}],
@@ -230,32 +254,44 @@ Rules:
 - Keep the store small and high-signal. Merge overlapping memories into one,
   delete duplicates and facts the conversations contradict, and add anything new
   the summaries reveal that is not already covered.
+- Use TODAY and the [created]/[updated] dates on each memory to judge freshness:
+  update memories the conversations have superseded, and drop memories that are
+  clearly outdated or contradicted. Pinned memories are exempt from pruning.
+- When adding a time-sensitive memory, say when it applies (for example
+  "As of June 2026, ..." or a specific date).
 - Do not invent facts that are not supported by the input.
 - Do not touch memories marked [pinned].
 - Every id in "updates" and "deletes" must appear in the CURRENT MEMORIES list.
 - Each new memory is one specific, self-contained sentence.
 - Return ONLY the JSON object, with no surrounding text or markdown.`
 
-function renderDreamInput(
+export function renderDreamInput(
   memories: Memory[],
-  conversations: DreamInputConversation[]
+  conversations: DreamInputConversation[],
+  now = new Date()
 ): string {
+  const today = formatDay(now)
   const memoryLines = memories.length
     ? memories
-        .map((memory) => `[id: ${memory.id}]${memory.pinned ? ' [pinned]' : ''} ${memory.text}`)
+        .map(
+          (memory) =>
+            `[id: ${memory.id}]${memory.pinned ? ' [pinned]' : ''} [created: ${memoryDay(
+              memory.created_at
+            )}] [updated: ${memoryDay(memory.updated_at)}] ${memory.text}`
+        )
         .join('\n')
     : '(none)'
   const conversationLines = conversations.length
     ? conversations
         .map(
           (conversation) =>
-            `- ${conversation.title} (${conversation.updated_at}): ${
+            `- ${conversation.title} (${formatDay(conversation.updated_at)}): ${
               conversation.summary?.trim() || 'no summary'
             }`
         )
         .join('\n')
     : '(none)'
-  return `CURRENT MEMORIES:\n${memoryLines}\n\nRECENT CONVERSATIONS:\n${conversationLines}`
+  return `TODAY: ${today}\n\nCURRENT MEMORIES:\n${memoryLines}\n\nRECENT CONVERSATIONS:\n${conversationLines}`
 }
 
 /** Pull the first balanced JSON object out of a model's reply. */

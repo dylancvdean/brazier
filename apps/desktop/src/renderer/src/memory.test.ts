@@ -36,11 +36,13 @@ import {
   buildMemoryContext,
   executeMemoryClientTool,
   extractDreamProposal,
+  formatDay,
   isMemoryClientTool,
   memoryToolDefinitions,
   MEMORY_RECALL_TOOL,
   MEMORY_SAVE_TOOL,
-  normalizeDreamProposal
+  normalizeDreamProposal,
+  renderDreamInput
 } from './memory'
 
 function memory(id: string, text: string, pinned = false): Memory {
@@ -50,8 +52,8 @@ function memory(id: string, text: string, pinned = false): Memory {
     kind: 'fact',
     pinned,
     tags: [],
-    created_at: '',
-    updated_at: ''
+    created_at: '2026-01-05 09:00:00',
+    updated_at: '2026-07-20 14:30:00',
   }
 }
 
@@ -79,11 +81,39 @@ describe('buildMemoryContext', () => {
       memory('2', 'b'.repeat(100)),
       memory('3', 'c'.repeat(100))
     ]
-    const context = buildMemoryContext(memories, 240)
+    const context = buildMemoryContext(memories, 260)
     expect(context).not.toBeNull()
     expect(context).toContain('aaa')
     expect(context).toContain('bbb')
     expect(context).not.toContain('ccc')
+  })
+
+  it('states today and each memory\'s update date', () => {
+    const context = buildMemoryContext([memory('1', 'User likes dark mode.')], 2000)
+    expect(context).toContain('today is ')
+    expect(context).toContain('(updated 2026-07-20)')
+  })
+})
+
+describe('formatDay', () => {
+  it('normalizes SQLite and ISO timestamps', () => {
+    expect(formatDay('2026-07-20 14:30:00')).toBe('2026-07-20')
+    expect(formatDay('2026-07-20T14:30:00.000Z')).toBe('2026-07-20')
+    expect(formatDay(new Date('2026-07-20T00:00:00Z'))).toBe('2026-07-20')
+    expect(formatDay('')).toBe('unknown')
+  })
+})
+
+describe('renderDreamInput', () => {
+  it('shows today, memory dates, and conversation dates', () => {
+    const input = renderDreamInput(
+      [memory('m1', 'User prefers tea.')],
+      [{ id: 'c1', title: 'Tea talk', summary: 'Discussed brewing.', updated_at: '2026-07-19 10:00:00' }],
+      new Date('2026-08-05T00:00:00Z')
+    )
+    expect(input).toContain('TODAY: 2026-08-05')
+    expect(input).toContain('[id: m1] [created: 2026-01-05] [updated: 2026-07-20] User prefers tea.')
+    expect(input).toContain('Tea talk (2026-07-19)')
   })
 })
 
