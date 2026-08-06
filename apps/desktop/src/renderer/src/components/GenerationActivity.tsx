@@ -58,6 +58,17 @@ export function GenerationActivity({
     }, 1000)
     return () => {
       cancelled = true
+    }
+  }, [active])
+
+  useEffect(() => {
+    if (!active) return
+    const timer = window.setInterval(() => {
+      void fetchActiveGeneration()
+        .then(setActive)
+        .catch(() => undefined)
+    }, 1000)
+    return () => {
       window.clearInterval(timer)
     }
   }, [active])

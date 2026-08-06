@@ -19,6 +19,8 @@ const TAG_TEXT = 0x02
 /** Server sample rate; frames are 20 ms, matching the reference web client. */
 const SAMPLE_RATE = 24000
 const FRAME_SAMPLES = 480
+/** How many audio packets to buffer while waiting for the OpusHead packet. */
+const PENDING_HEAD_PACKET_LIMIT = 50
 
 /** How long to wait for OpusHead before deciding the stream is malformed. */
 const OPUS_HEAD_WAIT_MS = 2000
@@ -224,6 +226,10 @@ export class VoiceStream {
 
   private ensureDecoder(): AudioDecoder | null {
     if (this.decoder) return this.decoder
+    const head = this.demuxer.opusHead
+    if (!head) return null
+    const info =
+      parseOpusHead(head) ?? { channelCount: 1, preSkip: 0, inputSampleRate: 48000 }
     const decoder = new AudioDecoder({
       output: (data) => this.playDecoded(data),
       error: (cause) => this.handlers.onError?.(`Audio decode failed: ${cause.message}`)
@@ -315,6 +321,19 @@ export class VoiceStream {
     })
     node.port.onmessage = (event) => this.encodeFrame(event.data as Float32Array<ArrayBuffer>)
     source.connect(node)
+
+    const track = this.media?.getAudioTracks()[0]
+    if (track) {
+      track.addEventListener('ended', () => {
+        if (this.stopped) return
+        this.handlers.onError?.('The microphone was disconnected.')
+        void this.stop()
+      })
+      track.addEventListener('mute', () => {
+        if (this.stopped) return
+        this.handlers.onError?.('The microphone was muted by the system.')
+      })
+    }
     // The processor writes no output; the silent sink is only there to put the
     // node in the graph that reaches the destination, which is what guarantees
     // it is rendered at all. A capture-only node with nowhere to go depends on
@@ -502,12 +521,20 @@ export class VoiceStream {
     this.pendingAudioPackets = []
     const socket = this.socket
     this.socket = null
+    if (this.encoder && this.encoder.state !== 'closed') {
+      await this.encoder.flush().catch(() => undefined)
+    }
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const eosPage = this.muxer.flush({ last: true })
+      if (eosPage) socket.send(withTag(TAG_AUDIO, eosPage))
+    }
     if (socket && socket.readyState <= WebSocket.OPEN) socket.close()
     for (const track of this.media?.getAudioTracks() ?? []) track.stop()
     this.media = null
     if (encoder && encoder.state !== 'closed') encoder.close()
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
     this.decoder = null
+    this.pendingAudioPackets = []
     this.playbackNode?.port.postMessage('flush')
     this.playbackNode = null
     this.playbackReady = null

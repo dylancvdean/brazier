@@ -139,6 +139,25 @@ export class BrokerError extends Error {
 
 const REQUEST_TIMEOUT_MS = 30_000
 
+function combineAbortSignals(signals: AbortSignal[]): AbortSignal {
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any(signals)
+  const controller = new AbortController()
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason)
+      return controller.signal
+    }
+  }
+  for (const signal of signals) {
+    signal.addEventListener(
+      'abort',
+      () => controller.abort(signal.reason),
+      { once: true }
+    )
+  }
+  return controller.signal
+}
+
 export class BrokerClient {
   private readonly connection: BrokerConnection
 

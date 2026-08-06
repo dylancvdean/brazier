@@ -698,6 +698,8 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         engineMs,
         roundTripMs: Date.now() - startedAt
       }
+    }).finally(() => {
+      this.activeTranscriptions.delete(abort)
     })
     // Whichever way the transcription settles, the controller is no longer
     // in flight and must not be aborted by a later `endSession`.

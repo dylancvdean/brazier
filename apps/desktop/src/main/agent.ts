@@ -30,6 +30,18 @@ const SHORT_REQUEST_TIMEOUT_MS = 60_000
 /** A stop is a safety control, so a wedged runtime gets only a short grace period. */
 const CANCEL_GRACE_MS = 2_000
 const DAEMON_CANCEL_TIMEOUT_MS = 5_000
+const DAEMON_PATCH_TIMEOUT_MS = 5_000
+
+const ALLOWED_COMMAND_TYPES: ReadonlySet<string> = new Set([
+  'open-session',
+  'run',
+  'cancel',
+  'compact',
+  'set-model',
+  'set-tools',
+  'set-permission-mode',
+  'close-session'
+])
 
 const ALLOWED_COMMAND_TYPES = new Set<WorkerCommandInput['type']>([
   'open-session',
@@ -50,6 +62,7 @@ export class AgentSupervisor {
   private nextId = 0
   private ready?: Promise<void>
   private crashes = 0
+  private readonly sessions = new Set<string>()
 
   /**
    * Where the built worker bundle lives. `scripts/build-agent-worker.mjs` emits
@@ -161,6 +174,7 @@ export class AgentSupervisor {
         this.ready = undefined
         void this.markSessionsFailed(known, code)
         console.error(`[agent-worker] exited with code ${code}`)
+        void this.markKnownSessionsFailed('agent worker exited')
       })
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(
@@ -268,6 +282,39 @@ export class AgentSupervisor {
     this.pending.clear()
     this.worker = undefined
     this.ready = undefined
+  }
+
+  private async markKnownSessionsFailed(reason: string): Promise<void> {
+    const connection = this.connection
+    if (!connection) return
+    const sessions = [...this.sessions]
+    if (sessions.length === 0) return
+    const headers = new Headers({ 'content-type': 'application/json' })
+    if (connection.apiKey) headers.set('authorization', `Bearer ${connection.apiKey}`)
+    await Promise.all(
+      sessions.map((sessionId) =>
+        fetch(`${connection.address}/api/v1/agent/sessions/${encodeURIComponent(sessionId)}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ last_run_status: 'failed' }),
+          signal: AbortSignal.timeout(DAEMON_PATCH_TIMEOUT_MS)
+        })
+          .then((response) => {
+            if (!response.ok) {
+              console.error(
+                `[agent-worker] could not reconcile session ${sessionId} after exit (status ${response.status}): ${reason}`
+              )
+            }
+          })
+          .catch((cause: unknown) => {
+            console.error(
+              `[agent-worker] could not reconcile session ${sessionId} after exit: ${
+                cause instanceof Error ? cause.message : String(cause)
+              }`
+            )
+          })
+      )
+    )
   }
 
   private async cancel(sessionId: string): Promise<{ cancelled: true }> {

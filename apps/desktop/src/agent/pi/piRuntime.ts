@@ -783,7 +783,8 @@ class PiAgentSession implements AgentSession {
             apiKey: this.broker.apiKey(),
             model: this.state.model.id,
             transcript: renderTranscript(dropped),
-            facts
+            facts,
+            signal: this.agent.signal ?? undefined
           })
         : null
     const summaryText = mergeSummary(prose, facts)
@@ -819,6 +820,10 @@ class PiAgentSession implements AgentSession {
     this.state = { ...this.state, compactionState: compaction }
     this.emit({ ...this.base('compacted'), state: compaction } as AgentEvent)
     return compaction
+  }
+
+  isBusy(): boolean {
+    return Boolean(this.agent.state.isStreaming) || this.completing
   }
 
   async setModel(model: AgentModelReference): Promise<void> {
@@ -1070,7 +1075,7 @@ export class PiAgentRuntime implements AgentRuntime {
     const { inferModelCapabilities } = await import('../core/modelCompat')
     const capabilities = inferModelCapabilities(modelId)
 
-    const results = await Promise.all(
+    const settled = await Promise.allSettled(
       prompts.map((prompt, index) =>
         this.runOneSubagent({
           parent,
@@ -1087,6 +1092,17 @@ export class PiAgentRuntime implements AgentRuntime {
         })
       )
     )
+    const results = settled.map((outcome, index) => {
+      if (outcome.status === 'fulfilled') return outcome.value
+      const cause = outcome.reason
+      return {
+        status: 'failed' as const,
+        summary: summarizeSubagentResult([], {
+          failed: true,
+          error: cause instanceof Error ? cause.message : String(cause ?? `Subagent ${index + 1} failed`)
+        })
+      }
+    })
 
     const output =
       results.length === 1
@@ -1183,6 +1199,7 @@ export class PiAgentRuntime implements AgentRuntime {
       prompt
     })
 
+    let childSession: PiAgentSession | undefined
     let status: 'completed' | 'failed' | 'cancelled' = 'completed'
     let summary = ''
     let childFinished = false
@@ -1193,7 +1210,7 @@ export class PiAgentRuntime implements AgentRuntime {
         await this.broker.cancel(childRecord.id).catch(() => undefined)
       } else {
         const promptPayload = await this.broker.systemPrompt(childRecord.id)
-        const childSession = (await this.createSession({
+        childSession = (await this.createSession({
           sessionId: childRecord.id,
           model: { id: modelId, name: modelId, contextWindow },
           systemPrompt: promptPayload.system_prompt,
@@ -1204,7 +1221,7 @@ export class PiAgentRuntime implements AgentRuntime {
         })) as PiAgentSession
 
         const abortChild = (): void => {
-          void childSession.cancel()
+          void childSession?.cancel()
         }
         request.signal?.addEventListener('abort', abortChild, { once: true })
         try {

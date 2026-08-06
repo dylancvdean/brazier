@@ -86,8 +86,7 @@ const agent = {
   closeSession: (sessionId: string): Promise<unknown> =>
     invokeAgent({ type: 'close-session', sessionId }),
   status: (): Promise<{ running: boolean; crashes: number }> =>
-    ipcRenderer.invoke('brazier:agent:status'),
-  /** Subscribe to worker events. Returns an unsubscribe function. */
+    ipcRenderer.invoke('brazil:agent:status'),
   onMessage: (listener: (message: WorkerMessage) => void): (() => void) => {
     agentMessageListeners.add(listener)
     ensureAgentMessageDispatcher()

@@ -396,7 +396,11 @@ export function InferenceMenu({
 
             {/* Everything above is the default for every model. Everything
                 below belongs to the one selected, and outranks it. */}
-            {modelKind && effectiveProfile && advancedEntry ? (
+            {advancedModel && !advancedEntry ? (
+              <div className="inference-advanced">
+                <p className="inference-help">Waiting for model library…</p>
+              </div>
+            ) : modelKind && effectiveProfile && advancedEntry ? (
               <div className="inference-advanced">
                 <button
                   type="button"

@@ -117,6 +117,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
     message?: string | null
   } | null>(null)
   const [pendingUserQuestion, setPendingUserQuestion] = useState<string | null>(null)
+  const [resolvingApproval, setResolvingApproval] = useState(false)
   const [liveThought, setLiveThought] = useState('')
   const [maxScreenshotsKept, setMaxScreenshotsKept] = useState(3)
   const abortRef = useRef<AbortController | null>(null)

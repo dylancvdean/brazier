@@ -633,14 +633,13 @@ async fn require_auth(
         None => Choice::from(0),
     };
     if bool::from(matched) {
-        next.run(request).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": { "message": "A valid API key is required." } })),
-        )
-            .into_response()
+        return next.run(request).await;
     }
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": { "message": "A valid API key is required." } })),
+    )
+        .into_response()
 }
 
 async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {

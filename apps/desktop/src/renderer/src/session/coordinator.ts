@@ -237,6 +237,8 @@ export class SessionCoordinator {
   >()
   private pendingApproval: PendingApproval | null = null
   private pendingRenewal: string | null = null
+  /** A renewal in flight, serialized against tick()/requestRenewal(). */
+  private renewing: Promise<void> | null = null
   /** The old PersonaPlex stream is silent while an authoritative turn runs. */
   private personaPlexHeldForRouting = false
   private interruptRequestedAt: number | null = null
@@ -850,7 +852,12 @@ export class SessionCoordinator {
 
   private failResponse(correlationId: string, error: string): void {
     const response = this.responses.get(correlationId)
-    if (response && response.status !== 'delivered') {
+    if (response && (response.status === 'delivered' || response.status === 'cancelled')) {
+      // A cancelled turn has already had its failure recorded by finishActive;
+      // a late rejection from the chat responder must not rewrite it.
+      return
+    }
+    if (response) {
       response.status = 'failed'
       response.cancellable = false
       if (response.userMessageId) {
@@ -1034,7 +1041,10 @@ export class SessionCoordinator {
         if (!event.fatal && this.hearing === 'transcribing') {
           this.releasePersonaPlexRoutingHold()
         }
-        this.onVoiceSessionError(event.error, event.fatal)
+        this.track(
+          this.onVoiceSessionError(event.error, event.fatal),
+          'Tearing down the voice session after a fatal error'
+        )
         return
       }
       case 'sessionLimitApproaching': {
@@ -1048,6 +1058,9 @@ export class SessionCoordinator {
 
   /** PersonaPlex handles duplex interruption; only the opt-in task cancel remains. */
   private async onBargeIn(): Promise<void> {
+    if (this.config.interruptStopsSpeech && this.speakingCorrelationId) {
+      await this.cancelVoiceOutput()
+    }
     if (this.config.interruptCancelsAgent && this.activeCorrelationId) {
       this.metricsState.agentTasksCancelledByInterruption += 1
       await this.cancelAgentTask(this.activeCorrelationId)
@@ -1056,6 +1069,7 @@ export class SessionCoordinator {
   }
 
   private async onTranscriptFinal(utteranceId: string, text: string): Promise<void> {
+    if (this.voiceStatus === 'error') return
     const trimmed = text.trim()
     this.hearing = 'idle'
     this.partialTranscript = ''
@@ -1063,15 +1077,9 @@ export class SessionCoordinator {
       this.releasePersonaPlexRoutingHold()
       return
     }
-    // A held tool call takes the next thing said. Anything else would submit a
-    // new request to an agent that is stopped mid-action, and would leave the
-    // question that was just asked out loud unanswered.
-    if (this.pendingApproval) {
-      await this.answerApproval(trimmed)
-      this.publish()
-      return
-    }
-    // One utterance is one turn even if the transcript is delivered twice.
+    // One utterance is one turn even if the transcript is delivered twice. The
+    // dedupe key is emitted before the approval branch as well, so a retry with
+    // the same utteranceId cannot re-enter the answerApproval path.
     const published = this.emit(
       'USER_VOICE_FINAL',
       utteranceId,
@@ -1081,6 +1089,14 @@ export class SessionCoordinator {
     )
     if (!published) {
       this.diagnose('DUPLICATE_IGNORED', utteranceId, 'voice')
+      return
+    }
+    // A held tool call takes the next thing said. Anything else would submit a
+    // new request to an agent that is stopped mid-action, and would leave the
+    // question that was just asked out loud unanswered.
+    if (this.pendingApproval) {
+      await this.answerApproval(trimmed)
+      this.publish()
       return
     }
 
@@ -1184,6 +1200,10 @@ export class SessionCoordinator {
       decision,
       text
     })
+    await this.decideApproval(pending, decision, `Spoken answer: “${text}”`)
+    // decideApproval restores the held call on failure, so the transcript must
+    // not record an action the broker never received.
+    if (this.pendingApproval) return
     if (this.conversationId) {
       // Written down: an action allowed by voice should be as visible afterwards
       // as one allowed by clicking.
@@ -1199,7 +1219,6 @@ export class SessionCoordinator {
       })
       this.recordMessage(note)
     }
-    await this.decideApproval(pending, decision, `Spoken answer: “${text}”`)
   }
 
   /**
@@ -1290,16 +1309,21 @@ export class SessionCoordinator {
     this.publish()
   }
 
-  private onVoiceSessionError(error: string, fatal: boolean): void {
+  private async onVoiceSessionError(error: string, fatal: boolean): Promise<void> {
     this.voiceError = error
     this.diagnose('VOICE_SESSION_ERROR', this.activeCorrelationId ?? 'none', 'voice', {
       errorCategory: fatal ? 'voice_fatal' : 'voice_recoverable'
     })
     if (fatal) {
       // Voice degrades to text. The agent keeps running and its answers keep
-      // arriving in the chat.
+      // arriving in the chat. PersonaPlex's endSession is the only path that
+      // tears down the capture graph, VAD, segmenter, and daemon-side session,
+      // so it must run before the local handle is dropped — otherwise the mic
+      // keeps listening and endVoiceSession's early-return leaves it running.
       this.voiceStatus = 'error'
+      await this.deps.voice.endSession().catch(() => undefined)
       this.voiceSessionId = null
+      this.pendingRenewal = null
       this.speakingCorrelationId = null
       for (const response of this.responses.values()) {
         if (response.spokenStatus === 'requested' || response.spokenStatus === 'speaking') {
@@ -1398,6 +1422,8 @@ export class SessionCoordinator {
     this.voiceStatus = 'starting'
     this.personaPlexHeldForRouting = false
     this.voiceError = null
+    this.pendingRenewal = null
+    this.renewing = null
     this.publish()
     try {
       const handle = await this.deps.voice.startSession(this.buildContext())
@@ -1435,6 +1461,7 @@ export class SessionCoordinator {
    */
   async tick(): Promise<void> {
     if (!this.voiceSessionId || this.voiceStatus !== 'live') return
+    if (this.renewing) return
     if (this.now() - this.voiceStartedAt >= this.config.voiceSessionMaxDurationMs) {
       await this.requestRenewal('voice session duration limit')
     }
@@ -1455,10 +1482,31 @@ export class SessionCoordinator {
   }
 
   private async runPendingRenewal(): Promise<void> {
+    // Serialize: a renewal already in flight (between endSession and
+    // startSession returning) keeps voiceStatus='live' and the old start time,
+    // so tick()/requestRenewal() would otherwise pass atSafeBoundary a second
+    // time and start a concurrent renewVoiceSession. Wait for the running one
+    // and re-evaluate the pending reason; if one is still set, drain it.
+    if (this.renewing) {
+      try {
+        await this.renewing
+      } catch {
+        // The in-flight renewal reports its own failures.
+      }
+      if (this.pendingRenewal) await this.runPendingRenewal()
+      return
+    }
     const reason = this.pendingRenewal
     if (!reason || !this.voiceSessionId || !this.atSafeBoundary()) return
     this.pendingRenewal = null
-    await this.renewVoiceSession(reason)
+    const run = this.renewVoiceSession(reason)
+    this.renewing = run
+    try {
+      await run
+    } finally {
+      if (this.renewing === run) this.renewing = null
+    }
+    if (this.pendingRenewal) await this.runPendingRenewal()
   }
 
   /**

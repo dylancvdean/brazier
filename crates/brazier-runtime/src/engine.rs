@@ -1709,19 +1709,27 @@ impl Runtime {
             .unwrap_or_default();
         let wanted_key =
             llama::launch_key(&settings, profile, loras.clone(), harmony, Some(model_path));
-        let binary = {
-            let guard = self.llama.lock().await;
-            if let Some(path) = &guard.binary
-                && path.is_file()
-            {
-                path.clone()
-            } else {
+        // Hold the llama mutex across binary resolution + the start decision so
+        // a concurrent `activate_binary` cannot swap `guard.binary` or stop
+        // `guard.server` between the two locked regions. Binary download is the
+        // only phase that releases the lock (a download would otherwise
+        // serialize every chat request); after it returns we re-acquire and use
+        // whatever binary is now pinned rather than the stale local copy.
+        let mut guard = self.llama.lock().await;
+        let binary = match guard.binary.as_ref().filter(|path| path.is_file()) {
+            Some(path) => path.clone(),
+            None => {
                 drop(guard);
-                self.ensure_llama_binary().await?
+                self.ensure_llama_binary().await?;
+                guard = self.llama.lock().await;
+                guard
+                    .binary
+                    .clone()
+                    .filter(|path| path.is_file())
+                    .ok_or_else(|| anyhow::anyhow!("llama-server binary is not available"))?
             }
         };
 
-        let mut guard = self.llama.lock().await;
         if let Some(server) = guard.server.as_mut() {
             if server.model_path == model_path
                 && server.projector_path == models_store::projector_for_model(model_path)

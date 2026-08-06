@@ -14,6 +14,7 @@ import type {
   AgentEnvironment,
   AgentEvent,
   AgentToolDefinition,
+  ApprovalStatus,
   SandboxDescription
 } from './types'
 
@@ -288,7 +289,7 @@ export class AgentToolExecutor {
   private async awaitDecision(
     request: ExecuteToolRequest,
     approval: AgentApproval
-  ): Promise<AgentApproval> {
+  ): Promise<Omit<AgentApproval, 'status'> & { status: ApprovalStatus | 'cancelled' }> {
     this.event(request.runId, 'approval-required', {
       toolCallId: request.toolCallId,
       approval

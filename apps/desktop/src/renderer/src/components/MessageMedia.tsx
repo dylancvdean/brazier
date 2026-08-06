@@ -143,6 +143,16 @@ export function MessageMedia({
     }
   }
 
+  function retry(blob: MessageBlob): void {
+    setFailed((current) => {
+      if (!current[blob.sha256]) return current
+      const next = { ...current }
+      delete next[blob.sha256]
+      return next
+    })
+    setRetryToken((value) => value + 1)
+  }
+
   return (
     <div className="message-media">
       {blobs.map((blob, index) => (

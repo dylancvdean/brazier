@@ -20,6 +20,15 @@ type Props = {
   controls: AgentSidebarControls | null
 }
 
+const RUNTIME_LABELS: Record<string, string> = {
+  powerful: 'Powerful',
+  balanced: 'Balanced'
+}
+
+function runtimeLabel(id: string | undefined): string {
+  return RUNTIME_LABELS[id ?? ''] ?? 'Simple'
+}
+
 /**
  * Sidebar body for Agent mode: new-task control plus sessions grouped by the
  * project directory they belong to (worktrees nest under their source repo).

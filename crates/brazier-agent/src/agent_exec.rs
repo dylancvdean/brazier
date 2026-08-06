@@ -950,6 +950,70 @@ async fn list_directory(
     Ok(lines)
 }
 
+#[cfg(unix)]
+async fn open_read_no_follow(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    path: &Path,
+) -> anyhow::Result<tokio::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let canonical = tokio::fs::canonicalize(path)
+        .await
+        .with_context(|| format!("cannot resolve {}", path.display()))?;
+    for secret in secret_paths(Some(context.data_dir)) {
+        anyhow::ensure!(
+            !is_inside(&canonical, &secret),
+            "`{}` resolves into a credential or Brazier-owned path",
+            path.display()
+        );
+    }
+    if plan.environment == AgentEnvironment::Sandbox {
+        let root = workspace.context("this session has no workspace")?;
+        anyhow::ensure!(
+            is_inside(&canonical, root),
+            "`{}` is outside the workspace; request host access for it",
+            path.display()
+        );
+    }
+    let mut options = std::fs::File::options();
+    options.read(true).custom_flags(libc::O_NOFOLLOW);
+    let std_file = options
+        .open(&canonical)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    Ok(tokio::fs::File::from_std(std_file))
+}
+
+#[cfg(not(unix))]
+async fn open_read_no_follow(
+    context: &BrokerContext<'_>,
+    plan: &CallPlan,
+    workspace: Option<&Path>,
+    path: &Path,
+) -> anyhow::Result<tokio::fs::File> {
+    let canonical = std::fs::canonicalize(path)
+        .with_context(|| format!("cannot resolve {}", path.display()))?;
+    for secret in secret_paths(Some(context.data_dir)) {
+        anyhow::ensure!(
+            !is_inside(&canonical, &secret),
+            "`{}` resolves into a credential or Brazier-owned path",
+            path.display()
+        );
+    }
+    if plan.environment == AgentEnvironment::Sandbox {
+        let root = workspace.context("this session has no workspace")?;
+        anyhow::ensure!(
+            is_inside(&canonical, root),
+            "`{}` is outside the workspace; request host access for it",
+            path.display()
+        );
+    }
+    let std_file = std::fs::File::open(&canonical)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    Ok(tokio::fs::File::from_std(std_file))
+}
+
 async fn fs_read(
     context: &BrokerContext<'_>,
     plan: &CallPlan,
@@ -1934,31 +1998,39 @@ async fn shell_output(
         .get("drain")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let processes = context.broker.processes.lock().await;
-    let process = processes
-        .get(id)
-        .with_context(|| format!("no background process {id}"))?;
-    anyhow::ensure!(
-        process.session_id == context.session.id,
-        "process {id} belongs to another session"
-    );
-    let mut buffer = process.output.lock().await;
+    let (command, started, output, child) = {
+        let processes = context.broker.processes.lock().await;
+        let process = processes
+            .get(id)
+            .with_context(|| format!("no background process {id}"))?;
+        anyhow::ensure!(
+            process.session_id == context.session.id,
+            "process {id} belongs to another session"
+        );
+        (
+            process.command.clone(),
+            process.started,
+            Arc::clone(&process.output),
+            Arc::clone(&process.child),
+        )
+    };
+    let mut buffer = output.lock().await;
     let text = buffer.clone();
     if drain {
         buffer.clear();
     }
     drop(buffer);
     let status = {
-        let mut child = process.child.lock().await;
-        match child.try_wait()? {
+        let mut child_guard = child.lock().await;
+        match child_guard.try_wait()? {
             Some(status) => format!("exited with {status}"),
-            None => format!("running for {} s", process.started.elapsed().as_secs()),
+            None => format!("running for {} s", started.elapsed().as_secs()),
         }
     };
     let body = if text.is_empty() {
-        format!("(no new output) [{}: {status}]", process.command)
+        format!("(no new output) [{command}: {status}]")
     } else {
-        format!("{text}\n[{}: {status}]", process.command)
+        format!("{text}\n[{command}: {status}]")
     };
     Ok(ToolOutcome::text(body))
 }
@@ -1975,16 +2047,19 @@ async fn shell_input(
         .get("data")
         .and_then(Value::as_str)
         .context("`data` is required")?;
-    let processes = context.broker.processes.lock().await;
-    let process = processes
-        .get(id)
-        .with_context(|| format!("no background process {id}"))?;
-    anyhow::ensure!(
-        process.session_id == context.session.id,
-        "process {id} belongs to another session"
-    );
-    let mut stdin = process.stdin.lock().await;
-    let pipe = stdin
+    let stdin = {
+        let processes = context.broker.processes.lock().await;
+        let process = processes
+            .get(id)
+            .with_context(|| format!("no background process {id}"))?;
+        anyhow::ensure!(
+            process.session_id == context.session.id,
+            "process {id} belongs to another session"
+        );
+        Arc::clone(&process.stdin)
+    };
+    let mut stdin_guard = stdin.lock().await;
+    let pipe = stdin_guard
         .as_mut()
         .context("that process no longer accepts input")?;
     pipe.write_all(data.as_bytes()).await?;

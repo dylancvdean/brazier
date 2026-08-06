@@ -3425,11 +3425,18 @@ a.inline-link {
   max-height: 320px;
   overflow: auto;
   overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow: auto;
   color: #b7b7b7;
   font-family: ui-monospace, monospace;
   font-size: var(--font-caption);
   line-height: 1.5;
   white-space: pre-wrap;
+}
+
+.tool-chip-body pre {
+  max-height: 320px;
+  overflow: auto;
 }
 
 .hardware-card {
