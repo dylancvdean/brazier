@@ -32,17 +32,6 @@ const CANCEL_GRACE_MS = 2_000
 const DAEMON_CANCEL_TIMEOUT_MS = 5_000
 const DAEMON_PATCH_TIMEOUT_MS = 5_000
 
-const ALLOWED_COMMAND_TYPES: ReadonlySet<string> = new Set([
-  'open-session',
-  'run',
-  'cancel',
-  'compact',
-  'set-model',
-  'set-tools',
-  'set-permission-mode',
-  'close-session'
-])
-
 const ALLOWED_COMMAND_TYPES = new Set<WorkerCommandInput['type']>([
   'open-session',
   'run',
@@ -58,7 +47,6 @@ export class AgentSupervisor {
   private worker?: UtilityProcess
   private connection?: WorkerConnection
   private readonly pending = new Map<string, Pending>()
-  private readonly sessions = new Set<string>()
   private nextId = 0
   private ready?: Promise<void>
   private crashes = 0

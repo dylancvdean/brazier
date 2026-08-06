@@ -857,17 +857,6 @@ class PiAgentSession implements AgentSession {
     await this.broker.updateSession(this.id, { permission_mode: mode })
   }
 
-  /**
-   * True while a run is producing or wrapping up. `isStreaming` covers active
-   * generation; `completing` covers the window between the model finishing and
-   * the run loop's `finally` clearing the supervisor's running flag, where a
-   * setter would otherwise slip in mid-compaction or before the final
-   * `session-state` event.
-   */
-  private isBusy(): boolean {
-    return Boolean(this.agent.state.isStreaming) || this.completing
-  }
-
   getState(): AgentSessionState {
     return this.state
   }

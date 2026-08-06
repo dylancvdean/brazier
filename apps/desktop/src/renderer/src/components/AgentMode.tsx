@@ -160,49 +160,6 @@ function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
 
-function useDialogOverlay(open: boolean, onClose: () => void): React.RefObject<HTMLDivElement | null> {
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    const overlay = ref.current
-    if (!overlay) return
-    const previouslyFocused = document.activeElement as HTMLElement | null
-    const focusables = () =>
-      Array.from(
-        overlay.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        )
-      )
-    focusables()[0]?.focus()
-    function onKeyDown(event: KeyboardEvent): void {
-      if (event.key === 'Escape') {
-        event.stopPropagation()
-        onClose()
-        return
-      }
-      if (event.key !== 'Tab') return
-      const items = focusables()
-      if (items.length === 0) return
-      const first = items[0]
-      const last = items[items.length - 1]
-      const active = document.activeElement
-      if (event.shiftKey && active === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-    overlay.addEventListener('keydown', onKeyDown)
-    return () => {
-      overlay.removeEventListener('keydown', onKeyDown)
-      previouslyFocused?.focus?.()
-    }
-  }, [open, onClose])
-  return ref
-}
-
 function shortPath(path: string | null | undefined): string {
   if (!path) return 'No workspace'
   const parts = path.split('/').filter(Boolean)

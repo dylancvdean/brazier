@@ -234,13 +234,11 @@ export class VoiceStream {
       output: (data) => this.playDecoded(data),
       error: (cause) => this.handlers.onError?.(`Audio decode failed: ${cause.message}`)
     })
-    const head = this.demuxer.opusHead
-    const info = head ? parseOpusHead(head) : null
     try {
       decoder.configure({
         codec: 'opus',
-        sampleRate: info?.inputSampleRate ?? 48000,
-        numberOfChannels: info?.channelCount ?? 1,
+        sampleRate: info.inputSampleRate,
+        numberOfChannels: info.channelCount,
         ...(head ? { description: head } : {})
       })
     } catch (cause) {
@@ -521,9 +519,6 @@ export class VoiceStream {
     this.pendingAudioPackets = []
     const socket = this.socket
     this.socket = null
-    if (this.encoder && this.encoder.state !== 'closed') {
-      await this.encoder.flush().catch(() => undefined)
-    }
     if (socket && socket.readyState === WebSocket.OPEN) {
       const eosPage = this.muxer.flush({ last: true })
       if (eosPage) socket.send(withTag(TAG_AUDIO, eosPage))
@@ -534,7 +529,6 @@ export class VoiceStream {
     if (encoder && encoder.state !== 'closed') encoder.close()
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
     this.decoder = null
-    this.pendingAudioPackets = []
     this.playbackNode?.port.postMessage('flush')
     this.playbackNode = null
     this.playbackReady = null

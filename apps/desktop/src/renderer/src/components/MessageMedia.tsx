@@ -120,15 +120,6 @@ export function MessageMedia({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keys, retries])
 
-  function retry(blob: MessageBlob): void {
-    setFailed((current) => {
-      const next = { ...current }
-      delete next[blob.sha256]
-      return next
-    })
-    setRetries((current) => current + 1)
-  }
-
   if (blobs.length === 0) return null
 
   async function save(blob: MessageBlob): Promise<void> {
@@ -150,7 +141,7 @@ export function MessageMedia({
       delete next[blob.sha256]
       return next
     })
-    setRetryToken((value) => value + 1)
+    setRetries((value) => value + 1)
   }
 
   return (

@@ -159,7 +159,6 @@ export class InMemoryChatAdapter implements ChatAdapter {
     }
     this.lastMessageId = stored.id
     const conversation = toConversationMessage(stored)
-    this.messages.set(stored.id, conversation)
     this.hooks.onMessage?.(stored)
     const conversationMessage = toConversationMessage(stored)
     this.messagesById.set(conversationMessage.id, conversationMessage)

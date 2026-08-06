@@ -260,7 +260,6 @@ export function ComputerMode(props: Props): React.JSX.Element {
   // records these as steps too, keeping the model's next turn honest about
   // what actually changed on the page.
   const [interacting, setInteracting] = useState(false)
-  const [resolvingApproval, setResolvingApproval] = useState(false)
   const lastScrollRef = useRef(0)
 
   async function interact(action: ComputerAction): Promise<void> {

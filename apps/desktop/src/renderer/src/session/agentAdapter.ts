@@ -37,6 +37,7 @@ export class WorkerAgentAdapter implements AgentAdapter {
    */
   private activeCorrelationId: string | null = null
   private activeRunId: string | null = null
+  private currentRunId: string | null = null
   private lastRunId: string | null = null
   private readonly statuses = new Map<string, AgentRunStatusReport>()
   private readonly listeners = new Set<(event: AgentAdapterEvent) => void>()
