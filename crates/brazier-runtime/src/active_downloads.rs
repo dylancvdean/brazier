@@ -12,7 +12,9 @@ use std::{
     },
 };
 
-fn lock<'a>(mutex: &'a Mutex<HashMap<String, Entry>>) -> std::sync::MutexGuard<'a, HashMap<String, Entry>> {
+fn lock<'a>(
+    mutex: &'a Mutex<HashMap<String, Entry>>,
+) -> std::sync::MutexGuard<'a, HashMap<String, Entry>> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
