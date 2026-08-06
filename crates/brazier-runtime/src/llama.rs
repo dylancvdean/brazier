@@ -2153,20 +2153,26 @@ fn speculative_draft_for_model(
     profile: Option<&TextProfile>,
     model_path: Option<&Path>,
 ) -> Option<(PathBuf, String)> {
+    // `speculative_draft_model` is tri-state: absent (or empty) means the auto
+    // rule, the literal value `"none"` means no draft even when one exists,
+    // and anything else is an explicit draft to attach.
     let configured = profile
         .and_then(|profile| profile.speculative_draft_model.as_deref())
         .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(|path| {
-            let path = PathBuf::from(path);
-            if path.is_absolute() {
-                path
-            } else if let Some(parent) = model_path.and_then(Path::parent) {
-                parent.join(path)
-            } else {
-                path
-            }
-        });
+        .filter(|path| !path.is_empty());
+    if configured == Some("none") {
+        return None;
+    }
+    let configured = configured.map(|path| {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            path
+        } else if let Some(parent) = model_path.and_then(Path::parent) {
+            parent.join(path)
+        } else {
+            path
+        }
+    });
     let draft =
         configured.or_else(|| model_path.and_then(crate::models_store::draft_model_for_model))?;
     let draft_type = profile
@@ -2592,6 +2598,38 @@ mod tests {
     use crate::types::{ChatCompletionRequest, OpenAiMessage};
     use serde_json::json;
     use std::io::Write;
+
+    /// `speculative_draft_model` is tri-state: absent means the auto rule, the
+    /// literal `"none"` disables drafts even when one exists, and an empty
+    /// string is treated as absent (profiles written before the library gained
+    /// a draft picker).
+    #[test]
+    fn explicit_none_disables_the_auto_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("Model-27B.gguf");
+        std::fs::write(&model, b"model").unwrap();
+
+        let mut profile = TextProfile::default();
+        assert_eq!(
+            speculative_draft_for_model(Some(&profile), Some(&model)),
+            None,
+            "no draft on disk and none configured resolves to none"
+        );
+
+        profile.speculative_draft_model = Some("none".to_owned());
+        assert_eq!(
+            speculative_draft_for_model(Some(&profile), Some(&model)),
+            None,
+            "explicit none wins even over an on-disk draft"
+        );
+
+        profile.speculative_draft_model = Some(String::new());
+        assert_eq!(
+            speculative_draft_for_model(Some(&profile), Some(&model)),
+            None,
+            "empty string is treated as unset"
+        );
+    }
 
     #[test]
     fn recognizes_only_llama_server_executables() {

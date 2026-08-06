@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::{
     mlx::MlxKind,
     model_library,
@@ -443,8 +445,276 @@ fn same_draft_family(model: &Path, draft: &Path) -> bool {
 /// group-128 tensor table always fails with "tensor data is inconsistent";
 /// only PrismML's own llama.cpp fork can load it. The engine must never
 /// auto-attach such a drafter to a mainline build.
-fn is_mainline_incompatible_draft(path: &Path) -> bool {
+/// Draft companions that mainline llama.cpp cannot load, identified by family.
+///
+/// PrismML ships a dspark drafter beside the Bonsai weights that embeds the
+/// target's legacy group-128 embedding. Mainline llama.cpp's Q2_0 is a
+/// group-64 layout (18 bytes per 64 weights), so reading the drafter's
+/// group-128 tensor table always fails with "tensor data is inconsistent";
+/// only PrismML's own llama.cpp fork can load it. The engine must never
+/// auto-attach such a drafter to a mainline build.
+pub fn is_mainline_incompatible_draft(path: &Path) -> bool {
     draft_family_prefix(path).is_some_and(|prefix| prefix.contains("bonsai-27b"))
+}
+
+// ---------------------------------------------------------------------------
+// Draft-model configuration
+// ---------------------------------------------------------------------------
+
+/// Whole-word suffixes of a repo name that say what the model is for, not what
+/// family it belongs to. Stripped so `Qwen3.5-27B-Instruct-GGUF` and
+/// `Qwen3.5-27B-GGUF` share a family key.
+const FAMILY_VARIANT_TOKENS: [&str; 13] = [
+    "instruct",
+    "it",
+    "chat",
+    "tool",
+    "turbo",
+    "agent",
+    "thinking",
+    "reasoning",
+    "vl",
+    "vlm",
+    "vision",
+    "omni",
+    "audio",
+];
+
+/// A coarse family key for a model, used to find same-family draft models.
+///
+/// Speculative decoding needs a draft model with the same tokenizer, which is
+/// exactly what shares a family key. Repo names encode the family, size, and
+/// instruction variant — `Qwen3.5-27B-GGUF` and `Qwen3.5-0.8B-Instruct-GGUF`
+/// both reduce to `qwen3.5`. This is deliberately a heuristic: it only needs
+/// to agree between the installed models of one publisher, not to know what
+/// every model in the world is.
+pub fn family_key(model_id: &str) -> Option<String> {
+    const ENGINE_PREFIXES: [&str; 5] = ["gguf:", "mlx:", "mlx-vlm:", "mlx-ext:", "gguf-ext:"];
+    let key = ENGINE_PREFIXES
+        .iter()
+        .find_map(|prefix| model_id.strip_prefix(prefix))?;
+    let repo = key.split('/').nth(1)?;
+    let lower = repo.to_ascii_lowercase();
+    let mut name = lower
+        .strip_suffix("-gguf")
+        .or_else(|| lower.strip_suffix("_gguf"))
+        .unwrap_or(&lower)
+        .to_owned();
+    loop {
+        let before = name.clone();
+        let variant = FAMILY_VARIANT_TOKENS
+            .iter()
+            .find_map(|token| strip_word_suffix(&name, token));
+        if let Some(stripped) = variant {
+            name = stripped;
+        } else if let Some(stripped) = strip_size_suffix(&name) {
+            name = stripped;
+        }
+        name = name.trim_end_matches(['-', '_', ' ']).to_owned();
+        if name == before {
+            break;
+        }
+    }
+    (!name.is_empty()).then_some(name)
+}
+
+/// Strip a whole-word suffix (`instruct`, `it`, …) only when it began at a
+/// word boundary, so `reddit` is never clipped down to `redd`.
+fn strip_word_suffix(name: &str, token: &str) -> Option<String> {
+    let base = name.strip_suffix(token)?;
+    if base.is_empty() || !base.ends_with(['-', '_', ' ']) {
+        return None;
+    }
+    Some(base.trim_end_matches(['-', '_', ' ']).to_owned())
+}
+
+/// Strip a trailing size token like `27b`, `0.8b`, `400m`, or the MoE form
+/// `a3b`/`x4b`, leaving the family name.
+fn strip_size_suffix(name: &str) -> Option<String> {
+    let bytes = name.as_bytes();
+    let n = bytes.len();
+    if n < 2 || !matches!(bytes[n - 1], b'm' | b'b') {
+        return None;
+    }
+    let mut start = n - 1;
+    while start > 0 && bytes[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    if start > 0 && bytes[start - 1] == b'.' && start > 1 && bytes[start - 2].is_ascii_digit() {
+        start -= 2;
+        while start > 0 && bytes[start - 1].is_ascii_digit() {
+            start -= 1;
+        }
+    }
+    // MoE active/parameter size: `a3b`, `x4b`.
+    if start > 0 && matches!(bytes[start - 1], b'a' | b'x') {
+        start -= 1;
+    }
+    if start >= n - 1 {
+        return None;
+    }
+    let base = name[..start].trim_end_matches(['-', '_', ' ']);
+    if base.is_empty() {
+        return None;
+    }
+    Some(base.to_owned())
+}
+
+/// One selectable draft model for a primary model.
+#[derive(Debug, Clone, Serialize)]
+pub struct DraftOption {
+    /// What to store in `speculative_draft_model` to select this option. A
+    /// bare filename for a companion beside the model; an absolute path for a
+    /// model installed in another repository.
+    pub value: String,
+    pub label: String,
+    /// `companion` (a dspark/dflash/draft GGUF beside the model) or `family`
+    /// (another installed model sharing the tokenizer family).
+    pub kind: String,
+    /// Whether mainline llama.cpp can load it. A `false` drafter needs the
+    /// publisher's own fork and is offered only so it can be chosen knowingly.
+    pub loadable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// The draft configuration a model library can offer for one model.
+#[derive(Debug, Clone, Serialize)]
+pub struct DraftOptions {
+    /// `auto` (the default rule), `none` (explicitly off), or `custom`.
+    pub current: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_label: Option<String>,
+    /// What the auto rule would pick today, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto: Option<DraftOption>,
+    pub options: Vec<DraftOption>,
+}
+
+/// The draft choices a model can attach to: same-directory drafter companions
+/// plus smaller installed models of the same tokenizer family.
+///
+/// `current` is the stored `speculative_draft_model` value (or `None`), so the
+/// response can show exactly what the engine will honour. The `auto` entry is
+/// what the default rule selects right now — a compatible companion, nothing
+/// else — so the library can label it without guessing.
+pub fn draft_options_for_model(
+    data_dir: &Path,
+    extra_paths: &[PathBuf],
+    model_id: &str,
+    models: &[ModelDescriptor],
+    current: Option<&str>,
+) -> DraftOptions {
+    let mut options = Vec::new();
+    let primary_size = models
+        .iter()
+        .find(|model| model.id == model_id)
+        .and_then(|model| model.size_bytes);
+    let model_path = path_for_model_id(data_dir, model_id, extra_paths).ok();
+
+    // Drafter companions published beside the model.
+    let directory = model_path.as_ref().and_then(|path| path.parent());
+    let entries = directory.and_then(|directory| std::fs::read_dir(directory).ok());
+    if let Some(entries) = entries {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_speculative_draft_file(&path) {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let loadable = !is_mainline_incompatible_draft(&path);
+            options.push(DraftOption {
+                value: name.to_owned(),
+                label: name.to_owned(),
+                kind: "companion".into(),
+                loadable,
+                size_bytes: std::fs::metadata(&path).ok().map(|meta| meta.len()),
+                note: (!loadable).then(|| "Requires the publisher's llama.cpp fork".to_owned()),
+            });
+        }
+    }
+    options.sort_by(|left, right| {
+        left.size_bytes
+            .cmp(&right.size_bytes)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+
+    // Smaller installed models of the same tokenizer family.
+    if let (Some(family), Some(primary_size)) = (family_key(model_id), primary_size) {
+        let mut family_models: Vec<&ModelDescriptor> = models
+            .iter()
+            .filter(|candidate| {
+                candidate.id != model_id
+                    && candidate.engine == "llama.cpp"
+                    && family_key(&candidate.id).as_deref() == Some(family.as_str())
+                    && candidate.size_bytes.is_some_and(|size| size < primary_size)
+            })
+            .collect();
+        family_models.sort_by(|left, right| {
+            left.size_bytes
+                .cmp(&right.size_bytes)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        for candidate in family_models {
+            let value = path_for_model_id(data_dir, &candidate.id, extra_paths)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| candidate.id.clone());
+            options.push(DraftOption {
+                value,
+                label: candidate.name.clone(),
+                kind: "family".into(),
+                loadable: true,
+                size_bytes: candidate.size_bytes,
+                note: Some(
+                    "Smaller model with the same tokenizer, used for speculative decoding"
+                        .to_owned(),
+                ),
+            });
+        }
+    }
+
+    // The default rule only ever picks a compatible companion.
+    let auto = model_path
+        .as_deref()
+        .and_then(crate::models_store::draft_model_for_model)
+        .and_then(|draft| {
+            options.iter().find(|option| {
+                let name = draft
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                option.value == name
+            })
+        })
+        .cloned();
+
+    let current = current.map(str::trim).filter(|value| !value.is_empty());
+    let (state, value, label) = match current {
+        Some("none") => ("none".to_owned(), None, None),
+        Some(path) => {
+            let label = options
+                .iter()
+                .find(|option| option.value == path)
+                .map(|option| option.label.clone())
+                .unwrap_or_else(|| path.to_owned());
+            ("custom".to_owned(), Some(path.to_owned()), Some(label))
+        }
+        None => ("auto".to_owned(), None, None),
+    };
+
+    DraftOptions {
+        current: state,
+        current_value: value,
+        current_label: label,
+        auto,
+        options,
+    }
 }
 
 /// Length of a `-00001-of-00003` shard suffix (llama.cpp split naming).
@@ -1699,6 +1969,141 @@ mod tests {
                 "auto-attached incompatible drafter for {model_name}"
             );
         }
+    }
+
+    fn descriptor(id: &str, name: &str, size: u64) -> ModelDescriptor {
+        ModelDescriptor {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            engine: "llama.cpp".to_owned(),
+            capabilities: ModelCapabilities::default(),
+            size_bytes: Some(size),
+            read_only: false,
+            library_label: None,
+        }
+    }
+
+    /// Repo names encode family, size, and instruction variant; a family key
+    /// must agree between the installed models of one publisher without
+    /// crossing into a different model family.
+    #[test]
+    fn family_keys_agree_within_a_publisher() {
+        assert_eq!(
+            family_key("gguf:unsloth/Qwen3.5-27B-GGUF/Qwen3.5-27B-UD-Q4_K_M.gguf").as_deref(),
+            Some("qwen3.5")
+        );
+        assert_eq!(
+            family_key("gguf:unsloth/Qwen3.5-0.8B-Instruct-GGUF/x.gguf").as_deref(),
+            Some("qwen3.5")
+        );
+        assert_eq!(
+            family_key("gguf:unsloth/Gemma-4-26B-A4B-it-GGUF/x.gguf").as_deref(),
+            Some("gemma-4")
+        );
+        assert_eq!(
+            family_key("gguf:unsloth/Gemma-4-4B-GGUF/x.gguf").as_deref(),
+            Some("gemma-4")
+        );
+        // A different generation is a different family, not a draft.
+        assert_ne!(
+            family_key("gguf:unsloth/Gemma-4-4B-GGUF/x.gguf"),
+            family_key("gguf:unsloth/Gemma-3-4B-GGUF/x.gguf")
+        );
+        // The ternary Bonsai keeps its own identity.
+        assert_eq!(
+            family_key("gguf:prism-ml/Ternary-Bonsai-27B-gguf/x.gguf").as_deref(),
+            Some("ternary-bonsai")
+        );
+    }
+
+    /// The library draft picker offers same-directory drafter companions and
+    /// smaller same-family installed models, never unrelated ones, and the
+    /// auto rule points at the compatible companion.
+    #[test]
+    fn draft_options_list_companions_and_same_family_models() {
+        let dir = tempdir().unwrap();
+        let root = gguf_root(dir.path());
+        let primary = root
+            .join("unsloth")
+            .join("Qwen3.5-27B-GGUF")
+            .join("Qwen3.5-27B-Q4_K_M.gguf");
+        let drafter = root
+            .join("unsloth")
+            .join("Qwen3.5-27B-GGUF")
+            .join("Qwen3.5-27B-dspark-Q4.gguf");
+        let small = root
+            .join("unsloth")
+            .join("Qwen3.5-0.8B-GGUF")
+            .join("Qwen3.5-0.8B-Q8_0.gguf");
+        let unrelated = root
+            .join("unsloth")
+            .join("Llama-3-8B-GGUF")
+            .join("Llama-3-8B-Q4_K_M.gguf");
+        for file in [&primary, &drafter, &small, &unrelated] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"model").unwrap();
+        }
+        let primary_id = model_id_for_path(&root, &primary).unwrap();
+        let models = vec![
+            descriptor(&primary_id, "Qwen 3.5 27B", 16_000_000_000),
+            descriptor(
+                &model_id_for_path(&root, &small).unwrap(),
+                "Qwen 3.5 0.8B",
+                500_000_000,
+            ),
+            descriptor(
+                &model_id_for_path(&root, &unrelated).unwrap(),
+                "Llama 3 8B",
+                5_000_000_000,
+            ),
+        ];
+
+        let options = draft_options_for_model(dir.path(), &[], &primary_id, &models, None);
+        let companion = options
+            .options
+            .iter()
+            .find(|option| option.kind == "companion")
+            .expect("companion drafter listed");
+        assert_eq!(companion.value, "Qwen3.5-27B-dspark-Q4.gguf");
+        assert!(companion.loadable);
+        let family = options
+            .options
+            .iter()
+            .find(|option| option.kind == "family")
+            .expect("same-family model listed");
+        assert!(family.value.contains("Qwen3.5-0.8B-Q8_0.gguf"));
+        assert!(family.loadable);
+        assert!(
+            options
+                .options
+                .iter()
+                .all(|option| !option.value.contains("Llama-3-8B")),
+            "unrelated family must not be offered"
+        );
+        // The auto rule selects the compatible companion, and the library shows
+        // that as the current (unconfigured) state.
+        assert_eq!(
+            options.auto.as_ref().map(|option| option.value.as_str()),
+            Some("Qwen3.5-27B-dspark-Q4.gguf")
+        );
+        assert_eq!(options.current, "auto");
+
+        // An explicit "none" is distinct from auto, and a picked companion is
+        // shown as custom with its label.
+        let none = draft_options_for_model(dir.path(), &[], &primary_id, &models, Some("none"));
+        assert_eq!(none.current, "none");
+        let picked = draft_options_for_model(
+            dir.path(),
+            &[],
+            &primary_id,
+            &models,
+            Some("Qwen3.5-27B-dspark-Q4.gguf"),
+        );
+        assert_eq!(picked.current, "custom");
+        assert_eq!(
+            picked.current_label.as_deref(),
+            Some("Qwen3.5-27B-dspark-Q4.gguf")
+        );
     }
 
     #[test]

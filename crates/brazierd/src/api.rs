@@ -552,6 +552,7 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         )
         .route("/api/v1/models/settings/reset", post(reset_model_settings))
         .route("/api/v1/models/chat-template", get(model_chat_template))
+        .route("/api/v1/models/draft-options", get(model_draft_options))
         .route("/api/v1/recommendations", get(model_recommendations))
         .route(
             "/api/v1/recommendations/setups",
@@ -2811,6 +2812,39 @@ async fn model_chat_template(
         "chat_template": template,
         "source": if template.is_some() { "gguf" } else { "missing" },
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelDraftOptionsQuery {
+    model_id: String,
+}
+
+/// Draft models a model library entry can attach for speculative decoding:
+/// same-directory dspark/dflash/draft companions plus smaller installed models
+/// of the same tokenizer family.
+async fn model_draft_options(
+    State(state): State<AppState>,
+    Query(query): Query<ModelDraftOptionsQuery>,
+) -> ApiResult<Json<Value>> {
+    let models = state.runtime.models().await.map_err(ApiError::internal)?;
+    let settings = state.runtime.settings().await;
+    let extra: Vec<PathBuf> = settings
+        .extra_model_library_paths
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    let store = model_settings::load(&state.data_dir);
+    let current = store
+        .text(&query.model_id)
+        .and_then(|profile| profile.speculative_draft_model.as_deref());
+    let options = models_store::draft_options_for_model(
+        &state.data_dir,
+        &extra,
+        &query.model_id,
+        &models,
+        current,
+    );
+    Ok(Json(json!(options)))
 }
 
 /// Resolve one repository-named recommendation against the Hub.

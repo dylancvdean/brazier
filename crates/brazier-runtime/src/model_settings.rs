@@ -551,13 +551,15 @@ fn validate_text(profile: &TextProfile) -> anyhow::Result<()> {
         "speculative draft type",
     )?;
     if let Some(path) = &profile.speculative_draft_model {
+        // An empty string means "no explicit draft" and is accepted for
+        // profiles written before the library gained a draft picker.
         anyhow::ensure!(
-            !path.trim().is_empty(),
-            "speculative draft model must not be empty when set"
+            path.trim().is_empty() || path.len() <= 4096,
+            "speculative draft model path is too long"
         );
         anyhow::ensure!(
-            path.len() <= 4096,
-            "speculative draft model path is too long"
+            path.trim().is_empty() || !path.contains('\0'),
+            "speculative draft model path contains a control character"
         );
     }
     validate_loras(&profile.loras)?;
@@ -810,6 +812,47 @@ pub async fn clear_profile(data_dir: &Path, model_id: &str) -> anyhow::Result<Mo
     Ok(store)
 }
 
+/// Pin a draft model as a model's default, unless it already has an explicit
+/// draft choice. Used when a dspark/dflash companion finishes downloading, so
+/// a freshly installed drafter becomes the active default until the person
+/// configures otherwise.
+///
+/// `draft` is the bare filename, resolved beside the primary model at launch.
+pub async fn set_draft_default_if_unset(
+    data_dir: &Path,
+    model_id: &str,
+    draft: &str,
+) -> anyhow::Result<bool> {
+    anyhow::ensure!(!model_id.is_empty(), "a model id is required");
+    anyhow::ensure!(!draft.trim().is_empty(), "a draft filename is required");
+    let mut store = load(data_dir);
+    let changed = match store.models.get_mut(model_id) {
+        Some(ModelProfile::Text(text)) => {
+            if text.speculative_draft_model.is_none() {
+                text.speculative_draft_model = Some(draft.to_owned());
+                true
+            } else {
+                false
+            }
+        }
+        Some(_) => false,
+        None => {
+            let profile = TextProfile {
+                speculative_draft_model: Some(draft.to_owned()),
+                ..TextProfile::default()
+            };
+            store
+                .models
+                .insert(model_id.to_owned(), ModelProfile::Text(profile));
+            true
+        }
+    };
+    if changed {
+        save(data_dir, &store).await?;
+    }
+    Ok(changed)
+}
+
 /// A LoRA binding resolved to a file that exists.
 pub struct ResolvedLora {
     pub path: PathBuf,
@@ -897,6 +940,65 @@ mod tests {
         let profile = ModelProfile::Image(DiffusionProfile::default());
         assert!(profile.validate("gguf:acme/model.gguf").is_err());
         assert!(profile.validate("sdcpp-image:flux").is_ok());
+    }
+
+    /// Installing a drafter pins it as the model's default only until the
+    /// model is configured otherwise; a later install never clobbers a choice.
+    #[tokio::test]
+    async fn a_draft_default_is_set_only_when_unconfigured() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "gguf:acme/Model-27B-GGUF/Model-27B.gguf";
+        assert!(
+            set_draft_default_if_unset(dir.path(), id, "Model-27B-dspark-Q4.gguf")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            load(dir.path())
+                .text(id)
+                .unwrap()
+                .speculative_draft_model
+                .as_deref(),
+            Some("Model-27B-dspark-Q4.gguf")
+        );
+        // A later install does not override the pinned default.
+        assert!(
+            !set_draft_default_if_unset(dir.path(), id, "other-draft.gguf")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            load(dir.path())
+                .text(id)
+                .unwrap()
+                .speculative_draft_model
+                .as_deref(),
+            Some("Model-27B-dspark-Q4.gguf")
+        );
+        // An explicitly chosen "none" is also left alone.
+        set_profile(
+            dir.path(),
+            id,
+            ModelProfile::Text(TextProfile {
+                speculative_draft_model: Some("none".to_owned()),
+                ..TextProfile::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !set_draft_default_if_unset(dir.path(), id, "Model-27B-dspark-Q4.gguf")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            load(dir.path())
+                .text(id)
+                .unwrap()
+                .speculative_draft_model
+                .as_deref(),
+            Some("none")
+        );
     }
 
     #[tokio::test]

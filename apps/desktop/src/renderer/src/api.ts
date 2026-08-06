@@ -2066,8 +2066,38 @@ export type ModelSettingsResponse = {
   kinds: Record<string, ModelKind>
 }
 
+/** One selectable draft model for a primary model. */
+export type DraftOption = {
+  /** Value to store in `speculative_draft_model` to select this option. */
+  value: string
+  label: string
+  /** `companion` (beside the model) or `family` (another installed model). */
+  kind: 'companion' | 'family'
+  /** Whether mainline llama.cpp can load it. False needs the publisher's fork. */
+  loadable: boolean
+  size_bytes?: number | null
+  note?: string | null
+}
+
+/** The draft configuration a model library can offer for one model. */
+export type DraftOptions = {
+  /** `auto`, `none`, or `custom`. */
+  current: 'auto' | 'none' | 'custom'
+  current_value?: string | null
+  current_label?: string | null
+  /** What the auto rule would pick today, when there is one. */
+  auto?: DraftOption | null
+  options: DraftOption[]
+}
+
 export function fetchModelSettings(): Promise<ModelSettingsResponse> {
   return request('/api/v1/models/settings')
+}
+
+/** Draft models a model can attach for speculative decoding. */
+export function fetchDraftOptions(modelId: string): Promise<DraftOptions> {
+  const parameters = new URLSearchParams({ model_id: modelId })
+  return request(`/api/v1/models/draft-options?${parameters.toString()}`)
 }
 
 export async function saveModelProfile(

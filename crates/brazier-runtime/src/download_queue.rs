@@ -18,6 +18,7 @@ use crate::{
     db::Database,
     download::{self, DownloadRequest, MlxDownloadRequest},
     engine::Runtime,
+    model_settings, models_store,
 };
 
 /// What a queued job should download. Serialized onto the job row.
@@ -188,16 +189,22 @@ async fn run_one(
     let job_handle = Some((db.clone(), work.job_id.clone()));
     let progress = Box::new(|_| {});
     let result = match work.work {
-        QueuedWork::Gguf(request) => download::download_gguf_with_progress(
-            http,
-            data_dir,
-            request,
-            progress,
-            job_handle,
-            Some(cancel.clone()),
-        )
-        .await
-        .map(|_| ()),
+        QueuedWork::Gguf(request) => {
+            let result = download::download_gguf_with_progress(
+                http,
+                data_dir,
+                request.clone(),
+                progress,
+                job_handle,
+                Some(cancel.clone()),
+            )
+            .await
+            .map(|_| ());
+            if result.is_ok() && request.engine == "llama.cpp" {
+                apply_installed_draft_defaults(data_dir, &request.repo_id, &request.filename).await;
+            }
+            result
+        }
         QueuedWork::Mlx(request) => download::download_mlx_snapshot_with_progress(
             http,
             data_dir,
@@ -260,6 +267,47 @@ async fn run_one(
         return false;
     }
     true
+}
+
+/// After a speculative-draft companion (`dspark`, `dflash`, `draft`) installs,
+/// make it the default draft for every primary model in its repository — but
+/// only when that model has not been configured otherwise, and never for a
+/// drafter mainline llama.cpp cannot load. This is what turns "I installed the
+/// drafter" into "the model now uses it", until the person changes the choice
+/// in the model library.
+async fn apply_installed_draft_defaults(data_dir: &Path, repo_id: &str, filename: &str) {
+    if !models_store::is_speculative_draft_file(Path::new(filename)) {
+        return;
+    }
+    if models_store::is_mainline_incompatible_draft(Path::new(filename)) {
+        return;
+    }
+    let root = models_store::gguf_root(data_dir);
+    let directory = root.join(repo_id);
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.to_ascii_lowercase().ends_with(".gguf") {
+            continue;
+        }
+        if models_store::is_projector_file(&path) || models_store::is_speculative_draft_file(&path)
+        {
+            continue;
+        }
+        let Ok(model_id) = models_store::model_id_for_path(&root, &path) else {
+            continue;
+        };
+        if let Err(error) =
+            model_settings::set_draft_default_if_unset(data_dir, &model_id, filename).await
+        {
+            tracing::warn!(%error, model_id, "could not set installed drafter as the default");
+        }
+    }
 }
 
 #[cfg(test)]

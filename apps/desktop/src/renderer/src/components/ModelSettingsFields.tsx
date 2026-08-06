@@ -19,12 +19,14 @@ import { AlertTriangle, FolderOpen, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 import {
+  fetchDraftOptions,
   fetchModelChatTemplate,
   listModels,
   registerAdapter,
   type Adapter,
   type ControlNetBinding,
   type DiffusionProfile,
+  type DraftOptions,
   type LocalModel,
   type LoraBinding,
   type ModelKind,
@@ -164,6 +166,68 @@ function SelectField(props: SelectFieldProps): React.JSX.Element {
         {props.options.map((option) => (
           <option key={option} value={option}>
             {option}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+type DraftSelectFieldProps = {
+  modelId: string
+  /** Stored `speculative_draft_model`: absent means auto, `'none'` means off. */
+  value: string | null | undefined
+  onChange: (value: string | null) => void
+}
+
+/**
+ * The model-library draft picker: Auto (the default rule), None, or a specific
+ * companion or same-family model. `null`/`undefined` selects Auto, `'none'`
+ * explicitly disables drafts, and a path selects a specific draft. A stored
+ * path the backend no longer lists is kept as a Custom option so the choice is
+ * never silently lost. Choices are resolved by the daemon, which knows what is
+ * installed and what mainline llama.cpp can load.
+ */
+function DraftSelectField(props: DraftSelectFieldProps): React.JSX.Element {
+  const [options, setOptions] = useState<DraftOptions | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void fetchDraftOptions(props.modelId)
+      .then((result) => {
+        if (!cancelled) setOptions(result)
+      })
+      .catch(() => {
+        if (!cancelled) setOptions(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [props.modelId])
+
+  const candidates = options?.options ?? []
+  const autoLabel = options?.auto
+    ? `Auto · ${options.auto.label}`
+    : 'Auto · no draft installed'
+  const stored = props.value?.trim()
+  const known = stored != null && candidates.some((option) => option.value === stored)
+  const current = !stored ? '' : stored === 'none' ? 'none' : stored
+
+  return (
+    <label className="model-field" title="Speculative decoding drafts tokens with a small model that shares this one's tokenizer. Auto picks a compatible dspark/dflash beside this model; None turns drafts off.">
+      <span>Draft model</span>
+      <select
+        value={current}
+        onChange={(event) => props.onChange(event.target.value === '' ? null : event.target.value)}
+      >
+        <option value="">{autoLabel}</option>
+        <option value="none">None</option>
+        {stored && !known && stored !== 'none' ? (
+          <option value={stored}>{stored}</option>
+        ) : null}
+        {candidates.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.kind === 'family' ? `${option.label} · same family` : option.label}
+            {option.loadable ? '' : ' · needs a fork'}
           </option>
         ))}
       </select>
@@ -1041,13 +1105,13 @@ function TextFields(props: SectionProps<TextProfile>): React.JSX.Element {
             value={profile.mtp_draft_tokens}
             onChange={(value) => set('mtp_draft_tokens', value)}
           />
-          <TextField
-            label="Speculative draft model"
-            placeholder="Auto-detect beside this model"
-            hint="Leave blank to find a same-family dspark, dflash, or draft GGUF beside the main model. Enter a filename or an absolute path to choose one manually."
-            value={profile.speculative_draft_model}
-            onChange={(value) => set('speculative_draft_model', value)}
-          />
+          {isLlama ? (
+            <DraftSelectField
+              modelId={props.modelId}
+              value={profile.speculative_draft_model}
+              onChange={(value) => set('speculative_draft_model', value ?? undefined)}
+            />
+          ) : null}
           <SelectField
             label="Speculative draft type"
             hint="Usually inferred from the draft filename. Override this only when the publisher uses a nonstandard name."
