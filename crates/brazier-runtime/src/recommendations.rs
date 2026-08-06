@@ -107,6 +107,10 @@ pub struct RepoRecommendation {
     /// source-built runtime fork whose local toolchain is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<Box<RepoRecommendation>>,
+    /// This repository is gated on Hugging Face. When no token is configured,
+    /// [`Self::fallback`] (if any) is offered instead.
+    #[serde(default)]
+    pub gated: bool,
     /// Context window, in tokens, this model should default to on a machine in
     /// the tier that names it. Used for computer-use models whose trained
     /// context (262k for Fara1.5) would overflow the KV cache of a small host;
@@ -150,6 +154,20 @@ pub struct BundleRecommendation {
     pub parts: Vec<BundlePart>,
     #[serde(default)]
     pub summary: Option<String>,
+    /// A non-gated recommendation to offer instead when this bundle needs a
+    /// Hugging Face token the user has not configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<Box<BundleRecommendation>>,
+}
+
+/// Whether a bundle recommendation resolves to at least one gated bundle.
+pub fn bundle_is_gated(data_dir: &Path, entry: &BundleRecommendation) -> bool {
+    entry
+        .parts
+        .iter()
+        .map(|part| part.bundle_id.as_str())
+        .chain(entry.bundle_id.as_deref())
+        .any(|id| crate::sdcpp_catalog::find(data_dir, id).is_some_and(|bundle| bundle.gated()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

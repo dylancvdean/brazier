@@ -279,6 +279,14 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
                 .delete(clear_huggingface_token),
         )
         .route(
+            "/api/v1/huggingface/access",
+            get(list_hf_access_requests).post(add_hf_access_request),
+        )
+        .route(
+            "/api/v1/huggingface/access/{*repo_path}",
+            delete(remove_hf_access_request),
+        )
+        .route(
             "/api/v1/remote/connections",
             get(list_remote_connections).put(save_remote_connection),
         )
@@ -1175,6 +1183,91 @@ async fn clear_huggingface_token(State(state): State<AppState>) -> ApiResult<Jso
     Ok(Json(
         json!({ "configured": hf_auth::token_configured(&state.data_dir) }),
     ))
+}
+
+/// Check every pending gated-model access request once, updating the persisted
+/// grant/check state. Run on a daemon timer so checking never depends on a page
+/// being open; each repository is checked at most once per interval and no more
+/// than [`crate::hf_access::MAX_CHECKS`] times in total.
+pub async fn check_hf_access(state: &AppState) {
+    let mut requests = crate::hf_access::load(&state.data_dir);
+    let now = crate::hf_access::now_seconds();
+    let mut changed = false;
+    for request in &mut requests {
+        if crate::hf_access::expired(request) || !crate::hf_access::due(request, now) {
+            continue;
+        }
+        request.granted =
+            crate::hf_access::access_granted(&state.http, &state.data_dir, &request.repo_id).await;
+        request.checks += 1;
+        request.last_checked_at = now;
+        changed = true;
+    }
+    if changed {
+        if let Err(error) = crate::hf_access::save(&state.data_dir, &requests).await {
+            tracing::warn!(%error, "failed to persist HF access checks");
+        }
+    }
+}
+
+/// Background task that re-checks pending gated-model access every
+/// [`crate::hf_access::CHECK_INTERVAL_SECS`]. The interval's first tick fires
+/// immediately, so anything waiting across a restart is checked right away.
+pub fn spawn_hf_access_checker(state: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+            crate::hf_access::CHECK_INTERVAL_SECS,
+        ));
+        loop {
+            ticker.tick().await;
+            check_hf_access(&state).await;
+        }
+    })
+}
+
+/// The settings queue as it stands right now: what was requested, what the last
+/// check found, and whether the two-hour check budget has run out. This only
+/// reads persisted state — the daemon's background task does the checking.
+async fn list_hf_access_requests(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let requests = crate::hf_access::load(&state.data_dir);
+    let mut data = Vec::new();
+    for request in &requests {
+        data.push(json!({
+            "repo_id": request.repo_id,
+            "requested_at": request.requested_at,
+            "checks": request.checks,
+            "checks_left": crate::hf_access::MAX_CHECKS.saturating_sub(request.checks),
+            "granted": request.granted,
+            "expired": crate::hf_access::expired(request),
+        }));
+    }
+    Ok(Json(json!({ "data": data })))
+}
+
+#[derive(Debug, Deserialize)]
+struct HfAccessRequest {
+    repo_id: String,
+}
+
+async fn add_hf_access_request(
+    State(state): State<AppState>,
+    Json(request): Json<HfAccessRequest>,
+) -> ApiResult<Json<Value>> {
+    crate::models_store::validate_repo_id(&request.repo_id).map_err(ApiError::bad_request)?;
+    let requests = crate::hf_access::add(&state.data_dir, &request.repo_id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": requests })))
+}
+
+async fn remove_hf_access_request(
+    State(state): State<AppState>,
+    Path(repo_path): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let requests = crate::hf_access::remove(&state.data_dir, &repo_path)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": requests })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2859,6 +2952,27 @@ async fn resolve_repo_recommendation(
     memory_bytes: u64,
     weight_fraction: Option<f64>,
 ) -> Value {
+    // Gated without a token cannot install; walk the catalogue's fallback chain
+    // to a non-gated alternative. (Without a token the Hub refuses the metadata
+    // call that would otherwise detect the gating, so the catalogue flags it.)
+    let mut entry = entry;
+    if !crate::hf_auth::token_configured(&state.data_dir) {
+        while entry.gated {
+            let Some(fallback) = entry.fallback.as_deref() else {
+                break;
+            };
+            entry = fallback;
+        }
+    }
+    resolve_repo_recommendation_inner(state, entry, memory_bytes, weight_fraction).await
+}
+
+async fn resolve_repo_recommendation_inner(
+    state: &AppState,
+    entry: &recommendations::RepoRecommendation,
+    memory_bytes: u64,
+    weight_fraction: Option<f64>,
+) -> Value {
     let mut resolved = json!({
         "id": entry.id,
         "label": entry.label,
@@ -3035,6 +3149,15 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
     let hardware = crate::hardware::detect();
     let catalog = recommendations::catalog(&state.data_dir);
     let recorded = recommendations::load_state(&state.data_dir);
+    let has_token = crate::hf_auth::token_configured(&state.data_dir);
+    // PersonaPlex is the only voice family Brazier runs and it is gated, so
+    // without a token voice is shut out entirely rather than offering a
+    // recogniser that has nothing to transcribe for.
+    let voice = if has_token {
+        catalog.voice.clone()
+    } else {
+        None
+    };
 
     let Some(memory) = crate::hardware::recommendation_memory_bytes(&hardware) else {
         return Ok(Json(json!({
@@ -3042,7 +3165,7 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
             "tier_gb": null,
             "reason": "This machine did not report how much memory it has, so nothing can be recommended by size.",
             "categories": {},
-            "voice": catalog.voice,
+            "voice": voice,
             "state": recorded,
             "swaps": [],
         })));
@@ -3056,7 +3179,7 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
                 memory / (1024 * 1024 * 1024)
             ),
             "categories": {},
-            "voice": catalog.voice,
+            "voice": voice,
             "state": recorded,
             "swaps": [],
         })));
@@ -3105,6 +3228,17 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
         ("video", tier.video.as_ref()),
     ] {
         let Some(entry) = entry else { continue };
+        // Without a token, gated bundles are swapped for the catalogue's
+        // non-gated fallback rather than offering an install that cannot work.
+        let mut entry = entry;
+        if !has_token {
+            while let Some(fallback) = entry.fallback.as_deref() {
+                entry = fallback;
+                if !recommendations::bundle_is_gated(&state.data_dir, entry) {
+                    break;
+                }
+            }
+        }
         let mut resolved = serde_json::to_value(entry).unwrap_or_else(|_| json!({}));
         // A bundle id that names nothing installable is a catalogue gap, and
         // showing it as a working button would waste a download attempt.
@@ -3126,9 +3260,21 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
             .iter()
             .map(|part| part.bundle_id.as_str())
             .chain(entry.bundle_id.as_deref());
-        resolved["gated"] = json!(bundle_ids.any(|id| {
+        let gated = bundle_ids.any(|id| {
             sdcpp_catalog::find(&state.data_dir, id).is_some_and(|bundle| bundle.gated())
-        }));
+        });
+        resolved["gated"] = json!(gated);
+        let gated_repos: Vec<String> = entry
+            .parts
+            .iter()
+            .map(|part| part.bundle_id.as_str())
+            .chain(entry.bundle_id.as_deref())
+            .filter_map(|id| sdcpp_catalog::find(&state.data_dir, id))
+            .flat_map(|bundle| bundle.components.into_iter().map(|component| component.repo_id))
+            .collect();
+        if !gated_repos.is_empty() {
+            resolved["gated_repos"] = json!(gated_repos);
+        }
         categories.insert(name.into(), resolved);
     }
 
@@ -3145,7 +3291,7 @@ async fn model_recommendations(State(state): State<AppState>) -> ApiResult<Json<
         "tier_gb": tier.min_gb,
         "categories": categories,
         "agent_options": agent_options,
-        "voice": catalog.voice,
+        "voice": voice,
         "state": recorded,
         "swaps": swaps,
     })))
@@ -9102,5 +9248,43 @@ done
             .await
             .unwrap();
         assert_eq!(chat_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn hf_access_queue_adds_lists_and_removes() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let app = router(state.clone());
+
+        let (status, _) = json_request(
+            &app,
+            "POST",
+            "/api/v1/huggingface/access",
+            json!({ "repo_id": "org/gated-model" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = json_request(&app, "GET", "/api/v1/huggingface/access", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        let data = body["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["repo_id"], "org/gated-model");
+        assert_eq!(data[0]["checks"], 0);
+        assert_eq!(data[0]["granted"], false);
+        assert_eq!(data[0]["expired"], false);
+
+        // The full repo path (owner/name) is one wildcard segment.
+        let (status, _) = json_request(
+            &app,
+            "DELETE",
+            "/api/v1/huggingface/access/org/gated-model",
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, body) = json_request(&app, "GET", "/api/v1/huggingface/access", json!({})).await;
+        assert_eq!(body["data"].as_array().unwrap().len(), 0);
     }
 }

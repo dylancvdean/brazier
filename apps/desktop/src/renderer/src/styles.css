@@ -1344,6 +1344,19 @@ code {
   gap: 8px;
 }
 
+.welcome-token-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.welcome-token-status.ok {
+  color: #bfd6c8;
+}
+
 @media (max-width: 680px) {
   .first-run {
     align-items: flex-start;
@@ -2240,6 +2253,56 @@ a.inline-link {
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.access-request-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.access-request-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #090909;
+}
+
+.access-request-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.access-request-info strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access-request-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.access-request-status.granted {
+  color: #bfd6c8;
+}
+
+.access-request-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .library-suggestions {

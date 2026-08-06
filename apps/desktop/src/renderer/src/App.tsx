@@ -3121,7 +3121,15 @@ export function App(): React.JSX.Element {
           </button>
         </aside>
       )}
-      <DownloadTray onChanged={() => void refreshLocalModels().catch(() => {})} />
+      <DownloadTray
+        onChanged={() => {
+          void refreshLocalModels().catch(() => {})
+          // A background install can settle after the welcome screen is left;
+          // it writes its mode defaults daemon-side, so pull fresh settings for
+          // the seeded selections to pick them up.
+          void refreshRuntime().catch(() => {})
+        }}
+      />
 
       {manageOpen && (
         <ManagePanel

@@ -1756,6 +1756,8 @@ export type BundleRecommendation = {
   unresolved?: string
   /** At least one bundle component requires a Hugging Face token. */
   gated?: boolean
+  /** Repositories to request access on when `gated`. */
+  gated_repos?: string[]
 }
 
 export type VoiceRecommendationModel = {
@@ -3037,4 +3039,34 @@ export function setHuggingFaceToken(token: string): Promise<{ configured: boolea
 
 export function clearHuggingFaceToken(): Promise<{ configured: boolean }> {
   return request('/api/v1/huggingface/token', { method: 'DELETE' })
+}
+
+/** A gated-model repository Brazier is waiting to gain access to. */
+export type HfAccessRequest = {
+  repo_id: string
+  /** Unix seconds when the request was recorded. */
+  requested_at: number
+  /** How many times access has been checked for. */
+  checks: number
+  /** Checks remaining before the queue stops asking. */
+  checks_left: number
+  /** Whether the saved token can fetch from the repository right now. */
+  granted: boolean
+  /** The two-hour check budget ran out; it will not be checked again. */
+  expired: boolean
+}
+
+export function listHfAccessRequests(): Promise<{ data: HfAccessRequest[] }> {
+  return request('/api/v1/huggingface/access')
+}
+
+export function addHfAccessRequest(repoId: string): Promise<{ data: unknown[] }> {
+  return request('/api/v1/huggingface/access', {
+    method: 'POST',
+    body: JSON.stringify({ repo_id: repoId })
+  })
+}
+
+export function removeHfAccessRequest(repoId: string): Promise<{ data: unknown[] }> {
+  return request(`/api/v1/huggingface/access/${repoId}`, { method: 'DELETE' })
 }

@@ -4,9 +4,11 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
   Copy,
   Cpu,
   Download,
+  ExternalLink,
   FolderOpen,
   Globe,
   Hammer,
@@ -64,6 +66,10 @@ import {
   saveSdcppBundle,
   clearHuggingFaceToken,
   huggingFaceTokenStatus,
+  listHfAccessRequests,
+  addHfAccessRequest,
+  removeHfAccessRequest,
+  type HfAccessRequest,
   fetchToolchainStatus,
   type ToolchainTool,
   listDownloadJobs,
@@ -2387,6 +2393,8 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [hfTokenSource, setHfTokenSource] = useState<string>('none')
   const [hfTokenDraft, setHfTokenDraft] = useState('')
   const [savingHfToken, setSavingHfToken] = useState(false)
+  const [accessRequests, setAccessRequests] = useState<HfAccessRequest[]>([])
+  const [accessChecking, setAccessChecking] = useState(false)
   const [downloadJobs, setDownloadJobs] = useState<DownloadJob[]>([])
   const downloadJobsRefreshRef = useRef(0)
   const [openDescription, setOpenDescription] = useState<string | null>(null)
@@ -2416,6 +2424,41 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       .then((status) => setHfTokenSource(status.source))
       .catch(() => setHfTokenSource('none'))
   }, [])
+
+  // Re-check pending gated-model access while the page is open, so a grant
+  // made on the Hub shows up without waiting for the app to restart. Checking
+  // is daemon-bounded to once every five minutes for up to twenty-four tries,
+  // so this only re-reads the status the queue has already gathered.
+  useEffect(() => {
+    let cancelled = false
+    async function refresh(): Promise<void> {
+      try {
+        const result = await listHfAccessRequests()
+        if (!cancelled) setAccessRequests(result.data)
+      } catch {
+        if (!cancelled) setAccessRequests([])
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), 5 * 60_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  async function dismissAccessRequest(repoId: string): Promise<void> {
+    setAccessChecking(true)
+    props.onError(null)
+    try {
+      await removeHfAccessRequest(repoId)
+      setAccessRequests((current) => current.filter((request) => request.repo_id !== repoId))
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setAccessChecking(false)
+    }
+  }
 
   async function refreshDownloadJobs(): Promise<void> {
     const refreshId = ++downloadJobsRefreshRef.current
@@ -3024,6 +3067,62 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           )}
         </div>
       </form>
+      {accessRequests.length > 0 ? (
+        <div className="settings-group">
+          <div className="section-label">Waiting for access</div>
+          <p className="model-help">
+            You asked to install gated models whose terms are accepted on Hugging Face, not in
+            Brazier. Each is re-checked while this page is open — once access is granted, come back
+            here and install.
+          </p>
+          <div className="access-request-list">
+            {accessRequests.map((request) => (
+              <div className="access-request-row" key={request.repo_id}>
+                <div className="access-request-info">
+                  <strong>{request.repo_id}</strong>
+                  {request.granted ? (
+                    <span className="access-request-status granted">
+                      <Check size={12} /> Access granted — install now
+                    </span>
+                  ) : request.expired ? (
+                    <span className="access-request-status">
+                      <CircleAlert size={12} /> Checking stopped after 2 hours — request access
+                      again to restart it
+                    </span>
+                  ) : (
+                    <span className="access-request-status">
+                      <LoaderCircle className="spin" size={12} /> Waiting for access ·{' '}
+                      {request.checks_left} checks left
+                    </span>
+                  )}
+                </div>
+                <div className="access-request-actions">
+                  <a
+                    className="chip-button"
+                    href={`https://huggingface.co/${request.repo_id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={() => {
+                      void addHfAccessRequest(request.repo_id).catch(() => {})
+                    }}
+                  >
+                    <ExternalLink size={12} /> {request.granted ? 'Open model' : 'Request access'}
+                  </a>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    title="Remove from the waiting list"
+                    disabled={accessChecking}
+                    onClick={() => void dismissAccessRequest(request.repo_id)}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {!isSdcpp && (
         <form className="model-search" onSubmit={(event) => void findModels(event)}>
           <label>

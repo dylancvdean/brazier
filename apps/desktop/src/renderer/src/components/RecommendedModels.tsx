@@ -15,6 +15,7 @@ import {
   AlertTriangle,
   Check,
   Download,
+  ExternalLink,
   Hammer,
   LoaderCircle,
   Sparkles
@@ -22,6 +23,7 @@ import {
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 
 import {
+  addHfAccessRequest,
   downloadModel,
   downloadPersonaplexModel,
   buildRuntime,
@@ -124,6 +126,27 @@ function Card(props: {
       </div>
       <div className="recommendation-card-action">{props.action}</div>
     </article>
+  )
+}
+
+/**
+ * Opens a gated model's Hugging Face page to request access, and records the
+ * repository so the settings queue can watch for the grant.
+ */
+function RequestAccessLink({ repoId }: { repoId: string }): React.JSX.Element {
+  return (
+    <a
+      className="chip-button"
+      href={`https://huggingface.co/${repoId}`}
+      target="_blank"
+      rel="noreferrer"
+      title={`Request access to ${repoId}`}
+      onClick={() => {
+        void addHfAccessRequest(repoId).catch(() => {})
+      }}
+    >
+      <ExternalLink size={13} /> Request access
+    </a>
   )
 }
 
@@ -449,6 +472,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
                 })()
               }
             />
+            {entry.gated ? <RequestAccessLink repoId={entry.repo_id} /> : null}
           </div>
         }
       />
@@ -528,6 +552,11 @@ export function RecommendedModels(props: Props): React.JSX.Element {
                 />
               )
             })}
+            {entry.gated
+              ? (entry.gated_repos ?? []).map((repoId) => (
+                  <RequestAccessLink key={repoId} repoId={repoId} />
+                ))
+              : null}
           </div>
         }
       />
@@ -584,6 +613,11 @@ export function RecommendedModels(props: Props): React.JSX.Element {
                 <Hammer size={13} /> Build the runtime
               </button>
             ) : null}
+            {models
+              .filter((model) => model.gated)
+              .map((model) => (
+                <RequestAccessLink key={model.id} repoId={model.repo_id} />
+              ))}
           </div>
         }
       />

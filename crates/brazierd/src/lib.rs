@@ -10,7 +10,7 @@ pub use brazier_formats::{gguf_meta, wav};
 pub use brazier_protocol::{agent_types, computer_types, message_format, progress, types};
 pub use brazier_runtime::{
     active_downloads, adapters, build_recipe, builds, download, download_queue, engine, fork_hints,
-    github_releases, hardware, harmony, hf, hf_auth, js_sandbox, llama, mcp, media, mlx,
+    github_releases, hardware, harmony, hf, hf_access, hf_auth, js_sandbox, llama, mcp, media, mlx,
     model_bindings, model_library, model_settings, models_store, recommendations, remote, rocm,
     runtime_settings, runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry,
     toolchain_hints, tools, voice, whisper, whisperkit,

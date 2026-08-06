@@ -3,6 +3,7 @@ import {
   ArrowRight,
   Check,
   CircleAlert,
+  KeyRound,
   LoaderCircle,
   RefreshCw,
   Sparkles,
@@ -14,6 +15,8 @@ import {
   fetchRecommendations,
   fetchToolchainStatus,
   hardwareInfo,
+  huggingFaceTokenStatus,
+  setHuggingFaceToken,
   setupToolchain,
   type HardwareInfo,
   type RecommendationCategory,
@@ -105,7 +108,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [stage, setStage] = useState<'features' | 'checklist' | 'models'>('features')
+  const [stage, setStage] = useState<'features' | 'token' | 'checklist' | 'models'>('features')
   const [wanted, setWanted] = useState<RecommendationCategory[]>(['text'])
   const [wantsComputerUse, setWantsComputerUse] = useState(false)
   const [customRuntimes, setCustomRuntimes] = useState(false)
@@ -113,6 +116,15 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
   const [loadingRecommendations, setLoadingRecommendations] = useState(false)
   const [settingUp, setSettingUp] = useState(false)
   const [setupOutput, setSetupOutput] = useState<string | null>(null)
+  const [hfTokenSource, setHfTokenSource] = useState('none')
+  const [hfTokenDraft, setHfTokenDraft] = useState('')
+  const [savingHfToken, setSavingHfToken] = useState(false)
+
+  useEffect(() => {
+    void huggingFaceTokenStatus()
+      .then((status) => setHfTokenSource(status.source))
+      .catch(() => setHfTokenSource('none'))
+  }, [])
 
   const needs: ToolchainNeeds = {
     customRuntimes,
@@ -140,6 +152,21 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         ? current.filter((entry) => entry !== feature)
         : [...current, feature]
     )
+  }
+
+  async function saveHubToken(): Promise<void> {
+    setSavingHfToken(true)
+    setError(null)
+    try {
+      await setHuggingFaceToken(hfTokenDraft.trim())
+      setHfTokenDraft('')
+      const status = await huggingFaceTokenStatus()
+      setHfTokenSource(status.source)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSavingHfToken(false)
+    }
   }
 
   const refresh = useCallback(async (selectedNeeds: ToolchainNeeds) => {
@@ -173,7 +200,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         <div className="first-run-card">
           <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
           <p className="first-run-eyebrow">
-            <Sparkles size={13} /> Step 1 of 3
+            <Sparkles size={13} /> Step 1 of 4
           </p>
           <h1>What do you want to do?</h1>
           <p className="first-run-lede">
@@ -234,14 +261,122 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
               type="button"
               className="primary-button"
               disabled={wanted.length === 0}
-              onClick={() => setStage('checklist')}
+              onClick={() => setStage('token')}
             >
-              Check this machine <ArrowRight size={15} />
+              Continue <ArrowRight size={15} />
             </button>
           </div>
           <p className="first-run-footnote">
             You can change these choices later. Advanced builds are optional; managed runtimes are
             the easiest place to start.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  if (stage === 'token') {
+    return (
+      <div className="first-run">
+        <div className="first-run-card">
+          <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
+          <p className="first-run-eyebrow">
+            <KeyRound size={13} /> Step 2 of 4
+          </p>
+          <h1>Connect Hugging Face</h1>
+          <p className="first-run-lede">
+            A free Hugging Face account unlocks the models that need you to accept a license — the
+            best image models and the voice model — and lets downloads use their servers directly,
+            which is faster. You can skip this and use only open models, and set it up later from
+            Manage.
+          </p>
+
+          {error && <div className="runtime-notice">{error}</div>}
+
+          <form
+            className="build-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void saveHubToken()
+            }}
+          >
+            <label>
+              <span className="label-with-link">
+                Hugging Face access token
+                <a
+                  className="inline-link"
+                  href="https://huggingface.co/settings/tokens"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Create a token (free)
+                </a>
+              </span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={hfTokenDraft}
+                onChange={(event) => setHfTokenDraft(event.target.value)}
+                placeholder={
+                  hfTokenSource === 'environment'
+                    ? 'Using HF_TOKEN from the environment'
+                    : hfTokenSource === 'stored'
+                      ? 'Token saved — paste to replace'
+                      : 'hf_…'
+                }
+              />
+            </label>
+            <p className="model-help">
+              Stored locally under your Brazier data directory. Nothing is sent anywhere except to
+              Hugging Face, and only to fetch models you ask for.
+            </p>
+            <div className="build-form-actions">
+              <button
+                className="secondary-action"
+                type="submit"
+                disabled={savingHfToken || !hfTokenDraft.trim()}
+              >
+                {savingHfToken ? <LoaderCircle className="spin" size={14} /> : 'Save token'}
+              </button>
+            </div>
+          </form>
+
+          {hfTokenSource === 'stored' ? (
+            <p className="welcome-token-status ok">
+              <Check size={13} /> Token saved — gated models will be recommended.
+            </p>
+          ) : hfTokenSource === 'environment' ? (
+            <p className="welcome-token-status ok">
+              <Check size={13} /> Using HF_TOKEN from the environment.
+            </p>
+          ) : (
+            <p className="welcome-token-status">
+              No token yet — open models only. The voice model and the best image models will be
+              left out.
+            </p>
+          )}
+
+          <div className="first-run-actions">
+            <button
+              type="button"
+              className="chip-button subtle"
+              onClick={() => setStage('features')}
+            >
+              <ArrowLeft size={15} /> Back
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                setError(null)
+                setStage('checklist')
+              }}
+            >
+              {hfTokenSource === 'none' ? 'Skip for now' : 'Continue'} <ArrowRight size={15} />
+            </button>
+          </div>
+          <p className="first-run-footnote">
+            You can add or remove a token later under Manage → Discover.
           </p>
         </div>
       </div>
@@ -254,7 +389,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         <div className="first-run-card wide">
           <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
           <p className="first-run-eyebrow">
-            <Sparkles size={13} /> Step 3 of 3
+            <Sparkles size={13} /> Step 4 of 4
           </p>
           <h1>Recommended for this machine</h1>
           <p className="first-run-lede">
@@ -278,6 +413,14 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
               onOpenRuntimes={props.onOpenRuntimes}
             />
           )}
+
+          {wanted.includes('voice') && recommendations && !recommendations.voice ? (
+            <p className="recommendation-note warn">
+              <CircleAlert size={12} />
+              Voice isn&apos;t available without a Hugging Face token — PersonaPlex requires access
+              to be granted. Go back and add one to include it.
+            </p>
+          ) : null}
 
           <div className="first-run-actions">
             <button
@@ -304,7 +447,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
       <div className="first-run-card">
         <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
         <p className="first-run-eyebrow">
-          <Sparkles size={13} /> Step 2 of 3
+          <Sparkles size={13} /> Step 3 of 4
         </p>
         <h1>Welcome to Brazier</h1>
         <p className="first-run-lede">
@@ -371,7 +514,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         {setupOutput && <div className="runtime-notice">{setupOutput}</div>}
 
         <div className="first-run-actions">
-          <button type="button" className="chip-button subtle" onClick={() => setStage('features')}>
+          <button type="button" className="chip-button subtle" onClick={() => setStage('token')}>
             <ArrowLeft size={15} /> Back
           </button>
           {toolchain?.os.family === 'macos' && missing.length > 0 && (

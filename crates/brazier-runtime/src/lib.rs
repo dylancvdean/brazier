@@ -13,6 +13,7 @@ pub mod github_releases;
 pub mod hardware;
 pub mod harmony;
 pub mod hf;
+pub mod hf_access;
 pub mod hf_auth;
 pub mod js_sandbox;
 pub mod llama;

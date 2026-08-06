@@ -173,6 +173,10 @@ async fn main() -> anyhow::Result<()> {
         agent_broker: Arc::new(brazierd::agent_exec::AgentBroker::new()),
         computer_broker: Arc::new(computer_broker),
     };
+    // Gated-model access is watched on a daemon timer (every five minutes, up
+    // to twenty-four checks) rather than on the settings page poll, so a grant
+    // is noticed even when nobody is looking at the queue.
+    brazierd::api::spawn_hf_access_checker(state.clone());
 
     let port = args.port.unwrap_or(if args.service {
         brazierd::service::DEFAULT_SERVICE_PORT

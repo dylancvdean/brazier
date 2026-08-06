@@ -87,7 +87,13 @@
         "id": "sd35-medium-complete",
         "label": "Stable Diffusion 3.5 Medium",
         "bundle_id": "sd35-medium",
-        "summary": "A 2.6B MMDiT model with strong prompt adherence on harder text. A clearer step up from SDXL than FLUX is at this tier."
+        "summary": "A 2.6B MMDiT model with strong prompt adherence on harder text. A clearer step up from SDXL than FLUX is at this tier.",
+        "fallback": {
+          "id": "sdxl-base-1.0",
+          "label": "Stable Diffusion XL Base 1.0",
+          "bundle_id": "sdxl-base-1.0",
+          "summary": "An open-weights alternative that needs no Hugging Face token."
+        }
       },
       "video": {
         "id": "wan2.1-t2v-1.3b-16gb",
@@ -131,7 +137,13 @@
         "id": "sd35-medium-complete",
         "label": "Stable Diffusion 3.5 Medium",
         "bundle_id": "sd35-medium",
-        "summary": "A 2.6B MMDiT model with strong prompt adherence on text rendering and complex scenes; a clear step up from SDXL at this tier."
+        "summary": "A 2.6B MMDiT model with strong prompt adherence on text rendering and complex scenes; a clear step up from SDXL at this tier.",
+        "fallback": {
+          "id": "sdxl-base-1.0",
+          "label": "Stable Diffusion XL Base 1.0",
+          "bundle_id": "sdxl-base-1.0",
+          "summary": "An open-weights alternative that needs no Hugging Face token."
+        }
       },
       "video": {
         "id": "wan2.2-ti2v-5b",
@@ -175,7 +187,14 @@
         "label": "FLUX.1 dev (Q8)",
         "bundle_id": "flux1-dev",
         "variant": "Q8_0",
-        "summary": "The current quality benchmark for open image models, at the largest quant this machine holds."
+        "summary": "The current quality benchmark for open image models, at the largest quant this machine holds.",
+        "fallback": {
+          "id": "qwen-image-q3",
+          "label": "Qwen-Image 20B (Q3)",
+          "bundle_id": "qwen-image",
+          "variant": "Q3_K_M",
+          "summary": "An open-weights alternative that needs no Hugging Face token."
+        }
       },
       "video": {
         "id": "wan2.2-ti2v-5b",
@@ -219,7 +238,14 @@
         "label": "FLUX.1 dev (Q8)",
         "bundle_id": "flux1-dev",
         "variant": "Q8_0",
-        "summary": "The largest quality-preserving FLUX.1 dev quant published in this bundle."
+        "summary": "The largest quality-preserving FLUX.1 dev quant published in this bundle.",
+        "fallback": {
+          "id": "qwen-image-q8",
+          "label": "Qwen-Image 20B (Q8)",
+          "bundle_id": "qwen-image",
+          "variant": "Q8_0",
+          "summary": "An open-weights alternative that needs no Hugging Face token."
+        }
       },
       "video": {
         "id": "ltx-2.3-dev",
@@ -299,7 +325,14 @@
         "id": "flux1-dev-bf16",
         "label": "FLUX.1 dev (full precision)",
         "bundle_id": "flux1-dev",
-        "summary": "FLUX.1 dev with no quantisation applied to the diffusion model."
+        "summary": "FLUX.1 dev with no quantisation applied to the diffusion model.",
+        "fallback": {
+          "id": "qwen-image-q8",
+          "label": "Qwen-Image 20B (Q8)",
+          "bundle_id": "qwen-image",
+          "variant": "Q8_0",
+          "summary": "An open-weights alternative that needs no Hugging Face token."
+        }
       },
       "video": {
         "id": "ltx-2.3-dev",
@@ -328,7 +361,14 @@
         "id": "flux1-dev-bf16",
         "label": "FLUX.1 dev (full precision)",
         "bundle_id": "flux1-dev",
-        "summary": "FLUX.1 dev with no quantisation applied to the diffusion model."
+        "summary": "FLUX.1 dev with no quantisation applied to the diffusion model.",
+        "fallback": {
+          "id": "qwen-image-q8",
+          "label": "Qwen-Image 20B (Q8)",
+          "bundle_id": "qwen-image",
+          "variant": "Q8_0",
+          "summary": "An open-weights alternative that needs no Hugging Face token."
+        }
       },
       "video": {
         "id": "ltx-2.3-dev",
