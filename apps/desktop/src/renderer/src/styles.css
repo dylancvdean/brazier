@@ -3549,6 +3549,51 @@ a.inline-link {
   font-size: 10px;
 }
 
+.dream-prompt-editor {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.dream-prompt-editor summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dream-prompt-editor .dream-prompt-textarea {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: 0;
+  resize: vertical;
+  color: #e3e3e3;
+  background: #0a0a0a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.dream-prompt-editor .dream-prompt-textarea:focus {
+  border-color: #964916;
+}
+
+.dream-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.dream-prompt-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .toggle-list {
   display: flex;
   flex-direction: column;

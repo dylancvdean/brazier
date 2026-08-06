@@ -2050,6 +2050,9 @@ pub const DEFAULT_MEMORY_RECALL_CHARS: i64 = 2400;
 /// How often a dreaming pass may run. Once a week keeps the store consolidated
 /// without spending model time on it every session.
 pub const DEFAULT_MEMORY_DREAM_INTERVAL_DAYS: i64 = 7;
+/// Upper bound on a customized dreaming prompt, so one pref edit cannot balloon
+/// the stored preference blob.
+pub const MAX_DREAM_PROMPT_CHARS: usize = 16_384;
 
 fn memory_dreaming(value: Option<&Value>) -> String {
     value
@@ -2078,6 +2081,14 @@ fn memory_last_dream_at(value: Option<&Value>) -> Option<i64> {
     value.and_then(|value| value["last_dream_at"].as_i64())
 }
 
+/// Custom dreaming prompt, when the user overrode the built-in default.
+fn memory_dream_prompt(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(|value| value["dream_prompt"].as_str())
+        .filter(|prompt| !prompt.trim().is_empty())
+        .map(str::to_owned)
+}
+
 async fn memory_preference(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let stored = state
         .db
@@ -2095,6 +2106,7 @@ async fn memory_preference(State(state): State<AppState>) -> ApiResult<Json<Valu
         "dreaming": memory_dreaming(stored.as_ref()),
         "dream_interval_days": memory_dream_interval_days(stored.as_ref()),
         "last_dream_at": memory_last_dream_at(stored.as_ref()),
+        "dream_prompt": memory_dream_prompt(stored.as_ref()),
     })))
 }
 
@@ -2112,6 +2124,10 @@ struct UpdateMemoryPreference {
     dream_interval_days: i64,
     #[serde(default)]
     last_dream_at: Option<i64>,
+    /// Custom dreaming prompt. `None` keeps the stored value; an empty string
+    /// clears the override back to the built-in default.
+    #[serde(default)]
+    dream_prompt: Option<String>,
 }
 
 fn default_memory_enabled() -> bool {
@@ -2156,6 +2172,25 @@ async fn update_memory_preference(
     let last_dream_at = preference
         .last_dream_at
         .or_else(|| memory_last_dream_at(stored.as_ref()));
+    // A provided prompt replaces the stored one; an empty string clears the
+    // override back to the built-in default; an omitted field keeps the
+    // existing override.
+    let dream_prompt = match preference.dream_prompt {
+        Some(prompt) => {
+            let trimmed = prompt.trim();
+            if trimmed.chars().count() > MAX_DREAM_PROMPT_CHARS {
+                return Err(ApiError::bad_request(format!(
+                    "dreaming prompt is too long (max {MAX_DREAM_PROMPT_CHARS} characters)"
+                )));
+            }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        None => memory_dream_prompt(stored.as_ref()),
+    };
     let value = json!({
         "enabled": preference.enabled,
         "recall_count": recall_count,
@@ -2163,6 +2198,7 @@ async fn update_memory_preference(
         "dreaming": dreaming,
         "dream_interval_days": dream_interval_days,
         "last_dream_at": last_dream_at,
+        "dream_prompt": dream_prompt,
     });
     state
         .db
@@ -8339,6 +8375,73 @@ mod tests {
 
         let (_, reloaded) = get_request(&app, "/api/v1/preferences/workspace").await;
         assert_eq!(reloaded["modes"]["computer"], true);
+    }
+
+    #[tokio::test]
+    async fn memory_preference_round_trips_the_dreaming_prompt() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+
+        let (status, initial) = get_request(&app, "/api/v1/preferences/memory").await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["dream_prompt"], Value::Null);
+
+        let (status, saved) = json_request(
+            &app,
+            "PUT",
+            "/api/v1/preferences/memory",
+            json!({
+                "enabled": true,
+                "recall_count": 6,
+                "recall_chars": 2400,
+                "dreaming": "auto",
+                "dream_interval_days": 7,
+                "last_dream_at": null,
+                "dream_prompt": "Consolidate carefully."
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["dream_prompt"], "Consolidate carefully.");
+
+        let (_, reloaded) = get_request(&app, "/api/v1/preferences/memory").await;
+        assert_eq!(reloaded["dream_prompt"], "Consolidate carefully.");
+
+        // An empty string clears the override back to the default.
+        let (status, cleared) = json_request(
+            &app,
+            "PUT",
+            "/api/v1/preferences/memory",
+            json!({
+                "enabled": true,
+                "recall_count": 6,
+                "recall_chars": 2400,
+                "dreaming": "auto",
+                "dream_interval_days": 7,
+                "last_dream_at": null,
+                "dream_prompt": ""
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert_eq!(cleared["dream_prompt"], Value::Null);
+
+        let (status, _) = json_request(
+            &app,
+            "PUT",
+            "/api/v1/preferences/memory",
+            json!({
+                "enabled": true,
+                "recall_count": 6,
+                "recall_chars": 2400,
+                "dreaming": "auto",
+                "dream_interval_days": 7,
+                "last_dream_at": null,
+                "dream_prompt": "x".repeat(MAX_DREAM_PROMPT_CHARS + 1)
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

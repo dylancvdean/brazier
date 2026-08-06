@@ -118,6 +118,8 @@ export type MemoryPreference = {
   dream_interval_days: number
   /** Epoch ms of the last dreaming pass (or decline); durable across restarts. */
   last_dream_at?: number | null
+  /** Custom dreaming prompt. Null/blank uses the built-in default. */
+  dream_prompt?: string | null
 }
 
 export const DEFAULT_MEMORY_PREFERENCE: MemoryPreference = {
@@ -126,7 +128,8 @@ export const DEFAULT_MEMORY_PREFERENCE: MemoryPreference = {
   recall_chars: 2400,
   dreaming: 'auto',
   dream_interval_days: 7,
-  last_dream_at: null
+  last_dream_at: null,
+  dream_prompt: null
 }
 
 export function fetchMemoryPreference(): Promise<MemoryPreference> {

@@ -241,7 +241,7 @@ export type DreamResult = {
   deleted: number
 }
 
-const DREAM_SYSTEM_PROMPT = `You are consolidating the user's long-term memory. Below are TODAY's date, the
+export const DEFAULT_DREAM_PROMPT = `You are consolidating the user's long-term memory. Below are TODAY's date, the
 current saved memories with their created/updated dates, and recent conversation
 summaries. Produce a single JSON object with exactly these fields:
 {
@@ -263,6 +263,8 @@ Rules:
 - Do not touch memories marked [pinned].
 - Every id in "updates" and "deletes" must appear in the CURRENT MEMORIES list.
 - Each new memory is one specific, self-contained sentence.
+- If the conversations reveal nothing new and the store is already accurate,
+  reply with exactly {"nop": true} instead of the object above.
 - Return ONLY the JSON object, with no surrounding text or markdown.`
 
 export function renderDreamInput(
@@ -363,6 +365,9 @@ export async function dream(options: {
   signal: AbortSignal
   memories: Memory[]
   conversations: DreamInputConversation[]
+  /** Custom system prompt for the consolidation pass. Defaults to
+   * {@link DEFAULT_DREAM_PROMPT} when omitted or blank. */
+  prompt?: string
   onPartial?: (delta: string) => void
   onLoad?: (event: { phase: string; message: string }) => void
 }): Promise<DreamResult> {
@@ -373,7 +378,7 @@ export async function dream(options: {
     conversation_id: 'dreaming',
     parent_id: null,
     role: 'system',
-    content: DREAM_SYSTEM_PROMPT,
+    content: options.prompt?.trim() || DEFAULT_DREAM_PROMPT,
     model: null,
     created_at: now
   }
@@ -399,7 +404,18 @@ export async function dream(options: {
   )
   const proposal = extractDreamProposal(result.responseText)
   if (!proposal) {
-    throw new Error('The model did not return a parseable memory consolidation.')
+    // Failing here would make a dreaming pass look like a broken generation.
+    // The pass is housekeeping: if the model would not say what changed, change
+    // nothing and stay quiet about it.
+    console.warn(
+      'Dreaming: the model did not return a parseable consolidation; nothing was changed.'
+    )
+    return { created: 0, updated: 0, deleted: 0 }
+  }
+  // The model can answer "nothing to do" with an explicit no-op rather than
+  // an object that happens to be empty.
+  if (proposal.nop === true) {
+    return { created: 0, updated: 0, deleted: 0 }
   }
   const normalized = normalizeDreamProposal(proposal, options.memories)
   if (!normalized) {

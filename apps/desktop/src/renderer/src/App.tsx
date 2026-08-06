@@ -149,6 +149,8 @@ import type { Attachment, ContentPart, Conversation, Message, Role } from './typ
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 const CHAT_TITLE_MODE_KEY = 'brazier.chatTitleMode.v1'
 const GENERATE_HISTORY_KEY = 'brazier.generateHistory.v1'
+/** How long the completed-dream notice stays before clearing itself. */
+const DREAM_STATUS_DISMISS_MS = 8_000
 
 type AppMode = 'chat' | 'agent' | 'generate' | 'voice' | 'computer'
 
@@ -195,6 +197,16 @@ function titleFromCompletion(text: string): string | null {
     .replace(/^\s*["'`]+|["'`]+\s*$/g, '')
     .trim()
   return title ? title.slice(0, 80) : null
+}
+
+/**
+ * Turn a model-load progress event into a status line that says what is really
+ * happening. The daemon's own messages describe a normal chat turn ("Model
+ * ready — generating…"), which is misleading mid-dream, so they are relabeled.
+ */
+function dreamStatusForLoad(event: { phase: string; message: string }): string {
+  if (event.phase === 'ready') return 'Dreaming — model ready, consolidating memories…'
+  return `Dreaming — ${event.message}`
 }
 
 function readEnabledTools(): string[] {
@@ -610,6 +622,7 @@ export function App(): React.JSX.Element {
   const scrollAnchor = useRef<HTMLDivElement>(null)
   const dreamAbortRef = useRef<AbortController | undefined>(undefined)
   const dreamTimerRef = useRef<number | undefined>(undefined)
+  const dreamDismissRef = useRef<number | undefined>(undefined)
   const lastDreamAtRef = useRef(0)
   const [dreamPromptOpen, setDreamPromptOpen] = useState(false)
   const [dreamStatus, setDreamStatus] = useState<string | null>(null)
@@ -1352,7 +1365,12 @@ export function App(): React.JSX.Element {
       setError('Select a chat model before running dreaming.')
       return
     }
-    setDreamStatus('Preparing dreaming pass…')
+    // A stale dismiss timer from a previous pass must not clear this one.
+    if (dreamDismissRef.current !== undefined) {
+      window.clearTimeout(dreamDismissRef.current)
+      dreamDismissRef.current = undefined
+    }
+    setDreamStatus('Dreaming — preparing pass…')
     const controller = new AbortController()
     dreamAbortRef.current = controller
     try {
@@ -1370,7 +1388,8 @@ export function App(): React.JSX.Element {
         signal: controller.signal,
         memories,
         conversations,
-        onLoad: (event) => setDreamStatus(event.message)
+        prompt: memoryPreference?.dream_prompt ?? undefined,
+        onLoad: (event) => setDreamStatus(dreamStatusForLoad(event))
       })
       markDreamed()
       const changed = result.created + result.updated + result.deleted
@@ -1379,13 +1398,26 @@ export function App(): React.JSX.Element {
           ? 'Dreaming found nothing to change.'
           : `Dreaming complete: ${result.created} added, ${result.updated} updated, ${result.deleted} removed.`
       )
+      // The status is transient: a finished pass should not sit in the notice
+      // bar until dismissed, especially one that ran silently in auto mode.
+      scheduleDreamStatusDismiss()
     } catch (cause) {
       if ((cause as Error).name !== 'AbortError') {
         setError(cause instanceof Error ? cause.message : String(cause))
       }
+      scheduleDreamStatusDismiss()
     } finally {
       dreamAbortRef.current = undefined
     }
+  }
+
+  /** Clear the dreaming notice a few seconds after a pass ends. */
+  function scheduleDreamStatusDismiss(): void {
+    if (dreamDismissRef.current !== undefined) window.clearTimeout(dreamDismissRef.current)
+    dreamDismissRef.current = window.setTimeout(() => {
+      dreamDismissRef.current = undefined
+      setDreamStatus(null)
+    }, DREAM_STATUS_DISMISS_MS)
   }
 
   /** Record that a dreaming pass ran (or was declined) so the configured
@@ -1438,6 +1470,12 @@ export function App(): React.JSX.Element {
   }
 
   useEffect(() => () => clearDreamTimer(), [])
+
+  useEffect(() => {
+    return () => {
+      if (dreamDismissRef.current !== undefined) window.clearTimeout(dreamDismissRef.current)
+    }
+  }, [])
 
   function maybeGenerateConversationTitle(
     id: string,

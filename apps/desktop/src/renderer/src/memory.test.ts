@@ -12,7 +12,10 @@ const daemon = vi.hoisted(() => ({
   created: [] as Array<Record<string, unknown>>,
   updated: [] as Array<{ id: string; patch: Record<string, unknown> }>,
   deleted: [] as string[],
-  memories: [] as Memory[]
+  memories: [] as Memory[],
+  stream: {
+    responseText: ''
+  }
 }))
 
 vi.mock('./api', () => ({
@@ -29,11 +32,20 @@ vi.mock('./api', () => ({
     return { deleted: true }
   }),
   listMemories: vi.fn(async () => daemon.memories),
-  streamCompletion: vi.fn()
+  streamCompletion: vi.fn(async () => ({
+    responseText: daemon.stream.responseText,
+    reasoningText: '',
+    toolRecords: [],
+    clientToolCalls: [],
+    transcript: [],
+    generationStats: null
+  }))
 }))
 
 import {
   buildMemoryContext,
+  DEFAULT_DREAM_PROMPT,
+  dream,
   executeMemoryClientTool,
   extractDreamProposal,
   formatDay,
@@ -191,5 +203,108 @@ describe('dream proposal parsing', () => {
       deletes: ['only']
     }
     expect(normalizeDreamProposal(proposal, current)).toBeNull()
+  })
+})
+
+describe('dream pass', () => {
+  beforeEach(() => {
+    daemon.created = []
+    daemon.updated = []
+    daemon.deleted = []
+    daemon.memories = [memory('1', 'User likes dark mode.')]
+  })
+
+  it('default prompt offers an explicit no-op reply', () => {
+    expect(DEFAULT_DREAM_PROMPT).toContain('{"nop": true}')
+    expect(DEFAULT_DREAM_PROMPT).toContain('current saved memories')
+  })
+
+  it('uses a custom prompt when provided', async () => {
+    let systemContent = ''
+    const { streamCompletion } = await import('./api')
+    ;(streamCompletion as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async (messages: Array<{ role: string; content: string }>) => {
+        systemContent = messages.find((message) => message.role === 'system')?.content ?? ''
+        return { responseText: '{"nop": true}', reasoningText: '', toolRecords: [], clientToolCalls: [], transcript: [], generationStats: null }
+      }
+    )
+    const result = await dream({
+      model: 'model-a',
+      signal: new AbortController().signal,
+      memories: daemon.memories,
+      conversations: [],
+      prompt: 'Custom dream prompt.'
+    })
+    expect(systemContent).toBe('Custom dream prompt.')
+    expect(result).toEqual({ created: 0, updated: 0, deleted: 0 })
+    expect(daemon.created).toHaveLength(0)
+  })
+
+  it('applies nothing when the model replies with a no-op', async () => {
+    const { streamCompletion } = await import('./api')
+    ;(streamCompletion as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      responseText: '{"nop": true}',
+      reasoningText: '',
+      toolRecords: [],
+      clientToolCalls: [],
+      transcript: [],
+      generationStats: null
+    })
+    const result = await dream({
+      model: 'model-a',
+      signal: new AbortController().signal,
+      memories: daemon.memories,
+      conversations: []
+    })
+    expect(result).toEqual({ created: 0, updated: 0, deleted: 0 })
+    expect(daemon.created).toHaveLength(0)
+    expect(daemon.updated).toHaveLength(0)
+    expect(daemon.deleted).toHaveLength(0)
+  })
+
+  it('fails silently instead of throwing when consolidation is unparseable', async () => {
+    const { streamCompletion } = await import('./api')
+    ;(streamCompletion as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      responseText: 'I have no idea what to return here.',
+      reasoningText: '',
+      toolRecords: [],
+      clientToolCalls: [],
+      transcript: [],
+      generationStats: null
+    })
+    await expect(
+      dream({
+        model: 'model-a',
+        signal: new AbortController().signal,
+        memories: daemon.memories,
+        conversations: []
+      })
+    ).resolves.toEqual({ created: 0, updated: 0, deleted: 0 })
+    expect(daemon.created).toHaveLength(0)
+  })
+
+  it('applies a valid proposal end to end', async () => {
+    const { streamCompletion } = await import('./api')
+    ;(streamCompletion as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      responseText: JSON.stringify({
+        new_memories: [{ text: 'User prefers tea.' }],
+        updates: [{ id: '1', text: 'User likes dark mode and tea.' }],
+        deletes: []
+      }),
+      reasoningText: '',
+      toolRecords: [],
+      clientToolCalls: [],
+      transcript: [],
+      generationStats: null
+    })
+    const result = await dream({
+      model: 'model-a',
+      signal: new AbortController().signal,
+      memories: daemon.memories,
+      conversations: []
+    })
+    expect(result).toEqual({ created: 1, updated: 1, deleted: 0 })
+    expect(daemon.created[0]).toMatchObject({ text: 'User prefers tea.', kind: 'summary' })
+    expect(daemon.updated[0]).toEqual({ id: '1', patch: { text: 'User likes dark mode and tea.' } })
   })
 })

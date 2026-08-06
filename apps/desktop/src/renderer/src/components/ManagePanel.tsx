@@ -125,6 +125,7 @@ import {
   type MemoryPreference
 } from '../api'
 import type { Memory } from '../types'
+import { DEFAULT_DREAM_PROMPT } from '../memory'
 import {
   fetchAgentCapabilities,
   fetchAgentPreference,
@@ -867,6 +868,7 @@ function ChatSection(props: SectionProps): React.JSX.Element {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editText, setEditText] = useState('')
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [dreamPromptDraft, setDreamPromptDraft] = useState<string>('')
 
   const loadMemories = useCallback(async (): Promise<void> => {
     setLoadingMemories(true)
@@ -883,7 +885,10 @@ function ChatSection(props: SectionProps): React.JSX.Element {
     let cancelled = false
     void fetchMemoryPreference()
       .then((preference) => {
-        if (!cancelled) setPreference(preference)
+        if (!cancelled) {
+          setPreference(preference)
+          setDreamPromptDraft(preference.dream_prompt ?? DEFAULT_DREAM_PROMPT)
+        }
       })
       .catch((cause) => {
         if (!cancelled) props.onError(errorText(cause))
@@ -917,6 +922,15 @@ function ChatSection(props: SectionProps): React.JSX.Element {
     } finally {
       setSavingPreference(false)
     }
+  }
+
+  async function saveDreamPrompt(): Promise<void> {
+    if (!preference) return
+    const trimmed = dreamPromptDraft.trim()
+    const patch = {
+      dream_prompt: trimmed === '' || trimmed === DEFAULT_DREAM_PROMPT ? null : trimmed
+    }
+    await savePreference(patch)
   }
 
   async function applyMemoryMutation(
@@ -1053,6 +1067,46 @@ function ChatSection(props: SectionProps): React.JSX.Element {
             </span>
           </label>
         </div>
+        <details className="dream-prompt-editor">
+          <summary>Dreaming prompt</summary>
+          <p className="model-help">
+            The system prompt each dreaming pass sends the model. The default asks
+            it to merge, prune, and add memories from recent conversations, and
+            lets it reply with a no-op when nothing needs to change. Customize it
+            to change what dreaming looks for or requires of the model.
+          </p>
+          <textarea
+            className="dream-prompt-textarea"
+            value={dreamPromptDraft}
+            disabled={!preference || savingPreference}
+            spellCheck={false}
+            rows={10}
+            aria-label="Dreaming system prompt"
+            onChange={(event) => setDreamPromptDraft(event.target.value)}
+          />
+          <div className="dream-prompt-actions">
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={!preference || savingPreference}
+              onClick={() => {
+                setDreamPromptDraft(DEFAULT_DREAM_PROMPT)
+                void savePreference({ dream_prompt: null })
+              }}
+            >
+              Reset to default
+            </button>
+            <button
+              type="button"
+              className="primary-action"
+              disabled={!preference || savingPreference}
+              onClick={() => void saveDreamPrompt()}
+            >
+              {savingPreference ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />}
+              Save prompt
+            </button>
+          </div>
+        </details>
         <div className="runtime-actions">
           <button
             className="primary-action"
