@@ -26,6 +26,20 @@ describe('usesIntegratedGpuVulkanDefaults', () => {
         { ...hardware, amd_apu: false, intel_igpu: true }
       )
     ).toBe(true)
+    // An Intel iGPU that prefers the SYCL llama.cpp backend still runs sd.cpp
+    // on Vulkan, so the unified-memory defaults follow it.
+    expect(
+      usesIntegratedGpuVulkanDefaults(
+        { target: 'sycl' } as RuntimeSettings,
+        { ...hardware, amd_apu: false, intel_igpu: true }
+      )
+    ).toBe(true)
+    expect(
+      usesIntegratedGpuVulkanDefaults(
+        { target: 'auto' } as RuntimeSettings,
+        { ...hardware, amd_apu: false, intel_igpu: true, recommended_target: 'sycl' }
+      )
+    ).toBe(true)
   })
 
   it('does not affect discrete GPUs or non-Vulkan runtimes', () => {

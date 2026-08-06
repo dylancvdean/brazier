@@ -11,6 +11,7 @@ pub enum RuntimeTarget {
     Rocm,
     Metal,
     Vulkan,
+    Sycl,
 }
 
 impl RuntimeTarget {
@@ -22,6 +23,7 @@ impl RuntimeTarget {
             Self::Rocm => "rocm",
             Self::Metal => "metal",
             Self::Vulkan => "vulkan",
+            Self::Sycl => "sycl",
         }
     }
 }

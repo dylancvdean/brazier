@@ -17,5 +17,7 @@ export function usesIntegratedGpuVulkanDefaults(
   if (!integrated) return false
   const target =
     settings.target === 'auto' ? hardware.recommended_target : settings.target
-  return target === 'vulkan'
+  // An Intel iGPU that prefers the SYCL llama.cpp backend still runs sd.cpp on
+  // Vulkan (sd.cpp has no SYCL build), so the Vulkan defaults apply there too.
+  return target === 'vulkan' || target === 'sycl'
 }

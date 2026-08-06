@@ -483,6 +483,7 @@ export type RuntimeTarget =
   | 'rocm'
   | 'metal'
   | 'vulkan'
+  | 'sycl'
 
 export type RuntimeSettings = {
   target: RuntimeTarget

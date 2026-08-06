@@ -56,8 +56,9 @@ describe('targetSupportedByBuildEngine', () => {
   it('disables Vulkan only for vLLM builds', () => {
     expect(targetSupportedByBuildEngine('vllm', 'vulkan')).toBe(false)
     expect(targetSupportedByBuildEngine('vllm', 'rocm')).toBe(true)
-    expect(targetSupportedByBuildEngine('vllm', 'cpu')).toBe(true)
     expect(targetSupportedByBuildEngine('llama.cpp', 'vulkan')).toBe(true)
+    expect(targetSupportedByBuildEngine('vllm', 'sycl')).toBe(false)
+    expect(targetSupportedByBuildEngine('llama.cpp', 'sycl')).toBe(true)
   })
 })
 

@@ -4109,6 +4109,7 @@ async fn managed_llama_status(
         ("cuda", RuntimeTarget::Cuda),
         ("rocm", RuntimeTarget::Rocm),
         ("vulkan", RuntimeTarget::Vulkan),
+        ("sycl", RuntimeTarget::Sycl),
     ];
     let targets: Vec<Value> = target_specs
         .iter()

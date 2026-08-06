@@ -159,13 +159,20 @@ pub fn platform_asset_tag() -> Option<&'static str> {
 
 /// Restrict an acceleration target to what this platform's managed releases
 /// actually publish, falling back to the platform's baseline flavor.
+///
+/// SYCL is a llama.cpp backend only: stable-diffusion.cpp publishes no SYCL
+/// build, so an Intel machine whose llama runtime prefers SYCL still runs
+/// sd.cpp on its closest backend (Vulkan, or Metal on macOS).
 fn constrain_target_to_platform(target: RuntimeTarget) -> RuntimeTarget {
     match (std::env::consts::OS, target) {
-        ("macos", RuntimeTarget::Cuda | RuntimeTarget::Rocm | RuntimeTarget::Vulkan) => {
-            RuntimeTarget::Metal
-        }
+        (
+            "macos",
+            RuntimeTarget::Cuda | RuntimeTarget::Rocm | RuntimeTarget::Vulkan | RuntimeTarget::Sycl,
+        ) => RuntimeTarget::Metal,
         ("linux", RuntimeTarget::Cuda | RuntimeTarget::Metal) => RuntimeTarget::Cpu,
+        ("linux", RuntimeTarget::Sycl) => RuntimeTarget::Vulkan,
         ("windows", RuntimeTarget::Rocm | RuntimeTarget::Metal) => RuntimeTarget::Cpu,
+        ("windows", RuntimeTarget::Sycl) => RuntimeTarget::Vulkan,
         _ => target,
     }
 }
@@ -468,11 +475,11 @@ pub async fn ensure_binary_with_progress(
     force: bool,
     mut progress: ProgressCallback,
 ) -> anyhow::Result<PathBuf> {
-    let target = if target == RuntimeTarget::Auto {
-        constrain_target_to_platform(crate::hardware::detect().recommended_target)
+    let target = constrain_target_to_platform(if target == RuntimeTarget::Auto {
+        crate::hardware::detect().recommended_target
     } else {
         target
-    };
+    });
     if force {
         return install_managed_binary_with_progress(client, data_dir, target, progress).await;
     }
@@ -1504,7 +1511,14 @@ fn effective_diffusion_profile(
     } else {
         configured_target
     };
-    let enabled = hardware.integrated_gpu() && effective_target == RuntimeTarget::Vulkan;
+    // sd.cpp has no SYCL backend: an Intel iGPU whose llama runtime prefers
+    // SYCL still runs sd.cpp on Vulkan (see constrain_target_to_platform), so
+    // the unified-memory Vulkan safety defaults apply to it too.
+    let enabled = hardware.integrated_gpu()
+        && matches!(
+            effective_target,
+            RuntimeTarget::Vulkan | RuntimeTarget::Sycl
+        );
     if enabled {
         tracing::info!(
             "applying Vulkan integrated-GPU defaults to stable-diffusion.cpp generation"
@@ -2683,6 +2697,21 @@ mod tests {
         assert!(
             component_destination(dir.path(), Modality::Video, "acme/wan", "vae.safetensors")
                 .is_ok()
+        );
+    }
+
+    /// sd.cpp publishes no SYCL build, so an Intel machine that prefers the
+    /// SYCL llama.cpp runtime still runs sd.cpp on its closest backend.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sycl_target_constrains_to_vulkan_on_linux() {
+        assert_eq!(
+            constrain_target_to_platform(RuntimeTarget::Sycl),
+            RuntimeTarget::Vulkan
+        );
+        assert_eq!(
+            constrain_target_to_platform(RuntimeTarget::Vulkan),
+            RuntimeTarget::Vulkan
         );
     }
 

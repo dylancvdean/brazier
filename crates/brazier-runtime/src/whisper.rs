@@ -42,7 +42,7 @@ pub fn managed_binary_path(data_dir: &Path) -> PathBuf {
 pub fn managed_binary_path_for_target(data_dir: &Path, target: RuntimeTarget) -> PathBuf {
     if matches!(
         target,
-        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal
+        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal | RuntimeTarget::Sycl
     ) {
         return managed_binary_path(data_dir);
     }
@@ -55,7 +55,9 @@ pub fn managed_binary_path_for_target(data_dir: &Path, target: RuntimeTarget) ->
 pub fn managed_install_root(data_dir: &Path, target: RuntimeTarget) -> PathBuf {
     let engine_dir = managed_engine_dir(data_dir);
     match target {
-        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal => engine_dir,
+        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal | RuntimeTarget::Sycl => {
+            engine_dir
+        }
         _ => engine_dir.join(target.as_str()),
     }
 }
@@ -123,9 +125,11 @@ pub fn select_release_asset_for_target<'a>(
     target: RuntimeTarget,
 ) -> Option<&'a str> {
     let names: Vec<&str> = asset_names.into_iter().collect();
+    // whisper.cpp publishes no SYCL CLI; an Intel machine that prefers SYCL for
+    // llama.cpp still runs whisper on the plain CPU prebuilt.
     if matches!(
         target,
-        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal
+        RuntimeTarget::Auto | RuntimeTarget::Cpu | RuntimeTarget::Metal | RuntimeTarget::Sycl
     ) {
         return select_release_asset(names, platform_tag);
     }

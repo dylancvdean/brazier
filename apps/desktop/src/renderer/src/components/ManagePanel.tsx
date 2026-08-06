@@ -3825,9 +3825,9 @@ function sourceBuildTargets(hardware: HardwareInfo | null): RuntimeTarget[] {
     case 'macos':
       return ['cpu', 'metal']
     case 'windows':
-      return ['cpu', 'cuda', 'vulkan']
+      return ['cpu', 'cuda', 'vulkan', 'sycl']
     default:
-      return ['cpu', 'cuda', 'rocm', 'vulkan']
+      return ['cpu', 'cuda', 'rocm', 'vulkan', 'sycl']
   }
 }
 
@@ -3835,7 +3835,7 @@ export function targetSupportedByBuildEngine(
   engine: BuildEngine,
   target: RuntimeTarget
 ): boolean {
-  return engine !== 'vllm' || target !== 'vulkan'
+  return engine !== 'vllm' || (target !== 'vulkan' && target !== 'sycl')
 }
 
 const BUILD_TARGET_LABELS: Record<RuntimeTarget, string> = {
@@ -3844,7 +3844,8 @@ const BUILD_TARGET_LABELS: Record<RuntimeTarget, string> = {
   cuda: 'NVIDIA CUDA',
   rocm: 'AMD ROCm',
   metal: 'Apple Metal',
-  vulkan: 'Vulkan'
+  vulkan: 'Vulkan',
+  sycl: 'Intel SYCL'
 }
 
 function llamaRuntimeLabel(target: RuntimeTarget): string {

@@ -139,6 +139,9 @@ pub fn target_flags(target: RuntimeTarget) -> Vec<String> {
         RuntimeTarget::Vulkan => vec!["-DGGML_VULKAN=ON".into()],
         RuntimeTarget::Rocm => vec!["-DGGML_HIP=ON".into()],
         RuntimeTarget::Metal => vec!["-DGGML_METAL=ON".into()],
+        RuntimeTarget::Sycl => {
+            vec!["-DGGML_SYCL=ON".into(), "-DGGML_SYCL_TARGET=INTEL".into()]
+        }
         RuntimeTarget::Auto | RuntimeTarget::Cpu => Vec::new(),
     }
 }
@@ -448,7 +451,7 @@ fn build_environment(engine: &str, target: RuntimeTarget) -> Vec<(String, String
         // vLLM-Metal uses the macOS CPU vLLM core wheel plus its MLX plugin.
         RuntimeTarget::Metal => vec![("UV_TORCH_BACKEND".into(), "cpu".into())],
         RuntimeTarget::Auto => vec![("UV_TORCH_BACKEND".into(), "auto".into())],
-        RuntimeTarget::Vulkan => Vec::new(),
+        RuntimeTarget::Vulkan | RuntimeTarget::Sycl => Vec::new(),
     }
 }
 
@@ -463,6 +466,10 @@ fn validate_engine_target(
     anyhow::ensure!(
         target != RuntimeTarget::Vulkan,
         "vLLM does not support a Vulkan backend; use ROCm or CPU on AMD hardware"
+    );
+    anyhow::ensure!(
+        target != RuntimeTarget::Sycl,
+        "vLLM does not support the Intel SYCL backend; use CPU or CUDA on Intel hardware"
     );
     anyhow::ensure!(
         target != RuntimeTarget::Auto,
@@ -1249,6 +1256,24 @@ mod tests {
         assert!(validate_engine_target("vllm", RuntimeTarget::Cpu, "macos-arm64").is_err());
         assert!(validate_engine_target("vllm", RuntimeTarget::Metal, "linux-x64").is_err());
         assert!(validate_engine_target("llama.cpp", RuntimeTarget::Vulkan, "linux-x64").is_ok());
+        // SYCL is llama.cpp-only too; vLLM rejects it but llama.cpp accepts it.
+        assert!(validate_engine_target("vllm", RuntimeTarget::Sycl, "linux-x64").is_err());
+        assert!(validate_engine_target("llama.cpp", RuntimeTarget::Sycl, "linux-x64").is_ok());
+    }
+
+    #[test]
+    fn sycl_target_flags_enable_the_oneapi_backend() {
+        let flags = target_flags(RuntimeTarget::Sycl);
+        assert_eq!(
+            flags,
+            vec![
+                "-DGGML_SYCL=ON".to_owned(),
+                "-DGGML_SYCL_TARGET=INTEL".to_owned()
+            ]
+        );
+        // Non-accelerated targets stay flag-free.
+        assert!(target_flags(RuntimeTarget::Auto).is_empty());
+        assert!(target_flags(RuntimeTarget::Cpu).is_empty());
     }
 
     #[test]

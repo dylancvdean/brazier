@@ -401,6 +401,27 @@ pub fn select_release_asset_for_target<'a>(
         platform_tag
     };
     let flavor = target.as_str();
+    if target == RuntimeTarget::Sycl {
+        // Upstream ships both an fp16 and an fp32 SYCL build on Linux; fp16 is
+        // the faster default on Gen12+ Intel GPUs, with fp32 as a fallback for
+        // older parts.
+        let mut candidates: Vec<&str> = asset_names
+            .into_iter()
+            .filter(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower.contains(platform)
+                    && lower.contains(arch)
+                    && lower.contains(flavor)
+                    && (lower.ends_with(".tar.gz") || lower.ends_with(".zip"))
+                    && !lower.contains("cudart")
+            })
+            .collect();
+        candidates.sort_by_key(|name| {
+            let lower = name.to_ascii_lowercase();
+            (lower.contains("fp32"), name.len())
+        });
+        return candidates.first().copied();
+    }
     let mut candidates: Vec<&str> = asset_names
         .into_iter()
         .filter(|name| {
@@ -457,6 +478,7 @@ pub fn managed_targets_for_platform() -> &'static [RuntimeTarget] {
             RuntimeTarget::Cuda,
             RuntimeTarget::Rocm,
             RuntimeTarget::Vulkan,
+            RuntimeTarget::Sycl,
             RuntimeTarget::Cpu,
         ],
         ("linux", "aarch64") => &[RuntimeTarget::Vulkan, RuntimeTarget::Cpu],
@@ -464,6 +486,7 @@ pub fn managed_targets_for_platform() -> &'static [RuntimeTarget] {
         ("windows", "x86_64") => &[
             RuntimeTarget::Cuda,
             RuntimeTarget::Vulkan,
+            RuntimeTarget::Sycl,
             RuntimeTarget::Cpu,
         ],
         ("windows", "aarch64") => &[RuntimeTarget::Cpu],
@@ -1581,10 +1604,19 @@ pub async fn ensure_binary_with_progress(
                 .targets
                 .iter()
                 .any(|t| t.id == RuntimeTarget::Vulkan && t.available);
+        // The oneAPI SYCL build likewise needs an Intel GPU to be present;
+        // offering it on a machine with no Intel device would install a build
+        // that only fails at model load.
+        let sycl_ready = supported.contains(&RuntimeTarget::Sycl)
+            && hardware
+                .targets
+                .iter()
+                .any(|t| t.id == RuntimeTarget::Sycl && t.available);
         let supported: Vec<RuntimeTarget> = supported
             .iter()
             .copied()
             .filter(|candidate| *candidate != RuntimeTarget::Vulkan || vulkan_ready)
+            .filter(|candidate| *candidate != RuntimeTarget::Sycl || sycl_ready)
             .collect();
         if supported.contains(&target) {
             std::iter::once(target)
@@ -2715,12 +2747,64 @@ mod tests {
         if std::env::consts::ARCH == "x86_64" && std::env::consts::OS == "linux" {
             assert!(list.contains(&RuntimeTarget::Cuda));
             assert!(list.contains(&RuntimeTarget::Rocm));
+            assert!(list.contains(&RuntimeTarget::Sycl));
         }
         if std::env::consts::ARCH == "aarch64" && std::env::consts::OS == "linux" {
             assert!(!list.contains(&RuntimeTarget::Cuda));
             assert!(!list.contains(&RuntimeTarget::Rocm));
             assert!(list.contains(&RuntimeTarget::Vulkan));
         }
+    }
+
+    /// Upstream ships both an fp16 and an fp32 SYCL build on x86_64 Linux; the
+    /// fp16 build is the faster default for Gen12+ Intel iGPUs.
+    #[test]
+    fn selects_the_fp16_sycl_asset_on_linux() {
+        let assets = [
+            "llama-b10297-bin-ubuntu-sycl-fp32-x64.tar.gz",
+            "llama-b10297-bin-ubuntu-sycl-fp16-x64.tar.gz",
+        ];
+        assert_eq!(
+            select_release_asset_for_target(
+                assets.iter().copied(),
+                "ubuntu-x64",
+                RuntimeTarget::Sycl
+            ),
+            Some("llama-b10297-bin-ubuntu-sycl-fp16-x64.tar.gz")
+        );
+        // The fp16 build is preferred, not required: an fp32-only release
+        // still resolves.
+        let fp32_only = ["llama-b10297-bin-ubuntu-sycl-fp32-x64.tar.gz"];
+        assert_eq!(
+            select_release_asset_for_target(
+                fp32_only.iter().copied(),
+                "ubuntu-x64",
+                RuntimeTarget::Sycl
+            ),
+            Some("llama-b10297-bin-ubuntu-sycl-fp32-x64.tar.gz")
+        );
+    }
+
+    #[test]
+    fn selects_the_sycl_asset_on_windows() {
+        let assets = [
+            "llama-b10297-bin-win-cpu-x64.zip",
+            "llama-b10297-bin-win-sycl-x64.zip",
+            "llama-b10297-bin-win-vulkan-x64.zip",
+        ];
+        assert_eq!(
+            select_release_asset_for_target(assets.iter().copied(), "win-x64", RuntimeTarget::Sycl),
+            Some("llama-b10297-bin-win-sycl-x64.zip")
+        );
+        // SYCL has no ARM64 or macOS prebuilt upstream.
+        assert_eq!(
+            select_release_asset_for_target(
+                assets.iter().copied(),
+                "macos-arm64",
+                RuntimeTarget::Sycl
+            ),
+            None
+        );
     }
 
     #[test]

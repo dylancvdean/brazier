@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::{builds, llama};
 
 pub const ENGINE: &str = "llama.cpp";
-const MANAGED_FLAVORS: &[&str] = &["cuda", "rocm", "vulkan"];
+const MANAGED_FLAVORS: &[&str] = &["cuda", "rocm", "vulkan", "sycl"];
 const PYTHON_ENGINES: &[&str] = &[
     "mlx-lm",
     "mlx-vlm",
@@ -28,6 +28,7 @@ fn llama_target_label(target: &str) -> &str {
         "cuda" => "CUDA",
         "rocm" => "ROCm",
         "vulkan" => "Vulkan",
+        "sycl" => "SYCL",
         "metal" => "Metal",
         _ => target,
     }

@@ -548,12 +548,18 @@ fn detect_uncached() -> HardwareInfo {
     // Vulkan runs on every one of these GPUs, ROCm does not.
     let rocm_verified = matches!(rocm_support(&gfx_arches), rocm::Support::Covered { .. });
     let rocm_available = amd;
+    // An Intel iGPU with no discrete VRAM gets no benefit from the generic
+    // Vulkan path that every other integrated GPU falls back to: llama.cpp's
+    // oneAPI SYCL build is the tuned backend for Intel GPUs, so prefer it when
+    // one exists.
     let recommended_target = if metal {
         RuntimeTarget::Metal
     } else if nvidia {
         RuntimeTarget::Cuda
     } else if amd && rocm_verified {
         RuntimeTarget::Rocm
+    } else if intel_igpu {
+        RuntimeTarget::Sycl
     } else if vulkan {
         RuntimeTarget::Vulkan
     } else {
@@ -625,6 +631,23 @@ fn detect_uncached() -> HardwareInfo {
             },
         ));
     }
+    // llama.cpp publishes a oneAPI SYCL prebuilt for Intel GPUs on x86_64
+    // Linux and Windows. It is only offered on hosts that report an Intel GPU;
+    // anything else would install a build that cannot reach a device.
+    targets.push(target(
+        RuntimeTarget::Sycl,
+        "Intel SYCL",
+        intel.is_some(),
+        cfg!(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "x86_64")
+        )),
+        if intel.is_some() {
+            "Intel GPU detected — oneAPI SYCL backend for Intel integrated and Arc GPUs"
+        } else {
+            "No Intel GPU detected"
+        },
+    ));
     let system_memory = memory_bytes();
     let gpu_offload_memory = vram.or_else(|| {
         if amd_apu {

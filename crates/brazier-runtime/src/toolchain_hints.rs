@@ -525,6 +525,9 @@ pub fn validate_build_target_for_os(target: RuntimeTarget, os: &OsInfo) -> Optio
             "{} builds are not supported on macOS. Use CPU or Metal.",
             target.as_str().to_ascii_uppercase()
         )),
+        (OsFamily::Macos, RuntimeTarget::Sycl) => {
+            Some("SYCL builds are not supported on macOS. Use CPU or Metal.".into())
+        }
         (OsFamily::Windows, RuntimeTarget::Rocm) => {
             Some("ROCm builds are Linux-only. Use CPU, CUDA, or Vulkan on Windows.".into())
         }
@@ -975,6 +978,8 @@ mod tests {
         };
         let message = validate_build_target_for_os(RuntimeTarget::Cuda, &os).unwrap();
         assert!(message.contains("macOS"));
+        let sycl = validate_build_target_for_os(RuntimeTarget::Sycl, &os).unwrap();
+        assert!(sycl.contains("SYCL"));
     }
 
     #[test]
