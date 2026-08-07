@@ -9,7 +9,7 @@ import {
   type ModelProfile,
   type RuntimeSettings
 } from '../api'
-import { isChatModel, modelDisplayName, modelEngine, modelKindFor } from '../model-utils'
+import { modelEngine, modelKindFor } from '../model-utils'
 import {
   INTEGRATED_GPU_VIDEO_DEFAULTS,
   usesIntegratedGpuVulkanDefaults
@@ -363,27 +363,6 @@ export function InferenceMenu({
                   shows in the UI either way.
                 </small>
               </span>
-            </label>
-            <label className="field-row">
-              <span>Default chat model</span>
-              <select
-                value={draft.default_chat_model ?? ''}
-                onChange={(event) =>
-                  setDraft({
-                    ...draft,
-                    default_chat_model: event.target.value || null
-                  })
-                }
-              >
-                <option value="">None</option>
-                {models
-                  .filter(isChatModel)
-                  .map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {modelDisplayName(model.id, model).title}
-                    </option>
-                  ))}
-              </select>
             </label>
             <button
               className="popover-apply"

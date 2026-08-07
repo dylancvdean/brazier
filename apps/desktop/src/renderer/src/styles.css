@@ -3674,6 +3674,11 @@ a.inline-link {
   background: var(--accent);
 }
 
+a.primary-action,
+a.secondary-action {
+  text-decoration: none;
+}
+
 .runtime-actions button:disabled {
   opacity: 0.5;
   cursor: default;

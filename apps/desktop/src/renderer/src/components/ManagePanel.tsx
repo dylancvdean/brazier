@@ -13,10 +13,12 @@ import {
   Globe,
   Hammer,
   HardDrive,
+  Image,
   KeyRound,
   LayoutDashboard,
   LoaderCircle,
   MessageSquare,
+  Mic,
   Pin,
   Plug,
   RefreshCw,
@@ -139,6 +141,11 @@ import { CapabilityIcons, capabilityFlags, hubCapabilityFlags } from './Capabili
 import {
   engineBadgeClass,
   engineLabel,
+  isChatModel,
+  isImageGenModel,
+  isVideoGenModel,
+  isVoiceModel,
+  modelDisplayName,
   modelEngine,
   modelLibraryKey,
   runtimeNoticeForModel,
@@ -409,14 +416,16 @@ export type ManageSection =
   | 'recommended'
   | 'discover'
   | 'runtimes'
+  | 'chat'
+  | 'agent'
+  | 'computer'
+  | 'generate'
+  | 'voice'
   | 'websearch'
   | 'engine'
   | 'server'
   | 'mcp'
-  | 'agent'
-  | 'computer'
   | 'remote'
-  | 'chat'
   | 'customization'
   | 'support'
 
@@ -452,14 +461,16 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'recommended', label: 'Recommended models', icon: <Sparkles size={15} /> },
   { id: 'discover', label: 'Download models', icon: <Download size={15} /> },
   { id: 'runtimes', label: 'Runtimes', icon: <Cpu size={15} /> },
-  { id: 'websearch', label: 'Web search', icon: <Search size={15} /> },
-  { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
+  { id: 'chat', label: 'Chat', icon: <MessageSquare size={15} /> },
   { id: 'agent', label: 'Agent', icon: <Bot size={15} /> },
   { id: 'computer', label: 'Computer use', icon: <LayoutDashboard size={15} /> },
+  { id: 'generate', label: 'Generate', icon: <Image size={15} /> },
+  { id: 'voice', label: 'Voice', icon: <Mic size={15} /> },
+  { id: 'websearch', label: 'Web search', icon: <Search size={15} /> },
+  { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
   { id: 'remote', label: 'Remote servers', icon: <Globe size={15} /> },
   { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> },
   { id: 'server', label: 'OpenAI server', icon: <KeyRound size={15} /> },
-  { id: 'chat', label: 'Chat', icon: <MessageSquare size={15} /> },
   { id: 'customization', label: 'Customization', icon: <LayoutDashboard size={15} /> },
   { id: 'support', label: 'Support', icon: <ShieldAlert size={15} /> }
 ]
@@ -708,6 +719,8 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
             {props.section === 'computer' && (
               <ComputerUseSection {...props} onError={setError} />
             )}
+            {props.section === 'generate' && <GenerateSection {...props} onError={setError} />}
+            {props.section === 'voice' && <VoiceSection {...props} onError={setError} />}
             {props.section === 'remote' && <RemoteSection {...props} onError={setError} />}
             {props.section === 'engine' && <EngineSection {...props} onError={setError} />}
             {props.section === 'server' && <ServerSection {...props} onError={setError} />}
@@ -865,6 +878,7 @@ function ChatSection(props: SectionProps): React.JSX.Element {
   const [filter, setFilter] = useState('')
   const [loadingMemories, setLoadingMemories] = useState(true)
   const [savingPreference, setSavingPreference] = useState(false)
+  const [savingDefaultModel, setSavingDefaultModel] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editText, setEditText] = useState('')
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -933,6 +947,28 @@ function ChatSection(props: SectionProps): React.JSX.Element {
     await savePreference(patch)
   }
 
+  async function saveDefaultChatModel(modelId: string): Promise<void> {
+    if (!props.settings) return
+    setSavingDefaultModel(true)
+    props.onError(null)
+    try {
+      const saved = await saveRuntimeSettings({
+        ...props.settings,
+        default_chat_model: modelId || null
+      })
+      props.onSettingsSaved(saved)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSavingDefaultModel(false)
+    }
+  }
+
+  const chatModels = useMemo(
+    () => props.models.filter((model) => isChatModel(model)),
+    [props.models]
+  )
+
   async function applyMemoryMutation(
     action: () => Promise<void>
   ): Promise<void> {
@@ -963,6 +999,31 @@ function ChatSection(props: SectionProps): React.JSX.Element {
           often it reflects on what it has learned.
         </p>
       </header>
+
+      <div className="settings-group">
+        <div className="section-label">Default chat model</div>
+        <p className="model-help">
+          Picked when no model is selected. Chat and agent share one model, so
+          this seeds both; the model itself loads on the first message.
+        </p>
+        <div className="settings-grid">
+          <label>
+            <span>Default chat model</span>
+            <select
+              value={props.settings?.default_chat_model ?? ''}
+              disabled={!props.settings || savingDefaultModel}
+              onChange={(event) => void saveDefaultChatModel(event.target.value)}
+            >
+              <option value="">None</option>
+              {chatModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {modelDisplayName(model.id, model).title}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
 
       <div className="settings-group">
         <div className="section-label">Chat memory</div>
@@ -1233,6 +1294,220 @@ function ChatSection(props: SectionProps): React.JSX.Element {
             )}
           </ul>
         )}
+      </div>
+    </section>
+  )
+}
+
+function GenerateSection(props: SectionProps): React.JSX.Element {
+  const [saving, setSaving] = useState(false)
+  const [timeoutDraft, setTimeoutDraft] = useState<string>(
+    String(props.settings?.generation_timeout_secs ?? 0)
+  )
+
+  useEffect(() => {
+    setTimeoutDraft(String(props.settings?.generation_timeout_secs ?? 0))
+  }, [props.settings?.generation_timeout_secs])
+
+  async function saveDefault(
+    modelId: string,
+    key: 'default_image_gen_model' | 'default_video_gen_model'
+  ): Promise<void> {
+    if (!props.settings) return
+    setSaving(true)
+    props.onError(null)
+    try {
+      const saved = await saveRuntimeSettings({ ...props.settings, [key]: modelId || null })
+      props.onSettingsSaved(saved)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function saveTimeout(seconds: number): Promise<void> {
+    if (!props.settings) return
+    setSaving(true)
+    props.onError(null)
+    try {
+      const saved = await saveRuntimeSettings({
+        ...props.settings,
+        generation_timeout_secs: seconds
+      })
+      props.onSettingsSaved(saved)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const imageModels = useMemo(
+    () => props.models.filter((model) => isImageGenModel(model)),
+    [props.models]
+  )
+  const videoModels = useMemo(
+    () => props.models.filter((model) => isVideoGenModel(model)),
+    [props.models]
+  )
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>Generate</h2>
+        <p>
+          The models Image and Video use when the user has not picked one, plus
+          how long a generation job is allowed to run.
+        </p>
+      </header>
+
+      <div className="settings-group">
+        <div className="section-label">Default models</div>
+        <p className="model-help">
+          Picked when no model is selected, and what the chat `generate_image` /
+          `generate_video` tools run with. Choose <em>None</em> to leave the tab empty until a
+          model is picked.
+        </p>
+        <div className="settings-grid">
+          <label>
+            <span>Default image model</span>
+            <select
+              value={props.settings?.default_image_gen_model ?? ''}
+              disabled={!props.settings || saving}
+              onChange={(event) =>
+                void saveDefault(event.target.value, 'default_image_gen_model')
+              }
+            >
+              <option value="">None</option>
+              {imageModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {modelDisplayName(model.id, model).title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Default video model</span>
+            <select
+              value={props.settings?.default_video_gen_model ?? ''}
+              disabled={!props.settings || saving}
+              onChange={(event) =>
+                void saveDefault(event.target.value, 'default_video_gen_model')
+              }
+            >
+              <option value="">None</option>
+              {videoModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {modelDisplayName(model.id, model).title}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div className="settings-group">
+        <div className="section-label">Generation timeout</div>
+        <div className="settings-grid">
+          <label>
+            <span>Generation timeout (seconds)</span>
+            <input
+              type="number"
+              min={0}
+              max={86400}
+              step={60}
+              value={timeoutDraft}
+              disabled={!props.settings || saving}
+              onChange={(event) => setTimeoutDraft(event.target.value)}
+              onBlur={(event) => void saveTimeout(Math.max(0, Number(event.target.value) || 0))}
+            />
+          </label>
+        </div>
+        <p className="model-help">
+          0 lets Brazier work it out from the frames and steps asked for, which suits most
+          machines. Raise it if a slow, CPU-only host is being cut off while still rendering;
+          a running job can always be stopped by hand.
+        </p>
+      </div>
+    </section>
+  )
+}
+
+function VoiceSection(props: SectionProps): React.JSX.Element {
+  const [saving, setSaving] = useState(false)
+  const [personaDraft, setPersonaDraft] = useState(props.settings?.default_voice_persona ?? '')
+
+  useEffect(() => {
+    setPersonaDraft(props.settings?.default_voice_persona ?? '')
+  }, [props.settings?.default_voice_persona])
+
+  async function save(patch: Partial<RuntimeSettings>): Promise<void> {
+    if (!props.settings) return
+    setSaving(true)
+    props.onError(null)
+    try {
+      const saved = await saveRuntimeSettings({ ...props.settings, ...patch })
+      props.onSettingsSaved(saved)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const voiceModels = useMemo(
+    () => props.models.filter((model) => isVoiceModel(model)),
+    [props.models]
+  )
+
+  return (
+    <section>
+      <header className="manage-heading">
+        <h2>Voice</h2>
+        <p>
+          Which PersonaPlex model speaks by default, and how it introduces
+          itself.
+        </p>
+      </header>
+
+      <div className="settings-group">
+        <div className="section-label">Default model &amp; persona</div>
+        <p className="model-help">
+          The model is picked when none is selected, and is also what a voice session starts
+          with when the top bar has nothing chosen.
+        </p>
+        <div className="settings-grid">
+          <label>
+            <span>Default voice model</span>
+            <select
+              value={props.settings?.default_voice_model ?? ''}
+              disabled={!props.settings || saving}
+              onChange={(event) =>
+                void save({ default_voice_model: event.target.value || null })
+              }
+            >
+              <option value="">None</option>
+              {voiceModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {modelDisplayName(model.id, model).title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="span-2">
+            <span>Default voice persona</span>
+            <input
+              value={personaDraft}
+              disabled={!props.settings || saving}
+              placeholder="You are a helpful assistant."
+              onChange={(event) => setPersonaDraft(event.target.value)}
+              onBlur={(event) =>
+                void save({ default_voice_persona: event.target.value.trim() || null })
+              }
+            />
+          </label>
+        </div>
       </div>
     </section>
   )
@@ -1662,6 +1937,25 @@ function SupportSection(props: SectionProps): React.JSX.Element {
         <h2>Support</h2>
         <p>Create a diagnostic archive you can inspect before sharing.</p>
       </header>
+
+      <div className="settings-group">
+        <div className="section-label">File an issue</div>
+        <p className="model-help">
+          Found a bug or want a feature? Open an issue on GitHub and attach the
+          support bundle below when the report is about something going wrong.
+        </p>
+        <div className="runtime-actions">
+          <a
+            className="primary-action support-link"
+            href="https://github.com/dylancvdean/brazier/issues"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <ExternalLink size={15} />
+            Report an issue on GitHub
+          </a>
+        </div>
+      </div>
 
       <div className="settings-group">
         <div className="section-label">Redacted support bundle</div>
