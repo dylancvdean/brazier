@@ -366,14 +366,9 @@ pub struct CreateAgentSession {
     pub confirm_elevated_permissions: bool,
 }
 
-/// Stock agent framework adapters the daemon advertises.
-///
-/// `simple` exposes the standard broker-sandboxed tool set. `powerful` adds the
-/// optional power-tool surface the operator enables in Manage → Agent. `pi` is
-/// kept as a legacy alias so sessions created before modes existed still open.
+/// Stock agent modes the daemon advertises.
 pub const AGENT_RUNTIME_SIMPLE: &str = "simple";
 pub const AGENT_RUNTIME_POWERFUL: &str = "powerful";
-pub const AGENT_RUNTIME_PI: &str = "pi";
 pub const DEFAULT_AGENT_RUNTIME_ID: &str = AGENT_RUNTIME_SIMPLE;
 
 /// Partial session update. Absent fields keep their stored value.

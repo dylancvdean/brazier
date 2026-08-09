@@ -4,8 +4,7 @@
  * Agent modes are selected the way model providers are: by id. `simple` exposes
  * the standard broker-sandboxed tool set; `powerful` adds the operator-enabled
  * power-tool surface. Both run the Pi adapter today — powerful grows its own
- * adapter as its tools land. `pi` is a legacy alias so sessions created before
- * modes existed still open.
+ * adapter as its tools land.
  */
 
 import type { BrokerClient } from './core/brokerClient'
@@ -16,8 +15,7 @@ export type AgentRuntimeFactory = (broker: BrokerClient) => AgentRuntime
 
 const FACTORIES = new Map<string, AgentRuntimeFactory>([
   ['simple', (broker) => new PiAgentRuntime(broker)],
-  ['powerful', (broker) => new PiAgentRuntime(broker)],
-  ['pi', (broker) => new PiAgentRuntime(broker)]
+  ['powerful', (broker) => new PiAgentRuntime(broker)]
 ])
 
 export const DEFAULT_RUNTIME_ID = 'simple'
