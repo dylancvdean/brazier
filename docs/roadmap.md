@@ -1,5 +1,36 @@
 # Roadmap
 
+## Public-beta progress
+
+The beta scope is **7 of 11 tracks complete (64%)**. A track counts as complete
+only when its product path, persistence, failure handling, and release checks
+exist; experiments and aspirational clients do not count. This summary is the
+source of truth for release readiness, while the detailed sections below retain
+implementation notes and follow-on work.
+
+- [x] Local chat, conversation persistence, branching, search, import/export,
+  attachments, cancellation, and OpenAI-compatible APIs.
+- [x] Local engine lifecycle for llama.cpp, MLX, vLLM, and managed/source runtime
+  builds, including activation, diagnostics, and JIT loading.
+- [x] Model discovery, gated downloads, resumable queueing, runtime/model
+  settings, and hardware-aware recommendations.
+- [x] Batch and streaming transcription, native-model audio fallback, realtime
+  PersonaPlex voice, and the shared voice/chat/agent conversation coordinator.
+- [x] Image and video generation through stable-diffusion.cpp, with attachment
+  hydration and a dedicated Generate workspace.
+- [x] Brokered Agent and Computer modes with durable runs, approvals, sandbox
+  boundaries, MCP tools, compaction, and live command output.
+- [x] Beta release and operations: authenticated service mode, named revocable
+  API keys, support bundles, signed/notarized installers, updater feeds,
+  checksums, Sigstore signatures, and SPDX SBOM publication.
+- [ ] Remote-daemon desktop profiles, reconnect/offline behavior, and clear
+  client-host versus daemon-host path semantics.
+- [ ] Remote trust hardening: pairing, scoped per-client credentials, transport
+  guidance, and execution-location-aware approvals.
+- [ ] Windows agent sandboxing and optional WASI/OCI tool runtimes.
+- [ ] Hardware release qualification for voice latency/VAD and packaged agent
+  startup across the supported OS matrix.
+
 ## Implemented foundation
 
 - Rust daemon with authenticated loopback startup and graceful shutdown.
@@ -75,7 +106,7 @@
   between utterances (3.1 s to 0.18 s a turn).
 - **Agent mode** — interactive coding and system agent as a fourth workspace
   mode. Agent frameworks are modular stock runtimes selected by `runtime_id`
-  (default `pi`). Pi (`@earendil-works/pi-*`, MIT) is the broker-sandboxed
+  (default `simple`). Pi (`@earendil-works/pi-*`, MIT) is the broker-sandboxed
   default: orchestration only, with Brazier owning 19 filesystem/shell/workspace
   tools, the policy broker (`ask` / `sandbox-only` / `skip-permissions`),
   argument-hash approvals, Seatbelt/Bubblewrap, and persistence. Adapters live
@@ -216,8 +247,11 @@ what is left is mostly the difference between working and trustworthy.
   list rather than emptying it. Not attempted: probing what a remote can
   actually do — capabilities are advertised as plain text in, text out, since
   the protocol says nothing and claiming vision would fail at the server.
-- Add Linux vLLM (buildable today, not yet servable), engine diagnostics, and
-  hardware-specific compatibility tests.
+- **Linux vLLM is servable.** Managed environments launch its OpenAI server on
+  an application-reserved loopback port, wait for health, pass saved Hugging
+  Face credentials, and expose context, dtype, revision, prefix caching, GPU
+  memory utilization, tensor parallelism, and reviewed extra arguments. Engine
+  diagnostics and broader hardware-specific compatibility tests remain open.
 - Optional mlx-whisper and bundled ffmpeg for stronger offline media prep.
 - Interruption UX polish; Nemotron VoiceChat if open self-host packaging lands.
   (Moshi MLX for Apple Silicon shipped: the `personaplex-mlx` recipe, the
@@ -284,13 +318,16 @@ what is left is mostly the difference between working and trustworthy.
   snapshot. Conversations, attachments, model output, credentials, and logs are
   excluded; secret-shaped fields, URL query strings, and user-home/data-directory
   path prefixes are scrubbed before serialization. **Release delivery is wired:**
-  a version tag builds a draft GitHub Release, with a signed/notarized Apple
+  a version tag builds a GitHub Release, with a signed/notarized Apple
   Silicon macOS distribution and a fixed-name (`Brazier.AppImage`) Linux
-  AppImage; the final job signs every asset and its checksum manifest with
-  Sigstore before publishing. Packaged macOS and AppImage installs check that
-  GitHub Releases feed and offer a restart to install; the AppImage replaces its
-  own stable path in place, while pacman/AUR installations remain package-manager
-  owned. Still open: API-key management (rotation and per-client keys; today
-  there is one key, generated at startup or supplied) and SBOMs.
+  AppImage; the final job signs each distribution, the SBOM, and its checksum
+  manifest with Sigstore before publishing. The release also includes that
+  SPDX JSON SBOM in the checksum set. Packaged macOS and AppImage installs check
+  that GitHub Releases feed and offer a restart to install; the AppImage
+  replaces its own stable path in place, while pacman/AUR installations remain
+  package-manager owned. **Named API-key management is in:** operators can mint independently
+  named keys, see only non-secret metadata after creation, and revoke each key
+  without replacing every client's credential. Scoped permissions and remote
+  pairing remain part of the remote-trust track.
 - Complete public naming review before a stable public release, despite the
   release-ready `com.brazier.desktop` application identifier.

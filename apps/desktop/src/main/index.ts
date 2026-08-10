@@ -14,14 +14,6 @@ import {
   type UpdateCheckResult
 } from './updates'
 
-/**
- * Where Electron kept per-app state before the rename below.
- *
- * `app.setName` moves `userData`, so this is read first: an install that
- * predates the rename still has its models and conversations under the old
- * name, and `migrateLegacyDataDirectory` needs to be able to find them.
- */
-const LEGACY_USER_DATA = app.getPath('userData')
 // Electron may render through XWayland for stability, but the daemon must see
 // the actual login session to choose the correct desktop-control driver. The
 // dev launcher intentionally unsets WAYLAND_DISPLAY, so recover the compositor
@@ -569,19 +561,13 @@ function validApiKeys(value: unknown): StoredApiKey[] {
 
 function loadServerSettings(): StoredServerSettings {
   try {
-    const parsed = JSON.parse(readFileSync(serverSettingsPath(), 'utf8')) as Partial<StoredServerSettings> & { apiKey?: string | null }
+    const parsed = JSON.parse(readFileSync(serverSettingsPath(), 'utf8')) as Partial<StoredServerSettings>
     const port = Number(parsed.port)
-    // Legacy single-key files migrate into the named list so existing OpenAI
-    // clients keep working with the credential they were configured with.
-    let apiKeys = validApiKeys(parsed.apiKeys)
-    if (apiKeys.length === 0 && typeof parsed.apiKey === 'string' && parsed.apiKey.trim()) {
-      apiKeys = [{ id: randomUUID(), name: 'Default', value: parsed.apiKey.trim(), createdAt: Date.now() }]
-    }
     return {
       enabled: parsed.enabled === true,
       port: Number.isInteger(port) && port >= 1 && port <= 65535 ? port : DEFAULT_SERVER_SETTINGS.port,
       apiKeyEnabled: parsed.apiKeyEnabled !== false,
-      apiKeys,
+      apiKeys: validApiKeys(parsed.apiKeys),
       localhostOnly: parsed.localhostOnly === true,
       jitLoading: parsed.jitLoading !== false
     }
@@ -626,15 +612,6 @@ function repositoryRoot(): string {
 }
 
 /**
- * State owned by brazierd rather than by Electron.
- *
- * `userData` holds both, so a migration must move these entries individually.
- * Moving the whole directory would take Chromium's Preferences, Cookies, and
- * caches with it, and Electron is already using them by this point.
- */
-const DAEMON_STATE = ['brazier.sqlite', 'runtime-settings.json', 'models', 'engines', 'downloads']
-
-/**
  * Where brazierd keeps models, engines, downloads, and its database.
  *
  * This mirrors `default_data_dir` in crates/brazierd/src/main.rs so both entry
@@ -659,41 +636,6 @@ function dataDirectory(): string {
   }
   const xdgDataHome = process.env.XDG_DATA_HOME
   return xdgDataHome ? join(xdgDataHome, 'brazier') : join(homedir(), '.local', 'share', 'brazier')
-}
-
-/**
- * Move daemon state out of the pre-XDG location once, so existing installs keep
- * their models and conversations instead of silently starting empty.
- *
- * Same-filesystem renames make this instant even for a multi-gigabyte models
- * directory. Anything that fails to move is left where it is: a partial
- * migration that still launches beats refusing to start.
- */
-function migrateLegacyDataDirectory(target: string): void {
-  const legacy = LEGACY_USER_DATA
-  if (legacy === target) {
-    return
-  }
-  const pending = DAEMON_STATE.filter(
-    (entry) => existsSync(join(legacy, entry)) && !existsSync(join(target, entry))
-  )
-  if (pending.length === 0) {
-    return
-  }
-  try {
-    mkdirSync(target, { recursive: true })
-  } catch (error) {
-    console.error('[brazier] could not create data directory', target, error)
-    return
-  }
-  for (const entry of pending) {
-    try {
-      renameSync(join(legacy, entry), join(target, entry))
-      console.log(`[brazier] migrated ${entry} to ${target}`)
-    } catch (error) {
-      console.error(`[brazier] could not migrate ${entry} from ${legacy}`, error)
-    }
-  }
 }
 
 /**
@@ -739,7 +681,6 @@ process.on('unhandledRejection', (reason) => {
 
 function startDaemon(): Promise<Connection> {
   const directory = dataDirectory()
-  migrateLegacyDataDirectory(directory)
   const installedDaemon = join(__dirname, '../..', process.platform === 'win32' ? 'brazierd.exe' : 'brazierd')
   const useInstalledDaemon = process.env.BRAZIER_INSTALLED === '1' || existsSync(installedDaemon)
   const command = useInstalledDaemon

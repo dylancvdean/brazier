@@ -2522,19 +2522,9 @@ impl Engine for Runtime {
                     return Err(error);
                 }
             };
-            let mut calls = llama::extract_tool_calls(&response);
-            let mut round_reasoning = llama::extract_reasoning(&response);
-            let mut round_text = llama::extract_assistant_text(&response).unwrap_or_default();
-            if tools_active
-                && calls.is_empty()
-                && let Some((call, thought)) = llama::extract_legacy_action(&round_text)
-            {
-                calls.push(call);
-                round_text.clear();
-                if round_reasoning.is_none() {
-                    round_reasoning = thought;
-                }
-            }
+            let calls = llama::extract_tool_calls(&response);
+            let round_reasoning = llama::extract_reasoning(&response);
+            let round_text = llama::extract_assistant_text(&response).unwrap_or_default();
             if !tools_active || calls.is_empty() {
                 return Ok(Generation {
                     text: round_text,
@@ -3029,18 +3019,7 @@ async fn stream_tool_rounds(
             }
             accumulator.absorb(&chunk.tool_calls);
         }
-        let mut calls = accumulator.into_calls();
-        let mut legacy_thought = None;
-        let mut legacy_call = false;
-        if tools_active
-            && calls.is_empty()
-            && let Some((call, thought)) = llama::extract_legacy_action(&round_text)
-        {
-            calls.push(call);
-            legacy_thought = thought;
-            legacy_call = true;
-            round_text.clear();
-        }
+        let calls = accumulator.into_calls();
         if !tools_active || calls.is_empty() {
             if stream_content != Some(true)
                 && !pending_content.is_empty()
@@ -3053,29 +3032,6 @@ async fn stream_tool_rounds(
             }
             send_generation_end(tx, prompt_tokens, completion_tokens, first_token_at).await;
             return Ok(());
-        }
-        if legacy_call {
-            if round_reasoning.is_empty()
-                && let Some(thought) = legacy_thought
-            {
-                round_reasoning = thought.clone();
-                if tx.send(Ok(StreamEvent::Reasoning(thought))).await.is_err() {
-                    return Ok(());
-                }
-            }
-            let call = &calls[0];
-            if tx
-                .send(Ok(StreamEvent::ToolCallDelta(llama::ToolCallFragment {
-                    index: 0,
-                    id: Some(call.id.clone()),
-                    name: Some(call.name.clone()),
-                    arguments: Some(call.arguments.clone()),
-                })))
-                .await
-                .is_err()
-            {
-                return Ok(());
-            }
         }
         let mut invocations = Vec::new();
         let mut transcript = Vec::new();

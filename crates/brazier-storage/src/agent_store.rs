@@ -141,24 +141,6 @@ pub struct NewApproval {
 }
 
 impl Database {
-    /// Convert runtime ids written by agent adapters that are no longer
-    /// shipped. This is intentionally idempotent so old databases repair
-    /// themselves the first time an agent session is read.
-    pub async fn migrate_legacy_agent_runtime_ids(&self) -> anyhow::Result<u64> {
-        let result = sqlx::query(
-            r#"UPDATE agent_sessions
-               SET runtime_id = CASE runtime_id
-                   WHEN 'omp' THEN 'powerful'
-                   WHEN 'pi' THEN 'simple'
-                   ELSE runtime_id
-               END
-               WHERE runtime_id IN ('omp', 'pi')"#,
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected())
-    }
-
     pub async fn remember_agent_workspace(&self, workspace_path: &str) -> anyhow::Result<()> {
         sqlx::query("INSERT OR IGNORE INTO agent_workspaces(workspace_path) VALUES (?)")
             .bind(workspace_path)
@@ -209,7 +191,7 @@ impl Database {
         let runtime_id = request
             .runtime_id
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "pi".to_owned());
+            .unwrap_or_else(|| "simple".to_owned());
         if let Some(workspace) = request.workspace_path.as_deref() {
             self.remember_agent_workspace(workspace).await?;
         }
@@ -239,7 +221,6 @@ impl Database {
     }
 
     pub async fn agent_session(&self, id: &str) -> anyhow::Result<AgentSessionRecord> {
-        self.migrate_legacy_agent_runtime_ids().await?;
         let row = sqlx::query_as::<_, SessionRow>(
             r#"SELECT id, title, workspace_path, model, runtime_id, permission_mode,
                       permission_settings_json, enabled_tools_json, last_run_status,
@@ -254,7 +235,6 @@ impl Database {
     }
 
     pub async fn list_agent_sessions(&self) -> anyhow::Result<Vec<AgentSessionRecord>> {
-        self.migrate_legacy_agent_runtime_ids().await?;
         let rows = sqlx::query_as::<_, SessionRow>(
             r#"SELECT id, title, workspace_path, model, runtime_id, permission_mode,
                       permission_settings_json, enabled_tools_json, last_run_status,
@@ -860,7 +840,7 @@ mod tests {
             title: Some("Test task".to_owned()),
             workspace_path: workspace.map(str::to_owned),
             model: "gguf:test".to_owned(),
-            runtime_id: Some("pi".to_owned()),
+            runtime_id: Some("simple".to_owned()),
             permission_mode: None,
             permission_settings: None,
             enabled_tools: None,
@@ -930,22 +910,6 @@ mod tests {
         // Untouched fields survive a partial update.
         assert_eq!(updated.model, "gguf:test");
         assert_eq!(updated.workspace_path.as_deref(), Some("/ws"));
-    }
-
-    #[tokio::test]
-    async fn removed_runtime_ids_are_migrated_when_sessions_are_read() {
-        let (_dir, db) = database().await;
-        let mut request = session_request(None);
-        request.runtime_id = Some("omp".to_owned());
-
-        let session = db
-            .create_agent_session(request)
-            .await
-            .expect("create session");
-        assert_eq!(session.runtime_id, "powerful");
-
-        let stored = db.agent_session(&session.id).await.expect("read session");
-        assert_eq!(stored.runtime_id, "powerful");
     }
 
     #[tokio::test]
