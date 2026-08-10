@@ -176,10 +176,24 @@ jobs:
       contents: write
       id-token: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           path: release
           merge-multiple: true
+      # Generate one machine-readable inventory for the exact source tree and
+      # packaged artifacts that are about to be published. Keeping it beside
+      # the installers means it is covered by the same checksums and release
+      # signing process rather than disappearing into workflow-only metadata.
+      - name: Generate SPDX software bill of materials
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: release/Brazier.spdx.json
+          upload-artifact: false
       - uses: sigstore/cosign-installer@v3
       - name: Create checksums and Sigstore bundles
         run: |
@@ -187,10 +201,17 @@ jobs:
           mapfile -d '' assets < <(find . -maxdepth 1 -type f -printf '%f\0')
           test "${#assets[@]}" -gt 0
           sha512sum "${assets[@]}" > SHA512SUMS
-          # Updater manifests are checksummed but not independently signed.
-          # Sign only executable installables users may download and run.
-          installables=(Brazier.dmg Brazier-*-arm64-mac.zip Brazier.AppImage)
-          for asset in "${installables[@]}"; do
+          # Updater manifests remain checksum-covered. Independently sign the
+          # executable distributions, dependency inventory, and checksum
+          # manifest users rely on to verify everything else.
+          signed_assets=(
+            Brazier.dmg
+            Brazier-*-arm64-mac.zip
+            Brazier.AppImage
+            Brazier.spdx.json
+            SHA512SUMS
+          )
+          for asset in "${signed_assets[@]}"; do
             cosign sign-blob --yes --bundle "$asset.sigstore.json" "$asset"
           done
       - name: Publish GitHub Release and updater metadata
