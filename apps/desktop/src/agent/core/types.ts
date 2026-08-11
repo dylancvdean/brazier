@@ -19,6 +19,15 @@ export type AgentPermissionSettings = {
   auto_approve_host_actions: boolean
 }
 
+/** Durable snapshot of the daemon host that executes a sensitive action. */
+export type ExecutionLocation = {
+  kind: 'daemon'
+  daemon_instance_id: string
+  daemon_display_name: string
+  platform: string
+  arch: string
+}
+
 export type RequestedPathAccess = {
   path: string
   write?: boolean
@@ -67,10 +76,12 @@ export type AgentApproval = {
   elevation: AgentElevationRequest
   summary: string
   sandbox: SandboxDescription
+  execution_location: ExecutionLocation
   status: ApprovalStatus
   scope?: ApprovalScope
   note?: string
   decided_at?: string
+  decided_by_client_id?: string
   created_at: string
 }
 
@@ -168,6 +179,8 @@ export type ToolExecutionRecord = {
   changed_paths?: string[]
   sandbox?: SandboxDescription
   approval_id?: string
+  execution_location?: ExecutionLocation
+  decided_by_client_id?: string
   error?: string
   duration_ms?: number
   created_at: string

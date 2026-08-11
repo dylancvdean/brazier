@@ -33,9 +33,11 @@ import {
   type ComputerSession,
   type ComputerStep,
   type ComputerTarget,
+  type ExecutionLocation,
   type LocalModel
 } from '../api'
 import { modelDisplayName } from '../model-utils'
+import { useConnectionProfile } from '../connectionProfile'
 import type { AgentComposerControls } from './AgentMode'
 import {
   buildComputerHistory,
@@ -99,6 +101,8 @@ function errorText(cause: unknown): string {
 
 export function ComputerMode(props: Props): React.JSX.Element {
   const { modelId, models, onError, onComposerChange, onSidebarChange } = props
+  const connectionProfile = useConnectionProfile()
+  const [daemonPlatform, setDaemonPlatform] = useState<string | null>(null)
   const modelLabel = useMemo(() => {
     const model = models.find((entry) => entry.id === modelId)
     return modelDisplayName(modelId, model).title
@@ -115,12 +119,23 @@ export function ComputerMode(props: Props): React.JSX.Element {
     approvalId: string
     action: ComputerAction
     message?: string | null
+    executionLocation?: ExecutionLocation | null
   } | null>(null)
   const [pendingUserQuestion, setPendingUserQuestion] = useState<string | null>(null)
   const [resolvingApproval, setResolvingApproval] = useState(false)
   const [liveThought, setLiveThought] = useState('')
   const [maxScreenshotsKept, setMaxScreenshotsKept] = useState(3)
   const abortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    let current = true
+    void window.brazier.getConnection().then((connection) => {
+      if (current) setDaemonPlatform(connection.daemon.daemon?.platform ?? null)
+    }).catch(() => {
+      if (current) setDaemonPlatform(null)
+    })
+    return () => { current = false }
+  }, [connectionProfile.id])
   const sessionRef = useRef<ComputerSession | null>(null)
   sessionRef.current = session
   // Fills the window (or screen) with the browser viewport and the step log
@@ -273,7 +288,12 @@ export function ComputerMode(props: Props): React.JSX.Element {
       const result = await computerExec({ session_id: active.id, action })
       if (result.needs_approval || result.status === 'needs_approval') {
         if (result.approval_id) {
-          setPendingApproval({ approvalId: result.approval_id, action, message: result.message })
+          setPendingApproval({
+            approvalId: result.approval_id,
+            action,
+            message: result.message,
+            executionLocation: result.execution_location
+          })
         }
         return
       }
@@ -516,7 +536,12 @@ export function ComputerMode(props: Props): React.JSX.Element {
             onError(result.message || 'Action needs approval, but no approval id was returned.')
             return
           }
-          setPendingApproval({ approvalId, action, message: result.message })
+          setPendingApproval({
+            approvalId,
+            action,
+            message: result.message,
+            executionLocation: result.execution_location
+          })
           return
         }
         if (continuation.kind === 'waiting_for_user') {
@@ -608,7 +633,11 @@ export function ComputerMode(props: Props): React.JSX.Element {
         }
         safetyActive = true
       }
-      const { result } = await decideComputerApproval(pendingApproval.approvalId, approve)
+      const { result } = await decideComputerApproval(
+        pendingApproval.approvalId,
+        approve,
+        pendingApproval.executionLocation ?? undefined
+      )
       setPendingApproval(null)
       if (result) {
         const shotUrl = computerScreenshotDataUrl(result)
@@ -641,7 +670,14 @@ export function ComputerMode(props: Props): React.JSX.Element {
     }
   }
 
-  const blockedReason = !modelId && !session?.model_id ? 'Choose a computer-use model in the top bar…' : ''
+  const targetUnavailable =
+    (target === 'desktop' && connectionProfile.kind === 'remote')
+      ? `Desktop control must be activated on ${connectionProfile.name}; use Browser for this remote daemon.`
+      : daemonPlatform === 'windows'
+        ? 'Computer Use is unavailable on this Windows daemon; Agent mode remains sandboxed and supported.'
+        : ''
+  const blockedReason = targetUnavailable ||
+    (!modelId && !session?.model_id ? 'Choose a computer-use model in the top bar…' : '')
   const composerPlaceholder =
     blockedReason ||
     (running
@@ -724,7 +760,9 @@ export function ComputerMode(props: Props): React.JSX.Element {
               onChange={(event) => setTarget(event.target.value as ComputerTarget)}
             >
               <option value="browser">Browser</option>
-              <option value="desktop">Desktop</option>
+              <option value="desktop" disabled={connectionProfile.kind === 'remote'}>
+                Desktop{connectionProfile.kind === 'remote' ? ' (daemon-host activation required)' : ''}
+              </option>
             </select>
           </label>
           <label>
@@ -802,6 +840,15 @@ export function ComputerMode(props: Props): React.JSX.Element {
               <div>
                 <strong>Approval needed</strong>
                 <p>{pendingApproval.message || computerActionLabel(pendingApproval.action)}</p>
+                {pendingApproval.executionLocation ? (
+                  <p>
+                    Runs on {pendingApproval.executionLocation.daemon_display_name} ·{' '}
+                    {pendingApproval.executionLocation.platform}/{pendingApproval.executionLocation.arch} · daemon{' '}
+                    <code>{pendingApproval.executionLocation.daemon_instance_id}</code>
+                  </p>
+                ) : (
+                  <p>Daemon host details were not retained for this legacy approval.</p>
+                )}
               </div>
               <div className="computer-approval-actions">
                 <button
@@ -815,7 +862,12 @@ export function ComputerMode(props: Props): React.JSX.Element {
                 <button
                   type="button"
                   className="primary"
-                  disabled={resolvingApproval}
+                  disabled={resolvingApproval || !pendingApproval.executionLocation}
+                  title={
+                    pendingApproval.executionLocation
+                      ? 'Approve this action on the recorded daemon host.'
+                      : 'Legacy approval has no trustworthy execution host and can only be denied.'
+                  }
                   onClick={() => void resolveApproval(true)}
                 >
                   {resolvingApproval ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}
@@ -869,6 +921,16 @@ export function ComputerMode(props: Props): React.JSX.Element {
                   <small className={`computer-step-status status-${step.result.status}`}>
                     {step.result.status}
                     {step.result.message ? ` · ${step.result.message}` : ''}
+                  </small>
+                ) : null}
+                {step.result?.execution_location ? (
+                  <small className="computer-step-location">
+                    Ran on {step.result.execution_location.daemon_display_name} ·{' '}
+                    {step.result.execution_location.platform}/{step.result.execution_location.arch} · daemon{' '}
+                    <code>{step.result.execution_location.daemon_instance_id}</code>
+                    {step.result.decided_by_client_id
+                      ? ` · approved by ${step.result.decided_by_client_id}`
+                      : ''}
                   </small>
                 ) : null}
               </article>

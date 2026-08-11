@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::execution_location::ExecutionLocation;
+
 /// Fara predicts pointer positions in this square model-display space rather
 /// than in framebuffer pixels.
 pub const FARA_DISPLAY_SIZE: f64 = 1000.0;
@@ -319,6 +321,12 @@ pub struct ComputerActionResult {
     pub needs_approval: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_id: Option<String>,
+    /// Exact daemon host that produced this result or is awaiting approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_location: Option<ExecutionLocation>,
+    /// Paired-client id, or the `owner` sentinel for a bootstrap owner key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by_client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

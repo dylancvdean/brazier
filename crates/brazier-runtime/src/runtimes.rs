@@ -1043,6 +1043,7 @@ mod tests {
     /// Two virtualenvs whose `bin/python` symlinks resolve to the same base
     /// interpreter — which is what uv produces for every build — are two
     /// runtimes. Resolving the symlink reported all of them as active at once.
+    #[cfg(unix)]
     #[test]
     fn separate_virtualenvs_are_separate_runtimes() {
         let dir = tempdir().unwrap();

@@ -39,15 +39,26 @@ struct Args {
     /// A single key is still the common case.
     #[arg(long, env = "BRAZIER_API_KEY")]
     api_key: Vec<String>,
+    /// Read newline-delimited owner credentials from stdin. Desktop uses this
+    /// protected pipe so full-power keys never appear in process arguments.
+    #[arg(long, conflicts_with_all = ["api_key", "no_auth"])]
+    api_keys_stdin: bool,
     /// Whether API requests may load a non-resident local model on demand.
     #[arg(long)]
     jit_loading: Option<bool>,
-    #[arg(long, conflicts_with = "api_key")]
+    #[arg(long, conflicts_with_all = ["api_key", "api_keys_stdin"])]
     no_auth: bool,
-    #[arg(long, requires = "no_auth")]
+    /// Explicitly acknowledge that a non-loopback listener serves plaintext
+    /// HTTP. Prefer a loopback listener behind TLS or an encrypted private
+    /// network. Authentication does not encrypt bearer credentials.
+    #[arg(long)]
     allow_insecure_remote: bool,
     #[arg(long, env = "BRAZIER_DATA_DIR")]
     data_dir: Option<PathBuf>,
+    /// Human-readable name shown to paired clients and in remote execution
+    /// context. The stable instance UUID remains tied to the data directory.
+    #[arg(long, env = "BRAZIER_DAEMON_NAME")]
+    daemon_name: Option<String>,
     /// Extra browser origin allowed to call the API. Repeatable, or
     /// comma-separated in `BRAZIER_ALLOWED_ORIGINS`. The packaged UI and the dev
     /// server are always allowed; a wildcard is not accepted.
@@ -76,8 +87,53 @@ fn default_data_dir() -> PathBuf {
     PathBuf::from(".brazier")
 }
 
+fn validate_remote_transport(args: &Args) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.host.is_loopback() || args.allow_insecure_remote,
+        "a non-loopback listener uses plaintext HTTP and requires --allow-insecure-remote; prefer loopback behind TLS or an encrypted private network"
+    );
+    Ok(())
+}
+
+fn resolve_api_keys(args: &Args, data_dir: &std::path::Path) -> anyhow::Result<Vec<String>> {
+    if args.no_auth {
+        return Ok(Vec::new());
+    }
+    if args.api_keys_stdin {
+        use std::io::Read as _;
+        let mut contents = String::new();
+        std::io::stdin().read_to_string(&mut contents)?;
+        return parse_stdin_api_keys(&contents);
+    }
+    if args.service && args.api_key.is_empty() {
+        // With no deployment-supplied owner credentials, service mode keeps
+        // one durable bootstrap key tied to this data directory.
+        return Ok(vec![brazierd::service::service_api_key(data_dir, None)?]);
+    }
+    let mut keys = args.api_key.clone();
+    if keys.is_empty() {
+        keys.push(format!("brazier_{}", Uuid::new_v4().simple()));
+    }
+    Ok(keys)
+}
+
+fn parse_stdin_api_keys(contents: &str) -> anyhow::Result<Vec<String>> {
+    let keys: Vec<_> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
+    anyhow::ensure!(!keys.is_empty(), "--api-keys-stdin received no credentials");
+    Ok(keys)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    if let Some(code) = brazier_agent::agent_sandbox::maybe_run_windows_helper() {
+        std::process::exit(code);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("brazierd=info")),
@@ -85,10 +141,7 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
-    anyhow::ensure!(
-        args.host.is_loopback() || !args.no_auth,
-        "keyless access (--no-auth) is not permitted on a non-loopback interface; bind to loopback or supply an API key"
-    );
+    validate_remote_transport(&args)?;
 
     // Parsed before anything is opened: a typo in an origin should fail at the
     // command line, not after a database and a model cache are warm.
@@ -100,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let data_dir = args.data_dir.unwrap_or_else(default_data_dir);
+    let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
     tokio::fs::create_dir_all(&data_dir)
         .await
         .context("create data directory")?;
@@ -108,6 +161,12 @@ async fn main() -> anyhow::Result<()> {
     // on GitHub just to show what is installed.
     brazierd::github_releases::set_cache_dir(data_dir.join("state"));
     let db = Database::open(&data_dir.join("brazier.sqlite")).await?;
+    let identity = db.daemon_identity(args.daemon_name.as_deref()).await?;
+    tracing::info!(
+        instance_id = %identity.instance_id,
+        display_name = %identity.display_name,
+        "loaded daemon identity"
+    );
     if let Some(jit_loading) = args.jit_loading {
         let mut settings = brazierd::runtime_settings::load(&data_dir);
         settings.jit_loading = jit_loading;
@@ -117,22 +176,7 @@ async fn main() -> anyhow::Result<()> {
     // that were mid-flight as paused so they can be resumed rather than
     // appearing to still be running.
     db.interrupt_running_download_jobs().await?;
-    let api_keys = if args.no_auth {
-        Vec::new()
-    } else if args.service {
-        // Service mode keeps a single durable credential keyed to the data
-        // directory; an explicitly supplied key remains its source of truth.
-        vec![brazierd::service::service_api_key(
-            &data_dir,
-            args.api_key.first().cloned(),
-        )?]
-    } else {
-        let mut keys = args.api_key.clone();
-        if keys.is_empty() {
-            keys.push(format!("brazier_{}", Uuid::new_v4().simple()));
-        }
-        keys
-    };
+    let api_keys = resolve_api_keys(&args, &data_dir)?;
     let http = reqwest::Client::builder()
         .user_agent(format!("brazier/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
@@ -145,9 +189,11 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&active_downloads),
         Arc::clone(&runtime),
     );
-    let computer_broker =
-        brazierd::computer_exec::ComputerBroker::open(data_dir.join("computer_sessions.json"))
-            .await?;
+    let computer_broker = brazierd::computer_exec::ComputerBroker::open_at(
+        data_dir.join("computer_sessions.json"),
+        identity.execution_location(),
+    )
+    .await?;
     let computer_preference = db
         .application_preference(brazierd::api::COMPUTER_PREFERENCE_KEY)
         .await?;
@@ -286,6 +332,67 @@ mod tests {
         assert_eq!(
             service.ready_file.unwrap(),
             PathBuf::from("/tmp/ready.json")
+        );
+    }
+
+    #[test]
+    fn non_loopback_plaintext_requires_explicit_opt_in_even_with_auth() {
+        let authenticated =
+            Args::try_parse_from(["brazierd", "--host", "0.0.0.0", "--api-key", "secret"]).unwrap();
+        assert!(validate_remote_transport(&authenticated).is_err());
+
+        let acknowledged = Args::try_parse_from([
+            "brazierd",
+            "--host",
+            "0.0.0.0",
+            "--api-key",
+            "secret",
+            "--allow-insecure-remote",
+        ])
+        .unwrap();
+        assert!(validate_remote_transport(&acknowledged).is_ok());
+    }
+
+    #[test]
+    fn loopback_plaintext_remains_the_safe_default() {
+        let args = Args::try_parse_from(["brazierd"]).unwrap();
+        assert!(validate_remote_transport(&args).is_ok());
+    }
+
+    #[test]
+    fn service_preserves_every_explicit_owner_key() {
+        let args = Args::try_parse_from([
+            "brazierd",
+            "--service",
+            "--api-key",
+            "owner-one",
+            "--api-key",
+            "owner-two",
+        ])
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_api_keys(&args, dir.path()).unwrap(),
+            vec!["owner-one", "owner-two"]
+        );
+        assert!(!brazierd::service::api_key_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn stdin_owner_keys_are_trimmed_and_never_mixed_with_argv_keys() {
+        assert_eq!(
+            parse_stdin_api_keys(" owner-one \n\nowner-two\r\n").unwrap(),
+            vec!["owner-one", "owner-two"]
+        );
+        assert!(parse_stdin_api_keys(" \n").is_err());
+        assert!(
+            Args::try_parse_from([
+                "brazierd",
+                "--api-keys-stdin",
+                "--api-key",
+                "visible-secret"
+            ])
+            .is_err()
         );
     }
 }

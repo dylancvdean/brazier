@@ -7,7 +7,9 @@ pub use brazier_agent::{
     computer_desktop, computer_exec, computer_fara, computer_policy,
 };
 pub use brazier_formats::{gguf_meta, wav};
-pub use brazier_protocol::{agent_types, computer_types, message_format, progress, types};
+pub use brazier_protocol::{
+    agent_types, computer_types, execution_location, message_format, progress, types,
+};
 pub use brazier_runtime::{
     active_downloads, adapters, build_recipe, builds, download, download_queue, engine, fork_hints,
     github_releases, hardware, harmony, hf, hf_access, hf_auth, js_sandbox, llama, mcp, media, mlx,
@@ -15,7 +17,7 @@ pub use brazier_runtime::{
     runtime_settings, runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry,
     toolchain_hints, tools, voice, whisper, whisperkit,
 };
-pub use brazier_storage::{agent_store, blob_store, db, license_store};
+pub use brazier_storage::{agent_store, blob_store, client_auth, db, license_store};
 
 use std::{path::PathBuf, sync::Arc};
 

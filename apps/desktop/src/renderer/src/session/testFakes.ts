@@ -17,6 +17,7 @@ import type {
   VoiceAdapterEvent,
   VoiceSessionHandle
 } from './adapters'
+import type { ExecutionLocation } from '../../../agent/core/types'
 import type {
   ConversationMessage,
   MessagePatch,
@@ -123,6 +124,7 @@ export class FakeAgent implements AgentAdapter {
   async decideApproval(
     approvalId: string,
     decision: 'approve' | 'deny',
+    _expectedExecutionLocation: ExecutionLocation,
     note?: string
   ): Promise<void> {
     if (this.failDecision) {

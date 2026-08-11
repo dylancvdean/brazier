@@ -14,6 +14,8 @@ import ortWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url'
 
 const VAD_SAMPLE_RATE = 16_000
 const VAD_WINDOW_SAMPLES = 512
+/** Fall back instead of letting a slower-than-realtime detector lag forever. */
+const MAX_QUEUED_VAD_MS = 2_000
 
 export type VadFrame = {
   samples: Float32Array
@@ -24,6 +26,16 @@ export type VadFrame = {
 export type VadModel = {
   process(samples: Float32Array): Promise<number>
   release(): Promise<void>
+}
+
+export type VadDiagnostics = {
+  processedWindows: number
+  currentQueueLagMs: number
+  maxQueueLagMs: number
+  lastInferenceMs: number
+  averageInferenceMs: number
+  p95InferenceMs: number
+  p95QueueLagMs: number
 }
 
 /**
@@ -116,6 +128,12 @@ export class StreamingSileroVad {
   private drainPromise: Promise<void> | null = null
   private released = false
   private modelReleased = false
+  private processedWindows = 0
+  private totalInferenceMs = 0
+  private lastInferenceMs = 0
+  private maxQueueLagMs = 0
+  private inferenceTimesMs: number[] = []
+  private queueLagsMs: number[] = []
 
   constructor(
     private readonly model: VadModel,
@@ -126,6 +144,16 @@ export class StreamingSileroVad {
   push(samples: Float32Array, sampleRate: number): void {
     if (this.released) return
     const resampled = resampleFrame(samples, sampleRate, VAD_SAMPLE_RATE)
+    const nextQueueLagMs = ((this.samples.length + resampled.length) / VAD_SAMPLE_RATE) * 1_000
+    this.maxQueueLagMs = Math.max(this.maxQueueLagMs, nextQueueLagMs)
+    this.queueLagsMs.push(nextQueueLagMs)
+    if (this.queueLagsMs.length > 20_000) this.queueLagsMs.splice(0, 10_000)
+    if (nextQueueLagMs > MAX_QUEUED_VAD_MS) {
+      void this.fail(
+        `Silero VAD fell ${Math.round(nextQueueLagMs)} ms behind realtime; using energy fallback.`
+      )
+      return
+    }
     this.samples = append(this.samples, resampled)
     this.frames.push({
       samples: samples.slice(),
@@ -154,19 +182,42 @@ export class StreamingSileroVad {
       while (!this.released && this.samples.length >= VAD_WINDOW_SAMPLES) {
         const window = this.samples.slice(0, VAD_WINDOW_SAMPLES)
         this.samples = this.samples.slice(VAD_WINDOW_SAMPLES)
+        const startedAt = performance.now()
         const probability = await this.model.process(window)
+        this.lastInferenceMs = performance.now() - startedAt
+        this.totalInferenceMs += this.lastInferenceMs
+        this.inferenceTimesMs.push(this.lastInferenceMs)
+        if (this.inferenceTimesMs.length > 20_000) this.inferenceTimesMs.splice(0, 10_000)
+        this.processedWindows += 1
+        if (this.released) return
         this.distribute(probability, VAD_WINDOW_SAMPLES)
       }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
-      this.onError?.(message)
-      // A broken model must not leave captured frames waiting forever. Mark the
-      // stream released; the adapter switches subsequent frames to RMS fallback.
-      this.released = true
-      this.frames = []
-      this.samples = new Float32Array(0)
-      await this.releaseModel().catch(() => undefined)
+      await this.fail(message)
     }
+  }
+
+  diagnostics(): VadDiagnostics {
+    return {
+      processedWindows: this.processedWindows,
+      currentQueueLagMs: (this.samples.length / VAD_SAMPLE_RATE) * 1_000,
+      maxQueueLagMs: this.maxQueueLagMs,
+      lastInferenceMs: this.lastInferenceMs,
+      averageInferenceMs:
+        this.processedWindows === 0 ? 0 : this.totalInferenceMs / this.processedWindows,
+      p95InferenceMs: percentile(this.inferenceTimesMs, 0.95),
+      p95QueueLagMs: percentile(this.queueLagsMs, 0.95)
+    }
+  }
+
+  private async fail(message: string): Promise<void> {
+    if (this.released) return
+    this.released = true
+    this.frames = []
+    this.samples = new Float32Array(0)
+    this.onError?.(message)
+    await this.releaseModel().catch(() => undefined)
   }
 
   private distribute(probability: number, count: number): void {
@@ -201,6 +252,12 @@ export class StreamingSileroVad {
     this.modelReleased = true
     await this.model.release()
   }
+}
+
+function percentile(values: number[], fraction: number): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((left, right) => left - right)
+  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)]
 }
 
 /** Linear resampling is sufficient for a binary speech detector and is cheap. */

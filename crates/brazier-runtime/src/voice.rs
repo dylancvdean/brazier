@@ -664,6 +664,15 @@ async fn wait_until_listening(
 #[derive(Clone)]
 pub struct VoiceSession {
     pub id: String,
+    /// Authenticated daemon client that created this session. The HTTP layer
+    /// uses this binding to keep another inference client from acquiring the
+    /// stream capability or terminating the session.
+    owner_client_id: String,
+    /// Per-session capability used only for the daemon's browser WebSocket
+    /// proxy. Browser WebSocket clients cannot attach the daemon Authorization
+    /// header, so this high-entropy ticket grants access to this one live voice
+    /// stream and disappears with the in-memory session.
+    ws_ticket: String,
     /// System-prompt-like description of the persona/character to speak as.
     pub persona_text: String,
     /// Optional reference audio clip used to condition the voice.
@@ -673,6 +682,11 @@ pub struct VoiceSession {
 }
 
 impl VoiceSession {
+    /// Stable authenticated client identity that owns this live session.
+    pub fn owner_client_id(&self) -> &str {
+        &self.owner_client_id
+    }
+
     /// Base HTTP URL of the backing server (`http://127.0.0.1:{port}`).
     pub async fn base_url(&self) -> String {
         self.server.lock().await.base_url.clone()
@@ -682,11 +696,41 @@ impl VoiceSession {
     pub async fn proxy_url(&self) -> String {
         self.server.lock().await.proxy_url()
     }
+
+    /// Validate the browser proxy ticket without an early-exit comparison.
+    pub fn accepts_ws_ticket(&self, supplied: &str) -> bool {
+        valid_voice_ws_ticket(&self.ws_ticket, supplied)
+    }
+
+    /// Ticket included in the authenticated create/list response. It is never
+    /// persisted and cannot authorize any HTTP or non-voice operation.
+    pub fn ws_ticket(&self) -> &str {
+        &self.ws_ticket
+    }
+}
+
+fn valid_voice_ws_ticket(expected: &str, supplied: &str) -> bool {
+    use subtle::ConstantTimeEq as _;
+
+    expected.len() == supplied.len() && bool::from(expected.as_bytes().ct_eq(supplied.as_bytes()))
 }
 
 /// Tracks at most one active realtime voice session (v1 limitation).
 pub struct SessionManager {
     session: Mutex<Option<VoiceSession>>,
+}
+
+/// Inputs needed to start a realtime voice session. Keeping the authenticated
+/// owner beside the launch options makes the session boundary harder to call
+/// without recording who owns its stream capability.
+pub struct VoiceSessionRequest<'a> {
+    pub owner_client_id: String,
+    pub python: &'a Path,
+    pub model_path: Option<&'a Path>,
+    pub persona_text: String,
+    pub voice_prompt: Option<PathBuf>,
+    pub hf_token: Option<String>,
+    pub profile: Option<&'a crate::model_settings::VoiceProfile>,
 }
 
 impl SessionManager {
@@ -700,12 +744,7 @@ impl SessionManager {
     /// already active — end it first.
     pub async fn create_session(
         &self,
-        python: &Path,
-        model_path: Option<&Path>,
-        persona_text: String,
-        voice_prompt: Option<PathBuf>,
-        hf_token: Option<String>,
-        profile: Option<&crate::model_settings::VoiceProfile>,
+        request: VoiceSessionRequest<'_>,
     ) -> anyhow::Result<VoiceSession> {
         let mut guard = self.session.lock().await;
         anyhow::ensure!(
@@ -713,23 +752,25 @@ impl SessionManager {
             "a realtime voice session is already active; end it before starting another"
         );
         let server = VoiceServer::start(
-            python,
-            model_path,
+            request.python,
+            request.model_path,
             VoiceLaunchOptions {
-                persona_text: Some(persona_text.clone()),
-                voice_prompt: voice_prompt.clone(),
+                persona_text: Some(request.persona_text.clone()),
+                voice_prompt: request.voice_prompt.clone(),
                 voice_id: None,
-                hf_token,
+                hf_token: request.hf_token,
                 quantization: None,
                 extra_args: Vec::new(),
             }
-            .with_profile(profile),
+            .with_profile(request.profile),
         )
         .await?;
         let session = VoiceSession {
             id: Uuid::new_v4().to_string(),
-            persona_text,
-            voice_prompt,
+            owner_client_id: request.owner_client_id,
+            ws_ticket: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+            persona_text: request.persona_text,
+            voice_prompt: request.voice_prompt,
             server: Arc::new(Mutex::new(server)),
         };
         *guard = Some(session.clone());
@@ -918,6 +959,14 @@ mod tests {
     #[test]
     fn builds_moshi_proxy_ws_url() {
         assert_eq!(proxy_ws_url(8998), "ws://127.0.0.1:8998/api/chat");
+    }
+
+    #[test]
+    fn voice_ws_tickets_require_the_exact_secret() {
+        let ticket = "a".repeat(64);
+        assert!(valid_voice_ws_ticket(&ticket, &ticket));
+        assert!(!valid_voice_ws_ticket(&ticket, &"b".repeat(64)));
+        assert!(!valid_voice_ws_ticket(&ticket, &ticket[..63]));
     }
 
     #[test]

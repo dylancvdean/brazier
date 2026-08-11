@@ -39,6 +39,7 @@ import {
 } from '../api'
 import { modelEngine, modelKindFor } from '../model-utils'
 import { ModelSettingsFields, emptyProfile } from './ModelSettingsFields'
+import { daemonPathLabel, useConnectionProfile } from '../connectionProfile'
 import {
   createAgentSession,
   fetchAgentCapabilities,
@@ -226,6 +227,7 @@ function AdvancedModelPanel(props: {
 }
 
 export function VoiceSessionConfig(props: Props): React.JSX.Element {
+  const connectionProfile = useConnectionProfile()
   const { onError } = props
   const [runtimes, setRuntimes] = useState<RuntimeEntry[]>([])
   const [sandbox, setSandbox] = useState<AgentSandboxCapabilities | null>(null)
@@ -342,7 +344,12 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
    * that refuses its first sentence for want of a session.
    */
   async function chooseWorkspace(): Promise<void> {
-    const selected = await window.brazier.selectWorkspace()
+    const selected = connectionProfile.kind === 'remote'
+      ? window.prompt(
+          `Workspace path on ${connectionProfile.name} (${connectionProfile.hostLabel})`,
+          workspace ?? ''
+        )?.trim() ?? null
+      : await window.brazier.selectWorkspace()
     if (!selected) return
     if (agentSession) {
       const updated = await updateAgentSession(agentSession.id, { workspace_path: selected })
@@ -611,11 +618,16 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
             </p>
           )}
 
-          <button type="button" className="voice-workspace" onClick={() => void guard(chooseWorkspace)}>
+          <button
+            type="button"
+            className="voice-workspace"
+            title={connectionProfile.kind === 'remote' ? `Enter ${daemonPathLabel(connectionProfile).toLowerCase()}` : 'Choose a workspace folder'}
+            onClick={() => void guard(chooseWorkspace)}
+          >
             <FolderOpen size={15} />
             <span>
               <strong>{shortPath(workspace)}</strong>
-              <small>Workspace — the agent reads, edits, and runs commands here</small>
+              <small>{daemonPathLabel(connectionProfile)} — the agent reads, edits, and runs commands here</small>
             </span>
           </button>
 

@@ -244,6 +244,16 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
         environment = AgentEnvironment::Host;
     }
 
+    // If process isolation vanished (or its startup probe failed), a requested
+    // sandbox command is host execution. Route Ask/Skip through the normal host
+    // approval contract; SandboxOnly refuses it below. The executor itself
+    // also fails closed, so a stale sandbox approval cannot bypass this check.
+    let unsandboxed_execution =
+        spec.executes && environment == AgentEnvironment::Sandbox && !request.backend.isolated();
+    if unsandboxed_execution {
+        environment = AgentEnvironment::Host;
+    }
+
     let profile = if environment == AgentEnvironment::Host {
         SandboxProfile::Workspace
     } else if wants_network {
@@ -253,11 +263,6 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
     } else {
         SandboxProfile::Workspace
     };
-
-    // An unsandboxed host cannot honestly offer sandboxed execution. Running a
-    // program then has host reach, so it is judged as host execution.
-    let unsandboxed_execution =
-        spec.executes && environment == AgentEnvironment::Sandbox && !request.backend.isolated();
 
     let scope_key = scope_key(request.tool, spec, request.arguments, &paths, wants_network);
     let summary = summarize(
@@ -1257,6 +1262,45 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_process_sandbox_routes_ask_to_host_and_denies_sandbox_only() {
+        let backend = SandboxBackend::unavailable("probe failed");
+        let arguments = json!({ "command": "echo hi" });
+        let mut request = base(
+            "shell_run",
+            &arguments,
+            Path::new("/ws"),
+            &backend,
+            Path::new("/data"),
+            &[],
+        );
+        match decide(&request) {
+            PolicyDecision::RequireApproval {
+                environment,
+                elevation,
+                allow_session_scope,
+                ..
+            } => {
+                assert_eq!(environment, AgentEnvironment::Host);
+                assert!(elevation.requested_host_execution);
+                assert!(!allow_session_scope);
+            }
+            other => panic!("expected host approval, got {other:?}"),
+        }
+
+        request.permission_mode = AgentPermissionMode::SandboxOnly;
+        assert!(matches!(decide(&request), PolicyDecision::Deny { .. }));
+
+        request.permission_mode = AgentPermissionMode::SkipPermissions;
+        request.permission_settings.auto_approve_host_actions = true;
+        match decide(&request) {
+            PolicyDecision::Allow { environment, .. } => {
+                assert_eq!(environment, AgentEnvironment::Host)
+            }
+            other => panic!("expected approved host execution, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn skip_permissions_needs_the_host_flag_for_host_work() {
         let backend = backend();
         let arguments = json!({ "path": "/etc/hosts" });
@@ -1330,12 +1374,20 @@ mod tests {
         );
         match decide(&request) {
             PolicyDecision::RequireApproval {
+                environment,
                 profile,
                 elevation,
                 scope_key,
                 ..
             } => {
-                assert_eq!(profile, SandboxProfile::WorkspaceNetwork);
+                if backend.isolated() {
+                    assert_eq!(environment, AgentEnvironment::Sandbox);
+                    assert_eq!(profile, SandboxProfile::WorkspaceNetwork);
+                } else {
+                    assert_eq!(environment, AgentEnvironment::Host);
+                    assert_eq!(profile, SandboxProfile::Workspace);
+                    assert!(elevation.requested_host_execution);
+                }
                 assert!(elevation.requested_network_access);
                 assert_eq!(scope_key, "run:curl:https://example.com+network");
             }

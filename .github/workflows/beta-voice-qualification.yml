@@ -1,0 +1,49 @@
+name: Beta voice qualification evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full commit SHA from both hardware reports
+        required: true
+        type: string
+      macos_result:
+        description: Compact JSON saved on the Apple-Silicon qualification host
+        required: true
+        type: string
+      linux_result:
+        description: Compact JSON saved on the Linux/NVIDIA qualification host
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Require a full immutable commit id
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.commit }}"
+      - name: Materialize and validate hardware reports
+        env:
+          BRAZIER_MACOS_VOICE_RESULT: ${{ inputs.macos_result }}
+          BRAZIER_LINUX_VOICE_RESULT: ${{ inputs.linux_result }}
+        run: |
+          node scripts/materialize-voice-qualification.mjs --output qualification-results
+          node scripts/verify-beta-qualification.mjs \
+            --results qualification-results \
+            --commit "${{ inputs.commit }}" \
+            --only voice
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-qualification-${{ inputs.commit }}
+          path: qualification-results/*.json
+          if-no-files-found: error
+          retention-days: 30

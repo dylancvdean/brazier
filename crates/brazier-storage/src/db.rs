@@ -838,6 +838,125 @@ impl Database {
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
+            version = 12;
+        }
+
+        if version < 13 {
+            // Remote clients authenticate with independently revocable,
+            // scope-bearing credentials. Only a SHA-256 digest of the
+            // high-entropy bearer is retained. Pairing codes are similarly
+            // hashed and are bounded by both time and failed attempts.
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS api_clients (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    scopes_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_used_at TEXT,
+                    revoked_at TEXT
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS api_clients_active_token
+                 ON api_clients(token_hash) WHERE revoked_at IS NULL",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS api_pairing_requests (
+                    id TEXT PRIMARY KEY,
+                    client_name TEXT NOT NULL,
+                    code_hash TEXT NOT NULL,
+                    scopes_json TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    max_attempts INTEGER NOT NULL,
+                    consumed_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS api_pairing_requests_expiry
+                 ON api_pairing_requests(expires_at)",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE IF NOT EXISTS daemon_identity (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                    instance_id TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (13)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            version = 13;
+        }
+
+        if version < 14 {
+            // Approval prompts and their decisions retain the daemon identity
+            // they referred to, even after reconnects or display-name changes.
+            // The actor is a paired-client id or the owner sentinel.
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("ALTER TABLE agent_approvals ADD COLUMN execution_location_json TEXT")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("ALTER TABLE agent_approvals ADD COLUMN decided_by_client_id TEXT")
+                .execute(&mut *tx)
+                .await?;
+
+            let instance_id = Uuid::new_v4().to_string();
+            sqlx::query(
+                r#"INSERT OR IGNORE INTO daemon_identity(singleton, instance_id, display_name)
+                   VALUES(1, ?, 'Brazier daemon')"#,
+            )
+            .bind(&instance_id)
+            .execute(&mut *tx)
+            .await?;
+            // Older rows never captured a daemon identity. Never relabel them
+            // with today's host: expire anything still actionable and retain
+            // an explicit unknown snapshot for historical display only.
+            sqlx::query(
+                "UPDATE agent_approvals SET status = 'expired' \
+                 WHERE execution_location_json IS NULL AND status = 'pending'",
+            )
+            .execute(&mut *tx)
+            .await?;
+            let location = serde_json::json!({
+                "kind": "daemon",
+                "daemon_instance_id": "legacy-unknown",
+                "daemon_display_name": "Unknown legacy daemon",
+                "platform": "unknown",
+                "arch": "unknown"
+            });
+            sqlx::query(
+                "UPDATE agent_approvals SET execution_location_json = ? \
+                 WHERE execution_location_json IS NULL",
+            )
+            .bind(serde_json::to_string(&location)?)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (14)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
 
         Ok(())
@@ -1851,6 +1970,15 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query(
+            "CREATE TABLE agent_approvals (\
+                 id TEXT PRIMARY KEY, \
+                 status TEXT NOT NULL DEFAULT 'pending'\
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         pool.close().await;
 
         let db = Database::open(&path).await.unwrap();

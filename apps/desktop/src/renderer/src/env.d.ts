@@ -6,19 +6,114 @@ declare module '*?url' {
   export default url
 }
 
+type BrazierConnectionProfile =
+  | {
+      id: 'local'
+      name: 'Local'
+      kind: 'local'
+      baseUrl: null
+      hostLabel: string
+      hasApiKey: false
+    }
+  | {
+      id: string
+      name: string
+      kind: 'remote'
+      baseUrl: string
+      hostLabel: string
+      hasApiKey: boolean
+    }
+
+type BrazierConnectionProfileSummary = {
+  id: string
+  name: string
+  kind: 'local' | 'remote'
+  baseUrl: string | null
+  hostLabel: string
+}
+
+type BrazierDaemonInfo = {
+  product: 'brazier'
+  version: string
+  management_api: { major: number; minor: number }
+  openai_api?: { chat_completions?: string; responses?: string }
+  daemon?: {
+    instance_id: string
+    display_name: string
+    platform: string
+    architecture: string
+  }
+  client?: {
+    id: string
+    name: string
+    scopes: Array<'inference' | 'management' | 'agent'>
+    owner: boolean
+  }
+}
+
+type BrazierConnection = {
+  address: string
+  profile: BrazierConnectionProfileSummary
+  daemon: BrazierDaemonInfo
+}
+
 declare global {
   interface Window {
     brazier: {
       getConnection(): Promise<{
         address: string
-        api_key: string | null
+        profile: BrazierConnectionProfileSummary
+        daemon: BrazierDaemonInfo
       }>
+      listConnectionProfiles(): Promise<BrazierConnectionProfile[]>
+      getCurrentConnectionProfile(): Promise<BrazierConnectionProfileSummary>
+      upsertConnectionProfile(profile: {
+        id?: string
+        name: string
+        kind?: 'remote'
+        baseUrl: string
+        apiKey?: string | null
+      }): Promise<Extract<BrazierConnectionProfile, { kind: 'remote' }>>
+      testConnectionProfile(idOrProfile: string | {
+        id?: string
+        name: string
+        kind?: 'remote'
+        baseUrl: string
+        apiKey?: string | null
+      }): Promise<{
+        profile: BrazierConnectionProfileSummary
+        daemon: BrazierDaemonInfo
+      }>
+      claimConnectionProfile(input: {
+        id?: string
+        name: string
+        baseUrl: string
+        pairingId: string
+        code: string
+      }): Promise<{
+        profile: BrazierConnectionProfileSummary
+        daemon: BrazierDaemonInfo
+        client: {
+          id: string
+          name: string
+          scopes: Array<'inference' | 'management' | 'agent'>
+          created_at: string
+          last_used_at?: string | null
+          revoked_at?: string | null
+        }
+      }>
+      selectConnectionProfile(id: string): Promise<BrazierConnectionProfileSummary>
+      deleteConnectionProfile(id: string): Promise<boolean>
+      onConnectionProfileChanged(
+        listener: (profile: BrazierConnectionProfileSummary) => void
+      ): () => void
       getServerSettings(): Promise<{
         enabled: boolean
         port: number
         apiKeyEnabled: boolean
         hasApiKeys: boolean
         localhostOnly: boolean
+        allowInsecureRemote: boolean
         jitLoading: boolean
         keys: Array<{ id: string; name: string; createdAt: number }>
       }>
@@ -27,6 +122,7 @@ declare global {
         port: number
         apiKeyEnabled: boolean
         localhostOnly: boolean
+        allowInsecureRemote: boolean
         jitLoading: boolean
       }): Promise<{
         enabled: boolean
@@ -34,6 +130,7 @@ declare global {
         apiKeyEnabled: boolean
         hasApiKeys: boolean
         localhostOnly: boolean
+        allowInsecureRemote: boolean
         jitLoading: boolean
         keys: Array<{ id: string; name: string; createdAt: number }>
       }>
@@ -49,12 +146,21 @@ declare global {
         apiKeyEnabled: boolean
         hasApiKeys: boolean
         localhostOnly: boolean
+        allowInsecureRemote: boolean
         jitLoading: boolean
         keys: Array<{ id: string; name: string; createdAt: number }>
       }>
       copyText(text: string): Promise<void>
       getFlags(): Promise<{
         forceWelcome: boolean
+      }>
+      qualificationHost(): Promise<{
+        commit: string
+        platform: 'macos' | 'linux' | 'windows'
+        arch: string
+        memory_gib: number
+        gpu_vram_gib: number | null
+        gpu_vendor: string | null
       }>
       /** Check the signed release feed; download still requires confirmation. */
       checkForUpdates(): Promise<{ supported: boolean }>

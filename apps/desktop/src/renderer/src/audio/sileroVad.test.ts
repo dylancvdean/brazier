@@ -48,6 +48,10 @@ describe('StreamingSileroVad', () => {
     // Frame two straddles the two windows: 192 samples at .8, 128 at .4.
     expect(received[1].probability).toBeCloseTo(0.64)
     expect(received[2].probability).toBeCloseTo(0.4)
+    const diagnostics = stream.diagnostics()
+    expect(diagnostics.processedWindows).toBe(2)
+    expect(diagnostics.p95InferenceMs).toBeGreaterThanOrEqual(0)
+    expect(diagnostics.p95QueueLagMs).toBeGreaterThan(0)
   })
 
   it('reports inference failure once and releases the model', async () => {
@@ -64,5 +68,25 @@ describe('StreamingSileroVad', () => {
     stream.push(new Float32Array(480), 24_000)
     await vi.waitFor(() => expect(error).toHaveBeenCalledWith('bad model'))
     expect(model.release).toHaveBeenCalledOnce()
+  })
+
+  it('falls back instead of accumulating unbounded lag behind realtime', async () => {
+    let unblock: (() => void) | undefined
+    const model: VadModel = {
+      process: () => new Promise<number>((resolve) => (unblock = () => resolve(0.5))),
+      release: vi.fn(async () => undefined)
+    }
+    const error = vi.fn()
+    const stream = new StreamingSileroVad(model, vi.fn(), error)
+
+    for (let index = 0; index < 110; index += 1) {
+      stream.push(new Float32Array(480), 24_000)
+    }
+
+    await vi.waitFor(() => expect(error).toHaveBeenCalledOnce())
+    expect(error.mock.calls[0][0]).toContain('behind realtime')
+    expect(stream.diagnostics().maxQueueLagMs).toBeGreaterThan(2_000)
+    expect(model.release).toHaveBeenCalledOnce()
+    unblock?.()
   })
 })

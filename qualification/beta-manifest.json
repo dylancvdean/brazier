@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "required_package_smokes": [
+    { "platform": "macos", "arch": "arm64", "artifact": "dmg" },
+    { "platform": "linux", "arch": "x64", "artifact": "appimage" },
+    { "platform": "windows", "arch": "x64", "artifact": "nsis" }
+  ],
+  "required_voice_hosts": [
+    {
+      "id": "macos-apple-silicon",
+      "platform": "macos",
+      "arch": "arm64",
+      "minimum_memory_gib": 16,
+      "microphone_classes": ["built-in", "usb"]
+    },
+    {
+      "id": "linux-nvidia-x64",
+      "platform": "linux",
+      "arch": "x64",
+      "minimum_memory_gib": 16,
+      "minimum_vram_gib": 12,
+      "required_gpu_vendor": "nvidia",
+      "microphone_classes": ["usb"]
+    }
+  ],
+  "voice_budgets": {
+    "speech_recall_min": 0.95,
+    "false_sustained_interruptions_per_noise_minute_max": 0.1,
+    "vad_window_p95_ms_max": 32,
+    "vad_queue_lag_p95_ms_max": 250,
+    "transcript_wait_p95_ms_max": 1500,
+    "interrupt_to_speech_stop_p95_ms_max": 350
+  },
+  "voice_minimums": {
+    "expected_speech_utterances": 20,
+    "noise_minutes": 5,
+    "vad_samples": 100,
+    "interruption_samples": 3
+  },
+  "voice_corpus_sha256": "931be73e3c69b025111bd4d0f057f2a69b2ff6dac63d4e5a5c115c3e12726692",
+  "package_budgets": {
+    "agent_worker_ready_ms_max": 10000,
+    "agent_session_open_ms_max": 15000
+  }
+}

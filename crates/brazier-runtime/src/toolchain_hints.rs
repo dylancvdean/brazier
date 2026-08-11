@@ -618,7 +618,10 @@ pub fn missing_hipsparselt(log_lower: &str, target: RuntimeTarget) -> bool {
 
 pub fn hipsparselt_install_hint() -> Option<String> {
     if !matches!(detect_os().family, OsFamily::Linux) {
-        return None;
+        return Some(
+            "hipSPARSELt is part of the Linux ROCm toolchain; run this ROCm build on a supported Linux host and install the hipSPARSELt package that matches its ROCm version."
+                .into(),
+        );
     }
     match detect_os().package_manager {
         PackageManager::Pacman => Some("sudo pacman -S hipsparselt".into()),

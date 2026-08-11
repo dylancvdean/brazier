@@ -22,6 +22,7 @@ import {
 import { SessionCoordinator, type CoordinatorSnapshot } from './coordinator'
 import { PersonaPlexVoiceAdapter } from './voiceAdapter'
 import type { ChatResponder } from './adapters'
+import type { SessionMetrics } from './types'
 
 /** Renewal thresholds are checked on this cadence. */
 const TICK_INTERVAL_MS = 15_000
@@ -55,6 +56,8 @@ export type SessionCoordinatorHandle = {
   setConfig: (config: IntegrationConfig) => void
   /** True when spoken delivery is possible on this host. */
   canSpeak: boolean
+  /** Raw local measurements for an explicitly saved qualification report. */
+  metrics: () => SessionMetrics
   inputLevel: number
   outputLevel: number
   startVoice: () => Promise<void>
@@ -219,6 +222,7 @@ export function useSessionCoordinator(
     config,
     setConfig,
     canSpeak: adapters.voice.canSpeak(),
+    metrics: useCallback(() => coordinator.metrics(), [coordinator]),
     inputLevel,
     outputLevel,
     startVoice: useCallback(async () => {

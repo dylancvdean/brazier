@@ -12,6 +12,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentEvent } from '../../../agent/core/types'
 import type { WorkerMessage } from '../../../agent/core/protocol'
 import type { Message } from '../types'
+import { setDaemonAvailability } from '../daemonAvailability'
+
+beforeEach(() => {
+  setDaemonAvailability('healthy')
+})
 
 const daemon = vi.hoisted(() => ({
   conversations: new Map<string, { id: string; agent_session_id: string | null }>(),

@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::execution_location::ExecutionLocation;
+
 /// Where a tool call runs. The sandbox is the default; `host` requires an
 /// approved elevation request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +207,8 @@ pub struct AgentApproval {
     /// What the daemon will actually do if this is approved.
     pub summary: String,
     pub sandbox: SandboxDescription,
+    /// Exact daemon host on which approving this request will run the action.
+    pub execution_location: ExecutionLocation,
     pub status: ApprovalStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ApprovalScope>,
@@ -212,6 +216,9 @@ pub struct AgentApproval {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_at: Option<String>,
+    /// Paired-client id, or the `owner` sentinel for a bootstrap owner key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by_client_id: Option<String>,
     pub created_at: String,
 }
 
@@ -224,6 +231,11 @@ pub struct ApprovalDecisionRequest {
     pub scope: Option<ApprovalScope>,
     #[serde(default)]
     pub note: Option<String>,
+    /// Optional optimistic trust-boundary check. When present, the daemon
+    /// rejects a decision unless it names the exact execution host snapshot
+    /// shown to the user for this approval.
+    #[serde(default)]
+    pub expected_execution_location: Option<ExecutionLocation>,
 }
 
 /// Honest description of the isolation a tool call actually got. The UI must
@@ -461,6 +473,12 @@ pub struct ToolExecutionRecord {
     pub sandbox: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_id: Option<String>,
+    /// Immutable daemon host recorded by the approval consumed for this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_location: Option<ExecutionLocation>,
+    /// Paired client (or owner sentinel) that approved the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by_client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

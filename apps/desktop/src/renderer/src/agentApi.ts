@@ -12,24 +12,39 @@ import type {
   AgentPermissionMode,
   AgentPermissionSettings,
   ApprovalScope,
+  ExecutionLocation,
   SandboxDescription,
   ToolExecutionRecord
 } from '../../agent/core/types'
+import { daemonFetch } from './daemonAvailability'
 
 type Connection = Awaited<ReturnType<typeof window.brazier.getConnection>>
 let connectionPromise: Promise<Connection> | undefined
 
+export function invalidateAgentConnectionCache(): void {
+  connectionPromise = undefined
+}
+
+if (typeof window !== 'undefined' && window.brazier?.onConnectionProfileChanged) {
+  window.brazier.onConnectionProfileChanged(invalidateAgentConnectionCache)
+}
+
 async function connection(): Promise<Connection> {
   connectionPromise ??= window.brazier.getConnection()
-  return connectionPromise
+  const pending = connectionPromise
+  try {
+    return await pending
+  } catch (error) {
+    if (connectionPromise === pending) connectionPromise = undefined
+    throw error
+  }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const daemon = await connection()
   const headers = new Headers(init?.headers)
   headers.set('content-type', 'application/json')
-  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
-  const response = await fetch(`${daemon.address}${path}`, { ...init, headers })
+  const response = await daemonFetch(`${daemon.address}${path}`, { ...init, headers })
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as {
       error?: { message?: string }
@@ -263,11 +278,17 @@ export async function decideAgentApproval(
   approvalId: string,
   decision: 'approve' | 'deny',
   scope?: ApprovalScope,
-  note?: string
+  note?: string,
+  expectedExecutionLocation?: ExecutionLocation
 ): Promise<AgentApproval> {
   return request(`/api/v1/agent/approvals/${approvalId}`, {
     method: 'POST',
-    body: JSON.stringify({ decision, scope, note })
+    body: JSON.stringify({
+      decision,
+      scope,
+      note,
+      expected_execution_location: expectedExecutionLocation
+    })
   })
 }
 
@@ -320,8 +341,7 @@ export async function saveAgentWorkspacePrompt(
 export async function fetchAgentArtifact(artifactId: string): Promise<string> {
   const daemon = await connection()
   const headers = new Headers()
-  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
-  const response = await fetch(`${daemon.address}/api/v1/agent/artifacts/${artifactId}`, {
+  const response = await daemonFetch(`${daemon.address}/api/v1/agent/artifacts/${artifactId}`, {
     headers
   })
   if (!response.ok) throw new Error(`Could not load artifact ${artifactId}.`)

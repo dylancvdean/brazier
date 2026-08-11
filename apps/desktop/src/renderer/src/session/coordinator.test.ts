@@ -16,6 +16,14 @@ import {
   sequentialIds
 } from './testFakes'
 
+const EXECUTION_LOCATION = {
+  kind: 'daemon',
+  daemon_instance_id: 'daemon-remote-1',
+  daemon_display_name: 'Lab GPU',
+  platform: 'linux',
+  arch: 'x64'
+} as const
+
 function harness(overrides: Partial<IntegrationConfig> = {}) {
   const clock = harnessClock(1_000)
   const chat = new FakeChat()
@@ -920,7 +928,8 @@ describe('spoken confirmation', () => {
       tool: 'shell_run',
       summary: 'Run rm -rf build in /work/brazier',
       risk: 'destructive',
-      environment: 'host'
+      environment: 'host',
+      executionLocation: EXECUTION_LOCATION
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     return { ...context, correlationId }
@@ -931,6 +940,7 @@ describe('spoken confirmation', () => {
     expect(voice.spoken).toHaveLength(0)
     expect(coordinator.snapshot().notice).toContain('Run rm -rf build')
     expect(coordinator.snapshot().pendingApproval?.approvalId).toBe('apv-1')
+    expect(coordinator.snapshot().pendingApproval?.executionLocation).toEqual(EXECUTION_LOCATION)
   })
 
   it('allows it on an unmistakable yes, and says so in the conversation', async () => {
@@ -1010,7 +1020,8 @@ describe('spoken confirmation', () => {
       tool: 'shell_run',
       summary: 'Run rm -rf build',
       risk: 'destructive',
-      environment: 'host'
+      environment: 'host',
+      executionLocation: EXECUTION_LOCATION
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(voice.spoken).toHaveLength(before)

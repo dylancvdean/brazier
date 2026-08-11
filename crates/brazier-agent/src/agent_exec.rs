@@ -9,7 +9,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs::OpenOptions,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -739,22 +738,29 @@ fn checked_path(
         .and_then(Value::as_str)
         .with_context(|| format!("`{field}` is required"))?;
     anyhow::ensure!(!raw.trim().is_empty(), "`{field}` must not be empty");
+    validate_platform_path(Path::new(raw))?;
     let resolved = agent_policy::resolve_path(workspace, raw);
+    validate_platform_path(&resolved)?;
 
     // Follow symlinks on the deepest existing ancestor: a link inside the
     // workspace must not point outside it. Every containment check below is on
     // this canonical form, never on the path the caller typed.
     let real = agent_policy::canonical_ancestor(&resolved);
     for secret in secret_paths(Some(context.data_dir)) {
+        let secret_real = agent_policy::canonical_ancestor(&secret);
         anyhow::ensure!(
-            !is_inside(&real, &secret) && !is_inside(&resolved, &secret),
+            !is_inside(&real, &secret)
+                && !is_inside(&real, &secret_real)
+                && !is_inside(&resolved, &secret)
+                && !is_inside(&resolved, &secret_real),
             "`{raw}` resolves into a credential or Brazier-owned path"
         );
     }
     if plan.environment == AgentEnvironment::Sandbox {
         let root = workspace.context("this session has no workspace")?;
+        let root_real = agent_policy::canonical_ancestor(root);
         anyhow::ensure!(
-            is_inside(&real, root),
+            is_inside(&real, root) || is_inside(&real, &root_real),
             "`{raw}` is outside the workspace; request host access for it"
         );
         if write && !plan.profile.allows_workspace_writes() {
@@ -767,11 +773,78 @@ fn checked_path(
     Ok(resolved)
 }
 
+#[cfg(not(windows))]
+fn validate_platform_path(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Reject Win32 path spellings that can alias a different object than the
+/// lexical path names. Canonical drive and UNC paths (including the verbatim
+/// forms returned by `canonicalize`) remain valid; raw device namespaces,
+/// alternate data streams, and reserved DOS device aliases do not.
+#[cfg(windows)]
+fn validate_platform_path(path: &Path) -> anyhow::Result<()> {
+    use std::path::{Component, Prefix};
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::DeviceNS(_) | Prefix::Verbatim(_) => {
+                    anyhow::bail!("Windows device namespace paths are not supported")
+                }
+                Prefix::Disk(_) | Prefix::VerbatimDisk(_) => anyhow::ensure!(
+                    path.has_root(),
+                    "Windows drive-relative paths are not supported"
+                ),
+                Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _) => {}
+            },
+            Component::Normal(name) => {
+                let name = name.to_string_lossy();
+                anyhow::ensure!(
+                    !name.contains(':'),
+                    "Windows alternate data stream paths are not supported"
+                );
+                anyhow::ensure!(
+                    !name.ends_with(['.', ' ']),
+                    "Windows path components ending in a dot or space are not supported"
+                );
+
+                let base = name
+                    .split('.')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_uppercase();
+                let numbered_device = base
+                    .strip_prefix("COM")
+                    .or_else(|| base.strip_prefix("LPT"))
+                    .is_some_and(|suffix| {
+                        matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+                    });
+                anyhow::ensure!(
+                    !matches!(
+                        base.as_str(),
+                        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+                    ) && !numbered_device,
+                    "Windows reserved device path component `{name}` is not supported"
+                );
+            }
+            Component::RootDir | Component::CurDir | Component::ParentDir => {}
+        }
+    }
+    Ok(())
+}
+
 /// Workspace-relative label for a path, for output the model and the UI read.
 fn relative_display(workspace: Option<&Path>, path: &Path) -> String {
     let real = agent_policy::canonical_ancestor(path);
     workspace
-        .and_then(|root| real.strip_prefix(root).ok())
+        .and_then(|root| {
+            let root_real = agent_policy::canonical_ancestor(root);
+            real.strip_prefix(root)
+                .or_else(|_| real.strip_prefix(&root_real))
+                .ok()
+                .map(Path::to_path_buf)
+        })
         .map(|relative| relative.display().to_string())
         .unwrap_or_else(|| path.display().to_string())
 }
@@ -957,17 +1030,6 @@ async fn fs_read(
     arguments: &Value,
 ) -> anyhow::Result<ToolOutcome> {
     let path = checked_path(context, plan, workspace, arguments, "path", false)?;
-    let size = tokio::fs::metadata(&path)
-        .await
-        .with_context(|| format!("cannot read {}", path.display()))?
-        .len();
-    anyhow::ensure!(
-        size <= MAX_READ_BYTES as u64,
-        "{} is {} bytes, larger than the {MAX_READ_BYTES}-byte read limit. Pass \
-         `start_line` and `line_count` to read a smaller range of a file that fits.",
-        path.display(),
-        size
-    );
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?;
@@ -977,26 +1039,37 @@ async fn fs_read(
         .file_name()
         .with_context(|| format!("{} has no file name", path.display()))?;
     let opened_path = canonical_parent.join(file_name);
+    let (file, actual_path) = open_read_without_final_link(&opened_path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    validate_platform_path(&actual_path)?;
     for secret in secret_paths(Some(context.data_dir)) {
+        let secret_real = agent_policy::canonical_ancestor(&secret);
         anyhow::ensure!(
-            !is_inside(&opened_path, &secret),
+            !is_inside(&actual_path, &secret) && !is_inside(&actual_path, &secret_real),
             "`{}` resolves into a credential or Brazier-owned path",
             path.display()
         );
     }
     if plan.environment == AgentEnvironment::Sandbox {
         let root = workspace.context("this session has no workspace")?;
+        let root_real = agent_policy::canonical_ancestor(root);
         anyhow::ensure!(
-            is_inside(&opened_path, root),
+            is_inside(&actual_path, root) || is_inside(&actual_path, &root_real),
             "`{}` is outside the workspace; request host access for it",
             path.display()
         );
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&opened_path)
-        .with_context(|| format!("cannot open {}", path.display()))?;
+    let size = file
+        .metadata()
+        .with_context(|| format!("cannot inspect {}", path.display()))?
+        .len();
+    anyhow::ensure!(
+        size <= MAX_READ_BYTES as u64,
+        "{} is {} bytes, larger than the {MAX_READ_BYTES}-byte read limit. Pass \
+         `start_line` and `line_count` to read a smaller range of a file that fits.",
+        path.display(),
+        size
+    );
     let mut file = tokio::fs::File::from_std(file);
     let mut bytes = Vec::with_capacity(size as usize);
     file.read_to_end(&mut bytes).await?;
@@ -1021,6 +1094,81 @@ async fn fs_read(
         return Ok(ToolOutcome::text("(no lines in that range)"));
     }
     Ok(ToolOutcome::text(numbered.join("\n")))
+}
+
+#[cfg(unix)]
+fn open_read_without_final_link(path: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    Ok((file, path.to_path_buf()))
+}
+
+#[cfg(windows)]
+fn open_read_without_final_link(path: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
+    use std::{
+        ffi::c_void, os::windows::fs::MetadataExt as _, os::windows::fs::OpenOptionsExt as _,
+    };
+    use std::{os::windows::io::AsRawHandle as _, ptr};
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFinalPathNameByHandleW(
+            file: *mut c_void,
+            path: *mut u16,
+            path_len: u32,
+            flags: u32,
+        ) -> u32;
+    }
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to read a Windows reparse point",
+        ));
+    }
+
+    let handle = file.as_raw_handle();
+    // A zero-length query returns the UTF-16 buffer length required for the
+    // normalized DOS-volume path. The handle pins the opened object while the
+    // caller validates that resolved path against the workspace boundary.
+    let required = unsafe { GetFinalPathNameByHandleW(handle, ptr::null_mut(), 0, 0) };
+    if required == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut buffer = vec![0_u16; required as usize + 1];
+    let written =
+        unsafe { GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0) };
+    if written == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if written as usize >= buffer.len() {
+        return Err(std::io::Error::other(
+            "opened Windows path changed while it was being resolved",
+        ));
+    }
+
+    use std::os::windows::ffi::OsStringExt as _;
+    let resolved = std::ffi::OsString::from_wide(&buffer[..written as usize]);
+    Ok((file, PathBuf::from(resolved)))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_read_without_final_link(_path: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "secure direct file reads are not supported on this platform",
+    ))
 }
 
 async fn doc_read(
@@ -3082,6 +3230,89 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_validation_accepts_canonical_drive_and_unc_paths() {
+        for path in [
+            r"C:\workspace\file.txt",
+            r"\\server\share\workspace\file.txt",
+            r"\\?\C:\workspace\file.txt",
+            r"\\?\UNC\server\share\workspace\file.txt",
+        ] {
+            validate_platform_path(Path::new(path)).unwrap_or_else(|error| {
+                panic!("expected canonical Windows path `{path}` to be valid: {error}")
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_validation_rejects_ambiguous_and_device_paths() {
+        for path in [
+            r"C:drive-relative.txt",
+            r"C:\workspace\file.txt:secret-stream",
+            r"C:\workspace\NUL.txt",
+            r"C:\workspace\COM1",
+            r"C:\workspace\trailing-dot.",
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\secret.txt",
+        ] {
+            assert!(
+                validate_platform_path(Path::new(path)).is_err(),
+                "ambiguous or device path `{path}` must be rejected"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_safe_open_refuses_a_final_file_reparse_point_when_available() {
+        let directory = TempDir::new().expect("temp dir");
+        let target = directory.path().join("target.txt");
+        let link = directory.path().join("link.txt");
+        std::fs::write(&target, "secret").expect("write target");
+        if let Err(error) = std::os::windows::fs::symlink_file(&target, &link) {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                // Developer Mode or SeCreateSymbolicLinkPrivilege is not
+                // guaranteed on downstream Windows test hosts.
+                return;
+            }
+            panic!("create file symlink: {error}");
+        }
+
+        let error = open_read_without_final_link(&link)
+            .expect_err("the final reparse point must not be followed");
+        assert!(error.to_string().contains("reparse point"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_junction_out_of_the_workspace_does_not_widen_access() {
+        let harness = Harness::new(AgentPermissionMode::SandboxOnly).await;
+        let outside = TempDir::new().expect("outside dir");
+        std::fs::write(outside.path().join("secret.txt"), "junction-secret").expect("write secret");
+        let junction = harness.workspace.path().join("escape");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(outside.path())
+            .status()
+            .expect("run mklink");
+        assert!(status.success(), "mklink /J must create the test junction");
+
+        let response = harness
+            .call("fs_read", json!({ "path": "escape/secret.txt" }))
+            .await;
+        std::fs::remove_dir(&junction).expect("remove junction");
+        assert_eq!(
+            response.status,
+            ToolExecStatus::Denied,
+            "{}",
+            response.output
+        );
+        assert!(!response.output.contains("junction-secret"));
+    }
+
     struct Harness {
         _data: TempDir,
         workspace: TempDir,
@@ -3506,7 +3737,13 @@ startxref
 
         harness
             .db
-            .decide_approval(&approval.id, true, Some(ApprovalScope::Once), None)
+            .decide_approval(
+                &approval.id,
+                true,
+                Some(ApprovalScope::Once),
+                None,
+                Some("test-client"),
+            )
             .await
             .expect("approve");
 
@@ -3548,7 +3785,13 @@ startxref
         let approval = first.approval.expect("approval");
         harness
             .db
-            .decide_approval(&approval.id, true, Some(ApprovalScope::Once), None)
+            .decide_approval(
+                &approval.id,
+                true,
+                Some(ApprovalScope::Once),
+                None,
+                Some("test-client"),
+            )
             .await
             .expect("approve");
 
@@ -3579,7 +3822,13 @@ startxref
         let approval = first.approval.expect("approval");
         harness
             .db
-            .decide_approval(&approval.id, false, None, Some("not that file".to_owned()))
+            .decide_approval(
+                &approval.id,
+                false,
+                None,
+                Some("not that file".to_owned()),
+                Some("test-client"),
+            )
             .await
             .expect("deny");
         let request = ToolExecRequest {

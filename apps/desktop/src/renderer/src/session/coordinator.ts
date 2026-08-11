@@ -46,6 +46,7 @@ import type {
   VoiceContext
 } from './types'
 import { buildVoiceContext, summarizeForVoice } from './voiceContext'
+import type { ExecutionLocation } from '../../../agent/core/types'
 
 export type VoiceStatus = 'off' | 'starting' | 'live' | 'error'
 
@@ -97,6 +98,11 @@ export type CoordinatorSnapshot = {
     noiseFloor: number
     vad: 'silero-v5' | 'energy-fallback'
     speechProbability: number | null
+    vadQueueLagMs: number
+    vadInferenceMs: number
+    vadInferenceP95Ms: number
+    vadQueueLagP95Ms: number
+    vadProcessedWindows: number
   }
   /**
    * What transcription is costing, per interface that has served an utterance
@@ -131,6 +137,7 @@ export type PendingApproval = {
   summary: string
   risk: string
   environment: 'sandbox' | 'host'
+  executionLocation: ExecutionLocation
   /** Whether the question was read out, so the UI does not repeat it silently. */
   spoken: boolean
   askedAt: number
@@ -221,7 +228,12 @@ export class SessionCoordinator {
     gate: 0,
     noiseFloor: 0,
     vad: 'energy-fallback',
-    speechProbability: null
+    speechProbability: null,
+    vadQueueLagMs: 0,
+    vadInferenceMs: 0,
+    vadInferenceP95Ms: 0,
+    vadQueueLagP95Ms: 0,
+    vadProcessedWindows: 0
   }
   /** Per-engine transcription totals; see `CoordinatorSnapshot.transcription`. */
   private readonly transcription = new Map<
@@ -245,6 +257,7 @@ export class SessionCoordinator {
 
   private readonly listeners = new Set<(snapshot: CoordinatorSnapshot) => void>()
   private readonly metricsState: SessionMetrics = {
+    transcriptTexts: [],
     transcriptWaitMs: [],
     transcriptToAgentStartMs: [],
     responseToSpeechStartMs: [],
@@ -706,6 +719,7 @@ export class SessionCoordinator {
           summary: event.summary,
           risk: event.risk,
           environment: event.environment,
+          executionLocation: event.executionLocation,
           spoken: false,
           askedAt: this.now()
         }
@@ -713,7 +727,8 @@ export class SessionCoordinator {
           approvalId: event.approvalId,
           tool: event.tool,
           risk: event.risk,
-          environment: event.environment
+          environment: event.environment,
+          executionLocation: event.executionLocation
         })
         this.track(this.askForApproval(), 'Reading back what it wants to do')
         this.publish()
@@ -924,7 +939,12 @@ export class SessionCoordinator {
           gate: event.gate,
           noiseFloor: event.noiseFloor,
           vad: event.vad,
-          speechProbability: event.speechProbability
+          speechProbability: event.speechProbability,
+          vadQueueLagMs: event.vadQueueLagMs,
+          vadInferenceMs: event.vadInferenceMs,
+          vadInferenceP95Ms: event.vadInferenceP95Ms,
+          vadQueueLagP95Ms: event.vadQueueLagP95Ms,
+          vadProcessedWindows: event.vadProcessedWindows
         }
         console.debug(
           `[voice] ${this.id} sees ${event.frames} frames, peak ${event.peak.toFixed(3)}`
@@ -998,6 +1018,7 @@ export class SessionCoordinator {
         return
       }
       case 'userTranscriptFinal': {
+        this.metricsState.transcriptTexts.push(event.text)
         this.track(this.onTranscriptFinal(event.utteranceId, event.text), 'Submitting what you said')
         return
       }
@@ -1170,7 +1191,9 @@ export class SessionCoordinator {
     if (!pending) return
     const response = this.responses.get(pending.correlationId)
     if (!response || response.originSource !== 'user_voice') return
-    this.report(`Waiting for you to allow: ${pending.summary}`)
+    this.report(
+      `Waiting for you to allow on ${pending.executionLocation.daemon_display_name}: ${pending.summary}`
+    )
   }
 
   /**
@@ -1187,7 +1210,7 @@ export class SessionCoordinator {
     if (verdict === 'unclear') {
       this.metricsState.approvalsUnclear += 1
       this.emit('APPROVAL_UNCLEAR', pending.correlationId, 'voice', { text })
-      const message = `That was not a yes or a no, so nothing has run. ${pending.summary}. Say yes to allow it, or no to stop.`
+      const message = `That was not a yes or a no, so nothing has run. On ${pending.executionLocation.daemon_display_name}: ${pending.summary}. Say yes to allow it, or no to stop.`
       this.report(message)
       return
     }
@@ -1239,7 +1262,12 @@ export class SessionCoordinator {
     note?: string
   ): Promise<void> {
     try {
-      await this.deps.agent.decideApproval(pending.approvalId, decision, note)
+      await this.deps.agent.decideApproval(
+        pending.approvalId,
+        decision,
+        pending.executionLocation,
+        note
+      )
     } catch (cause) {
       // The call is still held; say so rather than letting the session look
       // like it went ahead.

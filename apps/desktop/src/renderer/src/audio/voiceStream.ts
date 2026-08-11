@@ -107,7 +107,7 @@ export class VoiceStream {
   }
 
   /** Open the socket, start capture, and begin streaming both ways. */
-  async start(wsUrl: string): Promise<void> {
+  async start(wsUrl: string, wsProtocol?: string): Promise<void> {
     if (!voiceStreamSupported()) {
       throw new Error('This build lacks the WebCodecs Opus support realtime voice needs.')
     }
@@ -122,13 +122,13 @@ export class VoiceStream {
         channelCount: 1
       }
     })
-    await this.openSocket(wsUrl)
+    await this.openSocket(wsUrl, wsProtocol)
     await this.startCapture()
   }
 
-  private openSocket(wsUrl: string): Promise<void> {
+  private openSocket(wsUrl: string, wsProtocol?: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const socket = new WebSocket(wsUrl)
+      const socket = new WebSocket(wsUrl, wsProtocol ? [wsProtocol] : undefined)
       socket.binaryType = 'arraybuffer'
       this.socket = socket
       const failed = (message: string) => reject(new Error(message))

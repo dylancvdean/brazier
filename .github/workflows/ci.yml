@@ -28,8 +28,27 @@ jobs:
           bwrap --ro-bind / / --dev /dev --die-with-parent -- true
           bwrap --unshare-net --ro-bind / / --dev /dev --die-with-parent -- true
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  rust-platform:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
+      - name: Qualify native Windows AppContainer isolation
+        if: runner.os == 'Windows'
+        run: cargo test -p brazier-agent agent_sandbox_windows::tests -- --nocapture
 
   desktop:
     strategy:
@@ -51,3 +70,16 @@ jobs:
       - run: pnpm --filter @brazier/desktop --fail-if-no-match check
       - run: pnpm --filter @brazier/desktop --fail-if-no-match test
       - run: pnpm --filter @brazier/desktop --fail-if-no-match build
+
+  qualification-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm qualification:test
+      - run: pnpm qualification:voice-corpus

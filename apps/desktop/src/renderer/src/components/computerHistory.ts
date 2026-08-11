@@ -1,4 +1,10 @@
-import type { ComputerAction, ComputerActionResult, ComputerSession, ComputerStep } from '../api'
+import type {
+  ComputerAction,
+  ComputerActionResult,
+  ComputerSession,
+  ComputerStep,
+  ExecutionLocation
+} from '../api'
 import type { ContentPart, Message } from '../types'
 
 /** Matches Fara's reference agent: keep only the most recent few screenshots. */
@@ -218,7 +224,12 @@ export function continuationForResult(result: ComputerActionResult): ComputerCon
 }
 
 export type RecoveredComputerPause = {
-  approval: { approvalId: string; action: ComputerAction; message?: string | null } | null
+  approval: {
+    approvalId: string
+    action: ComputerAction
+    message?: string | null
+    executionLocation?: ExecutionLocation | null
+  } | null
   userQuestion: string | null
 }
 
@@ -235,7 +246,14 @@ export function recoverComputerPause(steps: ComputerStep[]): RecoveredComputerPa
     const result = step.result
     if (!result || !step.action) continue
     if (result.status === 'needs_approval' && result.approval_id) {
-      approval = { approvalId: result.approval_id, action: step.action, message: result.message }
+      approval = {
+        approvalId: result.approval_id,
+        action: step.action,
+        message: result.message,
+        ...(result.execution_location
+          ? { executionLocation: result.execution_location }
+          : {})
+      }
       continue
     }
     // Older brokers did not echo approval_id on the resolved result. A later

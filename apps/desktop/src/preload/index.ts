@@ -2,11 +2,29 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 import { AGENT_IPC, type WorkerCommandInput, type WorkerMessage } from '../agent/core/protocol'
 import type { AgentModelReference, AgentPermissionMode, AgentUserInput } from '../agent/core/types'
+import type {
+  ConnectionProfileSummary,
+  ConnectionProfileView,
+  ConnectionTestResult,
+  ClaimedConnection,
+  DaemonInfo,
+  PairingClaimInput,
+  RemoteConnectionProfileInput
+} from '../main/connections'
 
 export type BrazierConnection = {
   address: string
-  api_key: string | null
+  profile: ConnectionProfileSummary
+  daemon: DaemonInfo
 }
+
+export type BrazierConnectionProfile = ConnectionProfileView
+export type BrazierConnectionProfileSummary = ConnectionProfileSummary
+export type BrazierRemoteConnectionProfile = Extract<ConnectionProfileView, { kind: 'remote' }>
+export type BrazierConnectionTestResult = ConnectionTestResult
+export type BrazierRemoteConnectionProfileInput = RemoteConnectionProfileInput
+export type BrazierPairingClaimInput = PairingClaimInput
+export type BrazierClaimedConnection = ClaimedConnection
 
 export type BrazierFlags = {
   forceWelcome: boolean
@@ -24,6 +42,7 @@ export type BrazierServerSettings = {
   apiKeyEnabled: boolean
   hasApiKeys: boolean
   localhostOnly: boolean
+  allowInsecureRemote: boolean
   jitLoading: boolean
   keys: BrazierServerKey[]
 }
@@ -38,8 +57,13 @@ export type BrazierInputGuardStatus = {
   detail: string
 }
 
-const invokeAgent = (command: WorkerCommandInput): Promise<unknown> =>
-  ipcRenderer.invoke(AGENT_IPC.invoke, command)
+const invokeAgent = async (command: WorkerCommandInput): Promise<unknown> => {
+  // Agent mode can be the first daemon consumer after launch. Resolve the
+  // selected profile first so the main-process supervisor receives the same
+  // connection that renderer REST calls use.
+  await ipcRenderer.invoke('brazier:connection')
+  return ipcRenderer.invoke(AGENT_IPC.invoke, command)
+}
 
 const agentMessageListeners = new Set<(message: WorkerMessage) => void>()
 let agentMessageDispatcher:
@@ -101,6 +125,34 @@ const agent = {
 
 contextBridge.exposeInMainWorld('brazier', {
   getConnection: (): Promise<BrazierConnection> => ipcRenderer.invoke('brazier:connection'),
+  listConnectionProfiles: (): Promise<BrazierConnectionProfile[]> =>
+    ipcRenderer.invoke('brazier:connection-profiles:list'),
+  getCurrentConnectionProfile: (): Promise<BrazierConnectionProfileSummary> =>
+    ipcRenderer.invoke('brazier:connection-profiles:current'),
+  upsertConnectionProfile: (
+    profile: BrazierRemoteConnectionProfileInput
+  ): Promise<BrazierRemoteConnectionProfile> =>
+    ipcRenderer.invoke('brazier:connection-profiles:upsert', profile),
+  testConnectionProfile: (
+    idOrProfile: string | BrazierRemoteConnectionProfileInput
+  ): Promise<BrazierConnectionTestResult> =>
+    ipcRenderer.invoke('brazier:connection-profiles:test', idOrProfile),
+  claimConnectionProfile: (
+    input: BrazierPairingClaimInput
+  ): Promise<BrazierClaimedConnection> =>
+    ipcRenderer.invoke('brazier:connection-profiles:claim-pairing', input),
+  selectConnectionProfile: (id: string): Promise<BrazierConnectionProfileSummary> =>
+    ipcRenderer.invoke('brazier:connection-profiles:select', id),
+  deleteConnectionProfile: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke('brazier:connection-profiles:delete', id),
+  onConnectionProfileChanged: (
+    listener: (profile: BrazierConnectionProfileSummary) => void
+  ): (() => void) => {
+    const handler = (_event: unknown, profile: BrazierConnectionProfileSummary): void =>
+      listener(profile)
+    ipcRenderer.on('brazier:connection-changed', handler)
+    return () => ipcRenderer.removeListener('brazier:connection-changed', handler)
+  },
   getServerSettings: (): Promise<BrazierServerSettings> => ipcRenderer.invoke('brazier:server-settings'),
   saveServerSettings: (
     settings: Omit<BrazierServerSettings, 'hasApiKeys' | 'keys'>
@@ -112,6 +164,14 @@ contextBridge.exposeInMainWorld('brazier', {
     ipcRenderer.invoke('brazier:remove-server-api-key', id),
   copyText: (text: string): Promise<void> => ipcRenderer.invoke('brazier:copy-text', text),
   getFlags: (): Promise<BrazierFlags> => ipcRenderer.invoke('brazier:flags'),
+  qualificationHost: (): Promise<{
+    commit: string
+    platform: 'macos' | 'linux' | 'windows'
+    arch: string
+    memory_gib: number
+    gpu_vram_gib: number | null
+    gpu_vendor: string | null
+  }> => ipcRenderer.invoke('brazier:qualification-host'),
   checkForUpdates: (): Promise<{ supported: boolean }> => ipcRenderer.invoke('brazier:check-for-updates'),
   getUpdateSettings: (): Promise<{
     supported: boolean

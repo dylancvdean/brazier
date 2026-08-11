@@ -9,7 +9,14 @@
 
 import { existsSync } from 'node:fs'
 import { join, sep } from 'node:path'
-import { app, BrowserWindow, ipcMain, utilityProcess, type UtilityProcess } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  utilityProcess,
+  type IpcMainInvokeEvent,
+  type UtilityProcess
+} from 'electron'
 
 import {
   AGENT_IPC,
@@ -51,6 +58,7 @@ export class AgentSupervisor {
   private ready?: Promise<void>
   private crashes = 0
   private readonly sessions = new Set<string>()
+  private expectedExit?: UtilityProcess
 
   /**
    * Where the built worker bundle lives. `scripts/build-agent-worker.mjs` emits
@@ -81,6 +89,11 @@ export class AgentSupervisor {
 
   setConnection(connection: WorkerConnection): void {
     this.connection = connection
+  }
+
+  /** Eager package-smoke hook; normal UI sessions still start lazily. */
+  async warmup(): Promise<void> {
+    await this.ensureWorker()
   }
 
   private requestId(): string {
@@ -152,17 +165,19 @@ export class AgentSupervisor {
       this.worker = worker
       worker.on('message', (message: WorkerMessage) => this.onMessage(message))
       worker.on('exit', (code) => {
-        this.crashes += 1
+        const expected = this.expectedExit === worker
+        if (!expected) this.crashes += 1
         for (const [, pending] of this.pending) {
           pending.reject(new Error(`The agent worker exited (code ${code}).`))
         }
         this.pending.clear()
         const known = [...this.sessions]
+        if (expected) this.sessions.clear()
         this.worker = undefined
         this.ready = undefined
-        void this.markSessionsFailed(known, code)
+        if (expected) this.expectedExit = undefined
+        else void this.markSessionsFailed(known, code)
         console.error(`[agent-worker] exited with code ${code}`)
-        void this.markKnownSessionsFailed('agent worker exited')
       })
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(
@@ -272,39 +287,6 @@ export class AgentSupervisor {
     this.ready = undefined
   }
 
-  private async markKnownSessionsFailed(reason: string): Promise<void> {
-    const connection = this.connection
-    if (!connection) return
-    const sessions = [...this.sessions]
-    if (sessions.length === 0) return
-    const headers = new Headers({ 'content-type': 'application/json' })
-    if (connection.apiKey) headers.set('authorization', `Bearer ${connection.apiKey}`)
-    await Promise.all(
-      sessions.map((sessionId) =>
-        fetch(`${connection.address}/api/v1/agent/sessions/${encodeURIComponent(sessionId)}`, {
-          method: 'PATCH',
-          headers,
-          body: JSON.stringify({ last_run_status: 'failed' }),
-          signal: AbortSignal.timeout(DAEMON_PATCH_TIMEOUT_MS)
-        })
-          .then((response) => {
-            if (!response.ok) {
-              console.error(
-                `[agent-worker] could not reconcile session ${sessionId} after exit (status ${response.status}): ${reason}`
-              )
-            }
-          })
-          .catch((cause: unknown) => {
-            console.error(
-              `[agent-worker] could not reconcile session ${sessionId} after exit: ${
-                cause instanceof Error ? cause.message : String(cause)
-              }`
-            )
-          })
-      )
-    )
-  }
-
   private async cancel(sessionId: string): Promise<{ cancelled: true }> {
     if (!this.sessions.has(sessionId)) {
       throw new Error('Refusing to cancel a session the agent worker does not know about.')
@@ -368,14 +350,29 @@ export class AgentSupervisor {
   async shutdown(): Promise<void> {
     const worker = this.worker
     if (!worker) return
+    this.expectedExit = worker
+    const exited = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error('The agent worker did not exit within 5 seconds.')),
+        5_000
+      )
+      worker.once('exit', () => {
+        clearTimeout(timeout)
+        resolve()
+      })
+    })
     try {
       await this.send({ type: 'shutdown', requestId: this.requestId() })
     } catch {
       // A worker that cannot answer is killed below.
     }
     worker.kill()
-    this.worker = undefined
-    this.ready = undefined
+    await exited
+    if (this.worker === worker) {
+      this.worker = undefined
+      this.ready = undefined
+      // Keep expectedExit set so a delayed exit remains intentional.
+    }
   }
 
   /** Diagnostics for the UI: whether the worker is up and how often it died. */
@@ -384,12 +381,19 @@ export class AgentSupervisor {
   }
 }
 
-export function registerAgentIpc(supervisor: AgentSupervisor): void {
-  ipcMain.handle(AGENT_IPC.invoke, async (_event, payload: WorkerCommandInput) => {
+export function registerAgentIpc(
+  supervisor: AgentSupervisor,
+  assertTrustedSender: (event: IpcMainInvokeEvent) => void
+): void {
+  ipcMain.handle(AGENT_IPC.invoke, async (event, payload: WorkerCommandInput) => {
+    assertTrustedSender(event)
     if (!payload || typeof payload !== 'object' || typeof payload.type !== 'string') {
       throw new Error('Malformed agent command.')
     }
     return supervisor.invoke(payload)
   })
-  ipcMain.handle('brazil:agent:status', () => supervisor.status())
+  ipcMain.handle('brazil:agent:status', (event) => {
+    assertTrustedSender(event)
+    return supervisor.status()
+  })
 }

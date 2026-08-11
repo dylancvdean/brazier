@@ -3,6 +3,7 @@ import {
   Bot,
   Box,
   Brain,
+  CircleAlert,
   Cpu,
   ChevronLeft,
   ChevronRight,
@@ -82,7 +83,10 @@ import {
   DEFAULT_MEMORY_PREFERENCE,
   listMemories,
   type ClientToolCall,
-  type MemoryPreference
+  type MemoryPreference,
+  fetchCurrentConnectionProfile,
+  rememberedConnectionProfileId,
+  type ConnectionProfileSummary
 } from './api'
 import { AgentMode, type AgentComposerControls, type AgentSidebarControls } from './components/AgentMode'
 import { AgentSessionSidebar } from './components/AgentSessionSidebar'
@@ -143,6 +147,8 @@ import {
   writeCachedRuntimes
 } from './inventoryCache'
 import type { Attachment, ContentPart, Conversation, Message, Role } from './types'
+import { ConnectionProfileContext, LOCAL_CONNECTION_PROFILE } from './connectionProfile'
+import { setDaemonAvailability } from './daemonAvailability'
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 const CHAT_TITLE_MODE_KEY = 'brazier.chatTitleMode.v1'
@@ -162,9 +168,14 @@ const DEFAULT_WORKSPACE_MODES: WorkspaceModesPreference = {
 
 type ChatTitleMode = 'never' | 'always' | 'over-20-tokens'
 
-function readGenerateHistory(): GenerateHistoryEntry[] {
+function profileStorageKey(base: string, profileId: string): string {
+  return `${base}.${encodeURIComponent(profileId)}`
+}
+
+function readGenerateHistory(profileId: string): GenerateHistoryEntry[] {
   try {
-    const value = localStorage.getItem(GENERATE_HISTORY_KEY)
+    const value = localStorage.getItem(profileStorageKey(GENERATE_HISTORY_KEY, profileId)) ??
+      (profileId === 'local' ? localStorage.getItem(GENERATE_HISTORY_KEY) : null)
     const parsed = value ? (JSON.parse(value) as unknown) : []
     return Array.isArray(parsed) ? (parsed as GenerateHistoryEntry[]) : []
   } catch {
@@ -172,9 +183,12 @@ function readGenerateHistory(): GenerateHistoryEntry[] {
   }
 }
 
-function writeGenerateHistory(entries: GenerateHistoryEntry[]): void {
+function writeGenerateHistory(profileId: string, entries: GenerateHistoryEntry[]): void {
   try {
-    localStorage.setItem(GENERATE_HISTORY_KEY, JSON.stringify(entries.slice(0, 100)))
+    localStorage.setItem(
+      profileStorageKey(GENERATE_HISTORY_KEY, profileId),
+      JSON.stringify(entries.slice(0, 100))
+    )
   } catch {
     // Best-effort local history.
   }
@@ -207,9 +221,10 @@ function dreamStatusForLoad(event: { phase: string; message: string }): string {
   return `Dreaming — ${event.message}`
 }
 
-function readEnabledTools(): string[] {
+function readEnabledTools(profileId: string): string[] {
   try {
-    const raw = localStorage.getItem(ENABLED_TOOLS_KEY)
+    const raw = localStorage.getItem(profileStorageKey(ENABLED_TOOLS_KEY, profileId)) ??
+      (profileId === 'local' ? localStorage.getItem(ENABLED_TOOLS_KEY) : null)
     if (!raw) return []
     const parsed = JSON.parse(raw) as unknown
     return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
@@ -218,9 +233,9 @@ function readEnabledTools(): string[] {
   }
 }
 
-function writeEnabledTools(names: string[]): void {
+function writeEnabledTools(profileId: string, names: string[]): void {
   try {
-    localStorage.setItem(ENABLED_TOOLS_KEY, JSON.stringify(names))
+    localStorage.setItem(profileStorageKey(ENABLED_TOOLS_KEY, profileId), JSON.stringify(names))
   } catch {
     // Best-effort persistence.
   }
@@ -485,7 +500,11 @@ function RunHistory({
 }
 
 export function App(): React.JSX.Element {
-  const [conversations, setConversations] = useState<Conversation[]>(() => readCachedConversations())
+  const initialProfileId = useRef(rememberedConnectionProfileId()).current
+  const [connectionProfile, setConnectionProfile] = useState<ConnectionProfileSummary | null>(null)
+  const [conversations, setConversations] = useState<Conversation[]>(() =>
+    readCachedConversations(initialProfileId)
+  )
   const [conversationSearch, setConversationSearch] = useState('')
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [chatTitleMode, setChatTitleMode] = useState<ChatTitleMode>(() => readChatTitleMode())
@@ -513,8 +532,12 @@ export function App(): React.JSX.Element {
   } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [checkingForUpdates, setCheckingForUpdates] = useState(false)
-  const [localModels, setLocalModels] = useState<LocalModel[]>(() => readCachedModels())
-  const [modelsLoading, setModelsLoading] = useState(() => readCachedModels().length === 0)
+  const [localModels, setLocalModels] = useState<LocalModel[]>(() =>
+    readCachedModels(initialProfileId)
+  )
+  const [modelsLoading, setModelsLoading] = useState(
+    () => readCachedModels(initialProfileId).length === 0
+  )
   const [modelsLoadFailed, setModelsLoadFailed] = useState(false)
   const [selectedModel, setSelectedModel] = useState('')
   const [modelPrepareState, setModelPrepareState] = useState<
@@ -524,14 +547,17 @@ export function App(): React.JSX.Element {
   const [modelUnloading, setModelUnloading] = useState(false)
   const [modelBindings, setModelBindings] = useState<Record<string, string>>({})
   const [prefetchedRuntimes, setPrefetchedRuntimes] = useState<RuntimeEntry[] | null>(() => {
-    const cached = readCachedRuntimes()
+    const cached = readCachedRuntimes(initialProfileId)
     return cached.length > 0 ? cached : null
   })
-  const [enabledTools, setEnabledTools] = useState<string[]>(() => readEnabledTools())
+  const [enabledTools, setEnabledTools] = useState<string[]>(() =>
+    readEnabledTools(initialProfileId)
+  )
   const [availableTools, setAvailableTools] = useState<BundledTool[]>([])
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false)
   const toolsEnabled = enabledTools.length > 0
   const [daemonStatus, setDaemonStatus] = useState<'checking' | 'healthy' | 'offline'>('checking')
+  const daemonWasOfflineRef = useRef(false)
   const [daemonVersion, setDaemonVersion] = useState('')
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
   const [runtime, setRuntime] = useState<RuntimeSettings | null>(null)
@@ -560,7 +586,7 @@ export function App(): React.JSX.Element {
   const [computerModel, setComputerModel] = useState('')
   const [generateModality, setGenerateModality] = useState<'image' | 'video'>('image')
   const [generateHistory, setGenerateHistory] = useState<GenerateHistoryEntry[]>(() =>
-    readGenerateHistory()
+    readGenerateHistory(initialProfileId)
   )
   const [activeGenerateHistoryId, setActiveGenerateHistoryId] = useState<string | null>(null)
   const [persona, setPersona] = useState('You are a helpful assistant.')
@@ -583,6 +609,39 @@ export function App(): React.JSX.Element {
   const [computerComposer, setComputerComposer] = useState<AgentComposerControls | null>(null)
   const [agentSidebar, setAgentSidebar] = useState<AgentSidebarControls | null>(null)
   const [computerSidebar, setComputerSidebar] = useState<ComputerSidebarControls | null>(null)
+  const profileId = connectionProfile?.id ?? initialProfileId
+
+  useEffect(() => {
+    let active = true
+    const apply = (profile: ConnectionProfileSummary): void => {
+      if (!active) return
+      if (profile.id !== profileId) {
+        const cachedModels = readCachedModels(profile.id)
+        setConversations(readCachedConversations(profile.id))
+        setLocalModels(cachedModels)
+        setModelsLoading(cachedModels.length === 0)
+        const cachedRuntimes = readCachedRuntimes(profile.id)
+        setPrefetchedRuntimes(cachedRuntimes.length > 0 ? cachedRuntimes : null)
+        setEnabledTools(readEnabledTools(profile.id))
+        setGenerateHistory(readGenerateHistory(profile.id))
+        setConversationId(null)
+        setMessages([])
+      }
+      setConnectionProfile(profile)
+    }
+    void fetchCurrentConnectionProfile().then(apply).catch(() => {
+      setDaemonAvailability('offline')
+      setDaemonStatus('offline')
+    })
+    const removeListener = window.brazier.onConnectionProfileChanged(apply)
+    return () => {
+      active = false
+      removeListener()
+    }
+    // The main process reloads after a switch; this effect owns only this
+    // mount's initial profile resolution and pre-reload cache isolation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     if (showWelcome !== false) return
@@ -672,7 +731,7 @@ export function App(): React.JSX.Element {
 
   const updateEnabledTools = useCallback((next: string[]): void => {
     setEnabledTools(next)
-    writeEnabledTools(next)
+    writeEnabledTools(profileId, next)
   }, [])
 
   /**
@@ -707,7 +766,7 @@ export function App(): React.JSX.Element {
       setEnabledTools((current) => {
         const names = new Set(tools.map((tool) => tool.name))
         const filtered = current.filter((name) => names.has(name))
-        if (filtered.length !== current.length) writeEnabledTools(filtered)
+        if (filtered.length !== current.length) writeEnabledTools(profileId, filtered)
         return filtered
       })
     } catch {
@@ -718,7 +777,7 @@ export function App(): React.JSX.Element {
   async function refreshLocalModels(): Promise<void> {
     const models = await listModels()
     setLocalModels(models)
-    writeCachedModels(models)
+    writeCachedModels(profileId, models)
     setSelectedModel((current) => {
       if (current && models.some((model) => model.id === current)) return current
       return ''
@@ -1110,7 +1169,7 @@ export function App(): React.JSX.Element {
     try {
       const response = await listRuntimes()
       setPrefetchedRuntimes(response.data)
-      writeCachedRuntimes(response.data)
+      writeCachedRuntimes(profileId, response.data)
     } catch {
       // Best-effort prefetch — Manage panel falls back to its own fetch.
     }
@@ -1124,7 +1183,7 @@ export function App(): React.JSX.Element {
     if (refreshId !== conversationRefreshRef.current) return
     setConversations(data)
     // Only an unfiltered list is worth caching for the next cold start.
-    if (!query.trim()) writeCachedConversations(data)
+    if (!query.trim()) writeCachedConversations(profileId, data)
     if (!conversationId && data[0]) setConversationId(data[0].id)
   }
 
@@ -1177,6 +1236,37 @@ export function App(): React.JSX.Element {
     setHardware(status.hardware)
   }
 
+  async function rehydrateDaemonState(): Promise<void> {
+    await Promise.allSettled([
+      refreshConversations(''),
+      loadLocalModels(),
+      prefetchRuntimes(),
+      refreshTools(),
+      fetchModelBindings().then(setModelBindings),
+      fetchModelSettings().then((response) => setModelProfiles(response.models)),
+      refreshRuntime(),
+      refreshCapabilities(),
+      fetchMemoryPreference().then(setMemoryPreference)
+    ])
+  }
+
+  async function reconnectDaemon(): Promise<void> {
+    setDaemonStatus('checking')
+    setDaemonAvailability('checking')
+    try {
+      const result = await health()
+      setDaemonStatus('healthy')
+      setDaemonAvailability('healthy')
+      setDaemonVersion(result.version)
+      daemonWasOfflineRef.current = false
+      await rehydrateDaemonState()
+    } catch {
+      daemonWasOfflineRef.current = true
+      setDaemonStatus('offline')
+      setDaemonAvailability('offline')
+    }
+  }
+
   useEffect(() => {
     let cancelled = false
     void Promise.all([window.brazier.getFlags(), hasCompletedWelcome()])
@@ -1184,9 +1274,10 @@ export function App(): React.JSX.Element {
         if (cancelled) return
         setShowWelcome(Boolean(flags.forceWelcome) || !completed)
       })
-      .catch(async () => {
-        const completed = await hasCompletedWelcome()
-        if (!cancelled) setShowWelcome(!completed)
+      .catch(() => {
+        // An offline selected profile must still reach the shell so the user
+        // can retry or open Connections. Cached renderer data remains visible.
+        if (!cancelled) setShowWelcome(false)
       })
     return () => {
       cancelled = true
@@ -1194,6 +1285,7 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    if (!connectionProfile) return
     void refreshConversations().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
@@ -1217,27 +1309,39 @@ export function App(): React.JSX.Element {
       .catch(() => {
         // Memory defaults apply until the preference loads.
       })
-  }, [])
+  }, [connectionProfile?.id])
 
   useEffect(() => {
+    if (!connectionProfile || daemonStatus === 'offline') return
     const timer = window.setTimeout(() => {
       void refreshConversations(conversationSearch).catch((cause: unknown) =>
         setError(cause instanceof Error ? cause.message : String(cause))
       )
     }, 250)
     return () => window.clearTimeout(timer)
-  }, [conversationSearch])
+  }, [conversationSearch, connectionProfile?.id, daemonStatus])
 
   useEffect(() => {
+    if (!connectionProfile) return
     let active = true
     const check = (): void => {
       void health()
         .then((result) => {
           if (!active) return
           setDaemonStatus('healthy')
+          setDaemonAvailability('healthy')
           setDaemonVersion(result.version)
+          if (daemonWasOfflineRef.current) {
+            daemonWasOfflineRef.current = false
+            void rehydrateDaemonState()
+          }
         })
-        .catch(() => active && setDaemonStatus('offline'))
+        .catch(() => {
+          if (!active) return
+          daemonWasOfflineRef.current = true
+          setDaemonStatus('offline')
+          setDaemonAvailability('offline')
+        })
     }
     check()
     const timer = window.setInterval(check, 10_000)
@@ -1245,7 +1349,7 @@ export function App(): React.JSX.Element {
       active = false
       window.clearInterval(timer)
     }
-  }, [])
+  }, [connectionProfile?.id])
 
   useEffect(() => {
     // A selected chat changed; any fetch started for the previous one is now
@@ -1555,7 +1659,7 @@ export function App(): React.JSX.Element {
       }
       const remaining = await listConversations('')
       setConversations(remaining)
-      writeCachedConversations(remaining)
+      writeCachedConversations(profileId, remaining)
       setConversationSearch('')
       if (conversation.id === conversationId) setConversationId(remaining[0]?.id ?? null)
     } catch (cause) {
@@ -2019,6 +2123,7 @@ export function App(): React.JSX.Element {
   }
 
   return (
+    <ConnectionProfileContext.Provider value={connectionProfile ?? LOCAL_CONNECTION_PROFILE}>
     <main className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         {/* Narrow windows only (hidden by CSS otherwise): the history panel
@@ -2168,6 +2273,7 @@ export function App(): React.JSX.Element {
         )}
         <div className="privacy-note">
           <span className={`status-dot ${daemonStatus}`} />
+          {connectionProfile ? `${connectionProfile.name} · ${connectionProfile.hostLabel} · ` : ''}
           {daemonStatus === 'healthy'
             ? `Daemon ${daemonVersion}`
             : daemonStatus === 'offline'
@@ -2305,6 +2411,22 @@ export function App(): React.JSX.Element {
           </button>
         </header>
 
+        {daemonStatus === 'offline' && (
+          <div className="runtime-notice connection-offline-notice" role="status">
+            <CircleAlert size={15} />
+            <span>
+              {connectionProfile?.name ?? 'The selected daemon'} is offline. Cached local views stay
+              available, but changes are paused until it reconnects or you switch connections.
+            </span>
+            <button type="button" onClick={() => void reconnectDaemon()}>
+              Retry
+            </button>
+            <button type="button" onClick={() => openManage('connections')}>
+              Connections
+            </button>
+          </div>
+        )}
+
         {runtimeWarning && (
           <div className="runtime-notice">
             <span>{runtimeWarning}</span>
@@ -2398,7 +2520,7 @@ export function App(): React.JSX.Element {
             onGenerated={(entry) => {
               setGenerateHistory((current) => {
                 const next = [entry, ...current]
-                writeGenerateHistory(next)
+                writeGenerateHistory(profileId, next)
                 return next
               })
               setActiveGenerateHistoryId(entry.id)
@@ -3173,5 +3295,6 @@ export function App(): React.JSX.Element {
         />
       )}
     </main>
+    </ConnectionProfileContext.Provider>
   )
 }

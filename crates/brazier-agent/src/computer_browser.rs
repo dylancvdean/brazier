@@ -559,6 +559,8 @@ impl CdpBrowserSession {
                 .map(str::to_owned),
             needs_approval,
             approval_id: None,
+            execution_location: None,
+            decided_by_client_id: None,
         })
     }
 

@@ -18,6 +18,7 @@ use brazier_protocol::computer_types::{
     ComputerAction, ComputerActionResult, ComputerActionStatus, ComputerPermissionMode,
     ComputerSession, ComputerStep, ComputerTarget, ComputerViewport, OsPermissionStatus,
 };
+use brazier_protocol::execution_location::ExecutionLocation;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
@@ -47,12 +48,25 @@ pub struct PendingComputerApproval {
     pub session_id: String,
     pub action: ComputerAction,
     pub created_at: String,
+    /// Snapshot retained even if this daemon is later renamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_location: Option<ExecutionLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by_client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed_at: Option<String>,
 }
 
 struct LiveSession {
     record: ComputerSession,
     browser_id: Option<String>,
     steps: Vec<ComputerStep>,
+    /// Durable approval audit records. The historical field name is retained
+    /// in the on-disk format; decided entries remain here and cannot be reused.
     pending: HashMap<String, PendingComputerApproval>,
     /// Serializes an individual browser/desktop session without blocking any
     /// other session while Chromium waits or performs input.
@@ -92,6 +106,7 @@ pub struct ComputerBroker {
     /// written after releasing the session mutex; snapshots cannot regress.
     persistence: Mutex<()>,
     action_settle_delay_ms: AtomicU64,
+    execution_location: ExecutionLocation,
 }
 
 pub const DEFAULT_ACTION_SETTLE_DELAY_MS: u64 = 750;
@@ -99,15 +114,26 @@ pub const MAX_ACTION_SETTLE_DELAY_MS: u64 = 10_000;
 
 impl ComputerBroker {
     /// Ephemeral broker intended for unit tests. Daemon code must use
-    /// [`Self::open`] so task state survives restart.
+    /// [`Self::open_at`] with its stable identity so task state survives
+    /// restart and every approval names the correct host.
     pub fn new() -> Self {
-        Self::from_sessions(None, HashMap::new())
+        Self::new_at(ExecutionLocation::daemon(
+            "ephemeral-daemon",
+            "Brazier daemon",
+        ))
     }
 
-    /// Restore computer sessions, steps, memories, and pending approvals from
-    /// an atomically-written local file. Browser processes are intentionally
-    /// not restored: a later action starts a fresh isolated Chromium process.
-    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn new_at(execution_location: ExecutionLocation) -> Self {
+        Self::from_sessions(None, HashMap::new(), execution_location)
+    }
+
+    /// Restore computer sessions, steps, memories, and approvals from an
+    /// atomically-written local file. Browser processes are intentionally not
+    /// restored: a later action starts a fresh isolated Chromium process.
+    pub async fn open_at(
+        path: impl AsRef<Path>,
+        execution_location: ExecutionLocation,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let sessions = match tokio::fs::read(&path).await {
             Ok(bytes) => {
@@ -143,12 +169,17 @@ impl ComputerBroker {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
             Err(error) => return Err(error).context("read computer session store"),
         };
-        Ok(Self::from_sessions(Some(path), sessions))
+        Ok(Self::from_sessions(
+            Some(path),
+            sessions,
+            execution_location,
+        ))
     }
 
     fn from_sessions(
         persist_path: Option<PathBuf>,
         sessions: HashMap<String, LiveSession>,
+        execution_location: ExecutionLocation,
     ) -> Self {
         Self {
             browsers: Arc::new(BrowserSessionRegistry::new()),
@@ -159,6 +190,7 @@ impl ComputerBroker {
             persist_path,
             persistence: Mutex::new(()),
             action_settle_delay_ms: AtomicU64::new(DEFAULT_ACTION_SETTLE_DELAY_MS),
+            execution_location,
         }
     }
     pub fn action_settle_delay_ms(&self) -> u64 {
@@ -453,7 +485,14 @@ impl ComputerBroker {
             title: None,
             needs_approval: false,
             approval_id: None,
+            execution_location: None,
+            decided_by_client_id: None,
         }
+    }
+
+    fn located_result(&self, mut result: ComputerActionResult) -> ComputerActionResult {
+        result.execution_location = Some(self.execution_location.clone());
+        result
     }
     async fn record(
         &self,
@@ -522,9 +561,9 @@ impl ComputerBroker {
                     | ComputerAction::Terminate { .. }
             );
         if needs_desktop_authority && !desktop_authorized {
-            let result = Self::refusal(
+            let result = self.located_result(Self::refusal(
                 "Desktop control is locked because the always-visible safety overlay and Esc emergency stop are not active.",
-            );
+            ));
             self.record(&request.session_id, request.action, result.clone())
                 .await?;
             return Ok(result);
@@ -536,6 +575,8 @@ impl ComputerBroker {
             desktop_permitted: desktop_permitted(&self.os_permissions()),
         });
         let mut consumed_approval_id = None;
+        let mut decided_by_client_id = None;
+        let mut result_location = self.execution_location.clone();
         match decision {
             ComputerPolicyDecision::Refuse(reason) => {
                 let detail = if target == ComputerTarget::Desktop
@@ -547,7 +588,7 @@ impl ComputerBroker {
                 } else {
                     reason.into()
                 };
-                let result = Self::refusal(detail);
+                let result = self.located_result(Self::refusal(detail));
                 self.record(&request.session_id, request.action, result.clone())
                     .await?;
                 return Ok(result);
@@ -559,6 +600,11 @@ impl ComputerBroker {
                     session_id: request.session_id.clone(),
                     action: request.action.clone(),
                     created_at: now_stamp(),
+                    execution_location: Some(self.execution_location.clone()),
+                    approved: None,
+                    decided_at: None,
+                    decided_by_client_id: None,
+                    consumed_at: None,
                 };
                 let result = {
                     let mut sessions = self.sessions.lock().await;
@@ -576,6 +622,8 @@ impl ComputerBroker {
                         title: session.record.title_page.clone(),
                         needs_approval: true,
                         approval_id: Some(approval_id),
+                        execution_location: Some(self.execution_location.clone()),
+                        decided_by_client_id: None,
                     }
                 };
                 // The pending request is itself an authoritative tool record:
@@ -591,13 +639,23 @@ impl ComputerBroker {
                     .get_mut(&request.session_id)
                     .context("session disappeared")?;
                 let approval_id = request.approval_id.as_deref().unwrap_or("");
-                let Some(pending) = session.pending.get(approval_id).cloned() else {
+                let Some(pending) = session.pending.get_mut(approval_id) else {
                     bail!("approval not found or already spent");
                 };
                 if pending.action != request.action {
                     bail!("approval does not match action");
                 }
-                session.pending.remove(approval_id);
+                if pending.approved != Some(true) {
+                    bail!("approval has not been approved through the decision endpoint");
+                }
+                if pending.consumed_at.is_some() {
+                    bail!("approval not found or already spent");
+                }
+                pending.consumed_at = Some(now_stamp());
+                decided_by_client_id = pending.decided_by_client_id.clone();
+                if let Some(location) = &pending.execution_location {
+                    result_location = location.clone();
+                }
                 consumed_approval_id = Some(approval_id.to_owned());
             }
             ComputerPolicyDecision::Allow => {}
@@ -635,6 +693,8 @@ impl ComputerBroker {
                 title: None,
                 needs_approval: false,
                 approval_id: None,
+                execution_location: None,
+                decided_by_client_id: None,
             }),
             ComputerAction::AskUser { question } => Ok(ComputerActionResult {
                 status: ComputerActionStatus::WaitingForUser,
@@ -646,6 +706,8 @@ impl ComputerBroker {
                 title: None,
                 needs_approval: false,
                 approval_id: None,
+                execution_location: None,
+                decided_by_client_id: None,
             }),
             ComputerAction::Terminate { response } => Ok(ComputerActionResult {
                 status: ComputerActionStatus::Finished,
@@ -657,6 +719,8 @@ impl ComputerBroker {
                 title: None,
                 needs_approval: false,
                 approval_id: None,
+                execution_location: None,
+                decided_by_client_id: None,
             }),
             _ => match target {
                 ComputerTarget::Browser => match self.ensure_browser(&request.session_id).await {
@@ -688,6 +752,8 @@ impl ComputerBroker {
         match executed {
             Ok(mut result) => {
                 result.approval_id = consumed_approval_id.clone();
+                result.execution_location = Some(result_location);
+                result.decided_by_client_id = decided_by_client_id;
                 self.record(&request.session_id, request.action, result.clone())
                     .await?;
                 Ok(result)
@@ -703,6 +769,8 @@ impl ComputerBroker {
                     title: None,
                     needs_approval: false,
                     approval_id: consumed_approval_id,
+                    execution_location: Some(result_location),
+                    decided_by_client_id,
                 };
                 self.record(&request.session_id, request.action, result.clone())
                     .await?;
@@ -715,29 +783,43 @@ impl ComputerBroker {
         &self,
         approval_id: &str,
         approve: bool,
+        expected_execution_location: Option<&ExecutionLocation>,
+        decided_by_client_id: &str,
     ) -> Result<Option<ComputerActionResult>> {
-        let (session_id, action) = {
-            let sessions = self.sessions.lock().await;
-            sessions
-                .values()
-                .find_map(|session| {
-                    session
-                        .pending
-                        .get(approval_id)
-                        .map(|pending| (pending.session_id.clone(), pending.action.clone()))
-                })
-                .context("unknown approval")?
-        };
-        if !approve {
-            {
-                let mut sessions = self.sessions.lock().await;
-                let session = sessions
-                    .get_mut(&session_id)
-                    .context("session disappeared")?;
-                session.pending.remove(approval_id);
+        let (session_id, action, execution_location) = {
+            let mut sessions = self.sessions.lock().await;
+            let pending = sessions
+                .values_mut()
+                .find_map(|session| session.pending.get_mut(approval_id))
+                .context("unknown approval")?;
+            anyhow::ensure!(pending.approved.is_none(), "approval was already decided");
+            if let Some(expected) = expected_execution_location {
+                anyhow::ensure!(
+                    pending.execution_location.as_ref() == Some(expected),
+                    "the approval execution location no longer matches the location shown to the user"
+                );
             }
+            if approve {
+                anyhow::ensure!(
+                    pending.execution_location.is_some(),
+                    "legacy approval has no recorded execution host and cannot be approved"
+                );
+            }
+            pending.approved = Some(approve);
+            pending.decided_at = Some(now_stamp());
+            pending.decided_by_client_id = Some(decided_by_client_id.to_owned());
+            (
+                pending.session_id.clone(),
+                pending.action.clone(),
+                pending.execution_location.clone(),
+            )
+        };
+        self.persist().await?;
+        if !approve {
             let mut result = Self::refusal("User denied the action.");
             result.approval_id = Some(approval_id.into());
+            result.execution_location = execution_location;
+            result.decided_by_client_id = Some(decided_by_client_id.to_owned());
             self.record(&session_id, action, result.clone()).await?;
             self.approvals_changed.notify_waiters();
             return Ok(Some(result));
@@ -791,9 +873,11 @@ impl ComputerBroker {
             session.cancel.reset();
             session.cancel.clone()
         };
-        self.browsers
+        let result = self
+            .browsers
             .execute(&id, &ComputerAction::Screenshot, 0, Some(cancel.as_ref()))
-            .await
+            .await?;
+        Ok(self.located_result(result))
     }
 
     /// Revoke host-desktop authority immediately. The renderer calls this for
@@ -814,6 +898,8 @@ impl ComputerBroker {
             crate::computer_portal::close_session().await;
             crate::computer_portal::clear_restore_token();
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = target;
         self.persist().await
     }
 
@@ -946,10 +1032,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_session_keeps_steps_memories_and_pending_approvals() {
+    async fn persistent_session_keeps_approval_location_and_actor_audit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("computer.json");
-        let broker = ComputerBroker::open(&path).await.unwrap();
+        let location = ExecutionLocation::daemon("daemon-42", "Studio Mac");
+        let broker = ComputerBroker::open_at(&path, location.clone())
+            .await
+            .unwrap();
         let session = broker
             .create_session(
                 None,
@@ -981,22 +1070,58 @@ mod tests {
                     session_id: session.id.clone(),
                     action: ComputerAction::LeftClick { x: 1.0, y: 1.0 },
                     created_at: now_stamp(),
+                    execution_location: Some(broker.execution_location.clone()),
+                    approved: None,
+                    decided_at: None,
+                    decided_by_client_id: None,
+                    consumed_at: None,
                 },
             );
         }
         broker.persist().await.unwrap();
         drop(broker);
-        let restored = ComputerBroker::open(&path).await.unwrap();
+        let restored = ComputerBroker::open_at(
+            &path,
+            ExecutionLocation::daemon("daemon-42", "Renamed daemon"),
+        )
+        .await
+        .unwrap();
         let restored_session = restored.get_session(&session.id).await.unwrap();
         assert!(!restored_session.running);
         assert_eq!(restored_session.memories, vec!["persist me"]);
         assert_eq!(restored.list_steps(&session.id).await.unwrap().len(), 1);
         assert!(
             restored
-                .decide_approval(&approval_id, false)
+                .decide_approval(&approval_id, false, Some(&location), "desktop-client")
                 .await
                 .unwrap()
                 .is_some()
+        );
+        drop(restored);
+
+        let recovered = ComputerBroker::open_at(
+            &path,
+            ExecutionLocation::daemon("different-daemon", "Different daemon"),
+        )
+        .await
+        .unwrap();
+        let sessions = recovered.sessions.lock().await;
+        let audit = &sessions[&session.id].pending[&approval_id];
+        assert_eq!(audit.approved, Some(false));
+        assert_eq!(
+            audit.decided_by_client_id.as_deref(),
+            Some("desktop-client")
+        );
+        assert_eq!(audit.execution_location.as_ref(), Some(&location));
+        let result = sessions[&session.id]
+            .steps
+            .last()
+            .and_then(|step| step.result.as_ref())
+            .expect("durable denial result");
+        assert_eq!(result.execution_location.as_ref(), Some(&location));
+        assert_eq!(
+            result.decided_by_client_id.as_deref(),
+            Some("desktop-client")
         );
     }
 
@@ -1093,6 +1218,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_approval_id_cannot_bypass_the_decision_endpoint() {
+        let broker = ComputerBroker::new();
+        let session = broker
+            .create_session(
+                None,
+                ComputerTarget::Desktop,
+                None,
+                ComputerPermissionMode::Ask,
+                None,
+            )
+            .await
+            .unwrap();
+        let approval_id = Uuid::new_v4().to_string();
+        let action = ComputerAction::VisitUrl {
+            url: "https://example.com".into(),
+        };
+        {
+            let mut sessions = broker.sessions.lock().await;
+            let live = sessions.get_mut(&session.id).unwrap();
+            // Avoid opening Chromium: approval validation happens before a
+            // browser driver is needed.
+            live.record.target = ComputerTarget::Browser;
+            live.pending.insert(
+                approval_id.clone(),
+                PendingComputerApproval {
+                    id: approval_id.clone(),
+                    session_id: session.id.clone(),
+                    action: action.clone(),
+                    created_at: now_stamp(),
+                    execution_location: Some(broker.execution_location.clone()),
+                    approved: None,
+                    decided_at: None,
+                    decided_by_client_id: None,
+                    consumed_at: None,
+                },
+            );
+        }
+        let error = broker
+            .execute(ComputerExecRequest {
+                session_id: session.id,
+                action,
+                approval_id: Some(approval_id),
+                settle_delay_ms: None,
+            })
+            .await
+            .expect_err("an undecided id must not authorize execution");
+        assert!(error.to_string().contains("decision endpoint"));
+    }
+
+    #[tokio::test]
     #[ignore = "requires a working Chromium and local TCP loopback"]
     async fn approved_result_references_the_consumed_approval() {
         if !crate::computer_browser::chromium_available() {
@@ -1120,7 +1295,7 @@ mod tests {
             .unwrap();
         let approval_id = pending.approval_id.unwrap();
         let approved = broker
-            .decide_approval(&approval_id, true)
+            .decide_approval(&approval_id, true, None, "desktop-client")
             .await
             .unwrap()
             .unwrap();

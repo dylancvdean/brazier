@@ -18,6 +18,7 @@ import type {
   PersonaPlexHandoffRequest,
   PersonaPlexHandoffStrategy
 } from './personaplexHandoff'
+import type { ExecutionLocation } from '../../../agent/core/types'
 
 // --- Chat -------------------------------------------------------------------
 
@@ -82,8 +83,9 @@ export type AgentAdapterEvent =
    * The permission broker is holding a call until someone allows it.
    *
    * Normalized out of the agent's approval record because the coordinator has to
-   * read it out loud: the summary is what gets spoken, the risk and environment
-   * decide how firmly, and nothing else travels.
+   * read it out loud. The immutable daemon identity travels with the held call:
+   * a remote approval must never be described as local or approved after its
+   * execution host changes.
    */
   | {
       type: 'approvalRequired'
@@ -93,6 +95,7 @@ export type AgentAdapterEvent =
       summary: string
       risk: string
       environment: 'sandbox' | 'host'
+      executionLocation: ExecutionLocation
     }
   | { type: 'approvalResolved'; correlationId: string; approvalId: string }
   | { type: 'runFailed'; correlationId: string; error: string }
@@ -110,7 +113,12 @@ export interface AgentAdapter {
    * made — it never decides on their behalf, and there is no timeout that turns
    * silence into consent.
    */
-  decideApproval(approvalId: string, decision: 'approve' | 'deny', note?: string): Promise<void>
+  decideApproval(
+    approvalId: string,
+    decision: 'approve' | 'deny',
+    expectedExecutionLocation: ExecutionLocation,
+    note?: string
+  ): Promise<void>
   getStatus(correlationId: string): AgentRunStatusReport | null
   subscribe(listener: (event: AgentAdapterEvent) => void): () => void
 }
@@ -147,6 +155,14 @@ export type VoiceAdapterEvent =
       vad: 'silero-v5' | 'energy-fallback'
       /** Most recent model probability, absent while using RMS fallback. */
       speechProbability: number | null
+      /** Current queued audio waiting for VAD inference. */
+      vadQueueLagMs: number
+      /** Most recent 32 ms Silero inference cost. */
+      vadInferenceMs: number
+      /** Bounded-session window/queue percentiles and exact processed count. */
+      vadInferenceP95Ms: number
+      vadQueueLagP95Ms: number
+      vadProcessedWindows: number
     }
   /** A finished utterance is being transcribed. */
   | { type: 'transcriptionStarted'; utteranceId: string }

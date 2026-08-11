@@ -22,6 +22,7 @@ import type {
   AgentMessage,
   AgentPermissionMode,
   AgentRunSummary,
+  ExecutionLocation,
   SandboxDescription,
   ToolExecutionRecord
 } from '../../../agent/core/types'
@@ -54,6 +55,8 @@ import { modelDisplayName } from '../model-utils'
 import { Markdown } from './Markdown'
 import { ReasoningDisclosure } from './ReasoningDisclosure'
 import { ToolsMenu } from './ToolsMenu'
+import { daemonPathLabel, useConnectionProfile } from '../connectionProfile'
+import { assertDaemonMutationAllowed, daemonAvailability } from '../daemonAvailability'
 
 /**
  * What the shared composer needs to drive a run. Agent mode has no input of its
@@ -126,6 +129,8 @@ type TimelineEntry = {
   truncated?: boolean
   artifactId?: string
   durationMs?: number
+  executionLocation?: ExecutionLocation
+  decidedByClientId?: string
   /** When the tool call started, for interleaving with messages. */
   timestamp: string
   /** Set when this row tracks a `spawn_subagent` child. */
@@ -263,6 +268,8 @@ function timelineFromRecords(records: ToolExecutionRecord[]): TimelineEntry[] {
     truncated: record.truncated,
     artifactId: record.artifact_id,
     durationMs: record.duration_ms,
+    executionLocation: record.execution_location,
+    decidedByClientId: record.decided_by_client_id,
     timestamp: record.created_at
   }))
 }
@@ -463,6 +470,7 @@ function ApprovalCard({
   const elevation = approval.elevation
   const host = approval.environment === 'host' || elevation.requested_host_execution
   const paths = elevation.requested_filesystem_paths ?? []
+  const location = approval.execution_location
   return (
     <div className={`agent-approval ${host ? 'host' : ''}`}>
       <div className="agent-approval-head">
@@ -483,6 +491,13 @@ function ApprovalCard({
           <dt>Environment</dt>
           <dd className={host ? 'warn' : ''}>
             {host ? 'Host — no sandbox, full user privileges' : `Sandbox · ${approval.sandbox.backend}`}
+          </dd>
+        </div>
+        <div className="wide">
+          <dt>Runs on</dt>
+          <dd className="warn">
+            {location.daemon_display_name} · {location.platform}/{location.arch} · daemon{' '}
+            <code>{location.daemon_instance_id}</code>
           </dd>
         </div>
         {elevation.proposed_command && (
@@ -628,6 +643,14 @@ function TimelineRow({
         {entry.changedPaths && entry.changedPaths.length > 0 && (
           <p className="agent-tool-changed">Changed: {entry.changedPaths.join(', ')}</p>
         )}
+        {entry.executionLocation ? (
+          <p className="agent-tool-location">
+            Ran on {entry.executionLocation.daemon_display_name} ·{' '}
+            {entry.executionLocation.platform}/{entry.executionLocation.arch} · daemon{' '}
+            <code>{entry.executionLocation.daemon_instance_id}</code>
+            {entry.decidedByClientId ? ` · approved by ${entry.decidedByClientId}` : ''}
+          </p>
+        ) : null}
         <pre>{entry.error ?? entry.output ?? (entry.subagent ? '(working…)' : '(no output yet)')}</pre>
         {entry.truncated && entry.artifactId && (
           <button type="button" onClick={() => onShowFull(entry.artifactId!)}>
@@ -699,6 +722,8 @@ function useDialogOverlay(
 }
 
 export function AgentMode(props: Props): React.JSX.Element {
+  const connectionProfile = useConnectionProfile()
+  const lastAgentSessionKey = `${LAST_AGENT_SESSION_KEY}.${encodeURIComponent(connectionProfile.id)}`
   const { onError, onSessionBound } = props
   const [capabilities, setCapabilities] = useState<AgentCapabilities | null>(null)
   const [defaultRuntimeId, setDefaultRuntimeId] = useState('simple')
@@ -1071,7 +1096,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         sessionIdRef.current = detail.session.id
         onSessionBound?.(detail.session.id)
         try {
-          window.sessionStorage.setItem(LAST_AGENT_SESSION_KEY, detail.session.id)
+          window.sessionStorage.setItem(lastAgentSessionKey, detail.session.id)
         } catch {
           // Ignore quota / privacy mode failures.
         }
@@ -1118,7 +1143,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         const tasks = entries.filter((entry) => entry.runtime_metadata?.kind !== 'subagent')
         let lastId: string | null = null
         try {
-          lastId = window.sessionStorage.getItem(LAST_AGENT_SESSION_KEY)
+          lastId = window.sessionStorage.getItem(lastAgentSessionKey)
         } catch {
           lastId = null
         }
@@ -1134,7 +1159,12 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   async function chooseWorkspace(): Promise<void> {
     onError(null)
-    const selected = await window.brazier.selectWorkspace()
+    const selected = connectionProfile.kind === 'remote'
+      ? window.prompt(
+          `Workspace path on ${connectionProfile.name} (${connectionProfile.hostLabel})`,
+          workspace ?? ''
+        )?.trim() ?? null
+      : await window.brazier.selectWorkspace()
     if (!selected) return
     try {
       const validated = await validateAgentWorkspace(selected)
@@ -1209,6 +1239,7 @@ export function AgentMode(props: Props): React.JSX.Element {
       return
     }
     try {
+      assertDaemonMutationAllowed({ method: 'POST' })
       await window.brazier.agent.setPermissionMode(session.id, mode)
       const updated = (await fetchAgentSession(session.id)).session
       setSession(updated)
@@ -1229,7 +1260,13 @@ export function AgentMode(props: Props): React.JSX.Element {
   ): Promise<void> {
     setDeciding(true)
     try {
-      await decideAgentApproval(approval.id, decision, scope, note)
+      await decideAgentApproval(
+        approval.id,
+        decision,
+        scope,
+        note,
+        approval.execution_location
+      )
       setApprovals((current) => current.filter((entry) => entry.id !== approval.id))
       if (decision === 'approve' && scope === 'session') {
         setGrants((current) => [...current, `${approval.environment}:${approval.scope_key}`])
@@ -1254,6 +1291,7 @@ export function AgentMode(props: Props): React.JSX.Element {
       return
     }
     try {
+      assertDaemonMutationAllowed({ method: 'POST' })
       setWorktreeNotice(null)
       let active = session
       if (!active) {
@@ -1270,7 +1308,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         setSession(active)
         sessionIdRef.current = active.id
         try {
-          window.sessionStorage.setItem(LAST_AGENT_SESSION_KEY, active.id)
+          window.sessionStorage.setItem(lastAgentSessionKey, active.id)
         } catch {
           // Ignore.
         }
@@ -1332,6 +1370,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   async function stop(): Promise<void> {
     if (!session) return
     try {
+      assertDaemonMutationAllowed({ method: 'POST' })
       await window.brazier.agent.cancel(session.id)
       setRunning(false)
       setApprovals([])
@@ -1343,6 +1382,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   async function compact(): Promise<void> {
     if (!session) return
     try {
+      assertDaemonMutationAllowed({ method: 'POST' })
       await window.brazier.agent.compact(session.id)
     } catch (cause) {
       onError(errorText(cause))
@@ -1368,6 +1408,7 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   async function refreshWorkerPrompt(): Promise<void> {
     if (!session) return
+    assertDaemonMutationAllowed({ method: 'POST' })
     await window.brazier.agent.closeSession(session.id)
     await window.brazier.agent.openSession(session.id)
   }
@@ -1451,7 +1492,7 @@ export function AgentMode(props: Props): React.JSX.Element {
     setSession(null)
     sessionIdRef.current = null
     try {
-      window.sessionStorage.removeItem(LAST_AGENT_SESSION_KEY)
+      window.sessionStorage.removeItem(lastAgentSessionKey)
     } catch {
       // Ignore.
     }
@@ -1581,7 +1622,9 @@ export function AgentMode(props: Props): React.JSX.Element {
   useEffect(() => {
     return () => {
       const id = sessionIdRef.current
-      if (id) void window.brazier.agent.cancel(id).catch(() => undefined)
+      if (id && daemonAvailability() === 'healthy') {
+        void window.brazier.agent.cancel(id).catch(() => undefined)
+      }
     }
   }, [])
 
@@ -1591,9 +1634,20 @@ export function AgentMode(props: Props): React.JSX.Element {
         <button
           className="agent-workspace"
           type="button"
-          title={session ? 'Show this task workspace in the file manager.' : 'Choose a workspace'}
+          disabled={Boolean(session && connectionProfile.kind === 'remote')}
+          title={
+            session && connectionProfile.kind === 'remote'
+              ? `${daemonPathLabel(connectionProfile)}; reveal is unavailable from this desktop.`
+              : session
+                ? 'Show this task workspace in the file manager.'
+                : connectionProfile.kind === 'remote'
+                  ? `Enter a workspace path on ${connectionProfile.name}.`
+                  : 'Choose a workspace'
+          }
           onClick={() => {
-            if (session && workspace) void window.brazier.revealFile(workspace)
+            if (session && workspace && connectionProfile.kind === 'local') {
+              void window.brazier.revealFile(workspace)
+            }
             else void chooseWorkspace()
           }}
         >
@@ -1604,8 +1658,10 @@ export function AgentMode(props: Props): React.JSX.Element {
               {worktree
                 ? `Worktree · ${worktree.branch}`
                 : workspace
-                  ? 'Workspace'
-                  : 'Choose a folder'}
+                  ? daemonPathLabel(connectionProfile)
+                  : connectionProfile.kind === 'remote'
+                    ? `Choose a path on ${connectionProfile.name}`
+                    : 'Choose a folder'}
             </small>
           </span>
         </button>

@@ -2,6 +2,7 @@
 
 pub mod agent_types;
 pub mod computer_types;
+pub mod execution_location;
 pub mod message_format;
 pub mod progress;
 pub mod types;

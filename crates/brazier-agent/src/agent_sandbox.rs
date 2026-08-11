@@ -1,11 +1,12 @@
 //! Sandbox backends for agent tool execution.
 //!
 //! A backend wraps a command so it can only reach the session workspace and a
-//! scratch directory. Two real backends ship: macOS Seatbelt (`sandbox-exec`)
-//! and Linux Bubblewrap (`bwrap`). When neither exists the backend reports
-//! itself as `none` with `isolated: false`; the policy layer refuses to treat
-//! that as a sandbox, and the UI shows the caveat verbatim. Nothing in this
-//! module may claim isolation it did not apply.
+//! scratch directory. Three real backends ship: macOS Seatbelt
+//! (`sandbox-exec`), Linux Bubblewrap (`bwrap`), and Windows AppContainer plus
+//! a Job Object. When none is usable the backend reports itself as `none` with
+//! `isolated: false`; the policy layer refuses to treat that as a sandbox, and
+//! the UI shows the caveat verbatim. Nothing in this module may claim isolation
+//! it did not apply.
 
 use std::{
     collections::BTreeMap,
@@ -66,6 +67,8 @@ pub enum SandboxBackendKind {
     Seatbelt,
     /// Linux `bwrap`.
     Bubblewrap,
+    /// Windows AppContainer plus a kill-on-close Job Object.
+    AppContainer,
     /// No OS-level isolation available.
     None,
 }
@@ -75,6 +78,7 @@ impl SandboxBackendKind {
         match self {
             Self::Seatbelt => "seatbelt",
             Self::Bubblewrap => "bubblewrap",
+            Self::AppContainer => "appcontainer",
             Self::None => "none",
         }
     }
@@ -200,6 +204,12 @@ impl SandboxBackend {
         if cfg!(target_os = "macos") {
             let program = PathBuf::from("/usr/bin/sandbox-exec");
             if program.exists() {
+                if !seatbelt_is_usable(&program) {
+                    return Self::unavailable(
+                        "macOS Seatbelt is present but cannot create a sandbox in this process. \
+                         Agent shell commands will not be sandboxed.",
+                    );
+                }
                 return Self {
                     kind: SandboxBackendKind::Seatbelt,
                     program: Some(program),
@@ -243,10 +253,30 @@ impl SandboxBackend {
                 "No sandbox: install bubblewrap (`bwrap`) to isolate agent commands.",
             );
         }
+        #[cfg(windows)]
+        {
+            if let Some(program) = crate::agent_sandbox_windows::usable_launcher() {
+                return Self {
+                    kind: SandboxBackendKind::AppContainer,
+                    program: Some(program),
+                    detail: "Windows AppContainer scopes filesystem and credential access; a \
+                             kill-on-close Job Object contains the process tree. Network is \
+                             denied unless the selected profile grants outbound Internet and \
+                             private-network access."
+                        .to_owned(),
+                    unshare_net: true,
+                };
+            }
+            Self::unavailable(
+                "Windows AppContainer setup or the Brazier launcher probe failed. Agent shell \
+                 commands will not be sandboxed.",
+            )
+        }
+        #[cfg(not(windows))]
         Self::unavailable("No sandbox backend exists for this platform yet.")
     }
 
-    fn unavailable(detail: &str) -> Self {
+    pub(crate) fn unavailable(detail: &str) -> Self {
         Self {
             kind: SandboxBackendKind::None,
             program: None,
@@ -273,15 +303,23 @@ impl SandboxBackend {
             network_isolation: match self.kind {
                 SandboxBackendKind::Seatbelt => true,
                 SandboxBackendKind::Bubblewrap => self.unshare_net,
+                SandboxBackendKind::AppContainer => true,
                 SandboxBackendKind::None => false,
             },
-            process_isolation: matches!(self.kind, SandboxBackendKind::Bubblewrap),
-            profiles: vec![
-                SandboxProfile::Workspace.as_str().to_owned(),
-                SandboxProfile::WorkspaceNetwork.as_str().to_owned(),
-                SandboxProfile::ReadOnly.as_str().to_owned(),
-                SandboxProfile::Diagnostics.as_str().to_owned(),
-            ],
+            process_isolation: matches!(
+                self.kind,
+                SandboxBackendKind::Bubblewrap | SandboxBackendKind::AppContainer
+            ),
+            profiles: if self.isolated() {
+                vec![
+                    SandboxProfile::Workspace.as_str().to_owned(),
+                    SandboxProfile::WorkspaceNetwork.as_str().to_owned(),
+                    SandboxProfile::ReadOnly.as_str().to_owned(),
+                    SandboxProfile::Diagnostics.as_str().to_owned(),
+                ]
+            } else {
+                Vec::new()
+            },
             detail: self.detail.clone(),
             program: self.program.as_ref().map(|path| path.display().to_string()),
         }
@@ -297,7 +335,7 @@ impl SandboxBackend {
             backend: self.kind.as_str().to_owned(),
             profile: profile.as_str().to_owned(),
             isolated: self.isolated(),
-            network: profile.allows_network(),
+            network: self.isolated() && profile.allows_network(),
             workspace_path: workspace.map(|path| path.display().to_string()),
             detail: self.detail.clone(),
         }
@@ -355,12 +393,14 @@ impl SandboxBackend {
                     description,
                 })
             }
-            _ => Ok(WrappedCommand {
-                program: OsString::from(program),
-                args: args.iter().map(OsString::from).collect(),
+            #[cfg(windows)]
+            (SandboxBackendKind::AppContainer, Some(launcher)) => Ok(WrappedCommand {
+                program: launcher.clone().into_os_string(),
+                args: crate::agent_sandbox_windows::launcher_args(request, program, args),
                 env,
                 description,
             }),
+            _ => bail!("{}", self.detail),
         }
     }
 
@@ -379,6 +419,13 @@ impl SandboxBackend {
             description: self.describe_host(Some(request.workspace)),
         })
     }
+}
+
+/// Handle the daemon's private Windows AppContainer launcher mode before its
+/// normal CLI is parsed. Non-Windows callers can never enter this mode.
+#[cfg(windows)]
+pub fn maybe_run_windows_helper() -> Option<i32> {
+    crate::agent_sandbox_windows::maybe_run_helper()
 }
 
 /// Look up an executable on `PATH`.
@@ -502,7 +549,7 @@ const SEATBELT_SYSTEM_READ_PATHS: &[&str] = &[
 
 /// Toolchain caches that commonly live under `$HOME` but are not user documents.
 /// Credential files inside these trees are still denied via [`secret_paths`].
-const SEATBELT_HOME_TOOLCHAIN_PATHS: &[&str] = &[
+pub(crate) const HOME_TOOLCHAIN_PATHS: &[&str] = &[
     ".cargo",
     ".rustup",
     ".local/share/uv",
@@ -539,6 +586,12 @@ pub fn seatbelt_profile(request: &SandboxRequest<'_>) -> String {
     profile.push_str("(allow signal)\n(allow sysctl-read)\n");
     profile.push_str("(allow mach-lookup)\n(allow ipc-posix-shm)\n");
     profile.push_str("(allow file-read-metadata)\n");
+    // macOS `/bin/sh` reads the root directory itself during startup and
+    // aborts (rather than returning an ordinary permission error) when that
+    // single operation is denied. Grant only the root directory object, not a
+    // recursive root subpath; content below it remains governed by the
+    // explicit system, toolchain, workspace, and scratch rules.
+    profile.push_str("(allow file-read-data (literal \"/\"))\n");
     for path in SEATBELT_SYSTEM_READ_PATHS {
         profile.push_str(&format!(
             "(allow file-read* (subpath {}))\n",
@@ -550,7 +603,7 @@ pub fn seatbelt_profile(request: &SandboxRequest<'_>) -> String {
         sbpl_quote(request.workspace)
     ));
     if let Some(home) = home_directory() {
-        for relative in SEATBELT_HOME_TOOLCHAIN_PATHS {
+        for relative in HOME_TOOLCHAIN_PATHS {
             profile.push_str(&format!(
                 "(allow file-read* (subpath {}))\n",
                 sbpl_quote(&home.join(relative))
@@ -599,6 +652,25 @@ fn bubblewrap_probe(bwrap: &Path, extra: &[&str]) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     command
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Probe whether this process can create a nested Seatbelt sandbox. Merely
+/// finding `sandbox-exec` is not sufficient: packaged hosts, CI runners, and
+/// other parent sandboxes can deny profile creation. In that case reporting an
+/// isolated backend would make every command abort while the UI claimed the
+/// sandbox was healthy.
+fn seatbelt_is_usable(sandbox_exec: &Path) -> bool {
+    std::process::Command::new(sandbox_exec)
+        .args([
+            "-p",
+            "(version 1)\n(deny default)\n(allow process*)\n(allow file-read*)\n",
+            "/usr/bin/true",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -788,6 +860,7 @@ mod tests {
         assert!(profile.contains("(deny network*)"));
         assert!(profile.contains("(allow file-write* (subpath \"/tmp/ws\"))"));
         assert!(profile.contains("(allow file-read* (subpath \"/usr\"))"));
+        assert!(profile.contains("(allow file-read-data (literal \"/\"))"));
         assert!(profile.contains("(allow file-read* (subpath \"/tmp/ws\"))"));
         // No blanket home read — only explicit system/toolchain/workspace paths.
         assert!(!profile.contains("(allow file-read*)\n"));
@@ -955,20 +1028,18 @@ mod tests {
     }
 
     #[test]
-    fn wrapping_without_a_backend_runs_the_command_directly() {
+    fn wrapping_without_a_backend_fails_closed() {
         let backend = SandboxBackend::unavailable("no backend");
         let workspace = PathBuf::from("/tmp/ws");
         let scratch = PathBuf::from("/tmp/scratch");
-        let wrapped = backend
+        let error = backend
             .wrap(
                 &request(SandboxProfile::Workspace, &workspace, &scratch),
                 "echo",
                 &["hello".to_owned()],
                 &BTreeMap::new(),
             )
-            .expect("wrap with empty extra env");
-        assert_eq!(wrapped.program, OsString::from("echo"));
-        assert_eq!(wrapped.args, vec![OsString::from("hello")]);
-        assert!(!wrapped.description.isolated);
+            .expect_err("an unavailable sandbox must not run the command directly");
+        assert!(error.to_string().contains("no backend"));
     }
 }

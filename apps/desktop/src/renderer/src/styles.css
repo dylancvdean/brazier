@@ -2056,6 +2056,23 @@ code {
   overflow-y: auto;
 }
 
+.connection-location-strip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 16px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 10px;
+  background: #080808;
+}
+
+.connection-location-strip strong {
+  color: #ddd;
+}
+
 /* Small windows: the drawer takes the full width and its side nav folds into
    a horizontally scrollable strip so the content keeps a usable column. */
 @media (max-width: 720px) {
@@ -2484,6 +2501,15 @@ a.inline-link {
   background: #3d3420;
   border: none;
   cursor: pointer;
+}
+
+.connection-offline-notice span {
+  flex: 1;
+}
+
+.connection-offline-notice button {
+  flex: 0 0 auto;
+  margin-left: 0;
 }
 
 .dream-notice {
@@ -6786,6 +6812,35 @@ label.span-2 {
   flex: 0 0 auto;
   margin-top: 2px;
   color: #e79a9a;
+}
+
+.voice-qualification {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 16px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  font-size: 12px;
+}
+
+.voice-qualification details {
+  width: 100%;
+}
+
+.voice-qualification summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.voice-qualification ol {
+  max-height: 190px;
+  overflow: auto;
+  margin: 10px 0;
+  padding-left: 28px;
+  line-height: 1.55;
 }
 
 .voice-capture {

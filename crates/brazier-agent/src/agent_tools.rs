@@ -802,7 +802,10 @@ pub fn system_prompt_components(
     vec![
         (
             "identity",
-            "You are Brazier's coding and system agent, running locally on the user's machine."
+            "You are Brazier's coding and system agent. Tools and paths belong to the Brazier \
+             daemon host, which may be a different machine from the desktop client the user is \
+             holding. Never describe a daemon path or action as client-local unless the supplied \
+             execution location says it is."
                 .to_owned(),
         ),
         ("workspace", workspace_line),
@@ -999,6 +1002,8 @@ mod tests {
         assert!(prompt.contains("no OS sandbox"));
         assert!(prompt.contains("install bubblewrap"));
         assert!(prompt.contains("/ws"));
+        assert!(prompt.contains("daemon host"));
+        assert!(!prompt.contains("running locally on the user's machine"));
     }
 
     #[test]

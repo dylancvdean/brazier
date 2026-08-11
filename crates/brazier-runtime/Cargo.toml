@@ -23,6 +23,7 @@ rquickjs = "0.12"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle = "2.6"
 tar = "0.4"
 thiserror.workspace = true
 tokio.workspace = true

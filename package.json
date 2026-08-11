@@ -1,6 +1,6 @@
 {
   "name": "brazier",
-  "version": "0.2.13-beta.64",
+  "version": "0.2.13-beta.65",
   "private": true,
   "description": "A private, cross-platform workbench for local language models.",
   "license": "MIT",
@@ -12,10 +12,15 @@
     "dev:wayland": "pnpm --filter @brazier/desktop exec env ELECTRON_OZONE_PLATFORM_HINT=wayland electron-vite dev",
     "build": "pnpm -r build",
     "check": "pnpm -r check && cargo check --workspace",
-    "test": "pnpm -r test && cargo test --workspace",
+    "test": "pnpm -r test && pnpm qualification:test && pnpm qualification:voice-corpus && cargo test --workspace",
     "format:check": "cargo fmt --all --check",
+    "qualification:test": "node --test scripts/release-version.test.mjs scripts/verify-beta-qualification.test.mjs",
+    "qualification:voice-corpus": "node scripts/qualify-silero-vad.mjs",
+    "qualification:verify": "node scripts/verify-beta-qualification.mjs",
     "version:bump": "node scripts/bump-version.mjs",
-    "release": "node scripts/release.mjs"
+    "release": "node scripts/release.mjs",
+    "release:prepare": "node scripts/release.mjs prepare",
+    "release:publish": "node scripts/release.mjs publish"
   },
   "engines": {
     "node": ">=24"

@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   AudioLines,
   Bot,
+  Download,
   LoaderCircle,
   Mic,
   MicOff,
@@ -24,6 +25,11 @@ import {
   PERSONAPLEX_PRE_HANDOFF_OPTIONS
 } from '../session/personaplexHandoff'
 import type { SessionCoordinatorHandle } from '../session/useSessionCoordinator'
+import {
+  VOICE_QUALIFICATION_PHRASES,
+  buildVoiceQualificationResult,
+  countRecognizedQualificationPhrases
+} from '../session/voiceQualification'
 import { VoiceSessionConfig } from './VoiceSessionConfig'
 import { Markdown } from './Markdown'
 
@@ -97,6 +103,17 @@ export function VoiceMode(props: Props): React.JSX.Element {
   const [muted, setMuted] = useState(false)
   const [busy, setBusy] = useState(false)
   const [resolvingApproval, setResolvingApproval] = useState(false)
+  const [microphoneClass, setMicrophoneClass] = useState<'built-in' | 'usb'>('built-in')
+  const [qualificationTrial, setQualificationTrial] = useState<null | {
+    phase: 'speech' | 'noise'
+    transcriptBaseline: number
+    transcriptTextBaseline: number
+    vadProcessedBaseline: number
+    interruptBaseline: number
+    speechTranscriptEnd?: number
+    speechTranscriptTextEnd?: number
+    noiseStartedAt?: number
+  }>(null)
   const scrollAnchor = useRef<HTMLDivElement>(null)
 
   const needsTranscripts = config.voiceSessionTarget !== 'neither'
@@ -132,6 +149,12 @@ export function VoiceMode(props: Props): React.JSX.Element {
     setResolvingApproval(false)
   }, [snapshot.pendingApproval])
 
+  useEffect(() => {
+    if (snapshot.voiceStatus === 'off' || snapshot.voiceStatus === 'error') {
+      setQualificationTrial(null)
+    }
+  }, [snapshot.voiceStatus])
+
   async function guard(action: () => Promise<void>): Promise<void> {
     setBusy(true)
     props.onError(null)
@@ -148,6 +171,80 @@ export function VoiceMode(props: Props): React.JSX.Element {
     const next = !muted
     setMuted(next)
     session.setMuted(next)
+  }
+
+  function startQualificationTrial(): void {
+    const metrics = session.metrics()
+    setQualificationTrial({
+      phase: 'speech',
+      transcriptBaseline: metrics.transcriptWaitMs.length,
+      transcriptTextBaseline: metrics.transcriptTexts.length,
+      vadProcessedBaseline: snapshot.capture.vadProcessedWindows,
+      interruptBaseline: metrics.interruptToSpeechStopMs.length
+    })
+  }
+
+  function startQualificationNoiseWindow(): void {
+    if (!qualificationTrial || qualificationTrial.phase !== 'speech') return
+    setQualificationTrial({
+      ...qualificationTrial,
+      phase: 'noise',
+      speechTranscriptEnd: session.metrics().transcriptWaitMs.length,
+      speechTranscriptTextEnd: session.metrics().transcriptTexts.length,
+      noiseStartedAt: Date.now()
+    })
+  }
+
+  async function saveTrialReport(): Promise<void> {
+    if (
+      !qualificationTrial ||
+      qualificationTrial.phase !== 'noise' ||
+      qualificationTrial.speechTranscriptEnd === undefined ||
+      qualificationTrial.speechTranscriptTextEnd === undefined ||
+      qualificationTrial.noiseStartedAt === undefined
+    ) {
+      throw new Error('Finish the speech and noise phases before saving qualification evidence.')
+    }
+    const allMetrics = session.metrics()
+    const noiseMinutes = (Date.now() - qualificationTrial.noiseStartedAt) / 60_000
+    const report = await buildVoiceQualificationResult({
+      host: await window.brazier.qualificationHost(),
+      microphoneClass,
+      expectedSpeechUtterances: VOICE_QUALIFICATION_PHRASES.length,
+      recognizedSpeechUtterances: countRecognizedQualificationPhrases(
+        allMetrics.transcriptTexts.slice(
+          qualificationTrial.transcriptTextBaseline,
+          qualificationTrial.speechTranscriptTextEnd
+        )
+      ),
+      noiseMinutes,
+      falseNoiseUtterances:
+        allMetrics.transcriptWaitMs.length - qualificationTrial.speechTranscriptEnd,
+      captureVad: snapshot.capture.vad,
+      vadWindowP95Ms: snapshot.capture.vadInferenceP95Ms,
+      vadQueueLagP95Ms: snapshot.capture.vadQueueLagP95Ms,
+      vadSamples: snapshot.capture.vadProcessedWindows - qualificationTrial.vadProcessedBaseline,
+      models: { voice: props.modelId, background: props.chatModelId },
+      metrics: {
+        transcriptWaitMs: allMetrics.transcriptWaitMs.slice(
+          qualificationTrial.transcriptBaseline,
+          qualificationTrial.speechTranscriptEnd
+        ),
+        interruptToSpeechStopMs: allMetrics.interruptToSpeechStopMs.slice(
+          qualificationTrial.interruptBaseline
+        )
+      }
+    })
+    const bytes = new TextEncoder().encode(`${JSON.stringify(report, null, 2)}\n`)
+    const saved = await window.brazier.saveFile(
+      `brazier-voice-${report.host_id}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+      bytes.buffer
+    )
+    if (!saved) return
+    setQualificationTrial(null)
+    if (!report.passed) {
+      throw new Error('The report was saved, but this trial did not satisfy the beta qualification gate.')
+    }
   }
 
   /**
@@ -225,6 +322,15 @@ export function VoiceMode(props: Props): React.JSX.Element {
             {modelDisplayName(props.modelId, selected).title}
           </span>
         ) : null}
+        {qualificationTrial?.phase === 'noise' ? (
+          <button
+            type="button"
+            title="Save commit-bound hardware qualification evidence."
+            onClick={() => void guard(saveTrialReport)}
+          >
+            <Download size={15} /> Save qualification
+          </button>
+        ) : null}
         {live ? (
           <>
             <button type="button" className={muted ? 'toggled' : ''} onClick={toggleMute}>
@@ -260,6 +366,56 @@ export function VoiceMode(props: Props): React.JSX.Element {
         ) : null}
       </header>
 
+      {live ? (
+        <section className="voice-qualification" aria-label="Voice hardware qualification">
+          {!qualificationTrial ? (
+            <>
+              <span>Beta hardware trial</span>
+              <select
+                aria-label="Qualification microphone class"
+                value={microphoneClass}
+                onChange={(event) => setMicrophoneClass(event.target.value as 'built-in' | 'usb')}
+              >
+                <option value="built-in">Built-in microphone</option>
+                <option value="usb">USB microphone</option>
+              </select>
+              <button
+                type="button"
+                disabled={!anyAsr || snapshot.capture.vad !== 'silero-v5'}
+                title={
+                  !anyAsr
+                    ? 'Install a transcription runtime first.'
+                    : snapshot.capture.vad !== 'silero-v5'
+                      ? 'Silero VAD must be active before starting the trial.'
+                      : 'Start the fixed speech and noise hardware protocol.'
+                }
+                onClick={startQualificationTrial}
+              >
+                Qualify voice
+              </button>
+            </>
+          ) : qualificationTrial.phase === 'speech' ? (
+            <details open>
+              <summary>
+                Read all {VOICE_QUALIFICATION_PHRASES.length} sentences once, and interrupt at
+                least three answers
+              </summary>
+              <ol>
+                {VOICE_QUALIFICATION_PHRASES.map((phrase) => <li key={phrase}>{phrase}</li>)}
+              </ol>
+              <button type="button" onClick={startQualificationNoiseWindow}>
+                All read — start noise window
+              </button>
+            </details>
+          ) : (
+            <span>
+              Noise window: {((Date.now() - (qualificationTrial.noiseStartedAt ?? Date.now())) / 60_000).toFixed(1)} / 5 minutes.
+              Do not speak; use the room normally. Save from the top bar when complete.
+            </span>
+          )}
+        </section>
+      ) : null}
+
       {/* A live session that cannot transcribe, or whose turns are refused,
           fails once per utterance and otherwise looks exactly like one that is
           listening. Say so where the user is looking. */}
@@ -285,8 +441,10 @@ export function VoiceMode(props: Props): React.JSX.Element {
             <span>
               {snapshot.pendingApproval.tool} · {snapshot.pendingApproval.risk} ·{' '}
               {snapshot.pendingApproval.environment === 'host'
-                ? 'on your machine, outside the sandbox'
-                : 'in the sandbox'}
+                ? `outside the sandbox on ${snapshot.pendingApproval.executionLocation.daemon_display_name}`
+                : `in the sandbox on ${snapshot.pendingApproval.executionLocation.daemon_display_name}`}
+              {' · '}{snapshot.pendingApproval.executionLocation.platform}/
+              {snapshot.pendingApproval.executionLocation.arch}
               {snapshot.pendingApproval.spoken ? ' · read out to you' : ''}
             </span>
             <span className="voice-approval-hint">
@@ -351,8 +509,12 @@ export function VoiceMode(props: Props): React.JSX.Element {
                     }.`
                   : snapshot.capture.vad === 'silero-v5'
                     ? `Microphone: ${snapshot.capture.frames} frames, Silero speech probability ${(
-                        snapshot.capture.speechProbability ?? 0
-                      ).toFixed(2)}, loudest recent ${snapshot.capture.peak.toFixed(3)}. ${
+                      snapshot.capture.speechProbability ?? 0
+                      ).toFixed(2)}, VAD ${snapshot.capture.vadInferenceMs.toFixed(
+                        1
+                      )} ms/window with ${snapshot.capture.vadQueueLagMs.toFixed(
+                        0
+                      )} ms queued, loudest recent ${snapshot.capture.peak.toFixed(3)}. ${
                         snapshot.capture.status
                       }`
                     : `Microphone: ${snapshot.capture.frames} frames, loudest recent ${snapshot.capture.peak.toFixed(

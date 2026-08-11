@@ -188,13 +188,31 @@ describe('computer continuation state', () => {
   it('recovers a persisted approval but clears it once its broker result arrives', () => {
     const requested = step(1, {
       action: { type: 'visit_url', url: 'https://example.com' },
-      result: { status: 'needs_approval', approval_id: 'approval-1', message: 'Approve navigation' }
+      result: {
+        status: 'needs_approval',
+        approval_id: 'approval-1',
+        message: 'Approve navigation',
+        execution_location: {
+          kind: 'daemon',
+          daemon_instance_id: 'daemon-1',
+          daemon_display_name: 'Studio Mac',
+          platform: 'macos',
+          arch: 'aarch64'
+        }
+      }
     })
     expect(recoverComputerPause([requested])).toEqual({
       approval: {
         approvalId: 'approval-1',
         action: { type: 'visit_url', url: 'https://example.com' },
-        message: 'Approve navigation'
+        message: 'Approve navigation',
+        executionLocation: {
+          kind: 'daemon',
+          daemon_instance_id: 'daemon-1',
+          daemon_display_name: 'Studio Mac',
+          platform: 'macos',
+          arch: 'aarch64'
+        }
       },
       userQuestion: null
     })

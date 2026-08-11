@@ -80,6 +80,13 @@ function pendingApproval(overrides: Partial<AgentApproval> = {}): AgentApproval 
     elevation: { reason: 'Needs to write the file' },
     summary: 'Write a.txt in the sandbox',
     sandbox,
+    execution_location: {
+      kind: 'daemon',
+      daemon_instance_id: 'daemon-1',
+      daemon_display_name: 'Studio Mac',
+      platform: 'macos',
+      arch: 'aarch64'
+    },
     status: 'pending',
     created_at: '2026-07-24T00:00:00Z',
     ...overrides

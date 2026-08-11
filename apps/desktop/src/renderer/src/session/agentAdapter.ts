@@ -12,8 +12,10 @@
 import { decideAgentApproval, fetchAgentSession, updateAgentSession } from '../agentApi'
 import { getConversation, updateConversation } from '../api'
 import type { AgentEvent } from '../../../agent/core/types'
+import type { ExecutionLocation } from '../../../agent/core/types'
 import type { WorkerMessage } from '../../../agent/core/protocol'
 import type { AgentAdapter, AgentAdapterEvent, AgentRunStatusReport, AgentTurnRequest } from './adapters'
+import { assertDaemonMutationAllowed } from '../daemonAvailability'
 
 /** How a tool result is reduced to something short enough to say out loud. */
 function toolOutcome(event: Extract<AgentEvent, { type: 'tool-completed' }>): string {
@@ -66,6 +68,7 @@ export class WorkerAgentAdapter implements AgentAdapter {
       // Confirm the session still exists before claiming it is bound.
       await fetchAgentSession(sessionId)
       this.sessionId = sessionId
+      assertDaemonMutationAllowed({ method: 'POST' })
       await window.brazier.agent.openSession(sessionId)
       return sessionId
     } catch {
@@ -84,7 +87,10 @@ export class WorkerAgentAdapter implements AgentAdapter {
     if (this.conversationId) {
       await updateConversation(this.conversationId, { agent_session_id: sessionId })
     }
-    if (sessionId) await window.brazier.agent.openSession(sessionId)
+    if (sessionId) {
+      assertDaemonMutationAllowed({ method: 'POST' })
+      await window.brazier.agent.openSession(sessionId)
+    }
   }
 
   async submitTurn(request: AgentTurnRequest): Promise<void> {
@@ -93,9 +99,11 @@ export class WorkerAgentAdapter implements AgentAdapter {
     const model = this.model?.()
     if (model) {
       // Model changes only take effect between runs, which is where we are.
+      assertDaemonMutationAllowed({ method: 'POST' })
       await window.brazier.agent.setModel(sessionId, { id: model }).catch(() => undefined)
       await updateAgentSession(sessionId, { model }).catch(() => undefined)
     }
+    assertDaemonMutationAllowed({ method: 'POST' })
     this.activeCorrelationId = request.correlationId
     this.activeRunId = null
     this.streamed = ''
@@ -119,12 +127,29 @@ export class WorkerAgentAdapter implements AgentAdapter {
   async decideApproval(
     approvalId: string,
     decision: 'approve' | 'deny',
+    expectedExecutionLocation: ExecutionLocation,
     note?: string
   ): Promise<void> {
+    assertDaemonMutationAllowed({ method: 'POST' })
     // One-shot on purpose: a decision made by voice covers the call that was
     // read out, never the rest of the session. Session scope is a deliberate
     // choice made where the arguments are on screen.
-    await decideAgentApproval(approvalId, decision, 'once', note)
+    const decided = await decideAgentApproval(
+      approvalId,
+      decision,
+      'once',
+      note,
+      expectedExecutionLocation
+    )
+    const actual = decided.execution_location
+    if (
+      actual.daemon_instance_id !== expectedExecutionLocation.daemon_instance_id ||
+      actual.daemon_display_name !== expectedExecutionLocation.daemon_display_name ||
+      actual.platform !== expectedExecutionLocation.platform ||
+      actual.arch !== expectedExecutionLocation.arch
+    ) {
+      throw new Error('The approval execution host changed; the decision was not accepted by the client.')
+    }
     this.publish({
       type: 'approvalResolved',
       correlationId: this.activeCorrelationId ?? '',
@@ -136,6 +161,7 @@ export class WorkerAgentAdapter implements AgentAdapter {
     if (!this.sessionId) return
     if (this.activeCorrelationId && this.activeCorrelationId !== correlationId) return
     if (this.activeRunId !== null) this.lastRunId = this.activeRunId
+    assertDaemonMutationAllowed({ method: 'POST' })
     await window.brazier.agent.cancel(this.sessionId)
   }
 
@@ -222,7 +248,8 @@ export class WorkerAgentAdapter implements AgentAdapter {
           tool: event.approval.tool,
           summary: event.approval.summary,
           risk: event.approval.risk,
-          environment: event.approval.environment
+          environment: event.approval.environment,
+          executionLocation: event.approval.execution_location
         })
         return
       case 'tool-started':

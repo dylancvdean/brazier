@@ -2,7 +2,7 @@
 
 ## Public-beta progress
 
-The beta scope is **7 of 11 tracks complete (64%)**. A track counts as complete
+The beta scope is **10 of 11 tracks complete (91%)**. A track counts as complete
 only when its product path, persistence, failure handling, and release checks
 exist; experiments and aspirational clients do not count. This summary is the
 source of truth for release readiness, while the detailed sections below retain
@@ -18,16 +18,19 @@ implementation notes and follow-on work.
   PersonaPlex voice, and the shared voice/chat/agent conversation coordinator.
 - [x] Image and video generation through stable-diffusion.cpp, with attachment
   hydration and a dedicated Generate workspace.
-- [x] Brokered Agent and Computer modes with durable runs, approvals, sandbox
-  boundaries, MCP tools, compaction, and live command output.
+- [x] Brokered Agent mode on all beta platforms and Computer mode on
+  macOS/Linux, with durable runs, approvals, sandbox boundaries, MCP tools,
+  compaction, and live command output. Computer Use is unavailable on Windows
+  in this beta; that limitation is surfaced before session creation.
 - [x] Beta release and operations: authenticated service mode, named revocable
   API keys, support bundles, signed/notarized installers, updater feeds,
   checksums, Sigstore signatures, and SPDX SBOM publication.
-- [ ] Remote-daemon desktop profiles, reconnect/offline behavior, and clear
+- [x] Remote-daemon desktop profiles, reconnect/offline behavior, and clear
   client-host versus daemon-host path semantics.
-- [ ] Remote trust hardening: pairing, scoped per-client credentials, transport
+- [x] Remote trust hardening: pairing, scoped per-client credentials, transport
   guidance, and execution-location-aware approvals.
-- [ ] Windows agent sandboxing and optional WASI/OCI tool runtimes.
+- [x] Windows agent sandboxing. WASI/OCI tool runtimes remain optional post-beta
+  extensions rather than a condition for shipping native tools safely.
 - [ ] Hardware release qualification for voice latency/VAD and packaged agent
   startup across the supported OS matrix.
 
@@ -155,8 +158,9 @@ what is left is mostly the difference between working and trustworthy.
   opening a second microphone graph. The former adaptive energy detector stays
   as a visible meter, as extra echo protection while the assistant speaks, and
   as a recoverable fallback if WebAssembly or the model cannot initialize.
-  Still owed: a checked-in room/noise corpus and false-interruption measurements
-  across the microphones supported for release.
+  The checked-in deterministic room/noise corpus and real Silero regression gate
+  are in. Still owed for the release candidate: the two microphone-backed host
+  reports required by `qualification/beta-manifest.json`.
 - **Spoken confirmation before destructive agent actions.** *Held calls are
   shown and can be answered in words; the warning stays.* A call the permission
   broker holds is shown prominently — what it will do, and whether it is inside
@@ -185,28 +189,28 @@ what is left is mostly the difference between working and trustworthy.
 
 ## Remote daemon clients — medium term
 
-- **Full desktop connection to a remote Brazier daemon.** Add named local and
-  remote connection profiles so the existing desktop UI can use a daemon on
-  another host without spawning or owning its lifecycle. Chat, conversations,
-  model discovery and downloads, runtime installation and activation, media
-  generation, voice, tools, MCP servers, and agent sessions should operate on
-  the selected host, with that execution location visible anywhere it matters.
+- **Full desktop connection to a remote Brazier daemon is in.** Named persisted
+  profiles select Local or a compatible authenticated daemon without confusing
+  their lifecycles. Switching scopes renderer caches by host, surfaces
+  offline/retry state, gates mutations until the selected daemon is healthy,
+  and routes chat, generation, voice, management, MCP, Agent, and supported
+  browser-target Computer work to it. Native desktop control is deliberately
+  unavailable through a remote profile because its consent UI must be present
+  on the daemon host. Native file pickers stay client-local; daemon paths are
+  labeled and can be entered explicitly instead.
 - **Headless service foundation is in.** `brazierd --service` uses stable port
   7614 unless overridden, retains an owner-only generated bearer key across
   restarts when authentication is enabled, and writes an owner-only non-secret
   ready descriptor (customizable with `--ready-file`). Authenticated clients
   can check `/api/v1/daemon/info` before assuming management-API compatibility.
-  Reconnect/offline UI and shared-runtime multi-client semantics remain open.
-- Harden remote access before presenting it as a normal setup: pairing,
-  revocable per-client credentials, scoped inference/management/agent
-  permissions, encrypted or private-network transport, and remote-host context
-  in execution approvals. The current single bearer key remains suitable for
-  local startup, not the final remote trust model.
-- Make filesystem boundaries honest. Paths selected by the desktop belong to
-  the client, while model libraries, adapters, runtimes, MCP processes, and
-  agent workspaces normally belong to the daemon host. Prefer uploads into
-  managed stores where practical; otherwise label paths as remote and disable
-  local-only actions such as revealing them in the client's file manager.
+- **Remote trust hardening is in.** A management client creates short-lived,
+  single-use pairing codes with explicit inference/management/agent scopes;
+  the new client claims and stores its credential in the main process, and
+  operators can list/cancel pairings or revoke clients independently. Stable
+  daemon identity and execution-location fields make the approving client and
+  machine visible in durable Agent/Computer history. Public pairing requires
+  HTTPS; private-network HTTP is explicit, and non-loopback daemon binding
+  remains an acknowledged escape hatch documented in `docs/remote-access.md`.
 - Initially keep inference and tool execution together on the daemon host.
   Client-local tool runners may follow as a separately paired and permissioned
   reverse-RPC capability; they are not required for the first remote release.
@@ -261,17 +265,20 @@ what is left is mostly the difference between working and trustworthy.
 
 ## Agent mode follow-ons
 
-- **`asarUnpack` coverage is fixed and enforced**, though a packaged build on
-  each platform has still not been run. The worker keeps every import external,
+- **`asarUnpack` coverage is fixed and enforced.** The worker keeps every import external,
   so what it needs at run time is Pi *and its whole dependency closure* — 94
   packages, mostly provider SDKs — while only `@earendil-works/**` was unpacked.
   `node_modules/**` is now unpacked rather than an enumerated list that would
   rot on the next upgrade, and a test walks the real closure and fails with the
-  names of anything a narrower glob would miss. What remains is running the
-  packaged application on macOS, Linux, and Windows and starting an agent
-  session in it.
-- Windows sandboxing. There is no backend today, so the daemon reports
-  `isolated: false` and command execution is treated as host execution.
+  names of anything a narrower glob would miss. A local packaged macOS app has
+  started its bundled daemon, loaded that closure, opened a no-model Agent
+  session, and shut down cleanly. The tag workflow repeats the installed smoke
+  against the DMG, AppImage, and NSIS candidate before publication.
+- **Windows sandboxing is in.** Native command execution uses a per-run
+  AppContainer with workspace/scratch ACLs, credential deny rules, explicit
+  network capability, and a kill-on-close Job Object. Capability probing is
+  live and Sandbox-only fails closed when isolation is unavailable. Native
+  Windows tests run explicitly in CI.
 - **Live output streaming for `shell_run` is in.** Foreground commands now
   publish stdout and labelled stderr chunks into the existing agent tool
   timeline while they run; the bounded, persisted final result remains the
@@ -301,10 +308,12 @@ what is left is mostly the difference between working and trustworthy.
   Computer workspace mode; the daemon brokers normalized actions against an
   isolated Chromium/CDP browser session with Fara1.5 XML parsing, durable task
   recovery, approvals, and OS permission probes for a desktop target
-  (X11/Wayland/macOS). Desktop
-  input injection remains fail-closed until portal/Accessibility grants exist.
-- Add WASI code runtimes and optional OCI execution (safe built-in tools,
-  bounded web retrieval, and the agent permission broker are implemented).
+  (X11/Wayland/macOS). Desktop input injection remains fail-closed until
+  portal/Accessibility grants exist. The Chromium pipe and desktop drivers are
+  Unix-only today, so the Windows beta exposes Agent mode but blocks Computer
+  Use before creating a session.
+- WASI code runtimes and OCI execution remain optional post-beta extensions;
+  native tools already cross the permission broker and supported OS sandbox.
 - **Configurable CORS** is in: `--allowed-origin` (repeatable, or
   comma-separated in `BRAZIER_ALLOWED_ORIGINS`) names extra browser origins
   beside the packaged UI and the dev server, validated at startup so a typo
@@ -319,15 +328,17 @@ what is left is mostly the difference between working and trustworthy.
   excluded; secret-shaped fields, URL query strings, and user-home/data-directory
   path prefixes are scrubbed before serialization. **Release delivery is wired:**
   a version tag builds a GitHub Release, with a signed/notarized Apple
-  Silicon macOS distribution and a fixed-name (`Brazier.AppImage`) Linux
-  AppImage; the final job signs each distribution, the SBOM, and its checksum
+  Silicon macOS distribution, a fixed-name (`Brazier.AppImage`) Linux
+  AppImage, and a signed fixed-name (`Brazier-Setup.exe`) Windows installer;
+  the final job signs each distribution, the SBOM, and its checksum
   manifest with Sigstore before publishing. The release also includes that
   SPDX JSON SBOM in the checksum set. Packaged macOS and AppImage installs check
   that GitHub Releases feed and offer a restart to install; the AppImage
   replaces its own stable path in place, while pacman/AUR installations remain
   package-manager owned. **Named API-key management is in:** operators can mint independently
   named keys, see only non-secret metadata after creation, and revoke each key
-  without replacing every client's credential. Scoped permissions and remote
-  pairing remain part of the remote-trust track.
+  without replacing every client's credential. The beta qualification job
+  additionally refuses publication without exact-commit installed-package
+  smokes on all three OSes and the two required physical voice reports.
 - Complete public naming review before a stable public release, despite the
   release-ready `com.brazier.desktop` application identifier.

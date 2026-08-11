@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use async_stream::stream;
 use axum::http::header;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, request::Parts},
     middleware::{self, Next},
@@ -14,6 +14,7 @@ use axum::{
     },
     routing::{delete, get, post},
 };
+use futures::{SinkExt as _, StreamExt as _};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -90,6 +91,14 @@ impl ApiError {
     fn not_found(error: impl ToString) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: error.to_string(),
+            fork_hints: None,
+        }
+    }
+
+    fn forbidden(error: impl ToString) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: error.to_string(),
             fork_hints: None,
         }
@@ -226,6 +235,13 @@ pub fn router(state: AppState) -> Router {
 pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router {
     let protected = Router::new()
         .route("/api/v1/daemon/info", get(daemon_info))
+        .route(
+            "/api/v1/auth/pairings",
+            get(list_pairing_requests).post(create_pairing_request),
+        )
+        .route("/api/v1/auth/pairings/{id}", delete(cancel_pairing_request))
+        .route("/api/v1/auth/clients", get(list_api_clients))
+        .route("/api/v1/auth/clients/{id}", delete(revoke_api_client))
         .route("/api/v1/capabilities", get(capabilities))
         .route("/api/v1/support/bundle", get(support_bundle))
         .route(
@@ -436,6 +452,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/voice/sessions/{id}",
             axum::routing::delete(end_voice_session),
         )
+        .route(
+            "/api/v1/voice/sessions/{id}/stream",
+            get(stream_voice_session),
+        )
         .route("/api/v1/agent/capabilities", get(agent_capabilities))
         .route("/api/v1/agent/tools", get(agent_tool_catalog))
         .route(
@@ -599,6 +619,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
 
     Router::new()
         .route("/health", get(health))
+        .route(
+            "/api/v1/auth/pairings/{id}/claim",
+            post(claim_pairing_request),
+        )
         .merge(protected)
         .with_state(state)
         .layer(
@@ -610,21 +634,145 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         .layer(TraceLayer::new_for_http())
 }
 
-async fn require_auth(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    request: Request,
-    next: Next,
-) -> Response {
+/// Authenticated caller identity injected into every protected request.
+///
+/// Owner/bootstrap credentials keep their historical full access. Paired
+/// clients carry the exact durable scopes granted during pairing.
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    pub client_id: Option<String>,
+    pub client_name: String,
+    pub scopes: Vec<crate::client_auth::ClientScope>,
+    pub owner: bool,
+}
+
+impl AuthContext {
+    fn owner(name: impl Into<String>) -> Self {
+        Self {
+            client_id: None,
+            client_name: name.into(),
+            scopes: vec![
+                crate::client_auth::ClientScope::Inference,
+                crate::client_auth::ClientScope::Management,
+                crate::client_auth::ClientScope::Agent,
+            ],
+            owner: true,
+        }
+    }
+
+    fn paired(client: crate::client_auth::ApiClient) -> Self {
+        Self {
+            client_id: Some(client.id),
+            client_name: client.name,
+            scopes: client.scopes,
+            owner: false,
+        }
+    }
+
+    pub fn has_scope(&self, scope: crate::client_auth::ClientScope) -> bool {
+        self.owner || self.scopes.contains(&scope)
+    }
+
+    fn decision_actor_id(&self) -> &str {
+        self.client_id.as_deref().unwrap_or("owner")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthRequirement {
+    Public,
+    Authenticated,
+    Scoped(crate::client_auth::ClientScope),
+}
+
+/// Every API family gets one explicit trust class. Unknown protected paths fail
+/// closed in middleware, and a source-level coverage test below keeps newly
+/// registered routes from silently inheriting a permissive default.
+fn auth_requirement(path: &str) -> Option<AuthRequirement> {
+    use crate::client_auth::ClientScope::{Agent, Inference, Management};
+
+    let ticketed_voice_stream = path
+        .strip_prefix("/api/v1/voice/sessions/")
+        .and_then(|tail| tail.strip_suffix("/stream"))
+        .is_some_and(|session_id| !session_id.is_empty() && !session_id.contains('/'));
+    if path == "/health"
+        || ticketed_voice_stream
+        || (path.starts_with("/api/v1/auth/pairings/") && path.ends_with("/claim"))
+    {
+        return Some(AuthRequirement::Public);
+    }
+    if path == "/api/v1/daemon/info" {
+        return Some(AuthRequirement::Authenticated);
+    }
+    if path.starts_with("/v1/")
+        || [
+            "/api/v1/capabilities",
+            "/api/v1/conversations",
+            "/api/v1/memories",
+            "/api/v1/blobs",
+            "/api/v1/generate",
+            "/api/v1/voice",
+            "/api/v1/tools",
+        ]
+        .iter()
+        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+    {
+        return Some(AuthRequirement::Scoped(Inference));
+    }
+    if path.starts_with("/api/v1/agent") || path.starts_with("/api/v1/computer") {
+        return Some(AuthRequirement::Scoped(Agent));
+    }
+    if [
+        "/api/v1/auth",
+        "/api/v1/support",
+        "/api/v1/huggingface",
+        "/api/v1/remote",
+        "/api/v1/engines",
+        "/api/v1/runtime",
+        "/api/v1/preferences",
+        "/api/v1/hardware",
+        "/api/v1/toolchain",
+        "/api/v1/models",
+        "/api/v1/recommendations",
+        "/api/v1/adapters",
+        "/api/v1/mcp",
+        "/api/v1/runtimes",
+    ]
+    .iter()
+    .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+    {
+        return Some(AuthRequirement::Scoped(Management));
+    }
+    None
+}
+
+async fn require_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+    let requirement = match auth_requirement(request.uri().path()) {
+        Some(AuthRequirement::Public) => return next.run(request).await,
+        Some(requirement) => requirement,
+        None => {
+            tracing::error!(path = %request.uri().path(), "protected route has no auth scope");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": { "message": "This API route has no authorization policy." } })),
+            )
+                .into_response();
+        }
+    };
+
     if state.api_keys.is_empty() {
+        request
+            .extensions_mut()
+            .insert(AuthContext::owner("authentication disabled"));
         return next.run(request).await;
     }
-    let supplied = headers
+    let supplied = request
+        .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
     use subtle::{Choice, ConstantTimeEq};
-    let matched = match supplied {
+    let owner_matched = match supplied {
         Some(key_bytes) => state
             .api_keys
             .iter()
@@ -632,39 +780,206 @@ async fn require_auth(
             .fold(Choice::from(0), |acc, eq| acc | eq),
         None => Choice::from(0),
     };
-    if bool::from(matched) {
-        return next.run(request).await;
+    let context = if bool::from(owner_matched) {
+        Some(AuthContext::owner("owner"))
+    } else if let Some(api_key) = supplied {
+        match state.db.authenticate_api_client(api_key).await {
+            Ok(client) => client.map(AuthContext::paired),
+            Err(error) => {
+                tracing::error!(%error, "client credential lookup failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": { "message": "Authentication could not be checked." } })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+    let Some(context) = context else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": { "message": "A valid API key is required." } })),
+        )
+            .into_response();
+    };
+    if let AuthRequirement::Scoped(scope) = requirement
+        && !context.has_scope(scope)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": {
+                    "message": format!("This client does not have the {} scope.", scope.as_str())
+                }
+            })),
+        )
+            .into_response();
     }
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({ "error": { "message": "A valid API key is required." } })),
-    )
-        .into_response()
+    request.extensions_mut().insert(context);
+    next.run(request).await
 }
 
 async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     state.db.ping().await.map_err(ApiError::internal)?;
-    let llama = state.runtime.llama_server_summary().await;
     Ok(Json(json!({
         "status": "healthy",
         "engine": state.runtime.id(),
         "version": env!("CARGO_PKG_VERSION"),
         "database": "ok",
-        "llama_server": llama,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatePairingRequest {
+    client_name: String,
+    scopes: Vec<crate::client_auth::ClientScope>,
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+}
+
+/// Begin an operator-authorized pairing. The code is returned only here; list
+/// responses contain non-secret state so they remain safe to revisit.
+async fn create_pairing_request(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<CreatePairingRequest>,
+) -> ApiResult<Json<Value>> {
+    if !auth.owner
+        && request
+            .scopes
+            .iter()
+            .copied()
+            .any(|scope| !auth.has_scope(scope))
+    {
+        return Err(ApiError::forbidden(
+            "A paired client can grant only scopes it already holds.",
+        ));
+    }
+    let created = state
+        .db
+        .create_pairing_request(
+            &request.client_name,
+            &request.scopes,
+            request
+                .ttl_seconds
+                .unwrap_or(crate::client_auth::DEFAULT_PAIRING_TTL_SECONDS),
+        )
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "pairing": created.request,
+        "code": created.code,
+    })))
+}
+
+async fn list_pairing_requests(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let requests = state
+        .db
+        .list_pairing_requests()
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": requests })))
+}
+
+async fn cancel_pairing_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if !state
+        .db
+        .cancel_pairing_request(&id)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::not_found(
+            "pairing request does not exist or is no longer pending",
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimPairingRequest {
+    code: String,
+}
+
+/// The pairing code itself is the temporary authority for this public route.
+/// It is high entropy, attempt-bounded, expiring, and atomically single-use.
+async fn claim_pairing_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ClaimPairingRequest>,
+) -> ApiResult<Json<Value>> {
+    let issued = state
+        .db
+        .claim_pairing_request(&id, &request.code)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "client": issued.client,
+        "api_key": issued.api_key,
+    })))
+}
+
+async fn list_api_clients(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let clients = state
+        .db
+        .list_api_clients()
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": clients })))
+}
+
+async fn revoke_api_client(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    if !state
+        .db
+        .revoke_api_client(&id)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::not_found(
+            "client does not exist or is already revoked",
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The small, authenticated handshake a remote desktop client needs before it
 /// assumes a daemon speaks its management API. Keep this independent from the
 /// much larger capabilities response: compatibility must be checkable even
 /// while model discovery is slow or a remote engine is unavailable.
-async fn daemon_info() -> Json<Value> {
-    Json(json!({
+async fn daemon_info(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<Json<Value>> {
+    let identity = state
+        .db
+        .daemon_identity(None)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({
         "product": "brazier",
         "version": env!("CARGO_PKG_VERSION"),
         "management_api": { "major": 1, "minor": 0 },
         "openai_api": { "chat_completions": "/v1/chat/completions", "responses": "/v1/responses" },
-    }))
+        "daemon": {
+            "instance_id": identity.instance_id,
+            "display_name": identity.display_name,
+            "platform": std::env::consts::OS,
+            "architecture": std::env::consts::ARCH,
+        },
+        "client": {
+            "id": auth.client_id,
+            "name": auth.client_name,
+            "scopes": auth.scopes,
+            "owner": auth.owner,
+        },
+    })))
 }
 
 async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -2239,8 +2554,9 @@ struct CreateComputerSession {
     confirm_elevated_permissions: bool,
 }
 
-/// Peer address when the server was started with connect-info; absent in
-/// `oneshot` unit tests, which are treated as loopback.
+/// Peer address when the server was started with connect-info. Missing peer
+/// metadata is untrusted: an alternate server harness must opt into loopback
+/// explicitly rather than inheriting elevated authority by omission.
 struct ClientAddr(Option<SocketAddr>);
 
 impl<S> FromRequestParts<S> for ClientAddr
@@ -2260,7 +2576,10 @@ where
 }
 
 fn client_is_loopback(client: &ClientAddr) -> bool {
-    client.0.map(|addr| addr.ip().is_loopback()).unwrap_or(true)
+    client
+        .0
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false)
 }
 
 fn require_elevated_permission_step_up(
@@ -2405,9 +2724,16 @@ struct ComputerSafetyAuthority {
 
 async fn set_computer_safety_authority(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    client: ClientAddr,
     Path(id): Path<String>,
     Json(body): Json<ComputerSafetyAuthority>,
 ) -> ApiResult<StatusCode> {
+    if body.active && (!auth.owner || !client_is_loopback(&client)) {
+        return Err(ApiError::forbidden(
+            "desktop safety authority can only be activated by a local owner client",
+        ));
+    }
     if body.active && !crate::computer_exec::safety_overlay_is_ready(&state.data_dir) {
         return Err(ApiError::bad_request(
             "desktop safety authority requires the always-visible overlay and Esc emergency stop to be READY",
@@ -2541,16 +2867,24 @@ async fn computer_exec_action(
 #[derive(Debug, Deserialize)]
 struct DecideComputerApproval {
     approve: bool,
+    #[serde(default)]
+    expected_execution_location: Option<brazier_protocol::execution_location::ExecutionLocation>,
 }
 
 async fn decide_computer_approval(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(body): Json<DecideComputerApproval>,
 ) -> ApiResult<Json<Value>> {
     let result = state
         .computer_broker
-        .decide_approval(&id, body.approve)
+        .decide_approval(
+            &id,
+            body.approve,
+            body.expected_execution_location.as_ref(),
+            auth.decision_actor_id(),
+        )
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({ "result": result })))
@@ -4807,8 +5141,35 @@ struct CreateVoiceSessionRequest {
     voice_prompt_path: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct VoiceStreamQuery {
+    #[serde(default)]
+    text_prompt: Option<String>,
+    #[serde(default)]
+    voice_prompt: Option<String>,
+}
+
+fn voice_stream_path(id: &str) -> String {
+    format!("/api/v1/voice/sessions/{id}/stream")
+}
+
+fn voice_stream_protocol(ticket: &str) -> String {
+    format!("brazier.voice.{ticket}")
+}
+
+fn require_voice_session_owner(auth: &AuthContext, owner_client_id: &str) -> ApiResult<()> {
+    if auth.owner || auth.decision_actor_id() == owner_client_id {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "This voice session belongs to another authenticated client.",
+        ))
+    }
+}
+
 async fn create_voice_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Json(request): Json<CreateVoiceSessionRequest>,
 ) -> ApiResult<Json<Value>> {
     let settings = state.runtime.settings().await;
@@ -4845,20 +5206,23 @@ async fn create_voice_session(
     let voice_state = state.runtime.voice_state().await;
     let session = voice_state
         .sessions
-        .create_session(
-            &python,
-            model_path.as_deref(),
-            persona.clone(),
-            voice_prompt.clone(),
+        .create_session(brazier_runtime::voice::VoiceSessionRequest {
+            owner_client_id: auth.decision_actor_id().to_owned(),
+            python: &python,
+            model_path: model_path.as_deref(),
+            persona_text: persona.clone(),
+            voice_prompt: voice_prompt.clone(),
             hf_token,
-            voice_profile.as_ref(),
-        )
+            profile: voice_profile.as_ref(),
+        })
         .await
         .map_err(ApiError::internal)?;
-    let ws_url = session.proxy_url().await;
+    let ws_url = voice_stream_path(&session.id);
+    let ws_protocol = voice_stream_protocol(session.ws_ticket());
     Ok(Json(json!({
         "id": session.id,
         "ws_url": ws_url,
+        "ws_protocol": ws_protocol,
         "persona_text": persona,
         "voice_prompt": voice_prompt.map(|p| p.display().to_string()),
         "protocol": {
@@ -4870,14 +5234,20 @@ async fn create_voice_session(
     })))
 }
 
-async fn list_voice_session(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+async fn list_voice_session(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<Json<Value>> {
     let voice_state = state.runtime.voice_state().await;
     if let Some(session) = voice_state.sessions.active_session().await {
-        let ws_url = session.proxy_url().await;
+        require_voice_session_owner(&auth, session.owner_client_id())?;
+        let ws_url = voice_stream_path(&session.id);
+        let ws_protocol = voice_stream_protocol(session.ws_ticket());
         Ok(Json(json!({
             "session": {
                 "id": session.id,
                 "ws_url": ws_url,
+                "ws_protocol": ws_protocol,
                 "persona_text": session.persona_text,
             }
         })))
@@ -4886,11 +5256,121 @@ async fn list_voice_session(State(state): State<AppState>) -> ApiResult<Json<Val
     }
 }
 
+async fn stream_voice_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<VoiceStreamQuery>,
+    headers: HeaderMap,
+    upgrade: axum::extract::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    let voice_state = state.runtime.voice_state().await;
+    let session = voice_state
+        .sessions
+        .get_session(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found("voice session not found"))?;
+    let offered_ticket = headers
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .find_map(|protocol| protocol.strip_prefix("brazier.voice."));
+    if !offered_ticket.is_some_and(|ticket| session.accepts_ws_ticket(ticket)) {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "The voice stream ticket is invalid.".to_owned(),
+            fork_hints: None,
+        });
+    }
+
+    let mut upstream_url =
+        reqwest::Url::parse(&session.proxy_url().await).map_err(ApiError::internal)?;
+    {
+        let mut pairs = upstream_url.query_pairs_mut();
+        if let Some(prompt) = query.text_prompt.as_deref() {
+            pairs.append_pair("text_prompt", prompt);
+        }
+        if let Some(prompt) = query.voice_prompt.as_deref() {
+            pairs.append_pair("voice_prompt", prompt);
+        }
+    }
+    let (upstream, _) = tokio_tungstenite::connect_async(upstream_url.as_str())
+        .await
+        .map_err(ApiError::internal)?;
+    let protocol = voice_stream_protocol(session.ws_ticket());
+    Ok(upgrade
+        .protocols([protocol])
+        .on_upgrade(move |downstream| proxy_voice_stream(downstream, upstream))
+        .into_response())
+}
+
+async fn proxy_voice_stream(
+    mut downstream: axum::extract::ws::WebSocket,
+    mut upstream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    loop {
+        tokio::select! {
+            message = downstream.next() => {
+                let Some(Ok(message)) = message else { break };
+                let close = matches!(message, axum::extract::ws::Message::Close(_));
+                let forwarded = match message {
+                    axum::extract::ws::Message::Text(value) =>
+                        tokio_tungstenite::tungstenite::Message::Text(value.to_string().into()),
+                    axum::extract::ws::Message::Binary(value) =>
+                        tokio_tungstenite::tungstenite::Message::Binary(value),
+                    axum::extract::ws::Message::Ping(value) =>
+                        tokio_tungstenite::tungstenite::Message::Ping(value),
+                    axum::extract::ws::Message::Pong(value) =>
+                        tokio_tungstenite::tungstenite::Message::Pong(value),
+                    axum::extract::ws::Message::Close(_) =>
+                        tokio_tungstenite::tungstenite::Message::Close(None),
+                };
+                if upstream.send(forwarded).await.is_err() || close { break }
+            }
+            message = upstream.next() => {
+                let Some(Ok(message)) = message else { break };
+                let close = matches!(message, tokio_tungstenite::tungstenite::Message::Close(_));
+                let forwarded = match message {
+                    tokio_tungstenite::tungstenite::Message::Text(value) =>
+                        Some(axum::extract::ws::Message::Text(value.to_string().into())),
+                    tokio_tungstenite::tungstenite::Message::Binary(value) =>
+                        Some(axum::extract::ws::Message::Binary(value)),
+                    tokio_tungstenite::tungstenite::Message::Ping(value) =>
+                        Some(axum::extract::ws::Message::Ping(value)),
+                    tokio_tungstenite::tungstenite::Message::Pong(value) =>
+                        Some(axum::extract::ws::Message::Pong(value)),
+                    tokio_tungstenite::tungstenite::Message::Close(_) =>
+                        Some(axum::extract::ws::Message::Close(None)),
+                    tokio_tungstenite::tungstenite::Message::Frame(_) => None,
+                };
+                if let Some(forwarded) = forwarded
+                    && downstream.send(forwarded).await.is_err()
+                {
+                    break;
+                }
+                if close { break }
+            }
+        }
+    }
+    let _ = upstream.close(None).await;
+    let _ = downstream.close().await;
+}
+
 async fn end_voice_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let voice_state = state.runtime.voice_state().await;
+    let session = voice_state
+        .sessions
+        .get_session(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found("voice session not found"))?;
+    require_voice_session_owner(&auth, session.owner_client_id())?;
     voice_state
         .sessions
         .end_session(&id)
@@ -7711,6 +8191,7 @@ async fn get_agent_approval(
 
 async fn decide_agent_approval(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(request): Json<crate::agent_types::ApprovalDecisionRequest>,
 ) -> ApiResult<Json<crate::agent_types::AgentApproval>> {
@@ -7723,9 +8204,27 @@ async fn decide_agent_approval(
             )));
         }
     };
+    if let Some(expected) = request.expected_execution_location.as_ref() {
+        let held = state
+            .db
+            .approval(&id)
+            .await
+            .map_err(|error| ApiError::not_found(error.to_string()))?;
+        if held.execution_location != *expected {
+            return Err(ApiError::bad_request(
+                "The approval execution location no longer matches the location shown to the user.",
+            ));
+        }
+    }
     let approval = state
         .db
-        .decide_approval(&id, approved, request.scope, request.note)
+        .decide_approval(
+            &id,
+            approved,
+            request.scope,
+            request.note,
+            Some(auth.decision_actor_id()),
+        )
         .await
         .map_err(ApiError::bad_request)?;
     // The decision is already durable. Wake the waiting call before doing
@@ -8011,6 +8510,85 @@ mod tests {
     }
 
     #[test]
+    fn every_registered_route_has_an_explicit_auth_class() {
+        let source = include_str!("api.rs");
+        let mut remaining = source;
+        let mut paths = Vec::new();
+        // Build the marker so this test's own source is not mistaken for a
+        // route registration by the scanner.
+        let marker = [".rou", "te("].concat();
+        while let Some(offset) = remaining.find(&marker) {
+            remaining = &remaining[offset + marker.len()..];
+            let candidate = remaining.trim_start();
+            let Some(candidate) = candidate.strip_prefix('"') else {
+                continue;
+            };
+            let Some(end) = candidate.find('"') else {
+                panic!("unterminated route path in api.rs");
+            };
+            paths.push(&candidate[..end]);
+            remaining = &candidate[end + 1..];
+        }
+        assert!(
+            paths.len() > 100,
+            "route scan unexpectedly found too little"
+        );
+        let unclassified: Vec<_> = paths
+            .iter()
+            .copied()
+            .filter(|path| auth_requirement(path).is_none())
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "routes without an explicit auth class: {unclassified:?}"
+        );
+        assert_eq!(
+            auth_requirement("/api/v1/conversations/abc/messages"),
+            Some(AuthRequirement::Scoped(
+                crate::client_auth::ClientScope::Inference
+            ))
+        );
+        assert_eq!(
+            auth_requirement("/api/v1/runtime/settings"),
+            Some(AuthRequirement::Scoped(
+                crate::client_auth::ClientScope::Management
+            ))
+        );
+        assert_eq!(
+            auth_requirement("/api/v1/agent/exec"),
+            Some(AuthRequirement::Scoped(
+                crate::client_auth::ClientScope::Agent
+            ))
+        );
+        assert_eq!(
+            auth_requirement("/api/v1/voice/sessions/session-ticket/stream"),
+            Some(AuthRequirement::Public)
+        );
+        assert_eq!(
+            auth_requirement("/api/v1/voice/sessions/session-ticket"),
+            Some(AuthRequirement::Scoped(
+                crate::client_auth::ClientScope::Inference
+            ))
+        );
+        assert_eq!(
+            auth_requirement("/api/v1/voice/sessions/a/b/stream"),
+            Some(AuthRequirement::Scoped(
+                crate::client_auth::ClientScope::Inference
+            ))
+        );
+        assert_eq!(auth_requirement("/api/v1/new-unclassified"), None);
+    }
+
+    #[test]
+    fn voice_proxy_keeps_its_capability_out_of_the_url() {
+        let path = voice_stream_path("session-1");
+        let protocol = voice_stream_protocol("top-secret");
+        assert_eq!(path, "/api/v1/voice/sessions/session-1/stream");
+        assert!(!path.contains("secret"));
+        assert_eq!(protocol, "brazier.voice.top-secret");
+    }
+
+    #[test]
     fn converts_responses_string_input() {
         let messages = responses_input_to_messages(&json!("hello"));
         assert_eq!(messages.len(), 1);
@@ -8034,6 +8612,7 @@ mod tests {
         let db = Database::open(&data_dir.join("brazier.sqlite"))
             .await
             .unwrap();
+        let execution_location = db.execution_location().await.unwrap();
         let download_queue = DownloadQueue::spawn(
             http.clone(),
             data_dir.to_path_buf(),
@@ -8053,7 +8632,14 @@ mod tests {
             download_queue,
             runtimes_cache: Arc::new(Mutex::new(None)),
             agent_broker: Arc::new(crate::agent_exec::AgentBroker::new()),
-            computer_broker: Arc::new(crate::computer_exec::ComputerBroker::new()),
+            computer_broker: Arc::new(
+                crate::computer_exec::ComputerBroker::open_at(
+                    data_dir.join("computer_sessions.json"),
+                    execution_location,
+                )
+                .await
+                .unwrap(),
+            ),
         }
     }
 
@@ -8122,6 +8708,7 @@ mod tests {
                     .method(method)
                     .uri(uri)
                     .header("content-type", "application/json")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_000))))
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
@@ -8533,6 +9120,42 @@ mod tests {
         (status, parsed)
     }
 
+    async fn request_with_api_key(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Value,
+        api_key: &str,
+    ) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {api_key}"))
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_001))))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, parsed)
+    }
+
+    #[test]
+    fn absent_peer_metadata_is_not_treated_as_loopback() {
+        assert!(!client_is_loopback(&ClientAddr(None)));
+        assert!(client_is_loopback(&ClientAddr(Some(SocketAddr::from((
+            [127, 0, 0, 1],
+            7614,
+        ))))));
+    }
+
     #[tokio::test]
     async fn daemon_info_is_authenticated_and_describes_the_versioned_boundary() {
         let dir = tempdir().unwrap();
@@ -8559,6 +9182,10 @@ mod tests {
         assert_eq!(info["product"], "brazier");
         assert_eq!(info["management_api"]["major"], 1);
         assert_eq!(info["openai_api"]["responses"], "/v1/responses");
+        assert!(info["daemon"]["instance_id"].as_str().is_some());
+        assert_eq!(info["daemon"]["display_name"], "Brazier daemon");
+        assert_eq!(info["daemon"]["platform"], std::env::consts::OS);
+        assert_eq!(info["daemon"]["architecture"], std::env::consts::ARCH);
     }
 
     #[tokio::test]
@@ -8596,6 +9223,445 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn paired_management_client_cannot_delegate_scopes_it_lacks() {
+        let dir = tempdir().unwrap();
+        let mut state = test_state(dir.path()).await;
+        state.api_keys = vec!["owner-key".into()];
+        let bootstrap = state
+            .db
+            .create_pairing_request(
+                "Management console",
+                &[crate::client_auth::ClientScope::Management],
+                60,
+            )
+            .await
+            .unwrap();
+        let management = state
+            .db
+            .claim_pairing_request(&bootstrap.request.id, &bootstrap.code)
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let (status, body) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/auth/pairings",
+            json!({
+                "client_name": "Escalated client",
+                "scopes": ["management", "agent"],
+                "ttl_seconds": 60
+            }),
+            &management.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("only scopes it already holds")
+        );
+
+        let (status, body) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/auth/pairings",
+            json!({
+                "client_name": "Another management console",
+                "scopes": ["management"],
+                "ttl_seconds": 60
+            }),
+            &management.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, body) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/auth/pairings",
+            json!({
+                "client_name": "Owner-delegated client",
+                "scopes": ["inference", "management", "agent"],
+                "ttl_seconds": 60
+            }),
+            "owner-key",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn voice_session_access_is_isolated_between_paired_clients() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let first_pairing = state
+            .db
+            .create_pairing_request(
+                "First voice client",
+                &[crate::client_auth::ClientScope::Inference],
+                60,
+            )
+            .await
+            .unwrap();
+        let first = state
+            .db
+            .claim_pairing_request(&first_pairing.request.id, &first_pairing.code)
+            .await
+            .unwrap();
+        let second_pairing = state
+            .db
+            .create_pairing_request(
+                "Second voice client",
+                &[crate::client_auth::ClientScope::Inference],
+                60,
+            )
+            .await
+            .unwrap();
+        let second = state
+            .db
+            .claim_pairing_request(&second_pairing.request.id, &second_pairing.code)
+            .await
+            .unwrap();
+        let first_auth = AuthContext::paired(first.client);
+        let second_auth = AuthContext::paired(second.client);
+        let session_owner = first_auth.decision_actor_id().to_owned();
+
+        assert!(require_voice_session_owner(&first_auth, &session_owner).is_ok());
+        let rejected = require_voice_session_owner(&second_auth, &session_owner).unwrap_err();
+        assert_eq!(rejected.status, StatusCode::FORBIDDEN);
+        assert!(require_voice_session_owner(&AuthContext::owner("owner"), &session_owner).is_ok());
+    }
+
+    #[tokio::test]
+    async fn pairing_scopes_and_live_revocation_are_enforced_over_http() {
+        let dir = tempdir().unwrap();
+        let mut state = test_state(dir.path()).await;
+        state.api_keys = vec!["owner-key".into()];
+        let app = router(state);
+
+        let (status, created) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/auth/pairings",
+            json!({
+                "client_name": "Inference tablet",
+                "scopes": ["inference"],
+                "ttl_seconds": 60
+            }),
+            "owner-key",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let pairing_id = created["pairing"]["id"].as_str().unwrap();
+        let code = created["code"].as_str().unwrap();
+
+        let (status, claimed) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/auth/pairings/{pairing_id}/claim"),
+            json!({ "code": code }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{claimed}");
+        let client_id = claimed["client"]["id"].as_str().unwrap();
+        let client_key = claimed["api_key"].as_str().unwrap();
+
+        let (status, info) =
+            request_with_api_key(&app, "GET", "/api/v1/daemon/info", Value::Null, client_key).await;
+        assert_eq!(status, StatusCode::OK, "{info}");
+        assert_eq!(info["client"]["id"], client_id);
+        assert_eq!(info["client"]["scopes"], json!(["inference"]));
+        assert_eq!(info["client"]["owner"], false);
+
+        let (status, _) = request_with_api_key(
+            &app,
+            "GET",
+            "/api/v1/conversations",
+            Value::Null,
+            client_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = request_with_api_key(
+            &app,
+            "GET",
+            "/api/v1/runtime/settings",
+            Value::Null,
+            client_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("management")
+        );
+        let (status, _) = request_with_api_key(
+            &app,
+            "GET",
+            "/api/v1/agent/capabilities",
+            Value::Null,
+            client_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, body) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/auth/pairings/{pairing_id}/claim"),
+            json!({ "code": code }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, _) = request_with_api_key(
+            &app,
+            "DELETE",
+            &format!("/api/v1/auth/clients/{client_id}"),
+            Value::Null,
+            "owner-key",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = request_with_api_key(
+            &app,
+            "GET",
+            "/api/v1/conversations",
+            Value::Null,
+            client_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn approval_decisions_record_the_authenticated_client_and_daemon() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let computer_session_id = "computer-session-audit";
+        let computer_approval_id = "computer-approval-audit";
+        let bootstrap_db = Database::open(&dir.path().join("brazier.sqlite"))
+            .await
+            .unwrap();
+        let computer_location = bootstrap_db.execution_location().await.unwrap();
+        drop(bootstrap_db);
+        tokio::fs::write(
+            dir.path().join("computer_sessions.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "sessions": [{
+                    "record": {
+                        "id": computer_session_id,
+                        "title": "Audit computer approval",
+                        "target": "browser",
+                        "model_id": null,
+                        "permission_mode": "ask",
+                        "viewport": { "width": 1440, "height": 900, "device_pixel_ratio": 1.0 },
+                        "created_at": "1",
+                        "updated_at": "1",
+                        "url": null,
+                        "title_page": null,
+                        "running": false,
+                        "memories": []
+                    },
+                    "steps": [],
+                    "pending": {
+                        (computer_approval_id): {
+                            "id": computer_approval_id,
+                            "session_id": computer_session_id,
+                            "action": { "type": "visit_url", "url": "https://example.com" },
+                            "created_at": "1",
+                            "execution_location": computer_location
+                        }
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut state = test_state(dir.path()).await;
+        state.api_keys = vec!["owner-key".into()];
+        let daemon = state.db.execution_location().await.unwrap();
+        let pairing = state
+            .db
+            .create_pairing_request(
+                "Approval tablet",
+                &[crate::client_auth::ClientScope::Agent],
+                60,
+            )
+            .await
+            .unwrap();
+        let issued = state
+            .db
+            .claim_pairing_request(&pairing.request.id, &pairing.code)
+            .await
+            .unwrap();
+        let client_id = issued.client.id.clone();
+        let app = router(state);
+
+        let (status, session) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+            &issued.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        let session_id = session["id"].as_str().unwrap();
+        let (status, held) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/agent/exec",
+            json!({
+                "session_id": session_id,
+                "tool": "fs_write",
+                "arguments": { "path": "audit.txt", "content": "held" }
+            }),
+            &issued.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{held}");
+        let agent_approval_id = held["approval"]["id"].as_str().unwrap();
+        assert_eq!(
+            held["approval"]["execution_location"]["daemon_instance_id"],
+            daemon.daemon_instance_id
+        );
+        let (status, decided) = request_with_api_key(
+            &app,
+            "POST",
+            &format!("/api/v1/agent/approvals/{agent_approval_id}"),
+            json!({ "decision": "deny" }),
+            &issued.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{decided}");
+        assert_eq!(decided["decided_by_client_id"], client_id);
+
+        let (status, denied) = request_with_api_key(
+            &app,
+            "POST",
+            &format!("/api/v1/computer/approvals/{computer_approval_id}"),
+            json!({
+                "approve": false,
+                "expected_execution_location": {
+                    "kind": "daemon",
+                    "daemon_instance_id": "different-daemon",
+                    "daemon_display_name": daemon.daemon_display_name,
+                    "platform": daemon.platform,
+                    "arch": daemon.arch
+                }
+            }),
+            &issued.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{denied}");
+
+        let (status, denied) = request_with_api_key(
+            &app,
+            "POST",
+            &format!("/api/v1/computer/approvals/{computer_approval_id}"),
+            json!({
+                "approve": false,
+                "expected_execution_location": daemon
+            }),
+            &issued.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{denied}");
+        assert_eq!(denied["result"]["decided_by_client_id"], client_id);
+        assert_eq!(
+            denied["result"]["execution_location"]["daemon_instance_id"],
+            daemon.daemon_instance_id
+        );
+
+        let (status, steps) = request_with_api_key(
+            &app,
+            "GET",
+            &format!("/api/v1/computer/sessions/{computer_session_id}/steps"),
+            Value::Null,
+            &issued.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{steps}");
+        let durable_result = &steps["steps"].as_array().unwrap().last().unwrap()["result"];
+        assert_eq!(durable_result["decided_by_client_id"], client_id);
+    }
+
+    #[tokio::test]
+    async fn desktop_safety_authority_requires_a_local_owner() {
+        let dir = tempdir().unwrap();
+        let mut state = test_state(dir.path()).await;
+        state.api_keys = vec!["owner-key".into()];
+        let pairing = state
+            .db
+            .create_pairing_request(
+                "Agent client",
+                &[crate::client_auth::ClientScope::Agent],
+                60,
+            )
+            .await
+            .unwrap();
+        let issued = state
+            .db
+            .claim_pairing_request(&pairing.request.id, &pairing.code)
+            .await
+            .unwrap();
+        let app = router(state);
+        let (status, session) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/computer/sessions",
+            json!({ "target": "desktop" }),
+            &issued.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        let session_id = session["id"].as_str().unwrap();
+
+        let (status, body) = request_with_api_key(
+            &app,
+            "POST",
+            &format!("/api/v1/computer/sessions/{session_id}/safety-authority"),
+            json!({ "active": true }),
+            &issued.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        crate::computer_exec::write_safety_overlay_marker(dir.path()).unwrap();
+        let (status, body) = request_with_api_key(
+            &app,
+            "POST",
+            &format!("/api/v1/computer/sessions/{session_id}/safety-authority"),
+            json!({ "active": true }),
+            "owner-key",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    }
+
+    #[tokio::test]
+    async fn public_health_does_not_expose_engine_paths() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (status, health) = get_request(&app, "/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(health["status"], "healthy");
+        assert!(health.get("llama_server").is_none());
+        let encoded = health.to_string();
+        assert!(!encoded.contains(dir.path().to_string_lossy().as_ref()));
     }
 
     #[tokio::test]
@@ -8724,6 +9790,71 @@ mod tests {
         assert_eq!(rows[0]["status"], "completed");
         assert_eq!(rows[0]["approval_id"], json!(approval_id));
         assert_eq!(rows[0]["changed_paths"], json!(["hello.txt"]));
+    }
+
+    #[tokio::test]
+    async fn approval_decision_rejects_a_mismatched_execution_location_before_mutation() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (_, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+        )
+        .await;
+        let session_id = session["id"].as_str().unwrap();
+        let (_, held) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/exec",
+            json!({
+                "session_id": session_id,
+                "tool": "fs_write",
+                "arguments": { "path": "location-check.txt", "content": "held" }
+            }),
+        )
+        .await;
+        let approval_id = held["approval"]["id"].as_str().unwrap();
+        let expected_location = held["approval"]["execution_location"].clone();
+        let mut mismatched_location = expected_location.clone();
+        mismatched_location["daemon_instance_id"] = json!("a-different-daemon");
+
+        let (status, body) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/agent/approvals/{approval_id}"),
+            json!({
+                "decision": "approve",
+                "scope": "once",
+                "expected_execution_location": mismatched_location
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, still_held) =
+            get_request(&app, &format!("/api/v1/agent/approvals/{approval_id}")).await;
+        assert_eq!(status, StatusCode::OK, "{still_held}");
+        assert_eq!(still_held["status"], "pending");
+
+        let (status, decided) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/agent/approvals/{approval_id}"),
+            json!({
+                "decision": "approve",
+                "scope": "once",
+                "expected_execution_location": expected_location
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{decided}");
+        assert_eq!(decided["status"], "approved");
     }
 
     #[tokio::test]

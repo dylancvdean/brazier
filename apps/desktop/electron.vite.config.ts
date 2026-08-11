@@ -4,6 +4,11 @@ import { defineConfig } from 'electron-vite'
 
 export default defineConfig({
   main: {
+    define: {
+      __BRAZIER_BUILD_COMMIT__: JSON.stringify(
+        process.env.BRAZIER_BUILD_COMMIT ?? process.env.GITHUB_SHA ?? ''
+      )
+    },
     build: {
       rollupOptions: {
         input: resolve(__dirname, 'src/main/index.ts')

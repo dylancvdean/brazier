@@ -4,9 +4,15 @@
 pub mod agent_exec;
 pub mod agent_policy;
 pub mod agent_sandbox;
+#[cfg(windows)]
+mod agent_sandbox_windows;
 pub mod agent_tools;
 pub mod agent_worktree;
 
+#[cfg(unix)]
+pub mod computer_browser;
+#[cfg(not(unix))]
+#[path = "computer_browser_unsupported.rs"]
 pub mod computer_browser;
 pub mod computer_desktop;
 #[cfg(feature = "execution")]

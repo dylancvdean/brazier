@@ -36,6 +36,7 @@ import {
   type VoiceProfile
 } from '../api'
 import { modelDisplayName, modelKindFor } from '../model-utils'
+import { daemonPathLabel, useConnectionProfile } from '../connectionProfile'
 
 /** Extensions a LoRA or ControlNet is published as. */
 const ADAPTER_FILTERS = [
@@ -432,6 +433,7 @@ function LoraSection(props: {
   onAdapterAdded: () => void
   onError: (message: string | null) => void
 }): React.JSX.Element {
+  const connectionProfile = useConnectionProfile()
   const compatible = props.adapters.filter(
     (entry) => entry.kind === 'lora' && entry.engines.includes(props.engine)
   )
@@ -441,6 +443,7 @@ function LoraSection(props: {
   )
 
   async function addFromDisk(): Promise<void> {
+    if (connectionProfile.kind === 'remote') return
     props.onError(null)
     try {
       const path = await window.brazier.selectFile('Choose a LoRA', ADAPTER_FILTERS)
@@ -463,7 +466,13 @@ function LoraSection(props: {
     <div className="adapter-section">
       <div className="adapter-section-head">
         <span className="section-label">LoRA adapters</span>
-        <button type="button" className="chip-button subtle" onClick={() => void addFromDisk()}>
+        <button
+          type="button"
+          className="chip-button subtle"
+          disabled={connectionProfile.kind === 'remote'}
+          title={connectionProfile.kind === 'remote' ? `${daemonPathLabel(connectionProfile)}; the desktop picker cannot browse it.` : undefined}
+          onClick={() => void addFromDisk()}
+        >
           <FolderOpen size={12} /> Add from disk…
         </button>
       </div>
@@ -575,6 +584,7 @@ function ControlNetSection(props: {
   onAdapterAdded: () => void
   onError: (message: string | null) => void
 }): React.JSX.Element {
+  const connectionProfile = useConnectionProfile()
   const compatible = props.adapters.filter((entry) => entry.kind === 'controlnet')
   const chosen = props.controlNets
   const unused = compatible.filter(
@@ -589,6 +599,7 @@ function ControlNetSection(props: {
   }
 
   async function addFromDisk(): Promise<void> {
+    if (connectionProfile.kind === 'remote') return
     props.onError(null)
     try {
       const path = await window.brazier.selectFile('Choose a ControlNet', ADAPTER_FILTERS)
@@ -605,6 +616,7 @@ function ControlNetSection(props: {
   }
 
   async function chooseImage(index: number): Promise<void> {
+    if (connectionProfile.kind === 'remote') return
     props.onError(null)
     try {
       const path = await window.brazier.selectFile('Choose a control image', IMAGE_FILTERS)
@@ -618,7 +630,13 @@ function ControlNetSection(props: {
     <div className="adapter-section">
       <div className="adapter-section-head">
         <span className="section-label">ControlNet</span>
-        <button type="button" className="chip-button subtle" onClick={() => void addFromDisk()}>
+        <button
+          type="button"
+          className="chip-button subtle"
+          disabled={connectionProfile.kind === 'remote'}
+          title={connectionProfile.kind === 'remote' ? `${daemonPathLabel(connectionProfile)}; the desktop picker cannot browse it.` : undefined}
+          onClick={() => void addFromDisk()}
+        >
           <FolderOpen size={12} /> Add from disk…
         </button>
       </div>
@@ -654,8 +672,13 @@ function ControlNetSection(props: {
               <button
                 type="button"
                 className="chip-button subtle"
+                disabled={connectionProfile.kind === 'remote'}
                 onClick={() => void chooseImage(index)}
-                title={binding.image_path ?? 'Pick the image this ControlNet reads'}
+                title={
+                  connectionProfile.kind === 'remote'
+                    ? `${daemonPathLabel(connectionProfile)}; local file picking is unavailable.`
+                    : binding.image_path ?? 'Pick the image this ControlNet reads'
+                }
               >
                 {binding.image_path ? 'Change image' : 'Control image…'}
               </button>
@@ -1712,11 +1735,13 @@ function TranscriptionFields(
 }
 
 function VoiceFields(props: SectionProps<VoiceProfile>): React.JSX.Element {
+  const connectionProfile = useConnectionProfile()
   const { profile, onChange } = props
   const set = <K extends keyof VoiceProfile>(key: K, value: VoiceProfile[K]): void =>
     onChange({ ...profile, [key]: value })
 
   async function chooseClip(): Promise<void> {
+    if (connectionProfile.kind === 'remote') return
     props.onError(null)
     try {
       const path = await window.brazier.selectFile('Choose a reference voice clip', [
@@ -1748,7 +1773,13 @@ function VoiceFields(props: SectionProps<VoiceProfile>): React.JSX.Element {
         <label className="model-field">
           <span>Reference clip</span>
           <div className="model-field-actions">
-            <button type="button" className="chip-button subtle" onClick={() => void chooseClip()}>
+            <button
+              type="button"
+              className="chip-button subtle"
+              disabled={connectionProfile.kind === 'remote'}
+              title={connectionProfile.kind === 'remote' ? `${daemonPathLabel(connectionProfile)}; local file picking is unavailable.` : undefined}
+              onClick={() => void chooseClip()}
+            >
               <FolderOpen size={12} />
               {profile.voice_prompt_path ? 'Change clip…' : 'Choose clip…'}
             </button>
@@ -1764,8 +1795,10 @@ function VoiceFields(props: SectionProps<VoiceProfile>): React.JSX.Element {
           </div>
           <small>
             {profile.voice_prompt_path
-              ? profile.voice_prompt_path
-              : 'A clip clones its voice, and takes precedence over the id above.'}
+              ? `${profile.voice_prompt_path} · ${daemonPathLabel(connectionProfile)}`
+              : connectionProfile.kind === 'remote'
+                ? `Reference clips must already exist on ${connectionProfile.name}; local picking is disabled.`
+                : 'A clip clones its voice, and takes precedence over the id above.'}
           </small>
         </label>
       </FieldGroup>

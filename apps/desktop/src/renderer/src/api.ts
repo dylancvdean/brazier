@@ -1,19 +1,150 @@
 import type { ContentPart, Conversation, HubModel, Memory, Message, Role } from './types'
+import { daemonFetch, setDaemonAvailability } from './daemonAvailability'
 
 type Connection = Awaited<ReturnType<typeof window.brazier.getConnection>>
 let connectionPromise: Promise<Connection> | undefined
+const ACTIVE_CONNECTION_PROFILE_KEY = 'brazier.activeConnectionProfile.v1'
+
+export type ConnectionProfile = Awaited<
+  ReturnType<typeof window.brazier.listConnectionProfiles>
+>[number]
+export type ConnectionProfileSummary = Awaited<
+  ReturnType<typeof window.brazier.getCurrentConnectionProfile>
+>
+
+export function invalidateConnectionCache(): void {
+  connectionPromise = undefined
+}
+
+function rememberConnectionProfile(profile: ConnectionProfileSummary): void {
+  try {
+    localStorage.setItem(ACTIVE_CONNECTION_PROFILE_KEY, profile.id)
+  } catch {
+    // Profile-scoped caches are best-effort just like the cached data itself.
+  }
+}
+
+export function rememberedConnectionProfileId(): string {
+  try {
+    return localStorage.getItem(ACTIVE_CONNECTION_PROFILE_KEY) || 'local'
+  } catch {
+    return 'local'
+  }
+}
+
+if (typeof window !== 'undefined' && window.brazier?.onConnectionProfileChanged) {
+  window.brazier.onConnectionProfileChanged((profile) => {
+    invalidateConnectionCache()
+    rememberConnectionProfile(profile)
+    setDaemonAvailability('checking')
+  })
+}
 
 async function connection(): Promise<Connection> {
   connectionPromise ??= window.brazier.getConnection()
-  return connectionPromise
+  const pending = connectionPromise
+  try {
+    const ready = await pending
+    rememberConnectionProfile(ready.profile)
+    return ready
+  } catch (error) {
+    if (connectionPromise === pending) connectionPromise = undefined
+    setDaemonAvailability('offline')
+    throw error
+  }
+}
+
+export function listConnectionProfiles(): Promise<ConnectionProfile[]> {
+  return window.brazier.listConnectionProfiles()
+}
+
+export async function fetchCurrentConnectionProfile(): Promise<ConnectionProfileSummary> {
+  const profile = await window.brazier.getCurrentConnectionProfile()
+  rememberConnectionProfile(profile)
+  return profile
+}
+
+export function upsertConnectionProfile(profile: {
+  id?: string
+  name: string
+  baseUrl: string
+  apiKey?: string | null
+}): Promise<Extract<ConnectionProfile, { kind: 'remote' }>> {
+  return window.brazier.upsertConnectionProfile(profile)
+}
+
+export function testConnectionProfile(idOrProfile: string | {
+  id?: string
+  name: string
+  baseUrl: string
+  apiKey?: string | null
+}): ReturnType<typeof window.brazier.testConnectionProfile> {
+  return window.brazier.testConnectionProfile(idOrProfile)
+}
+
+export function claimConnectionProfile(input: {
+  id?: string
+  name: string
+  baseUrl: string
+  pairingId: string
+  code: string
+}): ReturnType<typeof window.brazier.claimConnectionProfile> {
+  return window.brazier.claimConnectionProfile(input)
+}
+
+export async function selectConnectionProfile(id: string): Promise<ConnectionProfileSummary> {
+  const profile = await window.brazier.selectConnectionProfile(id)
+  rememberConnectionProfile(profile)
+  return profile
+}
+
+export function deleteConnectionProfile(id: string): Promise<boolean> {
+  return window.brazier.deleteConnectionProfile(id)
+}
+
+export type ClientScope = 'inference' | 'management' | 'agent'
+
+export type DaemonPairingRequest = {
+  id: string
+  client_name: string
+  scopes: ClientScope[]
+  expires_at: number
+  attempts: number
+  max_attempts: number
+  consumed_at?: string | null
+  created_at: string
+}
+
+export type DaemonApiClient = {
+  id: string
+  name: string
+  scopes: ClientScope[]
+  created_at: string
+  last_used_at?: string | null
+  revoked_at?: string | null
+}
+
+export type CreatedDaemonPairing = {
+  pairing: DaemonPairingRequest
+  code: string
+}
+
+export function isPendingDaemonPairing(
+  pairing: DaemonPairingRequest,
+  nowSeconds = Math.floor(Date.now() / 1_000)
+): boolean {
+  return (
+    !pairing.consumed_at &&
+    pairing.expires_at > nowSeconds &&
+    pairing.attempts < pairing.max_attempts
+  )
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const daemon = await connection()
   const headers = new Headers(init?.headers)
   headers.set('content-type', 'application/json')
-  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
-  const response = await fetch(`${daemon.address}${path}`, { ...init, headers })
+  const response = await daemonFetch(`${daemon.address}${path}`, { ...init, headers })
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as {
       error?: { message?: string }
@@ -26,6 +157,37 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // operation look like an inference failure.
   if (response.status === 204 || response.status === 205) return undefined as T
   return response.json() as Promise<T>
+}
+
+export function createDaemonPairing(input: {
+  clientName: string
+  scopes: ClientScope[]
+  ttlSeconds?: number
+}): Promise<CreatedDaemonPairing> {
+  return request('/api/v1/auth/pairings', {
+    method: 'POST',
+    body: JSON.stringify({
+      client_name: input.clientName,
+      scopes: input.scopes,
+      ttl_seconds: input.ttlSeconds ?? 300
+    })
+  })
+}
+
+export async function listDaemonPairings(): Promise<DaemonPairingRequest[]> {
+  return (await request<{ data: DaemonPairingRequest[] }>('/api/v1/auth/pairings')).data
+}
+
+export function cancelDaemonPairing(id: string): Promise<void> {
+  return request(`/api/v1/auth/pairings/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export async function listDaemonApiClients(): Promise<DaemonApiClient[]> {
+  return (await request<{ data: DaemonApiClient[] }>('/api/v1/auth/clients')).data
+}
+
+export function revokeDaemonApiClient(id: string): Promise<void> {
+  return request(`/api/v1/auth/clients/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export async function fetchWelcomePreference(): Promise<{ completed: boolean }> {
@@ -189,6 +351,15 @@ export type ComputerViewport = {
   device_pixel_ratio?: number | null
 }
 
+/** Durable snapshot of the daemon host that executes a sensitive action. */
+export type ExecutionLocation = {
+  kind: 'daemon'
+  daemon_instance_id: string
+  daemon_display_name: string
+  platform: string
+  arch: string
+}
+
 /** Normalized computer-use action (tagged by `type`, snake_case). */
 export type ComputerAction =
   | { type: 'screenshot' }
@@ -233,6 +404,8 @@ export type ComputerActionResult = {
   title?: string | null
   needs_approval?: boolean
   approval_id?: string | null
+  execution_location?: ExecutionLocation | null
+  decided_by_client_id?: string | null
 }
 
 export type ComputerSession = {
@@ -317,8 +490,7 @@ export async function updateComputerSession(
 export async function deleteComputerSession(id: string): Promise<void> {
   const daemon = await connection()
   const headers = new Headers({ 'content-type': 'application/json' })
-  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
-  const response = await fetch(
+  const response = await daemonFetch(
     `${daemon.address}/api/v1/computer/sessions/${encodeURIComponent(id)}`,
     { method: 'DELETE', headers }
   )
@@ -410,8 +582,7 @@ export async function streamComputerPreview(
 ): Promise<void> {
   const daemon = await connection()
   const headers = new Headers({ accept: 'text/event-stream' })
-  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
-  const response = await fetch(
+  const response = await daemonFetch(
     `${daemon.address}/api/v1/computer/sessions/${encodeURIComponent(sessionId)}/stream`,
     { headers, signal }
   )
@@ -441,11 +612,15 @@ export async function streamComputerPreview(
 
 export async function decideComputerApproval(
   approvalId: string,
-  approve: boolean
+  approve: boolean,
+  expectedExecutionLocation?: ExecutionLocation
 ): Promise<{ result: ComputerActionResult | null }> {
   return request(`/api/v1/computer/approvals/${encodeURIComponent(approvalId)}`, {
     method: 'POST',
-    body: JSON.stringify({ approve })
+    body: JSON.stringify({
+      approve,
+      expected_execution_location: expectedExecutionLocation
+    })
   })
 }
 
@@ -1185,13 +1360,12 @@ export async function streamCompletion(
     (await runtimeSettings()
       .then((settings) => settings.drop_reasoning_between_turns ?? false)
       .catch(() => false))
-  const response = await fetch(`${daemon.address}/v1/chat/completions`, {
+  const response = await daemonFetch(`${daemon.address}/v1/chat/completions`, {
     method: 'POST',
     signal,
     headers: {
       'content-type': 'application/json',
       'x-brazier-mode': 'chat',
-      ...(daemon.api_key ? { authorization: `Bearer ${daemon.api_key}` } : {})
     },
     body: JSON.stringify({
       model,
@@ -1384,8 +1558,7 @@ async function readProgressSse(
   const daemon = await connection()
   const headers = new Headers(init.headers)
   headers.set('content-type', 'application/json')
-  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
-  const response = await fetch(`${daemon.address}${path}`, { ...init, headers })
+  const response = await daemonFetch(`${daemon.address}${path}`, { ...init, headers })
   if (!response.ok || !response.body) {
     throw new Error(`Request failed with status ${response.status}.`)
   }
@@ -2381,25 +2554,37 @@ export async function installSdcppBundle(
 export type VoiceSessionInfo = {
   id: string
   ws_url: string
+  ws_protocol?: string
   persona_text: string
   voice_prompt?: string | null
   protocol?: { handshake: number; audio: number; text: number }
   engine?: string
 }
 
-export function createVoiceSession(body?: {
+async function resolveVoiceWebSocketUrl(session: VoiceSessionInfo): Promise<VoiceSessionInfo> {
+  const daemon = await connection()
+  const url = new URL(session.ws_url, daemon.address)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return { ...session, ws_url: url.toString() }
+}
+
+export async function createVoiceSession(body?: {
   model_id?: string
   persona_text?: string
   voice_prompt_path?: string
 }): Promise<VoiceSessionInfo> {
-  return request('/api/v1/voice/sessions', {
+  const session = await request<VoiceSessionInfo>('/api/v1/voice/sessions', {
     method: 'POST',
     body: JSON.stringify(body ?? {})
   })
+  return resolveVoiceWebSocketUrl(session)
 }
 
-export function getVoiceSession(): Promise<{ session: VoiceSessionInfo | null }> {
-  return request('/api/v1/voice/sessions')
+export async function getVoiceSession(): Promise<{ session: VoiceSessionInfo | null }> {
+  const result = await request<{ session: VoiceSessionInfo | null }>('/api/v1/voice/sessions')
+  return {
+    session: result.session ? await resolveVoiceWebSocketUrl(result.session) : null
+  }
 }
 
 export function endVoiceSession(id: string): Promise<{ ended: string }> {
@@ -2524,12 +2709,11 @@ export async function prepareModel(
   }
 ): Promise<ModelResidency | null> {
   const daemon = await connection()
-  const response = await fetch(`${daemon.address}/api/v1/models/prepare?stream=true`, {
+  const response = await daemonFetch(`${daemon.address}/api/v1/models/prepare?stream=true`, {
     method: 'POST',
     signal: options?.signal,
     headers: {
       'content-type': 'application/json',
-      ...(daemon.api_key ? { authorization: `Bearer ${daemon.api_key}` } : {})
     },
     body: JSON.stringify({ model_id: modelId, mode: options?.mode ?? 'chat' })
   })
@@ -2899,8 +3083,7 @@ export async function fetchBlobObjectUrl(sha256: string): Promise<string> {
   if (cached) return cached
   const daemon = await connection()
   const headers = new Headers()
-  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
-  const response = await fetch(`${daemon.address}/api/v1/blobs/${sha256}`, { headers })
+  const response = await daemonFetch(`${daemon.address}/api/v1/blobs/${sha256}`, { headers })
   if (!response.ok) throw new Error(`Could not load attachment (${response.status}).`)
   const blob = await response.blob()
   const url = URL.createObjectURL(blob)
@@ -2959,8 +3142,7 @@ export async function saveBlobToDisk(
 ): Promise<string | null> {
   const daemon = await connection()
   const headers = new Headers()
-  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
-  const response = await fetch(`${daemon.address}/api/v1/blobs/${sha256}`, { headers })
+  const response = await daemonFetch(`${daemon.address}/api/v1/blobs/${sha256}`, { headers })
   if (!response.ok) throw new Error(`Could not read that file (${response.status}).`)
   const bytes = await response.arrayBuffer()
   const extension = extensionForMime(mimeType)
@@ -2972,8 +3154,7 @@ export async function saveBlobToDisk(
 export async function saveSupportBundle(): Promise<string | null> {
   const daemon = await connection()
   const headers = new Headers()
-  if (daemon.api_key) headers.set('authorization', `Bearer ${daemon.api_key}`)
-  const response = await fetch(`${daemon.address}/api/v1/support/bundle`, { headers })
+  const response = await daemonFetch(`${daemon.address}/api/v1/support/bundle`, { headers })
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as {
       error?: { message?: string }

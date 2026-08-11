@@ -218,7 +218,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
 
     const stream = this.createStream()
     try {
-      await stream.start(this.wsUrl(session, persona))
+      await stream.start(this.wsUrl(session, persona), session.ws_protocol)
     } catch (cause) {
       await stream.stop()
       await this.stopVad()
@@ -500,7 +500,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     // answer. The replacement needs to be audible for the checked-result replay.
     this.modelAudioEnabled = true
     const stream = this.createStream()
-    await stream.start(this.wsUrl(session, prompt))
+    await stream.start(this.wsUrl(session, prompt), session.ws_protocol)
     if (generation !== this.handoffGeneration) {
       await stream.stop()
       return
@@ -570,6 +570,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         this.stopCaptureReports()
         return
       }
+      const vadDiagnostics = this.vad?.diagnostics()
       this.publish({
         type: 'captureLevel',
         frames: this.captureFrames,
@@ -578,7 +579,12 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         gate: this.segmenter?.currentGate() ?? SPEECH_THRESHOLD,
         noiseFloor: this.segmenter?.noiseLevel() ?? 0,
         vad: this.vadHealthy ? 'silero-v5' : 'energy-fallback',
-        speechProbability: this.speechProbability
+        speechProbability: this.speechProbability,
+        vadQueueLagMs: vadDiagnostics?.currentQueueLagMs ?? 0,
+        vadInferenceMs: vadDiagnostics?.lastInferenceMs ?? 0,
+        vadInferenceP95Ms: vadDiagnostics?.p95InferenceMs ?? 0,
+        vadQueueLagP95Ms: vadDiagnostics?.p95QueueLagMs ?? 0,
+        vadProcessedWindows: vadDiagnostics?.processedWindows ?? 0
       })
       // Peak is per window, so a loud moment cannot mask a later silence.
       this.capturePeak = 0

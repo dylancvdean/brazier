@@ -62,6 +62,8 @@ fn result(status: ComputerActionStatus, message: Option<String>) -> ComputerActi
         title: None,
         needs_approval: false,
         approval_id: None,
+        execution_location: None,
+        decided_by_client_id: None,
     }
 }
 
@@ -292,6 +294,8 @@ async fn screenshot() -> Result<ComputerActionResult, String> {
         title: None,
         needs_approval: false,
         approval_id: None,
+        execution_location: None,
+        decided_by_client_id: None,
     })
 }
 

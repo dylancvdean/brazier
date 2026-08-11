@@ -495,10 +495,15 @@ impl Database {
 
     async fn agent_tool_execution(&self, id: &str) -> anyhow::Result<ToolExecutionRecord> {
         let row = sqlx::query(
-            r#"SELECT id, session_id, run_id, tool_call_id, tool, arguments_json, environment,
-                      risk, status, exit_code, output_preview, artifact_id, truncated,
-                      changed_paths_json, sandbox_json, approval_id, error, duration_ms, created_at
-               FROM agent_tool_executions WHERE id = ?"#,
+            r#"SELECT e.id, e.session_id, e.run_id, e.tool_call_id, e.tool, e.arguments_json,
+                      e.environment, e.risk, e.status, e.exit_code, e.output_preview,
+                      e.artifact_id, e.truncated, e.changed_paths_json, e.sandbox_json,
+                      e.approval_id, e.error, e.duration_ms, e.created_at,
+                      a.execution_location_json AS approval_execution_location_json,
+                      a.decided_by_client_id AS approval_decided_by_client_id
+               FROM agent_tool_executions e
+               LEFT JOIN agent_approvals a ON a.id = e.approval_id
+               WHERE e.id = ?"#,
         )
         .bind(id)
         .fetch_one(&self.pool)
@@ -511,11 +516,16 @@ impl Database {
         session_id: &str,
     ) -> anyhow::Result<Vec<ToolExecutionRecord>> {
         let rows = sqlx::query(
-            r#"SELECT id, session_id, run_id, tool_call_id, tool, arguments_json, environment,
-                      risk, status, exit_code, output_preview, artifact_id, truncated,
-                      changed_paths_json, sandbox_json, approval_id, error, duration_ms, created_at
-               FROM agent_tool_executions WHERE session_id = ?
-               ORDER BY created_at, rowid"#,
+            r#"SELECT e.id, e.session_id, e.run_id, e.tool_call_id, e.tool, e.arguments_json,
+                      e.environment, e.risk, e.status, e.exit_code, e.output_preview,
+                      e.artifact_id, e.truncated, e.changed_paths_json, e.sandbox_json,
+                      e.approval_id, e.error, e.duration_ms, e.created_at,
+                      a.execution_location_json AS approval_execution_location_json,
+                      a.decided_by_client_id AS approval_decided_by_client_id
+               FROM agent_tool_executions e
+               LEFT JOIN agent_approvals a ON a.id = e.approval_id
+               WHERE e.session_id = ?
+               ORDER BY e.created_at, e.rowid"#,
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -525,11 +535,13 @@ impl Database {
 
     pub async fn create_approval(&self, approval: NewApproval) -> anyhow::Result<AgentApproval> {
         let id = Uuid::new_v4().to_string();
+        let execution_location = self.execution_location().await?;
         sqlx::query(
             r#"INSERT INTO agent_approvals(
                    id, session_id, tool, arguments_json, arguments_hash, environment, risk,
-                   scope_key, allow_session_scope, elevation_json, sandbox_json, summary, status)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')"#,
+                   scope_key, allow_session_scope, elevation_json, sandbox_json, summary,
+                   execution_location_json, status)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')"#,
         )
         .bind(&id)
         .bind(&approval.session_id)
@@ -543,6 +555,7 @@ impl Database {
         .bind(serde_json::to_string(&approval.elevation)?)
         .bind(serde_json::to_string(&approval.sandbox)?)
         .bind(&approval.summary)
+        .bind(serde_json::to_string(&execution_location)?)
         .execute(&self.pool)
         .await?;
         self.approval(&id).await
@@ -552,7 +565,8 @@ impl Database {
         let row = sqlx::query(
             r#"SELECT id, session_id, tool, arguments_json, arguments_hash, environment, risk,
                       scope_key, allow_session_scope, elevation_json, sandbox_json, summary,
-                      status, scope, note, decided_at, created_at
+                      execution_location_json, status, scope, note, decided_at,
+                      decided_by_client_id, created_at
                FROM agent_approvals WHERE id = ?"#,
         )
         .bind(id)
@@ -576,7 +590,8 @@ impl Database {
         let rows = sqlx::query(
             r#"SELECT id, session_id, tool, arguments_json, arguments_hash, environment, risk,
                       scope_key, allow_session_scope, elevation_json, sandbox_json, summary,
-                      status, scope, note, decided_at, created_at
+                      execution_location_json, status, scope, note, decided_at,
+                      decided_by_client_id, created_at
                FROM agent_approvals WHERE session_id = ? AND status = 'pending'
                ORDER BY created_at"#,
         )
@@ -594,6 +609,7 @@ impl Database {
         approved: bool,
         scope: Option<ApprovalScope>,
         note: Option<String>,
+        decided_by_client_id: Option<&str>,
     ) -> anyhow::Result<AgentApproval> {
         let current = self.approval(id).await?;
         anyhow::ensure!(
@@ -615,12 +631,14 @@ impl Database {
         let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             r#"UPDATE agent_approvals
-               SET status = ?, scope = ?, note = ?, decided_at = datetime('now')
+               SET status = ?, scope = ?, note = ?, decided_at = datetime('now'),
+                   decided_by_client_id = ?
                WHERE id = ? AND status = 'pending'"#,
         )
         .bind(status.as_str())
         .bind(effective_scope.as_str())
         .bind(&note)
+        .bind(decided_by_client_id)
         .bind(id)
         .execute(&mut *tx)
         .await?;
@@ -745,6 +763,8 @@ fn tool_execution_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Tool
     let arguments_json: String = row.try_get("arguments_json")?;
     let changed_paths_json: Option<String> = row.try_get("changed_paths_json")?;
     let sandbox_json: Option<String> = row.try_get("sandbox_json")?;
+    let execution_location_json: Option<String> =
+        row.try_get("approval_execution_location_json")?;
     let truncated: i64 = row.try_get("truncated")?;
     Ok(ToolExecutionRecord {
         id: row.try_get("id")?,
@@ -768,6 +788,11 @@ fn tool_execution_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Tool
             .as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok()),
         approval_id: row.try_get("approval_id")?,
+        execution_location: execution_location_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
+        decided_by_client_id: row.try_get("approval_decided_by_client_id")?,
         error: row.try_get("error")?,
         duration_ms: row.try_get("duration_ms")?,
         created_at: row.try_get("created_at")?,
@@ -783,6 +808,7 @@ fn approval_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<AgentAppro
     let risk: String = row.try_get("risk")?;
     let scope: Option<String> = row.try_get("scope")?;
     let allow_session_scope: i64 = row.try_get("allow_session_scope")?;
+    let execution_location_json: String = row.try_get("execution_location_json")?;
     Ok(AgentApproval {
         id: row.try_get("id")?,
         session_id: row.try_get("session_id")?,
@@ -796,6 +822,7 @@ fn approval_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<AgentAppro
         elevation: serde_json::from_str(&elevation_json)?,
         summary: row.try_get("summary")?,
         sandbox: serde_json::from_str(&sandbox_json)?,
+        execution_location: serde_json::from_str(&execution_location_json)?,
         status: ApprovalStatus::parse(&status),
         scope: scope.as_deref().and_then(|value| match value {
             "session" => Some(ApprovalScope::Session),
@@ -804,6 +831,7 @@ fn approval_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<AgentAppro
         }),
         note: row.try_get("note")?,
         decided_at: row.try_get("decided_at")?,
+        decided_by_client_id: row.try_get("decided_by_client_id")?,
         created_at: row.try_get("created_at")?,
     })
 }
@@ -1106,13 +1134,72 @@ mod tests {
         assert_eq!(approval.status, ApprovalStatus::Pending);
 
         let decided = db
-            .decide_approval(&approval.id, true, Some(ApprovalScope::Session), None)
+            .decide_approval(
+                &approval.id,
+                true,
+                Some(ApprovalScope::Session),
+                None,
+                Some("test-client"),
+            )
             .await
             .expect("decide");
         assert_eq!(decided.status, ApprovalStatus::Approved);
         assert_eq!(decided.scope, Some(ApprovalScope::Session));
         let grants = db.session_grants(&session.id).await.expect("grants");
         assert_eq!(grants, vec!["sandbox:run:cargo".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn approval_location_and_decision_actor_survive_recovery() {
+        let (dir, db) = database().await;
+        let identity = db.daemon_identity(Some("Studio Mac")).await.unwrap();
+        let session = db
+            .create_agent_session(session_request(Some("/ws")))
+            .await
+            .expect("create session");
+        let approval = db
+            .create_approval(new_approval(&session.id, true))
+            .await
+            .expect("create approval");
+        assert_eq!(
+            approval.execution_location.daemon_instance_id,
+            identity.instance_id
+        );
+        assert_eq!(
+            approval.execution_location.daemon_display_name,
+            "Studio Mac"
+        );
+
+        // A location is a point-in-time audit snapshot, not a live label.
+        db.daemon_identity(Some("Renamed daemon")).await.unwrap();
+        db.decide_approval(
+            &approval.id,
+            false,
+            Some(ApprovalScope::Once),
+            Some("reviewed remotely".to_owned()),
+            Some("client-42"),
+        )
+        .await
+        .expect("decide approval");
+        drop(db);
+
+        let reopened = Database::open(&dir.path().join("brazier.sqlite"))
+            .await
+            .expect("reopen database");
+        let recovered = reopened
+            .approval(&approval.id)
+            .await
+            .expect("recover approval");
+        assert_eq!(
+            recovered.execution_location.daemon_instance_id,
+            identity.instance_id
+        );
+        assert_eq!(
+            recovered.execution_location.daemon_display_name,
+            "Studio Mac"
+        );
+        assert_eq!(recovered.decided_by_client_id.as_deref(), Some("client-42"));
+        assert_eq!(recovered.status, ApprovalStatus::Denied);
     }
 
     #[tokio::test]
@@ -1184,7 +1271,13 @@ mod tests {
             .await
             .expect("create approval");
         let decided = db
-            .decide_approval(&approval.id, true, Some(ApprovalScope::Session), None)
+            .decide_approval(
+                &approval.id,
+                true,
+                Some(ApprovalScope::Session),
+                None,
+                Some("test-client"),
+            )
             .await
             .expect("decide");
         assert_eq!(decided.scope, Some(ApprovalScope::Once));
@@ -1207,13 +1300,25 @@ mod tests {
             .create_approval(new_approval(&session.id, true))
             .await
             .expect("create approval");
-        db.decide_approval(&approval.id, true, Some(ApprovalScope::Once), None)
-            .await
-            .expect("first decision");
+        db.decide_approval(
+            &approval.id,
+            true,
+            Some(ApprovalScope::Once),
+            None,
+            Some("test-client"),
+        )
+        .await
+        .expect("first decision");
         assert!(
-            db.decide_approval(&approval.id, true, Some(ApprovalScope::Once), None)
-                .await
-                .is_err(),
+            db.decide_approval(
+                &approval.id,
+                true,
+                Some(ApprovalScope::Once),
+                None,
+                Some("racing-client"),
+            )
+            .await
+            .is_err(),
             "a decided approval must not be re-decided"
         );
         db.consume_approval(&approval.id).await.expect("consume");
@@ -1236,9 +1341,15 @@ mod tests {
             .create_approval(new_approval(&session.id, true))
             .await
             .expect("create approval");
-        db.decide_approval(&approval.id, true, Some(ApprovalScope::Once), None)
-            .await
-            .expect("approve");
+        db.decide_approval(
+            &approval.id,
+            true,
+            Some(ApprovalScope::Once),
+            None,
+            Some("test-client"),
+        )
+        .await
+        .expect("approve");
 
         let first_db = db.clone();
         let first_id = approval.id.clone();

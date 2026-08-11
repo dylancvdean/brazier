@@ -188,6 +188,8 @@ export type DiagnosticRecord = {
 }
 
 export type SessionMetrics = {
+  /** Final, non-empty ASR transcripts retained only for local qualification. */
+  transcriptTexts: string[]
   /**
    * Utterance close to transcript in hand: the silence between someone
    * finishing a sentence and anything at all happening.

@@ -3,14 +3,23 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-// pnpm forwards its argument separator, so `pnpm release -- --patch` reaches
-// this script as both `--` and `--patch`.
-const args = process.argv.slice(2).filter((argument) => argument !== '--')
-const bump = args[0] ?? 'beta'
+import { nextBetaVersion, parseReleaseVersion } from './release-version.mjs'
 
-if (!['beta', '--major', '--minor', '--patch'].includes(bump) || args.length > 1) {
-  console.error('Usage: pnpm release -- [--major|--minor|--patch]')
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
+// pnpm forwards its argument separator, so filter it before parsing modes.
+const args = process.argv.slice(2).filter((argument) => argument !== '--')
+const mode = args[0]
+const bump = args[1] ?? 'beta'
+
+if (
+  !['prepare', 'publish'].includes(mode) ||
+  (mode === 'prepare' && (!['beta', '--major', '--minor', '--patch'].includes(bump) || args.length > 2)) ||
+  (mode === 'publish' && args.length > 1)
+) {
+  console.error(
+    'Usage: pnpm release:prepare -- [--major|--minor|--patch]\n' +
+    '       pnpm release:publish'
+  )
   process.exit(1)
 }
 
@@ -19,65 +28,81 @@ function git(args, options = {}) {
   return typeof output === 'string' ? output.trim() : ''
 }
 
-if (git(['status', '--porcelain']).length > 0) {
+function requireCleanCheckout() {
+  if (git(['status', '--porcelain']).length === 0) return
   console.error('Refusing to package a release from an unclean checkout. Commit or stash every change first.')
   process.exit(1)
 }
 
-const version = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version
-const match = /^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:-beta\.(?<beta>0|[1-9]\d*))?$/.exec(version)
-if (!match?.groups) {
-  console.error(`Expected a stable version or -beta.N prerelease, received ${version}.`)
-  process.exit(1)
+function currentVersion() {
+  return JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version
 }
 
-let major = Number(match.groups.major)
-let minor = Number(match.groups.minor)
-let patch = Number(match.groups.patch)
-const beta = match.groups.beta == null ? null : Number(match.groups.beta)
-
-switch (bump) {
-  case '--major':
-    major += 1
-    minor = 0
-    patch = 0
-    break
-  case '--minor':
-    minor += 1
-    patch = 0
-    break
-  case '--patch':
-    patch += 1
-    break
-  default:
-    // A beta-only release advances its prerelease counter. Once stable, the
-    // natural no-flag action is a stable patch release; it never revives beta.
-    if (beta == null) patch += 1
+function parsedVersion(version) {
+  try {
+    return parseReleaseVersion(version)
+  } catch (cause) {
+    console.error(cause instanceof Error ? cause.message : String(cause))
+    process.exit(1)
+  }
 }
 
-const nextBeta = beta == null ? null : beta + 1
-const next = `${major}.${minor}.${patch}${nextBeta == null ? '' : `-beta.${nextBeta}`}`
-const tag = `v${next}`
-
-try {
-  git(['rev-parse', '--verify', '--quiet', `refs/tags/${tag}`], { stdio: 'ignore' })
-  console.error(`Refusing to overwrite existing local tag ${tag}.`)
-  process.exit(1)
-} catch {
-  // `rev-parse` exits nonzero when the tag is available.
+function requireAvailableTag(tag) {
+  try {
+    git(['rev-parse', '--verify', '--quiet', `refs/tags/${tag}`], { stdio: 'ignore' })
+    console.error(`Refusing to overwrite existing local tag ${tag}.`)
+    process.exit(1)
+  } catch {
+    // `rev-parse` exits nonzero when the tag is available.
+  }
 }
 
-console.log(`Preparing Brazier ${next} from ${version}.`)
-execFileSync('pnpm', ['version:bump', '--', next], { cwd: root, stdio: 'inherit' })
+function prepare() {
+  requireCleanCheckout()
+  const version = currentVersion()
+  parsedVersion(version)
+  const next = nextBetaVersion(version, bump)
+  const tag = `v${next}`
+  requireAvailableTag(tag)
 
-// The release tag must point at the commit whose manifests carry that exact
-// version. Stage only tracked bump output: the checkout was verified clean
-// before this command, so this cannot accidentally absorb unrelated files.
-if (git(['status', '--porcelain']).length === 0) {
-  throw new Error('Version bump did not change any tracked files.')
+  console.log(`Preparing Brazier candidate ${next} from ${version}.`)
+  execFileSync('pnpm', ['version:bump', '--', next], { cwd: root, stdio: 'inherit' })
+  if (git(['status', '--porcelain']).length === 0) {
+    throw new Error('Version bump did not change any tracked files.')
+  }
+  // The checkout was clean above, so stage only the tracked version outputs.
+  git(['add', '-u'], { stdio: 'inherit' })
+  git(['commit', '-m', `release: prepare ${tag}`], { stdio: 'inherit' })
+  git(['push', 'origin', 'HEAD'], { stdio: 'inherit' })
+  const commit = git(['rev-parse', 'HEAD'])
+  console.log(
+    `Prepared and pushed ${tag} candidate ${commit}.\n` +
+    'Run both exact-commit voice qualifications and upload their evidence, then run `pnpm release:publish`.'
+  )
 }
-git(['add', '-u'], { stdio: 'inherit' })
-git(['commit', '-m', `release: ${tag}`], { stdio: 'inherit' })
-git(['tag', '-a', tag, '-m', `Brazier ${tag}`], { stdio: 'inherit' })
-git(['push', 'origin', 'HEAD', tag], { stdio: 'inherit' })
-console.log(`Released ${tag}.`)
+
+function publish() {
+  requireCleanCheckout()
+  const version = currentVersion()
+  parsedVersion(version)
+  const tag = `v${version}`
+  requireAvailableTag(tag)
+  const head = git(['rev-parse', 'HEAD'])
+  let upstream
+  try {
+    upstream = git(['rev-parse', '@{upstream}'])
+  } catch {
+    console.error('The candidate branch has no upstream. Push the exact candidate commit before publishing.')
+    process.exit(1)
+  }
+  if (head !== upstream) {
+    console.error(`Candidate ${head} is not the exact pushed upstream commit ${upstream}.`)
+    process.exit(1)
+  }
+  git(['tag', '-a', tag, '-m', `Brazier ${tag}`], { stdio: 'inherit' })
+  git(['push', 'origin', tag], { stdio: 'inherit' })
+  console.log(`Published ${tag}; the gated release workflow now owns packaging and publication.`)
+}
+
+if (mode === 'prepare') prepare()
+else publish()
