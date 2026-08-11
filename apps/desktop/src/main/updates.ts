@@ -26,6 +26,62 @@ const DEFAULT_STORED: StoredUpdateSettings = {
   autoDownload: false
 }
 
+const GITHUB_RELEASES_API = 'https://api.github.com/repos/dylancvdean/brazier/releases?per_page=100'
+
+type GithubReleaseAsset = {
+  name: string
+  browser_download_url: string
+}
+
+type GithubRelease = {
+  draft: boolean
+  prerelease: boolean
+  assets: GithubReleaseAsset[]
+}
+
+function updaterManifestName(): string {
+  if (process.platform === 'darwin') return 'latest-mac.yml'
+  if (process.platform === 'linux') return 'latest-linux.yml'
+  return 'latest.yml'
+}
+
+/**
+ * GitHub's /releases/latest can point at a partially published release.
+ * Select the newest complete release for this platform instead, so an
+ * experimental Windows failure cannot break update checks everywhere.
+ */
+async function configurePlatformUpdateFeed(report: Report): Promise<void> {
+  const manifest = updaterManifestName()
+  try {
+    const response = await fetch(GITHUB_RELEASES_API, {
+      headers: { Accept: 'application/vnd.github+json' }
+    })
+    if (!response.ok) throw new Error(`GitHub releases request failed (${response.status})`)
+    const releases = (await response.json()) as GithubRelease[]
+    const asset = releases
+      .filter((release) => !release.draft && !release.prerelease)
+      .flatMap((release) => release.assets)
+      .find((candidate) => candidate.name === manifest)
+    if (!asset) {
+      report(`[updater] no published release contains ${manifest}; using the embedded GitHub feed`, 'warn')
+      return
+    }
+    const slash = asset.browser_download_url.lastIndexOf('/')
+    if (slash < 0) throw new Error(`invalid updater manifest URL: ${asset.browser_download_url}`)
+    autoUpdater.setFeedURL({
+      provider: 'generic',
+      url: asset.browser_download_url.slice(0, slash + 1)
+    })
+  } catch (error) {
+    // Retain electron-builder's embedded GitHub feed if the release listing
+    // cannot be retrieved (offline use, rate limit, or a transient outage).
+    report(
+      `[updater] platform release lookup failed; using the embedded GitHub feed: ${error instanceof Error ? error.message : String(error)}`,
+      'warn'
+    )
+  }
+}
+
 function updateSettingsPath(): string {
   return join(app.getPath('userData'), 'update-settings.json')
 }
@@ -175,6 +231,7 @@ export function startUpdates(report: Report): { checkForUpdates: () => Promise<U
     checking = true
     interactiveCheck = interactive
     try {
+      await configurePlatformUpdateFeed(report)
       await autoUpdater.checkForUpdates()
     } catch (error) {
       // electron-updater usually emits `error`, but retain this fallback so a

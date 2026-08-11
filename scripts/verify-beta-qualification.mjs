@@ -26,7 +26,7 @@ async function loadJson(file) {
   return value
 }
 
-export function verifyQualification(manifest, results, commit) {
+export function verifyQualification(manifest, results, commit, optionalPlatforms = new Set()) {
   assert(typeof commit === 'string' && commit.length >= 7, 'a release commit is required')
   for (const result of results) {
     assert(result.schema_version === manifest.schema_version, `${result.file}: schema mismatch`)
@@ -43,6 +43,7 @@ export function verifyQualification(manifest, results, commit) {
         result.artifact === required.artifact
     )
     const label = `${required.platform}-${required.arch}-${required.artifact}`
+    if (matches.length === 0 && optionalPlatforms.has(required.platform)) continue
     assert(matches.length === 1, `expected exactly one package smoke for ${label}, found ${matches.length}`)
     const result = matches[0]
     for (const check of [
@@ -152,6 +153,7 @@ async function main() {
   const resultsDirectory = argument('--results')
   const commit = argument('--commit')
   const only = argument('--only')
+  const optionalPlatform = argument('--optional-platform')
   assert(resultsDirectory, 'usage: verify-beta-qualification.mjs --results DIR --commit SHA')
   const manifest = await loadJson(path.join(root, 'qualification', 'beta-manifest.json'))
   if (only === 'voice') manifest.required_package_smokes = []
@@ -161,7 +163,8 @@ async function main() {
     .filter((file) => file.endsWith('.json'))
     .sort()
   const results = await Promise.all(files.map((file) => loadJson(path.join(directory, file))))
-  const summary = verifyQualification(manifest, results, commit)
+  const optionalPlatforms = new Set(optionalPlatform ? [optionalPlatform] : [])
+  const summary = verifyQualification(manifest, results, commit, optionalPlatforms)
   process.stdout.write(`${JSON.stringify(summary)}\n`)
 }
 

@@ -131,3 +131,25 @@ test('requires the installed AppContainer launcher probe for Windows packages', 
     voice_hosts: 0
   })
 })
+
+test('allows an experimental platform to be absent while requiring every other target', () => {
+  const mixedManifest = structuredClone(manifest)
+  mixedManifest.required_package_smokes.push({
+    platform: 'windows',
+    arch: 'x64',
+    artifact: 'nsis'
+  })
+
+  assert.deepEqual(
+    verifyQualification(mixedManifest, passingResults(), commit, new Set(['windows'])),
+    {
+      commit,
+      package_smokes: 2,
+      voice_hosts: 1
+    }
+  )
+  assert.throws(
+    () => verifyQualification(mixedManifest, passingResults(), commit),
+    /windows-x64-nsis/
+  )
+})

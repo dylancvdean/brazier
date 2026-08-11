@@ -218,6 +218,9 @@ jobs:
   windows:
     needs: [validate, verify]
     runs-on: windows-latest
+    # Windows packaging is experimental. Preserve a failed job for diagnosis,
+    # but allow the signed macOS/Linux release to proceed.
+    continue-on-error: true
     permissions:
       contents: write
     steps:
@@ -283,6 +286,13 @@ jobs:
 
   qualification:
     needs: [validate, macos, appimage, windows]
+    if: >-
+      ${{
+        always() &&
+        needs.validate.result == 'success' &&
+        needs.macos.result == 'success' &&
+        needs.appimage.result == 'success'
+      }}
     runs-on: ubuntu-22.04
     permissions:
       actions: read
@@ -312,10 +322,10 @@ jobs:
           test -n "$artifact_id" && test "$artifact_id" != "null"
           gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > voice-results.zip
           unzip -q voice-results.zip -d qualification-results
-      - name: Verify complete beta qualification evidence
+      - name: Verify beta qualification evidence
         env:
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-        run: node scripts/verify-beta-qualification.mjs --results qualification-results --commit "$RELEASE_COMMIT"
+        run: node scripts/verify-beta-qualification.mjs --results qualification-results --commit "$RELEASE_COMMIT" --optional-platform windows
       - uses: actions/upload-artifact@v4
         with:
           name: beta-qualification-results
@@ -324,6 +334,14 @@ jobs:
 
   publish:
     needs: [validate, macos, appimage, windows, qualification]
+    if: >-
+      ${{
+        always() &&
+        needs.validate.result == 'success' &&
+        needs.macos.result == 'success' &&
+        needs.appimage.result == 'success' &&
+        needs.qualification.result == 'success'
+      }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -356,16 +374,10 @@ jobs:
           test "${#assets[@]}" -gt 0
           sha512sum "${assets[@]}" > SHA512SUMS
           # Updater manifests remain checksum-covered. Independently sign the
-          # executable distributions, dependency inventory, and checksum
-          # manifest users rely on to verify everything else.
-          signed_assets=(
-            Brazier.dmg
-            Brazier-*-arm64-mac.zip
-            Brazier.AppImage
-            Brazier-Setup.exe
-            Brazier.spdx.json
-            SHA512SUMS
-          )
+          # every published artifact, including whichever platform manifests
+          # are available. Windows may be absent while that build is
+          # experimental, so do not require a hard-coded installer name.
+          signed_assets=("${assets[@]}" SHA512SUMS)
           for asset in "${signed_assets[@]}"; do
             cosign sign-blob --yes --bundle "$asset.sigstore.json" "$asset"
           done
