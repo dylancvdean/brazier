@@ -315,15 +315,21 @@ jobs:
           RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
         run: |
           name="voice-qualification-${RELEASE_COMMIT}"
-          artifact_id="$(gh api \
+          if ! artifacts="$(gh api \
             --method GET \
             -H 'Accept: application/vnd.github+json' \
             "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
             -f "name=${name}" \
-            -f per_page=100 \
-            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id')"
+            -f per_page=100)"; then
+            echo "Could not list Actions artifacts for ${GITHUB_REPOSITORY}." >&2
+            exit 1
+          fi
+          artifact_id="$(jq -r '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty' <<<"${artifacts}")"
           test -n "$artifact_id" && test "$artifact_id" != "null"
-          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > voice-results.zip
+          if ! gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > voice-results.zip; then
+            echo "Could not download Actions artifact ${artifact_id}." >&2
+            exit 1
+          fi
           unzip -q voice-results.zip -d qualification-results
       - name: Verify beta qualification evidence
         env:
