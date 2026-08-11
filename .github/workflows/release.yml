@@ -316,11 +316,14 @@ jobs:
         run: |
           name="voice-qualification-${RELEASE_COMMIT}"
           artifact_id="$(gh api \
+            --method GET \
             -H 'Accept: application/vnd.github+json' \
-            "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${name}&per_page=100" \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+            -f "name=${name}" \
+            -f per_page=100 \
             --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id')"
           test -n "$artifact_id" && test "$artifact_id" != "null"
-          gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > voice-results.zip
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > voice-results.zip
           unzip -q voice-results.zip -d qualification-results
       - name: Verify beta qualification evidence
         env:
