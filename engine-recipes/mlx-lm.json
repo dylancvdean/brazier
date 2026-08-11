@@ -13,14 +13,9 @@
       "args": ["venv", "--python", "3.12", "{venv}"]
     },
     {
-      "label": "Install pinned dependencies",
-      "program": "uv",
-      "args": ["pip", "install", "--python", "{python}", "--requirements", "{recipe}/mlx-lm.lock"]
-    },
-    {
       "label": "Build and install selected source",
       "program": "uv",
-      "args": ["pip", "install", "--python", "{python}", "--no-deps", "{source}"]
+      "args": ["pip", "install", "--python", "{python}", "{source}"]
     }
   ]
 }

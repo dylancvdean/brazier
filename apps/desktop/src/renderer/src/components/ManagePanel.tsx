@@ -229,11 +229,6 @@ const BUILD_ENGINE_LABELS: Record<BuildEngine, string> = {
   whisperkit: 'ASR · WhisperKit'
 }
 
-// stable-diffusion.cpp intentionally has an unstable CLI. Keep this in sync
-// with the managed release pin in crates/brazier-runtime/src/sdcpp.rs; the
-// build form remains editable for users who deliberately choose another revision.
-const SDCPP_SOURCE_REVISION = 'ea7f0c87cfe4c673263b4c201c596c7f1cbe2528'
-
 const BUILD_ENGINE_DEFAULTS: Record<
   BuildEngine,
   { repository: string; revision: string }
@@ -264,7 +259,8 @@ const BUILD_ENGINE_DEFAULTS: Record<
   },
   'stable-diffusion.cpp': {
     repository: 'https://github.com/leejet/stable-diffusion.cpp',
-    revision: SDCPP_SOURCE_REVISION
+    // Leave the revision empty so Git follows upstream's default branch.
+    revision: ''
   },
   personaplex: {
     repository: 'https://github.com/NVIDIA/personaplex',
@@ -5633,8 +5629,8 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                       {installed && <span className="installed-badge">Installed</span>}
                     </strong>
                     <span>
-                      Prebuilt sd-cli pinned to Brazier's supported release; build from source to
-                      opt into a newer version.
+                      Prebuilt sd-cli follows the latest upstream release; build from source to
+                      use a specific revision.
                     </span>
                     {runtimeArch && <span className="runtime-offer-arch">Built for {runtimeArch}</span>}
                   </div>
@@ -5958,7 +5954,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             </div>
             <p className="model-help">
               {isStreamingAsrBuild
-                ? 'Installs a bundled Transformers worker plus pinned deps with uv (no Git checkout). Then download a Nemotron ASR Streaming snapshot from Discover.'
+                ? 'Installs a bundled Transformers worker and its current upstream dependencies with uv (no Git checkout). Then download a Nemotron ASR Streaming snapshot from Discover.'
                 : isSwiftBuild
                   ? 'WhisperKit builds require Xcode or the Swift toolchain. CoreML models download on first transcription (or install via `brew install whisperkit-cli`).'
                   : isPythonBuild
@@ -5966,7 +5962,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                     : isWhisperBuild
                       ? 'whisper.cpp builds produce the whisper-cli binary used to transcribe audio and video soundtracks before chat.'
                       : buildEngine === 'stable-diffusion.cpp'
-                        ? "stable-diffusion.cpp defaults to Brazier's reviewed commit; edit the revision above to opt into another upstream version."
+                        ? 'stable-diffusion.cpp follows its upstream default branch unless you specify a branch, tag, or commit.'
                       : props.hardware?.os === 'macos'
                         ? 'macOS builds use Xcode Command Line Tools. Metal is the recommended GPU target.'
                         : props.hardware?.os === 'windows'

@@ -13,18 +13,6 @@
       "args": ["venv", "--python", "3.12", "{venv}"]
     },
     {
-      "label": "Install pinned dependencies",
-      "program": "uv",
-      "args": [
-        "pip",
-        "install",
-        "--python",
-        "{python}",
-        "--requirements",
-        "{recipe}/personaplex.lock"
-      ]
-    },
-    {
       "label": "Install PersonaPlex / Moshi from source",
       "program": "uv",
       "args": [
@@ -32,7 +20,6 @@
         "install",
         "--python",
         "{python}",
-        "--no-deps",
         "{source}/moshi"
       ]
     }

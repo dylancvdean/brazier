@@ -8,15 +8,6 @@
     "https://github.com/vllm-project/vllm-metal"
   ],
   "supported_platforms": ["linux-x64", "linux-arm64", "macos-arm64"],
-  "platform_pre_steps": {
-    "macos-arm64": [
-      {
-        "label": "Install vLLM core macOS arm64 wheel",
-        "program": "uv",
-        "args": ["pip", "install", "--python", "{python}", "https://github.com/vllm-project/vllm/releases/download/v0.26.0/vllm-0.26.0%2Bcpu-cp312-cp312-macosx_11_0_arm64.whl"]
-      }
-    ]
-  },
   "steps": [
     {
       "label": "Create isolated environment",

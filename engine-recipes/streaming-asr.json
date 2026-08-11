@@ -19,18 +19,6 @@
       "args": ["venv", "--python", "3.12", "{venv}"]
     },
     {
-      "label": "Install pinned dependencies",
-      "program": "uv",
-      "args": [
-        "pip",
-        "install",
-        "--python",
-        "{python}",
-        "--requirements",
-        "{recipe}/streaming-asr.lock"
-      ]
-    },
-    {
       "label": "Install Brazier streaming ASR worker",
       "program": "uv",
       "args": [
@@ -38,7 +26,6 @@
         "install",
         "--python",
         "{python}",
-        "--no-deps",
         "{recipe}/streaming_asr_pkg"
       ]
     }

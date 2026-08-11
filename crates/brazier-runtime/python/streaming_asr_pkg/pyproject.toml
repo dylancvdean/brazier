@@ -3,7 +3,13 @@ name = "brazier-streaming-asr"
 version = "0.2.13-beta.65"
 description = "Brazier worker for NVIDIA Nemotron-class streaming ASR"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "accelerate",
+    "librosa",
+    "soundfile",
+    "torch",
+    "transformers",
+]
 
 [project.scripts]
 brazier-streaming-asr = "brazier_streaming_asr.__main__:main"

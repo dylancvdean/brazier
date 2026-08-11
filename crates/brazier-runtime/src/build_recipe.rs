@@ -16,11 +16,6 @@ const STREAMING_ASR: &str = include_str!("../../../engine-recipes/streaming-asr.
 const SDCPP: &str = include_str!("../../../engine-recipes/stable-diffusion.cpp.json");
 const PERSONAPLEX: &str = include_str!("../../../engine-recipes/personaplex.json");
 const PERSONAPLEX_MLX: &str = include_str!("../../../engine-recipes/personaplex-mlx.json");
-const MLX_LM_LOCK: &str = include_str!("../../../engine-recipes/mlx-lm.lock");
-const MLX_VLM_LOCK: &str = include_str!("../../../engine-recipes/mlx-vlm.lock");
-const STREAMING_ASR_LOCK: &str = include_str!("../../../engine-recipes/streaming-asr.lock");
-const PERSONAPLEX_LOCK: &str = include_str!("../../../engine-recipes/personaplex.lock");
-const PERSONAPLEX_MLX_LOCK: &str = include_str!("../../../engine-recipes/personaplex-mlx.lock");
 const STREAMING_ASR_PYPROJECT: &str = include_str!("../python/streaming_asr_pkg/pyproject.toml");
 const STREAMING_ASR_INIT: &str =
     include_str!("../python/streaming_asr_pkg/brazier_streaming_asr/__init__.py");
@@ -39,23 +34,15 @@ pub fn is_swift_engine(engine: &str) -> bool {
     matches!(engine, "whisperkit")
 }
 
-/// Directory containing shipped lock files for Python engine builds.
+/// Directory containing the bundled streaming ASR worker package.
 pub fn recipe_root(data_dir: &Path) -> PathBuf {
     data_dir.join("engine-recipes")
 }
 
-/// Write bundled recipe lock files and Python packages into the data directory.
+/// Write bundled Python packages into the data directory.
 pub fn ensure_recipe_files(data_dir: &Path) -> anyhow::Result<PathBuf> {
     let dir = recipe_root(data_dir);
     std::fs::create_dir_all(&dir).context("create engine-recipes directory")?;
-    std::fs::write(dir.join("mlx-lm.lock"), MLX_LM_LOCK).context("write mlx-lm.lock")?;
-    std::fs::write(dir.join("mlx-vlm.lock"), MLX_VLM_LOCK).context("write mlx-vlm.lock")?;
-    std::fs::write(dir.join("streaming-asr.lock"), STREAMING_ASR_LOCK)
-        .context("write streaming-asr.lock")?;
-    std::fs::write(dir.join("personaplex.lock"), PERSONAPLEX_LOCK)
-        .context("write personaplex.lock")?;
-    std::fs::write(dir.join("personaplex-mlx.lock"), PERSONAPLEX_MLX_LOCK)
-        .context("write personaplex-mlx.lock")?;
 
     let pkg = dir.join("streaming_asr_pkg");
     let module = pkg.join("brazier_streaming_asr");
@@ -469,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn vllm_metal_installs_core_then_builds_plugin_artifacts() {
+    fn vllm_metal_builds_plugin_artifacts_from_the_selected_source() {
         let plan = plan(BuildPlanRequest {
             engine: "vllm".into(),
             repository: "https://github.com/vllm-project/vllm-metal".into(),
@@ -487,19 +474,17 @@ mod tests {
             labels,
             vec![
                 "Create isolated environment",
-                "Install vLLM core macOS arm64 wheel",
                 "Build and install selected vLLM-Metal source",
                 "Compile vLLM-Metal native artifacts",
             ]
         );
-        assert_eq!(plan.build[3].program, "{python}");
+        assert_eq!(plan.build[2].program, "{python}");
     }
 
     #[test]
     fn ensure_recipe_files_writes_streaming_asr_package() {
         let dir = tempfile::tempdir().unwrap();
         let root = ensure_recipe_files(dir.path()).unwrap();
-        assert!(root.join("streaming-asr.lock").is_file());
         assert!(
             root.join("streaming_asr_pkg/brazier_streaming_asr/__main__.py")
                 .is_file()

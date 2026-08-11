@@ -35,19 +35,7 @@ use crate::{
 
 pub const ENGINE: &str = "stable-diffusion.cpp";
 
-/// Reviewed sd.cpp compatibility boundary.
-///
-/// Upstream intentionally ships an unstable CLI, so managed installs stay on
-/// this release until Brazier is updated and tested against a newer one. Users
-/// can still build another revision explicitly under Manage → Runtimes.
-///
-/// `master-812-ea7f0c8` is the first release with MiniMax-H3 support
-/// (day-1, 2026-08-04). If you move this pin, re-run the sd.cpp smoke tests:
-/// the audio-preserving AVI→MP4 path and the H3 conditioning args depend on it.
-const PINNED_RELEASE_TAG: &str = "master-812-ea7f0c8";
-pub const PINNED_SOURCE_REVISION: &str = "ea7f0c87cfe4c673263b4c201c596c7f1cbe2528";
-const GITHUB_API: &str =
-    "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/tags/master-812-ea7f0c8";
+const GITHUB_API: &str = "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/latest";
 const USER_AGENT: &str = "brazier-sdcpp-manager";
 
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -373,7 +361,7 @@ pub async fn install_managed_binary_with_progress(
 ) -> anyhow::Result<PathBuf> {
     progress(ProgressEvent::phase(
         "resolve",
-        format!("Looking up supported stable-diffusion.cpp release {PINNED_RELEASE_TAG}"),
+        "Looking up the latest stable-diffusion.cpp release",
     ));
     let (tag, asset) = resolve_managed_release(client, target).await?;
     tracing::info!(%tag, asset = %asset.name, "downloading managed stable-diffusion.cpp binary");
@@ -2617,9 +2605,8 @@ mod tests {
     }
 
     #[test]
-    fn managed_sdcpp_release_and_source_revision_are_pinned_together() {
-        assert!(GITHUB_API.ends_with(&format!("/releases/tags/{PINNED_RELEASE_TAG}")));
-        assert!(PINNED_RELEASE_TAG.ends_with(&PINNED_SOURCE_REVISION[..7]));
+    fn managed_sdcpp_uses_the_latest_upstream_release() {
+        assert!(GITHUB_API.ends_with("/releases/latest"));
     }
 
     #[test]
