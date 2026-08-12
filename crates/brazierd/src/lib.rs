@@ -33,6 +33,10 @@ pub struct AppState {
     pub db: Database,
     pub runtime: Arc<Runtime>,
     pub api_keys: Vec<String>,
+    /// One-time per-process credential handed only to the local desktop main
+    /// process. It is separate from API bearer keys so a loopback reverse
+    /// proxy cannot turn a remote request into a trusted local elevation.
+    pub local_control_key: Option<String>,
     pub http: reqwest::Client,
     pub data_dir: PathBuf,
     pub active_builds: Arc<builds::ActiveBuilds>,

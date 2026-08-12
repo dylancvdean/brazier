@@ -99,11 +99,12 @@ app.setName('Brazier')
  * (access(W_OK|X_OK) returns ESRCH), the GPU/zygote path melts down, and the
  * window stays the backgroundColor black shell.
  *
- * Mitigations that work in practice:
- * - no-sandbox: node_modules chrome-sandbox is never setuid
+ * Rendering mitigations retained here do not disable Chromium's process
+ * sandbox. A package whose sandbox helper is misconfigured must fail visibly
+ * instead of silently running web content without isolation.
  * - disable-dev-shm-usage: avoid /dev/shm
  * - force X11 (XWayland) instead of Ozone/Wayland color-management path
- * - software compositing + in-process GPU to avoid the crashing GPU process
+ * - software compositing to avoid the crashing GPU process
  */
 if (process.platform === 'linux') {
   // Prefer X11 even when WAYLAND_DISPLAY is set. Electron reads the env var.
@@ -115,10 +116,7 @@ if (process.platform === 'linux') {
     delete process.env.WAYLAND_DISPLAY
   }
 
-  app.commandLine.appendSwitch('no-sandbox')
-  app.commandLine.appendSwitch('no-zygote')
   app.commandLine.appendSwitch('disable-dev-shm-usage')
-  app.commandLine.appendSwitch('disable-gpu-sandbox')
   app.commandLine.appendSwitch('ozone-platform-hint', process.env.ELECTRON_OZONE_PLATFORM_HINT)
   if (process.env.ELECTRON_OZONE_PLATFORM_HINT === 'x11') {
     app.commandLine.appendSwitch('ozone-platform', 'x11')
@@ -129,13 +127,13 @@ if (process.platform === 'linux') {
   if (process.env.BRAZIER_ELECTRON_SOFTWARE_GL !== '0') {
     app.disableHardwareAcceleration()
     app.commandLine.appendSwitch('disable-gpu')
-    app.commandLine.appendSwitch('in-process-gpu')
   }
 }
 
 type Connection = {
   address: string
   api_key: string | null
+  local_control_key: string | null
 }
 
 let computerSafetyOverlay: BrowserWindow | null = null
@@ -1086,16 +1084,24 @@ function installRendererConnectionGuard(profiles: ConnectionProfileManager): voi
   session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
     const requestHeaders = { ...details.requestHeaders }
     for (const name of Object.keys(requestHeaders)) {
-      if (name.toLowerCase() === 'authorization') delete requestHeaders[name]
+      if (
+        name.toLowerCase() === 'authorization' ||
+        name.toLowerCase() === 'x-brazier-local-control'
+      ) {
+        delete requestHeaders[name]
+      }
     }
     if (!details.webContentsId) {
       callback({ requestHeaders })
       return
     }
-    void profiles
-      .rendererApiKeyForUrl(details.url)
-      .then((apiKey) => {
+    void Promise.all([
+      profiles.rendererApiKeyForUrl(details.url),
+      profiles.rendererLocalControlKeyForUrl(details.url)
+    ])
+      .then(([apiKey, localControlKey]) => {
         if (apiKey) requestHeaders.Authorization = `Bearer ${apiKey}`
+        if (localControlKey) requestHeaders['X-Brazier-Local-Control'] = localControlKey
         callback({ requestHeaders })
       })
       .catch(() => callback({ cancel: true, requestHeaders }))

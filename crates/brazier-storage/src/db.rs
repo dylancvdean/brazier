@@ -957,6 +957,29 @@ impl Database {
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
+            version = 14;
+        }
+
+        if version < 15 {
+            // Agent-scoped API keys must not be able to enumerate or operate
+            // sessions created by another paired client. Existing sessions
+            // belong to the bootstrap owner for backwards compatibility.
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(
+                "ALTER TABLE agent_sessions ADD COLUMN owner_client_id TEXT NOT NULL DEFAULT 'owner'",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS agent_sessions_owner_updated \
+                 ON agent_sessions(owner_client_id, updated_at DESC)",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (15)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
 
         Ok(())
@@ -1974,6 +1997,15 @@ mod tests {
             "CREATE TABLE agent_approvals (\
                  id TEXT PRIMARY KEY, \
                  status TEXT NOT NULL DEFAULT 'pending'\
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE agent_sessions (\
+                 id TEXT PRIMARY KEY, \
+                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))\
              )",
         )
         .execute(&pool)

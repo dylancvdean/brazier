@@ -6,9 +6,11 @@
 //! records what happened. The agent runtime never touches the filesystem, a
 //! shell, or any host API by itself.
 
+#[cfg(windows)]
+use std::fs::OpenOptions;
 use std::{
     collections::{BTreeMap, HashMap},
-    fs::OpenOptions,
+    io::{Read as _, Seek as _, Write as _},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -742,6 +744,16 @@ fn checked_path(
     let resolved = agent_policy::resolve_path(workspace, raw);
     validate_platform_path(&resolved)?;
 
+    // Windows path-based mutation APIs can traverse a reparse point after the
+    // policy check and before the operation. Until these operations use NT
+    // handle-relative calls throughout, refusing them is the only honest
+    // fail-closed behavior. Unix uses openat/mkdirat/renameat/unlinkat below.
+    #[cfg(windows)]
+    anyhow::ensure!(
+        !write,
+        "direct agent filesystem mutations are unavailable on Windows because they cannot yet be performed without reparse-point races"
+    );
+
     // Follow symlinks on the deepest existing ancestor: a link inside the
     // workspace must not point outside it. Every containment check below is on
     // this canonical form, never on the path the caller typed.
@@ -752,8 +764,12 @@ fn checked_path(
             !is_inside(&real, &secret)
                 && !is_inside(&real, &secret_real)
                 && !is_inside(&resolved, &secret)
-                && !is_inside(&resolved, &secret_real),
-            "`{raw}` resolves into a credential or Brazier-owned path"
+                && !is_inside(&resolved, &secret_real)
+                && !is_inside(&secret, &real)
+                && !is_inside(&secret_real, &real)
+                && !is_inside(&secret, &resolved)
+                && !is_inside(&secret_real, &resolved),
+            "`{raw}` overlaps a credential or Brazier-owned path"
         );
     }
     if plan.environment == AgentEnvironment::Sandbox {
@@ -867,17 +883,17 @@ async fn workspace_info(
         "architecture": std::env::consts::ARCH,
     });
     if let Some(root) = workspace {
-        let git_dir = root.join(".git");
-        info["git_repository"] = Value::Bool(git_dir.exists());
-        let mut entries = Vec::new();
-        if let Ok(mut dir) = tokio::fs::read_dir(root).await {
-            while let Ok(Some(entry)) = dir.next_entry().await {
-                entries.push(entry.file_name().to_string_lossy().to_string());
-                if entries.len() >= 100 {
-                    break;
-                }
-            }
-        }
+        let listed = secure_directory_entries(root).unwrap_or_default();
+        info["git_repository"] = Value::Bool(
+            listed
+                .iter()
+                .any(|(name, metadata)| name == ".git" && metadata.is_dir()),
+        );
+        let mut entries: Vec<_> = listed
+            .into_iter()
+            .take(100)
+            .map(|(name, _)| name.to_string_lossy().to_string())
+            .collect();
         entries.sort();
         info["top_level_entries"] = json!(entries);
     }
@@ -926,26 +942,40 @@ fn walk_boundary(root: &Path, workspace: Option<&Path>) -> Option<PathBuf> {
 
 /// Resolve an entry for walking. Symlinks are followed only when their target
 /// remains inside `boundary` (when set); escapes are skipped.
-fn walk_entry_target(path: &Path, boundary: Option<&Path>) -> Option<(PathBuf, std::fs::Metadata)> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if meta.file_type().is_symlink() {
-        let real = agent_policy::canonical_ancestor(path);
-        if let Some(root) = boundary
-            && !is_inside(&real, root)
-        {
-            return None;
-        }
-        let followed = std::fs::metadata(path).ok()?;
-        Some((real, followed))
-    } else {
-        let real = agent_policy::canonical_ancestor(path);
-        if let Some(root) = boundary
-            && !is_inside(&real, root)
-        {
-            return None;
-        }
-        Some((real, meta))
+/// Enumerate a directory through a pinned handle and open each child with the
+/// component-by-component no-symlink routine. A concurrent symlink swap can
+/// make an entry disappear from the result, but cannot redirect the walk.
+#[cfg(unix)]
+fn secure_directory_entries(
+    path: &Path,
+) -> std::io::Result<Vec<(std::ffi::OsString, std::fs::Metadata)>> {
+    use std::os::fd::AsRawFd as _;
+    let directory = unix_open_file(path, libc::O_RDONLY | libc::O_DIRECTORY, false)?;
+    #[cfg(target_os = "linux")]
+    let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    #[cfg(not(target_os = "linux"))]
+    let descriptor_path = PathBuf::from(format!("/dev/fd/{}", directory.as_raw_fd()));
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(descriptor_path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let logical = path.join(&name);
+        let Ok(child) = secure_open_read(&logical) else {
+            continue;
+        };
+        entries.push((name, child.metadata()?));
     }
+    Ok(entries)
+}
+
+#[cfg(not(unix))]
+fn secure_directory_entries(
+    _path: &Path,
+) -> std::io::Result<Vec<(std::ffi::OsString, std::fs::Metadata)>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "secure handle-relative directory traversal is unavailable on this platform",
+    ))
 }
 
 /// Depth-first listing, walked iteratively so the recursion stays off the async
@@ -960,9 +990,9 @@ async fn list_directory(
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     let mut visited_root = false;
     while let Some((directory, level)) = stack.pop() {
-        let read = tokio::fs::read_dir(&directory).await;
-        let mut dir = match read {
-            Ok(dir) => dir,
+        let read = secure_directory_entries(&directory);
+        let mut entries = match read {
+            Ok(entries) => entries,
             Err(error) if !visited_root => {
                 return Err(anyhow::Error::from(error))
                     .with_context(|| format!("cannot list {}", directory.display()));
@@ -971,32 +1001,17 @@ async fn list_directory(
             Err(_) => continue,
         };
         visited_root = true;
-        let mut entries = Vec::new();
-        while let Some(entry) = dir.next_entry().await? {
-            entries.push(entry);
-        }
-        entries.sort_by_key(|entry| entry.file_name());
+        entries.sort_by_key(|(name, _)| name.clone());
         let mut children = Vec::new();
-        for entry in entries {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let entry_path = entry.path();
+        for (entry_name, metadata) in entries {
+            let name = entry_name.to_string_lossy().to_string();
+            let entry_path = directory.join(&entry_name);
             let indent = "  ".repeat(level);
-            let Some((_real, metadata)) = walk_entry_target(&entry_path, boundary) else {
-                // Symlink (or mount) that leaves the workspace: name it without
-                // following so the model can see it exists without reading out.
-                if entry
-                    .file_type()
-                    .await
-                    .map(|kind| kind.is_symlink())
-                    .unwrap_or(false)
-                {
-                    lines.push(format!(
-                        "{indent}{} (symlink outside workspace)",
-                        relative_display(workspace, &entry_path)
-                    ));
-                }
+            if let Some(root) = boundary
+                && !is_inside(&entry_path, root)
+            {
                 continue;
-            };
+            }
             if metadata.is_dir() {
                 lines.push(format!(
                     "{indent}{}/",
@@ -1030,35 +1045,8 @@ async fn fs_read(
     arguments: &Value,
 ) -> anyhow::Result<ToolOutcome> {
     let path = checked_path(context, plan, workspace, arguments, "path", false)?;
-    let parent = path
-        .parent()
-        .with_context(|| format!("{} has no parent directory", path.display()))?;
-    let canonical_parent = std::fs::canonicalize(parent)
-        .with_context(|| format!("cannot canonicalize {}", parent.display()))?;
-    let file_name = path
-        .file_name()
-        .with_context(|| format!("{} has no file name", path.display()))?;
-    let opened_path = canonical_parent.join(file_name);
-    let (file, actual_path) = open_read_without_final_link(&opened_path)
-        .with_context(|| format!("cannot open {}", path.display()))?;
-    validate_platform_path(&actual_path)?;
-    for secret in secret_paths(Some(context.data_dir)) {
-        let secret_real = agent_policy::canonical_ancestor(&secret);
-        anyhow::ensure!(
-            !is_inside(&actual_path, &secret) && !is_inside(&actual_path, &secret_real),
-            "`{}` resolves into a credential or Brazier-owned path",
-            path.display()
-        );
-    }
-    if plan.environment == AgentEnvironment::Sandbox {
-        let root = workspace.context("this session has no workspace")?;
-        let root_real = agent_policy::canonical_ancestor(root);
-        anyhow::ensure!(
-            is_inside(&actual_path, root) || is_inside(&actual_path, &root_real),
-            "`{}` is outside the workspace; request host access for it",
-            path.display()
-        );
-    }
+    let file =
+        secure_open_read(&path).with_context(|| format!("cannot open {}", path.display()))?;
     let size = file
         .metadata()
         .with_context(|| format!("cannot inspect {}", path.display()))?
@@ -1097,14 +1085,249 @@ async fn fs_read(
 }
 
 #[cfg(unix)]
-fn open_read_without_final_link(path: &Path) -> std::io::Result<(std::fs::File, PathBuf)> {
-    use std::os::unix::fs::OpenOptionsExt as _;
+fn unix_component(name: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt as _;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in path"))
+}
 
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    Ok((file, path.to_path_buf()))
+/// Open and pin every path component without following symlinks. Policy checks
+/// and I/O therefore refer to the same directory objects even if a resident
+/// process renames entries concurrently.
+#[cfg(unix)]
+fn unix_open_parent(
+    path: &Path,
+    create_parents: bool,
+) -> std::io::Result<(std::fs::File, std::ffi::CString)> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secure filesystem paths must be absolute",
+        ));
+    }
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(name) => names.push(name.to_os_string()),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "path contains a non-normal component",
+                ));
+            }
+        }
+    }
+    let leaf = names.pop().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no final component",
+        )
+    })?;
+    let mut directory = std::fs::File::open("/")?;
+    for name in names {
+        let name = unix_component(&name)?;
+        let mut fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0
+            && create_parents
+            && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
+        {
+            let made = unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o777) };
+            if made < 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+        }
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok((directory, unix_component(&leaf)?))
+}
+
+#[cfg(unix)]
+fn unix_open_file(path: &Path, flags: i32, create_parents: bool) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    let (parent, leaf) = unix_open_parent(path, create_parents)?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            leaf.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o666,
+        )
+    };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+}
+
+#[cfg(unix)]
+fn secure_open_read(path: &Path) -> std::io::Result<std::fs::File> {
+    unix_open_file(path, libc::O_RDONLY, false)
+}
+
+#[cfg(unix)]
+fn secure_path_is_file(path: &Path) -> bool {
+    secure_open_read(path)
+        .and_then(|file| file.metadata())
+        .is_ok_and(|metadata| metadata.is_file())
+}
+
+#[cfg(unix)]
+fn secure_open_write(path: &Path) -> std::io::Result<std::fs::File> {
+    unix_open_file(path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, true)
+}
+
+#[cfg(unix)]
+fn secure_open_read_write(path: &Path) -> std::io::Result<std::fs::File> {
+    unix_open_file(path, libc::O_RDWR, false)
+}
+
+#[cfg(unix)]
+fn secure_create_dir_all(path: &Path) -> std::io::Result<()> {
+    // Appending a dummy leaf lets the shared parent walker create and pin every
+    // requested directory component.
+    let _ = unix_open_parent(&path.join(".brazier-directory-sentinel"), true)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let (from_parent, from_leaf) = unix_open_parent(from, false)?;
+    let (to_parent, to_leaf) = unix_open_parent(to, true)?;
+    let result = unsafe {
+        libc::renameat(
+            from_parent.as_raw_fd(),
+            from_leaf.as_ptr(),
+            to_parent.as_raw_fd(),
+            to_leaf.as_ptr(),
+        )
+    };
+    if result < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn secure_remove(path: &Path, directory: bool) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let (parent, leaf) = unix_open_parent(path, false)?;
+    let flags = if directory { libc::AT_REMOVEDIR } else { 0 };
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), flags) };
+    if result < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn unix_remove_directory_contents(directory: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        unsafe { libc::close(duplicate) };
+        return Err(std::io::Error::last_os_error());
+    }
+    let result = (|| {
+        loop {
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                break;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                continue;
+            }
+            let child_fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if child_fd >= 0 {
+                let child = unsafe { std::fs::File::from_raw_fd(child_fd) };
+                unix_remove_directory_contents(&child)?;
+                let removed = unsafe {
+                    libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
+                };
+                if removed < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else {
+                // The name is not a directory (including a symlink). Unlink the
+                // directory entry itself; never follow it.
+                let removed = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
+                if removed < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+        }
+        Ok(())
+    })();
+    unsafe { libc::closedir(stream) };
+    result
+}
+
+#[cfg(unix)]
+fn secure_remove_tree(path: &Path) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    let (parent, leaf) = unix_open_parent(path, false)?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            leaf.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    unix_remove_directory_contents(&directory)?;
+    // If another process replaced the leaf while the pinned directory was
+    // being emptied, fail instead of deleting the replacement.
+    let opened = directory.metadata()?;
+    let current = std::fs::symlink_metadata(path)?;
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if opened.dev() != current.dev() || opened.ino() != current.ino() {
+            return Err(std::io::Error::other(
+                "directory changed while it was being removed",
+            ));
+        }
+    }
+    secure_remove(path, true)
 }
 
 #[cfg(windows)]
@@ -1125,6 +1348,23 @@ fn open_read_without_final_link(path: &Path) -> std::io::Result<(std::fs::File, 
             path_len: u32,
             flags: u32,
         ) -> u32;
+    }
+
+    // Capture the resolved object before opening and reject every existing
+    // reparse-point component. Comparing it with the opened handle catches a
+    // component swapped between those two operations.
+    let expected = std::fs::canonicalize(path)?;
+    for component in path
+        .ancestors()
+        .filter(|component| !component.as_os_str().is_empty())
+    {
+        let metadata = std::fs::symlink_metadata(component)?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to traverse a Windows reparse point",
+            ));
+        }
     }
 
     let file = OpenOptions::new()
@@ -1160,7 +1400,62 @@ fn open_read_without_final_link(path: &Path) -> std::io::Result<(std::fs::File, 
 
     use std::os::windows::ffi::OsStringExt as _;
     let resolved = std::ffi::OsString::from_wide(&buffer[..written as usize]);
-    Ok((file, PathBuf::from(resolved)))
+    let resolved = PathBuf::from(resolved);
+    if expected != resolved {
+        return Err(std::io::Error::other(
+            "Windows path changed while it was being securely opened",
+        ));
+    }
+    Ok((file, resolved))
+}
+
+#[cfg(windows)]
+fn secure_open_read(path: &Path) -> std::io::Result<std::fs::File> {
+    open_read_without_final_link(path).map(|(file, _)| file)
+}
+
+#[cfg(windows)]
+fn secure_path_is_file(path: &Path) -> bool {
+    secure_open_read(path)
+        .and_then(|file| file.metadata())
+        .is_ok_and(|metadata| metadata.is_file())
+}
+
+#[cfg(windows)]
+fn secure_open_write(path: &Path) -> std::io::Result<std::fs::File> {
+    let _ = path;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "secure direct writes are unavailable on Windows",
+    ))
+}
+
+#[cfg(windows)]
+fn secure_open_read_write(path: &Path) -> std::io::Result<std::fs::File> {
+    let _ = path;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "secure direct writes are unavailable on Windows",
+    ))
+}
+
+#[cfg(windows)]
+fn secure_create_dir_all(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(windows)]
+fn secure_rename(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(windows)]
+fn secure_remove(_path: &Path, _directory: bool) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+#[cfg(windows)]
+fn secure_remove_tree(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1169,6 +1464,41 @@ fn open_read_without_final_link(_path: &Path) -> std::io::Result<(std::fs::File,
         std::io::ErrorKind::Unsupported,
         "secure direct file reads are not supported on this platform",
     ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn secure_open_read(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+#[cfg(not(any(unix, windows)))]
+fn secure_path_is_file(path: &Path) -> bool {
+    secure_open_read(path)
+        .and_then(|file| file.metadata())
+        .is_ok_and(|metadata| metadata.is_file())
+}
+#[cfg(not(any(unix, windows)))]
+fn secure_open_write(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+#[cfg(not(any(unix, windows)))]
+fn secure_open_read_write(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+#[cfg(not(any(unix, windows)))]
+fn secure_create_dir_all(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+#[cfg(not(any(unix, windows)))]
+fn secure_rename(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+#[cfg(not(any(unix, windows)))]
+fn secure_remove(_path: &Path, _directory: bool) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+#[cfg(not(any(unix, windows)))]
+fn secure_remove_tree(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 async fn doc_read(
@@ -1180,7 +1510,7 @@ async fn doc_read(
     // A `document` id refers to a PDF a previous web_fetch attached (stored as
     // a blob), mirroring the chat `doc_read` attachment flow. Otherwise the
     // path-based workspace form applies.
-    let path = match arguments.get("document").and_then(Value::as_str) {
+    let (path, staged) = match arguments.get("document").and_then(Value::as_str) {
         Some(requested) => {
             let sha256 = requested
                 .strip_prefix("brazier_blob:")
@@ -1192,9 +1522,28 @@ async fn doc_read(
                 path.is_file(),
                 "that document is no longer stored locally — re-fetch it with web_fetch"
             );
-            path
+            (path, None)
         }
-        None => checked_path(context, plan, workspace, arguments, "path", false)?,
+        None => {
+            let source = checked_path(context, plan, workspace, arguments, "path", false)?;
+            let mut input = secure_open_read(&source)
+                .with_context(|| format!("cannot open {}", source.display()))?;
+            anyhow::ensure!(
+                input.metadata()?.len() <= 64 * 1024 * 1024,
+                "documents are limited to 64 MiB"
+            );
+            let staging = context.data_dir.join("agent").join("document-staging");
+            secure_create_dir_all(&staging)?;
+            let suffix = source
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("bin");
+            let staged = staging.join(format!("{}.{}", Uuid::new_v4(), suffix));
+            let mut output = secure_open_write(&staged)?;
+            std::io::copy(&mut input, &mut output)?;
+            output.sync_all()?;
+            (staged.clone(), Some(staged))
+        }
     };
     let name = path
         .file_name()
@@ -1256,14 +1605,18 @@ async fn doc_read(
                 mime_type: page.mime_type,
             })
             .collect::<Vec<_>>();
-        return Ok(ToolOutcome::with_images(
+        let outcome = ToolOutcome::with_images(
             format!(
                 "Rendered {} ({}) as images. The pages are included for a vision model.",
                 relative_display(workspace, &path),
                 pages.join(", ")
             ),
             images,
-        ));
+        );
+        if let Some(path) = staged {
+            let _ = secure_remove(&path, false);
+        }
+        return Ok(outcome);
     }
 
     let pages = if kind == brazier_runtime::documents::DocumentKind::Pdf {
@@ -1314,6 +1667,9 @@ async fn doc_read(
         brazier_runtime::documents::MAX_EXTRACTION_CHARS,
     )
     .await?;
+    if let Some(path) = staged {
+        let _ = secure_remove(&path, false);
+    }
     Ok(ToolOutcome::text(extraction.describe()))
 }
 
@@ -1324,13 +1680,13 @@ async fn fs_stat(
     arguments: &Value,
 ) -> anyhow::Result<ToolOutcome> {
     let path = checked_path(context, plan, workspace, arguments, "path", false)?;
-    let metadata = tokio::fs::symlink_metadata(&path)
-        .await
+    let opened =
+        secure_open_read(&path).with_context(|| format!("cannot stat {}", path.display()))?;
+    let metadata = opened
+        .metadata()
         .with_context(|| format!("cannot stat {}", path.display()))?;
     let kind = if metadata.is_dir() {
         "directory"
-    } else if metadata.file_type().is_symlink() {
-        "symlink"
     } else {
         "file"
     };
@@ -1377,16 +1733,18 @@ async fn fs_search(
     let mut matches = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(directory) = stack.pop() {
-        let Ok(mut dir) = tokio::fs::read_dir(&directory).await else {
+        let Ok(entries) = secure_directory_entries(&directory) else {
             continue;
         };
-        while let Ok(Some(entry)) = dir.next_entry().await {
-            let entry_path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            let Some((_real, metadata)) = walk_entry_target(&entry_path, boundary.as_deref())
-            else {
+        for (entry_name, metadata) in entries {
+            let entry_path = directory.join(&entry_name);
+            let name = entry_name.to_string_lossy().to_string();
+            if boundary
+                .as_deref()
+                .is_some_and(|root| !is_inside(&entry_path, root))
+            {
                 continue;
-            };
+            }
             if metadata.is_dir() {
                 if !SKIPPED_DIRECTORIES.contains(&name.as_str()) {
                     stack.push(entry_path);
@@ -1401,9 +1759,13 @@ async fn fs_search(
             if metadata.len() > 4 * 1024 * 1024 {
                 continue;
             }
-            let Ok(bytes) = tokio::fs::read(&entry_path).await else {
+            let Ok(mut file) = secure_open_read(&entry_path) else {
                 continue;
             };
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            if file.read_to_end(&mut bytes).is_err() {
+                continue;
+            }
             if bytes.contains(&0) {
                 continue; // binary
             }
@@ -1476,16 +1838,18 @@ async fn fs_find(
     let mut results = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(directory) = stack.pop() {
-        let Ok(mut entries) = tokio::fs::read_dir(&directory).await else {
+        let Ok(entries) = secure_directory_entries(&directory) else {
             continue;
         };
-        while let Some(entry) = entries.next_entry().await? {
-            let entry_path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            let Some((_real, metadata)) = walk_entry_target(&entry_path, boundary.as_deref())
-            else {
+        for (entry_name, metadata) in entries {
+            let entry_path = directory.join(&entry_name);
+            let name = entry_name.to_string_lossy().to_string();
+            if boundary
+                .as_deref()
+                .is_some_and(|root| !is_inside(&entry_path, root))
+            {
                 continue;
-            };
+            }
             let is_directory = metadata.is_dir();
             let relative = entry_path
                 .strip_prefix(workspace.unwrap_or(&root))
@@ -1542,17 +1906,18 @@ async fn fs_read_many(
             .context("every entry in paths must be a string")?;
         let path_arguments = json!({ "path": raw });
         let path = checked_path(context, plan, workspace, &path_arguments, "path", false)?;
-        let bytes = tokio::fs::read(&path)
-            .await
-            .with_context(|| format!("cannot read {raw}"))?;
+        let mut file = secure_open_read(&path).with_context(|| format!("cannot read {raw}"))?;
+        let size = file.metadata()?.len();
         output.push_str(&format!("--- {} ---\n", relative_display(workspace, &path)));
-        if bytes.len() > max_bytes {
+        if size > max_bytes as u64 {
             output.push_str(&format!(
                 "[skipped: {} bytes exceeds max_bytes_each={max_bytes}]\n\n",
-                bytes.len()
+                size
             ));
             continue;
         }
+        let mut bytes = Vec::with_capacity(size as usize);
+        file.read_to_end(&mut bytes)?;
         let text = String::from_utf8_lossy(&bytes);
         for (index, line) in text.lines().enumerate() {
             output.push_str(&format!("{:>6}\t{line}\n", index + 1));
@@ -1625,12 +1990,10 @@ async fn fs_write(
         .get("content")
         .and_then(Value::as_str)
         .context("`content` is required")?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(&path, content.as_bytes())
-        .await
-        .with_context(|| format!("cannot write {}", path.display()))?;
+    let mut file =
+        secure_open_write(&path).with_context(|| format!("cannot write {}", path.display()))?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
     let display = relative_display(workspace, &path);
     Ok(ToolOutcome::changed(
         format!("Wrote {} bytes to {display}.", content.len()),
@@ -1658,9 +2021,11 @@ async fn fs_patch(
         .get("replace_all")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let original = tokio::fs::read_to_string(&path)
-        .await
-        .with_context(|| format!("cannot read {}", path.display()))?;
+    let mut file =
+        secure_open_read_write(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut original = String::new();
+    file.read_to_string(&mut original)
+        .with_context(|| format!("cannot read {} as UTF-8 text", path.display()))?;
     let occurrences = original.matches(old).count();
     anyhow::ensure!(
         occurrences > 0,
@@ -1677,7 +2042,10 @@ async fn fs_patch(
     } else {
         original.replacen(old, new, 1)
     };
-    tokio::fs::write(&path, patched.as_bytes()).await?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.write_all(patched.as_bytes())?;
+    file.sync_all()?;
     let display = relative_display(workspace, &path);
     let replaced = if replace_all { occurrences } else { 1 };
     Ok(ToolOutcome::changed(
@@ -1693,9 +2061,7 @@ async fn fs_mkdir(
     arguments: &Value,
 ) -> anyhow::Result<ToolOutcome> {
     let path = checked_path(context, plan, workspace, arguments, "path", true)?;
-    tokio::fs::create_dir_all(&path)
-        .await
-        .with_context(|| format!("cannot create {}", path.display()))?;
+    secure_create_dir_all(&path).with_context(|| format!("cannot create {}", path.display()))?;
     let display = relative_display(workspace, &path);
     Ok(ToolOutcome::changed(
         format!("Created directory {display}."),
@@ -1711,15 +2077,15 @@ async fn fs_copy(
 ) -> anyhow::Result<ToolOutcome> {
     let from = checked_path(context, plan, workspace, arguments, "from", false)?;
     let to = checked_path(context, plan, workspace, arguments, "to", true)?;
-    let metadata = tokio::fs::symlink_metadata(&from).await?;
+    let mut source = secure_open_read(&from)?;
+    let metadata = source.metadata()?;
     anyhow::ensure!(
         !metadata.is_dir(),
         "fs_copy handles files; copy directory contents file by file"
     );
-    if let Some(parent) = to.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::copy(&from, &to).await?;
+    let mut destination = secure_open_write(&to)?;
+    std::io::copy(&mut source, &mut destination)?;
+    destination.sync_all()?;
     let display = relative_display(workspace, &to);
     Ok(ToolOutcome::changed(
         format!(
@@ -1738,11 +2104,7 @@ async fn fs_move(
 ) -> anyhow::Result<ToolOutcome> {
     let from = checked_path(context, plan, workspace, arguments, "from", true)?;
     let to = checked_path(context, plan, workspace, arguments, "to", true)?;
-    if let Some(parent) = to.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::rename(&from, &to)
-        .await
+    secure_rename(&from, &to)
         .with_context(|| format!("cannot move {} to {}", from.display(), to.display()))?;
     let from_display = relative_display(workspace, &from);
     let to_display = relative_display(workspace, &to);
@@ -1768,9 +2130,9 @@ async fn fs_delete(
             root.display()
         );
     }
-    let metadata = tokio::fs::symlink_metadata(&path)
-        .await
-        .with_context(|| format!("{} does not exist", path.display()))?;
+    let opened =
+        secure_open_read(&path).with_context(|| format!("{} does not exist", path.display()))?;
+    let metadata = opened.metadata()?;
     let recursive = arguments
         .get("recursive")
         .and_then(Value::as_bool)
@@ -1781,9 +2143,11 @@ async fn fs_delete(
             "{} is a directory; pass recursive=true to delete it",
             path.display()
         );
-        tokio::fs::remove_dir_all(&path).await?;
+        // Remove children through a pinned directory descriptor before
+        // unlinking the now-empty directory itself.
+        secure_remove_tree(&path)?;
     } else {
-        tokio::fs::remove_file(&path).await?;
+        secure_remove(&path, false)?;
     }
     let display = relative_display(workspace, &path);
     Ok(ToolOutcome::changed(
@@ -1861,16 +2225,52 @@ async fn build_command(
                 .wrap_host(&sandbox_request, shell, &args, &extra_env)?
         }
     };
+    #[cfg(unix)]
+    let pinned_directories: Vec<std::fs::File> = wrapped
+        .pinned_directories
+        .iter()
+        .map(|path| unix_open_file(path, libc::O_RDONLY | libc::O_DIRECTORY, false))
+        .collect::<std::io::Result<_>>()?;
+    let launch_cwd = if plan.environment == AgentEnvironment::Sandbox {
+        Path::new("/")
+    } else {
+        &cwd
+    };
     let mut command = Command::new(&wrapped.program);
     command
         .args(&wrapped.args)
-        .current_dir(&cwd)
+        .current_dir(launch_cwd)
         .env_clear()
         .envs(&wrapped.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    if !pinned_directories.is_empty() {
+        use std::os::fd::AsRawFd as _;
+        unsafe {
+            command.pre_exec(move || {
+                let mut temporary = Vec::with_capacity(pinned_directories.len());
+                for file in &pinned_directories {
+                    let fd = libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64);
+                    if fd < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    temporary.push(fd);
+                }
+                for (index, fd) in temporary.iter().copied().enumerate() {
+                    if libc::dup2(fd, 3 + index as i32) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                for fd in temporary {
+                    libc::close(fd);
+                }
+                Ok(())
+            });
+        }
+    }
     Ok((command, wrapped.description))
 }
 
@@ -2289,7 +2689,10 @@ async fn git_log(
     ];
     if arguments.get("path").is_some() {
         let checked = checked_path(context, plan, workspace, arguments, "path", false)?;
-        anyhow::ensure!(checked.is_file(), "git_log path must be a file");
+        anyhow::ensure!(
+            secure_path_is_file(&checked),
+            "git_log path must be a non-symlink file"
+        );
         args.push("--".to_owned());
         args.push(relative_display(workspace, &checked));
     }
@@ -2342,7 +2745,10 @@ async fn git_blame(
     arguments: &Value,
 ) -> anyhow::Result<ToolOutcome> {
     let checked = checked_path(context, plan, workspace, arguments, "path", false)?;
-    anyhow::ensure!(checked.is_file(), "git_blame path must be a file");
+    anyhow::ensure!(
+        secure_path_is_file(&checked),
+        "git_blame path must be a non-symlink file"
+    );
     let mut args = vec![
         "--no-pager".to_owned(),
         "blame".to_owned(),
@@ -2503,7 +2909,7 @@ async fn project_check(
 }
 
 async fn project_command(cwd: &Path, tool: &str) -> anyhow::Result<String> {
-    let has = |name: &str| cwd.join(name).is_file();
+    let has = |name: &str| secure_path_is_file(&cwd.join(name));
     if has("Cargo.toml") {
         return Ok(match tool {
             "project_test" => "cargo test --all-targets".to_owned(),
@@ -2523,8 +2929,15 @@ async fn project_command(cwd: &Path, tool: &str) -> anyhow::Result<String> {
         });
     }
     if has("package.json") {
-        let contents = tokio::fs::read_to_string(cwd.join("package.json"))
-            .await
+        let package_path = cwd.join("package.json");
+        let mut package_file = secure_open_read(&package_path).context("open package.json")?;
+        anyhow::ensure!(
+            package_file.metadata()?.len() <= 2 * 1024 * 1024,
+            "package.json exceeds the 2 MiB manifest limit"
+        );
+        let mut contents = String::new();
+        package_file
+            .read_to_string(&mut contents)
             .context("read package.json")?;
         let package: Value = serde_json::from_str(&contents).context("parse package.json")?;
         let scripts = package.get("scripts").and_then(Value::as_object);
@@ -2594,7 +3007,7 @@ async fn env_info(
         "pyproject.toml",
         "requirements.txt",
     ] {
-        if cwd.join(name).is_file() {
+        if secure_path_is_file(&cwd.join(name)) {
             manifests.push(name);
         }
     }
@@ -2697,15 +3110,18 @@ async fn code_symbols(
     let mut files = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(path) = stack.pop() {
-        let metadata = tokio::fs::symlink_metadata(&path).await?;
+        let opened = match secure_open_read(&path) {
+            Ok(opened) => opened,
+            Err(_) => continue,
+        };
+        let metadata = opened.metadata()?;
         if metadata.is_dir() {
             let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
             if SKIPPED_DIRECTORIES.contains(&name) {
                 continue;
             }
-            let mut entries = tokio::fs::read_dir(&path).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                stack.push(entry.path());
+            for (name, _) in secure_directory_entries(&path)? {
+                stack.push(path.join(name));
             }
         } else if metadata.is_file() {
             let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
@@ -2720,8 +3136,17 @@ async fn code_symbols(
     files.sort();
     let mut symbols = Vec::new();
     for path in files {
-        let bytes = tokio::fs::read(&path).await?;
-        if bytes.len() > 2 * 1024 * 1024 || bytes.contains(&0) {
+        let mut file = match secure_open_read(&path) {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        let size = file.metadata()?.len();
+        if size > 2 * 1024 * 1024 {
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(size as usize);
+        file.read_to_end(&mut bytes)?;
+        if bytes.contains(&0) {
             continue;
         }
         let extension = path.extension().and_then(|v| v.to_str()).unwrap_or("");
@@ -3013,9 +3438,14 @@ async fn lsp_diagnostics(
     let checked = checked_path(context, plan, workspace, arguments, "path", false)?;
     let workspace_root = workspace.context("this session has no workspace")?;
     let label = relative_display(workspace, &checked);
-    let text = tokio::fs::read_to_string(&checked)
-        .await
-        .with_context(|| format!("cannot read `{label}`"))?;
+    let mut file = secure_open_read(&checked).with_context(|| format!("cannot read `{label}`"))?;
+    anyhow::ensure!(
+        file.metadata()?.len() <= 2 * 1024 * 1024,
+        "language-server input is limited to 2 MiB"
+    );
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .with_context(|| format!("cannot read `{label}` as UTF-8 text"))?;
     let extension = checked
         .extension()
         .and_then(|value| value.to_str())
@@ -3396,6 +3826,23 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_detection_does_not_follow_manifest_symlinks() {
+        let workspace = TempDir::new().expect("workspace");
+        let outside = TempDir::new().expect("outside");
+        let manifest = outside.path().join("package.json");
+        std::fs::write(&manifest, r#"{"scripts":{"test":"echo exposed"}}"#)
+            .expect("write outside manifest");
+        std::os::unix::fs::symlink(&manifest, workspace.path().join("package.json"))
+            .expect("link manifest");
+
+        let error = project_command(workspace.path(), "project_test")
+            .await
+            .expect_err("a symlinked manifest must not select a project command");
+        assert!(error.to_string().contains("could not detect"), "{error}");
+    }
+
     #[tokio::test]
     async fn writes_and_reads_round_trip_inside_the_workspace() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -3683,11 +4130,6 @@ startxref
             response.output
         );
         assert!(
-            response.output.contains("symlink outside workspace"),
-            "escaping symlink should be named without following: {}",
-            response.output
-        );
-        assert!(
             !response.output.contains("secret.txt")
                 && !response.output.contains("listed-escape-marker"),
             "fs_list must not descend an escaping directory symlink: {}",
@@ -3956,11 +4398,11 @@ startxref
 
     #[cfg(unix)]
     fn require_usable_sandbox(broker: &AgentBroker) -> bool {
-        if broker.backend().isolated() {
+        if broker.backend().enforces(SandboxProfile::Workspace) {
             return true;
         }
         eprintln!(
-            "skipping sandboxed shell test: {}",
+            "skipping no-network sandbox test: {}",
             broker.backend().capabilities().detail
         );
         false
@@ -3988,6 +4430,35 @@ startxref
             .await;
         assert_eq!(failure.exit_code, Some(3));
         assert!(failure.is_error);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn network_sandbox_uses_the_pinned_workspace_mount() {
+        let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        if !harness
+            .broker
+            .backend()
+            .enforces(SandboxProfile::WorkspaceNetwork)
+        {
+            return;
+        }
+        std::fs::write(harness.workspace.path().join("pinned.txt"), "pinned").unwrap();
+        let response = harness
+            .call(
+                "shell_run",
+                json!({
+                    "command": "test \"$(pwd)\" = /tmp/brazier-workspace && test \"$(cat pinned.txt)\" = pinned && printf pinned-mount-ok",
+                    "network": true
+                }),
+            )
+            .await;
+        assert_eq!(response.exit_code, Some(0), "{}", response.output);
+        assert!(
+            response.output.contains("pinned-mount-ok"),
+            "{}",
+            response.output
+        );
     }
 
     #[cfg(unix)]

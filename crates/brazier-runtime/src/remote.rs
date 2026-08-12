@@ -113,6 +113,7 @@ pub async fn upsert(data_dir: &Path, connection: StoredConnection) -> anyhow::Re
         .api_key
         .map(|key| key.trim().to_owned())
         .filter(|key| !key.is_empty());
+    validate_connection_transport(&connection)?;
     connections.retain(|entry| entry.id != connection.id);
     connections.push(connection);
     connections.sort_by(|a, b| a.id.cmp(&b.id));
@@ -128,7 +129,9 @@ pub async fn remove(data_dir: &Path, id: &str) -> anyhow::Result<()> {
 }
 
 pub fn find(data_dir: &Path, id: &str) -> Option<StoredConnection> {
-    load(data_dir).into_iter().find(|entry| entry.id == id)
+    load(data_dir)
+        .into_iter()
+        .find(|entry| entry.id == id && validate_connection_transport(entry).is_ok())
 }
 
 /// Ids appear in model ids and in URLs, so they are kept to a boring alphabet.
@@ -159,7 +162,44 @@ pub fn normalize_base_url(url: &str) -> anyhow::Result<String> {
     );
     let parsed = reqwest::Url::parse(url).context("that base URL could not be parsed")?;
     anyhow::ensure!(parsed.host_str().is_some(), "that base URL has no host");
+    anyhow::ensure!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "put credentials in the API key field, not in the base URL"
+    );
+    anyhow::ensure!(
+        parsed.query().is_none() && parsed.fragment().is_none(),
+        "a base URL cannot contain a query or fragment"
+    );
     Ok(url.trim_end_matches("/v1").trim_end_matches('/').to_owned())
+}
+
+fn validate_connection_transport(connection: &StoredConnection) -> anyhow::Result<()> {
+    if connection.api_key.is_none() {
+        return Ok(());
+    }
+    let parsed = reqwest::Url::parse(&connection.base_url)?;
+    if parsed.scheme() == "https" {
+        return Ok(());
+    }
+    let host = parsed.host_str().context("that base URL has no host")?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(());
+    }
+    let private = host.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+        std::net::IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || (ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
+        }
+        std::net::IpAddr::V6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+    });
+    anyhow::ensure!(
+        private,
+        "an API key requires HTTPS unless the remote server is a private address literal"
+    );
+    Ok(())
 }
 
 /// The model id a conversation stores for a model served remotely.
@@ -204,21 +244,40 @@ pub fn capabilities() -> ModelCapabilities {
 
 /// Model names a server reports, from `GET {base}/v1/models`.
 pub async fn fetch_model_names(
-    http: &reqwest::Client,
+    _http: &reqwest::Client,
     connection: &StoredConnection,
 ) -> anyhow::Result<Vec<String>> {
-    let mut request = http
+    validate_connection_transport(connection)?;
+    let no_redirects = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut request = no_redirects
         .get(format!("{}/v1/models", connection.base_url))
         .timeout(std::time::Duration::from_secs(15));
     if let Some(key) = connection.api_key.as_deref() {
         request = request.bearer_auth(key);
     }
-    let response = request
+    let mut response = request
         .send()
         .await
         .with_context(|| format!("could not reach {}", connection.base_url))?;
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    anyhow::ensure!(
+        response
+            .content_length()
+            .is_none_or(|length| length <= 4 * 1024 * 1024),
+        "{} returned a response larger than 4 MiB",
+        connection.base_url
+    );
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(
+            bytes.len() + chunk.len() <= 4 * 1024 * 1024,
+            "remote model list response exceeds 4 MiB"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&bytes);
     anyhow::ensure!(
         status.is_success(),
         "{} returned {status}: {}",
@@ -306,9 +365,36 @@ mod tests {
             normalize_base_url(" https://api.example.com ").unwrap(),
             "https://api.example.com"
         );
-        for bad in ["", "example.com:8000", "ftp://example.com", "http://"] {
+        for bad in [
+            "",
+            "example.com:8000",
+            "ftp://example.com",
+            "http://",
+            "https://user@example.com",
+            "https://user:secret@example.com",
+            "https://example.com?token=secret",
+            "https://example.com/#fragment",
+        ] {
             assert!(normalize_base_url(bad).is_err(), "{bad} must be refused");
         }
+    }
+
+    #[test]
+    fn api_keys_require_confidential_transport_or_a_private_ip_literal() {
+        let connection = |base_url: &str| StoredConnection {
+            id: "work".into(),
+            label: "Workstation".into(),
+            base_url: base_url.into(),
+            api_key: Some("secret".into()),
+            enabled: true,
+            llama_cpp_compatible: false,
+        };
+
+        assert!(validate_connection_transport(&connection("https://api.example.com")).is_ok());
+        assert!(validate_connection_transport(&connection("http://127.0.0.1:8080")).is_ok());
+        assert!(validate_connection_transport(&connection("http://10.0.0.4:8080")).is_ok());
+        assert!(validate_connection_transport(&connection("http://api.example.com")).is_err());
+        assert!(validate_connection_transport(&connection("http://labbox.local")).is_err());
     }
 
     #[test]

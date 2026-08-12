@@ -5,6 +5,84 @@ use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+#[cfg(windows)]
+mod windows_acl {
+    use std::{
+        ffi::OsStr,
+        fs::File,
+        mem::size_of,
+        os::windows::{ffi::OsStrExt as _, io::FromRawHandle as _},
+        path::Path,
+        ptr,
+    };
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE, LocalFree},
+        Security::{
+            Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            },
+            PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+        },
+        Storage::FileSystem::{CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL},
+    };
+
+    fn wide(value: &OsStr) -> Vec<u16> {
+        value.encode_wide().chain(Some(0)).collect()
+    }
+
+    pub(super) fn create_new_private(path: &Path) -> std::io::Result<File> {
+        let sddl = wide(OsStr::new("D:P(A;;FA;;;OW)"));
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let path = wide(path.as_os_str());
+        let handle = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                &attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                ptr::null_mut(),
+            )
+        };
+        unsafe { LocalFree(descriptor) };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+}
+
+#[cfg(windows)]
+async fn open_private_temporary(path: &Path) -> std::io::Result<tokio::fs::File> {
+    windows_acl::create_new_private(path).map(tokio::fs::File::from_std)
+}
+
+#[cfg(not(windows))]
+async fn open_private_temporary(path: &Path) -> std::io::Result<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path).await
+}
+
 pub(crate) async fn write_json(
     path: &Path,
     value: &(impl Serialize + ?Sized),
@@ -27,14 +105,7 @@ pub(crate) async fn write(path: &Path, bytes: &[u8], label: &str) -> anyhow::Res
         .unwrap_or("state");
     let temporary = parent.join(format!(".{name}.{}.tmp", Uuid::new_v4()));
 
-    let mut options = tokio::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&temporary)
+    let mut file = open_private_temporary(&temporary)
         .await
         .with_context(|| format!("create temporary {label}"))?;
     if let Err(error) = file.write_all(bytes).await {

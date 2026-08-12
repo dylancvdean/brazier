@@ -332,6 +332,11 @@ pub struct ToolExecResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSessionRecord {
     pub id: String,
+    /// Authorization principal that created this session. This is deliberately
+    /// not returned over the API; callers only need the server-side ownership
+    /// check, not another client's durable identifier.
+    #[serde(default = "default_agent_session_owner", skip_serializing)]
+    pub owner_client_id: String,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
@@ -348,6 +353,10 @@ pub struct AgentSessionRecord {
     pub runtime_metadata: Option<serde_json::Value>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_agent_session_owner() -> String {
+    "owner".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]

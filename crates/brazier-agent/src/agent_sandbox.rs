@@ -140,6 +140,10 @@ pub struct WrappedCommand {
     pub args: Vec<OsString>,
     pub env: BTreeMap<String, String>,
     pub description: SandboxDescription,
+    /// Directories the launcher must pin and place at consecutive descriptors
+    /// starting at 3 before exec. Bubblewrap resolves and mounts those proc-fd
+    /// paths during setup, so a path rename cannot change the approved root.
+    pub pinned_directories: Vec<PathBuf>,
 }
 
 /// Environment variable names that never reach a tool, matched
@@ -169,8 +173,18 @@ const DENIED_ENV_NAMES: &[&str] = &[
     "SSH_AGENT_PID",
     "GPG_AGENT_INFO",
     "NETRC",
-    "npm_config_registry",
+    "NPM_CONFIG_REGISTRY",
     "PIP_INDEX_URL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "DOCKER_CONFIG",
+    "KUBECONFIG",
+    "AZURE_CONFIG_DIR",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "DATABASE_URL",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
 ];
 
 /// Paths under the user's home that a sandboxed command must not read.
@@ -294,6 +308,16 @@ impl SandboxBackend {
         self.kind.isolated()
     }
 
+    /// Whether this backend can enforce every restriction in `profile`.
+    pub fn enforces(&self, profile: SandboxProfile) -> bool {
+        let network_isolation = match self.kind {
+            SandboxBackendKind::Seatbelt | SandboxBackendKind::AppContainer => true,
+            SandboxBackendKind::Bubblewrap => self.unshare_net,
+            SandboxBackendKind::None => false,
+        };
+        self.isolated() && (profile.allows_network() || network_isolation)
+    }
+
     pub fn capabilities(&self) -> SandboxBackendCapabilities {
         SandboxBackendCapabilities {
             backend: self.kind.as_str().to_owned(),
@@ -310,16 +334,16 @@ impl SandboxBackend {
                 self.kind,
                 SandboxBackendKind::Bubblewrap | SandboxBackendKind::AppContainer
             ),
-            profiles: if self.isolated() {
-                vec![
-                    SandboxProfile::Workspace.as_str().to_owned(),
-                    SandboxProfile::WorkspaceNetwork.as_str().to_owned(),
-                    SandboxProfile::ReadOnly.as_str().to_owned(),
-                    SandboxProfile::Diagnostics.as_str().to_owned(),
-                ]
-            } else {
-                Vec::new()
-            },
+            profiles: [
+                SandboxProfile::Workspace,
+                SandboxProfile::WorkspaceNetwork,
+                SandboxProfile::ReadOnly,
+                SandboxProfile::Diagnostics,
+            ]
+            .into_iter()
+            .filter(|profile| self.enforces(*profile))
+            .map(|profile| profile.as_str().to_owned())
+            .collect(),
             detail: self.detail.clone(),
             program: self.program.as_ref().map(|path| path.display().to_string()),
         }
@@ -361,6 +385,13 @@ impl SandboxBackend {
         args: &[String],
         extra_env: &BTreeMap<String, String>,
     ) -> anyhow::Result<WrappedCommand> {
+        if !self.enforces(request.profile) {
+            bail!(
+                "{} cannot enforce the requested {} profile",
+                self.detail,
+                request.profile.as_str()
+            );
+        }
         let env = filtered_env(extra_env, request)?;
         let description = self.describe(request.profile, Some(request.workspace));
         match (self.kind, self.program.as_ref()) {
@@ -376,9 +407,16 @@ impl SandboxBackend {
                     args: wrapped,
                     env,
                     description,
+                    pinned_directories: Vec::new(),
                 })
             }
             (SandboxBackendKind::Bubblewrap, Some(bwrap)) => {
+                let mut env = env;
+                let cwd = sandbox_workspace_path(request);
+                env.insert("PWD".to_owned(), cwd.display().to_string());
+                env.insert("TMPDIR".to_owned(), "/tmp/brazier-scratch".to_owned());
+                env.insert("TEMP".to_owned(), "/tmp/brazier-scratch".to_owned());
+                env.insert("TMP".to_owned(), "/tmp/brazier-scratch".to_owned());
                 let mut wrapped: Vec<OsString> = bubblewrap_args(request, self.unshare_net)
                     .into_iter()
                     .map(OsString::from)
@@ -391,6 +429,10 @@ impl SandboxBackend {
                     args: wrapped,
                     env,
                     description,
+                    pinned_directories: vec![
+                        request.workspace.to_path_buf(),
+                        request.scratch.to_path_buf(),
+                    ],
                 })
             }
             #[cfg(windows)]
@@ -399,6 +441,7 @@ impl SandboxBackend {
                 args: crate::agent_sandbox_windows::launcher_args(request, program, args),
                 env,
                 description,
+                pinned_directories: Vec::new(),
             }),
             _ => bail!("{}", self.detail),
         }
@@ -417,6 +460,7 @@ impl SandboxBackend {
             args: args.iter().map(OsString::from).collect(),
             env: filtered_env(extra_env, request)?,
             description: self.describe_host(Some(request.workspace)),
+            pinned_directories: Vec::new(),
         })
     }
 }
@@ -477,10 +521,10 @@ pub fn filtered_env(
 
 /// True when a variable name looks like it carries a credential.
 pub fn is_secret_env(name: &str) -> bool {
-    if DENIED_ENV_NAMES.iter().any(|denied| denied == &name) {
+    let upper = name.to_ascii_uppercase();
+    if DENIED_ENV_NAMES.iter().any(|denied| *denied == upper) {
         return true;
     }
-    let upper = name.to_ascii_uppercase();
     SECRET_ENV_PATTERNS
         .iter()
         .any(|pattern| upper.contains(pattern))
@@ -686,8 +730,8 @@ fn bubblewrap_supports_unshare_net(bwrap: &Path) -> bool {
     bubblewrap_probe(bwrap, &["--unshare-net"])
 }
 
-/// Generate Bubblewrap arguments. Later binds override earlier ones, so the
-/// workspace bind comes after the home tmpfs that hides credentials.
+/// Generate Bubblewrap arguments. Workspaces are rejected when they overlap a
+/// protected path, so their later bind cannot uncover a credential mask.
 pub fn bubblewrap_args(request: &SandboxRequest<'_>, unshare_net: bool) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "--die-with-parent".into(),
@@ -704,6 +748,11 @@ pub fn bubblewrap_args(request: &SandboxRequest<'_>, unshare_net: bool) -> Vec<S
         "/dev".into(),
         "--tmpfs".into(),
         "/tmp".into(),
+        // `/run` contains user/session D-Bus, keyring, container, and desktop
+        // control sockets. A read-only root bind does not make Unix sockets
+        // harmless, so hide the entire runtime tree.
+        "--tmpfs".into(),
+        "/run".into(),
     ];
 
     if let Some(home) = home_directory() {
@@ -714,7 +763,8 @@ pub fn bubblewrap_args(request: &SandboxRequest<'_>, unshare_net: bool) -> Vec<S
     }
 
     // Custom --data-dir outside $HOME would otherwise stay readable via the
-    // root ro-bind. Hide it, then re-bind scratch (which lives under it).
+    // root ro-bind. Scratch is mounted at a fixed path below rather than
+    // uncovering a child of this protected directory.
     if let Some(data_dir) = request.data_dir {
         let hide = home_directory().is_none_or(|home| !data_dir.starts_with(&home));
         if hide {
@@ -723,25 +773,39 @@ pub fn bubblewrap_args(request: &SandboxRequest<'_>, unshare_net: bool) -> Vec<S
         }
     }
 
-    args.push("--bind".into());
-    args.push(request.scratch.display().to_string());
-    args.push(request.scratch.display().to_string());
+    args.extend([
+        "--dir".into(),
+        "/tmp/brazier-workspace".into(),
+        "--dir".into(),
+        "/tmp/brazier-scratch".into(),
+        "--bind".into(),
+        "/proc/self/fd/4".into(),
+        "/tmp/brazier-scratch".into(),
+    ]);
 
     if request.profile.allows_workspace_writes() {
         args.push("--bind".into());
     } else {
         args.push("--ro-bind".into());
     }
-    args.push(request.workspace.display().to_string());
-    args.push(request.workspace.display().to_string());
+    args.push("/proc/self/fd/3".into());
+    args.push("/tmp/brazier-workspace".into());
 
     if !request.profile.allows_network() && unshare_net {
         args.push("--unshare-net".into());
     }
 
     args.push("--chdir".into());
-    args.push(request.cwd.display().to_string());
+    args.push(sandbox_workspace_path(request).display().to_string());
     args
+}
+
+fn sandbox_workspace_path(request: &SandboxRequest<'_>) -> PathBuf {
+    request
+        .cwd
+        .strip_prefix(request.workspace)
+        .map(|relative| Path::new("/tmp/brazier-workspace").join(relative))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/brazier-workspace"))
 }
 
 #[cfg(test)]
@@ -942,7 +1006,7 @@ mod tests {
         assert!(joined.contains("--tmpfs /var/lib/brazier"));
         let data_tmpfs = joined.find("--tmpfs /var/lib/brazier").expect("data tmpfs");
         let scratch_bind = joined
-            .find("--bind /var/lib/brazier/agent/scratch/s1")
+            .find("--bind /proc/self/fd/4 /tmp/brazier-scratch")
             .expect("scratch bind");
         assert!(
             scratch_bind > data_tmpfs,
@@ -974,11 +1038,14 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("--ro-bind / /"));
         assert!(joined.contains("--unshare-net"));
-        assert!(joined.contains("--bind /tmp/ws /tmp/ws"));
+        assert!(joined.contains("--bind /proc/self/fd/3 /tmp/brazier-workspace"));
+        assert!(joined.contains("--tmpfs /run"));
         if let Some(home) = home_directory() {
             let tmpfs_home = format!("--tmpfs {}", home.display());
             let home_index = joined.find(&tmpfs_home).expect("home tmpfs");
-            let bind_index = joined.find("--bind /tmp/ws").expect("workspace bind");
+            let bind_index = joined
+                .find("--bind /proc/self/fd/3")
+                .expect("workspace bind");
             assert!(
                 bind_index > home_index,
                 "workspace must survive the home tmpfs"
@@ -1002,7 +1069,7 @@ mod tests {
             true,
         );
         let joined = args.join(" ");
-        assert!(joined.contains("--ro-bind /tmp/ws /tmp/ws"));
+        assert!(joined.contains("--ro-bind /proc/self/fd/3 /tmp/brazier-workspace"));
     }
 
     #[test]

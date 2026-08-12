@@ -2527,7 +2527,13 @@ async fn computer_os_permissions(State(state): State<AppState>) -> Json<Value> {
     Json(json!(state.computer_broker.os_permissions()))
 }
 
-async fn request_computer_os_permissions(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+async fn request_computer_os_permissions(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    client: ClientAddr,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    require_local_control(&state, &auth, &headers, client_is_loopback(&client))?;
     let status = state
         .computer_broker
         .request_os_permissions()
@@ -2536,8 +2542,40 @@ async fn request_computer_os_permissions(State(state): State<AppState>) -> ApiRe
     Ok(Json(json!(status)))
 }
 
-async fn list_computer_sessions(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({ "sessions": state.computer_broker.list_sessions().await }))
+fn require_computer_session_owner(
+    auth: &AuthContext,
+    session: &crate::computer_types::ComputerSession,
+) -> ApiResult<()> {
+    if auth.owner || session.owner_client_id == auth.decision_actor_id() {
+        Ok(())
+    } else {
+        Err(ApiError::not_found("computer session does not exist"))
+    }
+}
+
+async fn authorized_computer_session(
+    state: &AppState,
+    auth: &AuthContext,
+    id: &str,
+) -> ApiResult<crate::computer_types::ComputerSession> {
+    let session = state
+        .computer_broker
+        .get_session(id)
+        .await
+        .map_err(ApiError::not_found)?;
+    require_computer_session_owner(auth, &session)?;
+    Ok(session)
+}
+
+async fn list_computer_sessions(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Json<Value> {
+    let mut sessions = state.computer_broker.list_sessions().await;
+    if !auth.owner {
+        sessions.retain(|session| session.owner_client_id == auth.decision_actor_id());
+    }
+    Json(json!({ "sessions": sessions }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2583,6 +2621,9 @@ fn client_is_loopback(client: &ClientAddr) -> bool {
 }
 
 fn require_elevated_permission_step_up(
+    state: &AppState,
+    auth: &AuthContext,
+    headers: &HeaderMap,
     elevated: bool,
     confirmed: bool,
     loopback: bool,
@@ -2595,9 +2636,37 @@ fn require_elevated_permission_step_up(
             "elevated permission modes require confirm_elevated_permissions=true",
         ));
     }
+    require_local_control(state, auth, headers, loopback)
+}
+
+fn require_local_control(
+    state: &AppState,
+    auth: &AuthContext,
+    headers: &HeaderMap,
+    loopback: bool,
+) -> ApiResult<()> {
     if !loopback {
-        return Err(ApiError::bad_request(
-            "elevated permission modes can only be set by a loopback client",
+        return Err(ApiError::forbidden(
+            "this action requires the local desktop",
+        ));
+    }
+    if !auth.owner {
+        return Err(ApiError::forbidden(
+            "paired clients cannot exercise local desktop authority",
+        ));
+    }
+    let supplied = headers
+        .get("x-brazier-local-control")
+        .and_then(|value| value.to_str().ok());
+    use subtle::ConstantTimeEq as _;
+    let trusted_local_control = state
+        .local_control_key
+        .as_deref()
+        .zip(supplied)
+        .is_some_and(|(expected, actual)| bool::from(expected.as_bytes().ct_eq(actual.as_bytes())));
+    if !trusted_local_control {
+        return Err(ApiError::forbidden(
+            "elevated permission modes require proof from the local desktop",
         ));
     }
     Ok(())
@@ -2605,7 +2674,9 @@ fn require_elevated_permission_step_up(
 
 async fn create_computer_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     client: ClientAddr,
+    headers: HeaderMap,
     Json(body): Json<CreateComputerSession>,
 ) -> ApiResult<Json<Value>> {
     let target = match body.target.as_deref().unwrap_or("browser") {
@@ -2624,18 +2695,22 @@ async fn create_computer_session(
             | crate::computer_types::ComputerPermissionMode::AllowAll
     );
     require_elevated_permission_step_up(
+        &state,
+        &auth,
+        &headers,
         elevated,
         body.confirm_elevated_permissions,
         client_is_loopback(&client),
     )?;
     let session = state
         .computer_broker
-        .create_session(
+        .create_session_owned(
             body.title,
             target,
             body.model_id,
             permission_mode,
             body.viewport,
+            auth.decision_actor_id(),
         )
         .await
         .map_err(ApiError::bad_request)?;
@@ -2644,13 +2719,10 @@ async fn create_computer_session(
 
 async fn get_computer_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let session = state
-        .computer_broker
-        .get_session(&id)
-        .await
-        .map_err(ApiError::not_found)?;
+    let session = authorized_computer_session(&state, &auth, &id).await?;
     Ok(Json(json!(session)))
 }
 
@@ -2665,10 +2737,13 @@ struct UpdateComputerSession {
 
 async fn update_computer_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     client: ClientAddr,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<UpdateComputerSession>,
 ) -> ApiResult<Json<Value>> {
+    authorized_computer_session(&state, &auth, &id).await?;
     let permission_mode = match body.permission_mode.as_str() {
         "browser-only" => crate::computer_types::ComputerPermissionMode::BrowserOnly,
         "skip-permissions" => crate::computer_types::ComputerPermissionMode::SkipPermissions,
@@ -2681,6 +2756,9 @@ async fn update_computer_session(
             | crate::computer_types::ComputerPermissionMode::AllowAll
     );
     require_elevated_permission_step_up(
+        &state,
+        &auth,
+        &headers,
         elevated,
         body.confirm_elevated_permissions,
         client_is_loopback(&client),
@@ -2695,8 +2773,10 @@ async fn update_computer_session(
 
 async fn delete_computer_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
+    authorized_computer_session(&state, &auth, &id).await?;
     state
         .computer_broker
         .delete_session(&id)
@@ -2707,8 +2787,10 @@ async fn delete_computer_session(
 
 async fn stop_computer_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
+    authorized_computer_session(&state, &auth, &id).await?;
     state
         .computer_broker
         .stop(&id)
@@ -2726,13 +2808,13 @@ async fn set_computer_safety_authority(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
     client: ClientAddr,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<ComputerSafetyAuthority>,
 ) -> ApiResult<StatusCode> {
-    if body.active && (!auth.owner || !client_is_loopback(&client)) {
-        return Err(ApiError::forbidden(
-            "desktop safety authority can only be activated by a local owner client",
-        ));
+    authorized_computer_session(&state, &auth, &id).await?;
+    if body.active {
+        require_local_control(&state, &auth, &headers, client_is_loopback(&client))?;
     }
     if body.active && !crate::computer_exec::safety_overlay_is_ready(&state.data_dir) {
         return Err(ApiError::bad_request(
@@ -2747,7 +2829,15 @@ async fn set_computer_safety_authority(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn revoke_all_desktop_authority(State(state): State<AppState>) -> ApiResult<StatusCode> {
+async fn revoke_all_desktop_authority(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<StatusCode> {
+    if !auth.owner {
+        return Err(ApiError::forbidden(
+            "only the desktop owner may revoke global safety authority",
+        ));
+    }
     crate::computer_exec::clear_safety_overlay_marker(&state.data_dir);
     state
         .computer_broker
@@ -2759,8 +2849,10 @@ async fn revoke_all_desktop_authority(State(state): State<AppState>) -> ApiResul
 
 async fn list_computer_steps(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    authorized_computer_session(&state, &auth, &id).await?;
     let steps = state
         .computer_broker
         .list_steps(&id)
@@ -2780,9 +2872,11 @@ struct AppendComputerStep {
 
 async fn append_computer_step(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(body): Json<AppendComputerStep>,
 ) -> ApiResult<Json<Value>> {
+    authorized_computer_session(&state, &auth, &id).await?;
     let step = state
         .computer_broker
         .append_step(
@@ -2800,8 +2894,10 @@ async fn append_computer_step(
 
 async fn computer_screenshot(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    authorized_computer_session(&state, &auth, &id).await?;
     let result = state
         .computer_broker
         .screenshot(&id)
@@ -2815,8 +2911,10 @@ async fn computer_screenshot(
 /// unlike `computer_screenshot` it never writes a step into the trajectory.
 async fn computer_preview(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    authorized_computer_session(&state, &auth, &id).await?;
     let result = state
         .computer_broker
         .live_screenshot(&id)
@@ -2831,8 +2929,10 @@ async fn computer_preview(
 /// stills. Nothing here is recorded into the trajectory.
 async fn computer_stream(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
+    authorized_computer_session(&state, &auth, &id).await?;
     let mut frames = state
         .computer_broker
         .subscribe_screencast(&id)
@@ -2854,8 +2954,10 @@ async fn computer_stream(
 
 async fn computer_exec_action(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Json(body): Json<crate::computer_exec::ComputerExecRequest>,
 ) -> ApiResult<Json<Value>> {
+    authorized_computer_session(&state, &auth, &body.session_id).await?;
     let result = state
         .computer_broker
         .execute(body)
@@ -2877,6 +2979,12 @@ async fn decide_computer_approval(
     Path(id): Path<String>,
     Json(body): Json<DecideComputerApproval>,
 ) -> ApiResult<Json<Value>> {
+    let session_id = state
+        .computer_broker
+        .approval_session_id(&id)
+        .await
+        .map_err(ApiError::not_found)?;
+    authorized_computer_session(&state, &auth, &session_id).await?;
     let result = state
         .computer_broker
         .decide_approval(
@@ -7407,25 +7515,61 @@ async fn agent_tool_catalog(State(state): State<AppState>) -> Json<Value> {
     Json(agent_tool_definitions(&state.data_dir))
 }
 
-async fn list_agent_sessions(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let sessions = state
+fn require_agent_session_owner(
+    auth: &AuthContext,
+    session: &crate::agent_types::AgentSessionRecord,
+) -> ApiResult<()> {
+    if auth.owner || session.owner_client_id == auth.decision_actor_id() {
+        Ok(())
+    } else {
+        // Use the same response as an unknown id so session identifiers cannot
+        // be used as an ownership oracle.
+        Err(ApiError::not_found("agent session does not exist"))
+    }
+}
+
+async fn authorized_agent_session(
+    state: &AppState,
+    auth: &AuthContext,
+    id: &str,
+) -> ApiResult<crate::agent_types::AgentSessionRecord> {
+    let session = state
+        .db
+        .agent_session(id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    require_agent_session_owner(auth, &session)?;
+    Ok(session)
+}
+
+async fn list_agent_sessions(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<Json<Value>> {
+    let mut sessions = state
         .db
         .list_agent_sessions()
         .await
         .map_err(ApiError::internal)?;
+    if !auth.owner {
+        sessions.retain(|session| session.owner_client_id == auth.decision_actor_id());
+    }
     Ok(Json(json!({ "data": sessions })))
 }
 
 async fn create_agent_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     client: ClientAddr,
+    headers: HeaderMap,
     Json(mut request): Json<crate::agent_types::CreateAgentSession>,
 ) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
     let confine = request.confine_to_worktree;
     request.confine_to_worktree = false;
     if let Some(workspace) = request.workspace_path.as_deref() {
         request.workspace_path = Some(
-            validate_workspace_path(&state, workspace)?
+            authorize_agent_workspace(&state, &auth, workspace)
+                .await?
                 .display()
                 .to_string(),
         );
@@ -7443,6 +7587,9 @@ async fn create_agent_session(
         .permission_settings
         .is_some_and(|settings| settings.auto_approve_host_actions);
     require_elevated_permission_step_up(
+        &state,
+        &auth,
+        &headers,
         elevated,
         request.confirm_elevated_permissions,
         client_is_loopback(&client),
@@ -7464,7 +7611,7 @@ async fn create_agent_session(
     request.runtime_id = Some(runtime_id);
     let mut session = state
         .db
-        .create_agent_session(request)
+        .create_agent_session_owned(request, auth.decision_actor_id())
         .await
         .map_err(ApiError::internal)?;
     if confine {
@@ -7487,13 +7634,10 @@ async fn create_agent_session(
 
 async fn get_agent_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let session = state
-        .db
-        .agent_session(&id)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let session = authorized_agent_session(&state, &auth, &id).await?;
     let messages = state
         .db
         .agent_messages(&id)
@@ -7526,10 +7670,13 @@ async fn get_agent_session(
 
 async fn patch_agent_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     client: ClientAddr,
+    headers: HeaderMap,
     Json(mut update): Json<crate::agent_types::UpdateAgentSession>,
 ) -> ApiResult<Json<crate::agent_types::AgentSessionRecord>> {
+    let authorized = authorized_agent_session(&state, &auth, &id).await?;
     let confine = update.confine_to_worktree.take();
     let discard_unapplied = update.discard_unapplied.take().unwrap_or(false);
     let confirm_elevated = update.confirm_elevated_permissions.take().unwrap_or(false);
@@ -7553,7 +7700,8 @@ async fn patch_agent_session(
         ));
     }
     if let Some(Some(workspace)) = update.workspace_path.as_ref() {
-        let resolved = validate_workspace_path(&state, workspace)?
+        let resolved = authorize_agent_workspace(&state, &auth, workspace)
+            .await?
             .display()
             .to_string();
         update.workspace_path = Some(Some(resolved));
@@ -7562,20 +7710,11 @@ async fn patch_agent_session(
         validate_agent_enabled_tools(&state.data_dir, enabled)?;
     }
     if let Some(enabled) = confine {
-        let session = state
-            .db
-            .agent_session(&id)
-            .await
-            .map_err(|error| ApiError::not_found(error.to_string()))?;
         return Ok(Json(
-            set_worktree_confinement(&state, session, enabled, discard_unapplied).await?,
+            set_worktree_confinement(&state, authorized, enabled, discard_unapplied).await?,
         ));
     }
-    let existing = state
-        .db
-        .agent_session(&id)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let existing = authorized;
     if let Some(enabled) = update.enabled_tools.as_deref() {
         validate_agent_tools_for_runtime(&existing.runtime_id, enabled, &state.data_dir)?;
     }
@@ -7591,6 +7730,9 @@ async fn patch_agent_session(
             && !existing.permission_settings.auto_approve_host_actions
     });
     require_elevated_permission_step_up(
+        &state,
+        &auth,
+        &headers,
         elevating_mode || elevating_host,
         confirm_elevated,
         client_is_loopback(&client),
@@ -7611,14 +7753,11 @@ struct DeleteAgentSessionQuery {
 
 async fn delete_agent_session(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Query(query): Query<DeleteAgentSessionQuery>,
 ) -> ApiResult<Json<Value>> {
-    let session = state
-        .db
-        .agent_session(&id)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let session = authorized_agent_session(&state, &auth, &id).await?;
     // Refuse discardable worktrees before tearing down the agent, so a missing
     // discard flag cannot kill the run and then leave the session behind.
     if let Some(info) =
@@ -7653,13 +7792,10 @@ async fn delete_agent_session(
 /// Inspect a session's managed worktree before delete/unconfine confirmation.
 async fn agent_worktree_status(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let session = state
-        .db
-        .agent_session(&id)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let session = authorized_agent_session(&state, &auth, &id).await?;
     let Some(info) =
         crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
     else {
@@ -7674,13 +7810,10 @@ async fn agent_worktree_status(
 /// Copy the task's worktree delta into the source checkout for local testing.
 async fn apply_agent_worktree(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let session = state
-        .db
-        .agent_session(&id)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let session = authorized_agent_session(&state, &auth, &id).await?;
     if session.last_run_status == "running" {
         return Err(ApiError::bad_request(
             "stop the agent before applying its worktree changes",
@@ -7715,8 +7848,10 @@ async fn apply_agent_worktree(
 
 async fn list_agent_messages(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    authorized_agent_session(&state, &auth, &id).await?;
     let messages = state
         .db
         .agent_messages(&id)
@@ -7727,15 +7862,12 @@ async fn list_agent_messages(
 
 async fn append_agent_messages(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(request): Json<crate::agent_types::AppendAgentMessages>,
 ) -> ApiResult<Json<Value>> {
     // Confirm the session exists before writing rows against it.
-    state
-        .db
-        .agent_session(&id)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    authorized_agent_session(&state, &auth, &id).await?;
     let messages = state
         .db
         .append_agent_messages(&id, &request.messages, request.replace)
@@ -7746,8 +7878,10 @@ async fn append_agent_messages(
 
 async fn list_agent_tool_executions(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    authorized_agent_session(&state, &auth, &id).await?;
     let executions = state
         .db
         .list_tool_executions(&id)
@@ -7758,8 +7892,10 @@ async fn list_agent_tool_executions(
 
 async fn list_agent_approvals(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    authorized_agent_session(&state, &auth, &id).await?;
     let pending = state
         .db
         .pending_approvals(&id)
@@ -7772,13 +7908,10 @@ async fn list_agent_approvals(
 /// on the user, so no approved-after-the-fact command runs later.
 async fn cancel_agent_run(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    state
-        .db
-        .agent_session(&id)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    authorized_agent_session(&state, &auth, &id).await?;
     let terminated = state.agent_broker.terminate_session_processes(&id).await;
     let expired = state
         .db
@@ -7807,13 +7940,10 @@ async fn cancel_agent_run(
 /// saved, otherwise the application default built from live session state.
 async fn agent_system_prompt(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let session = state
-        .db
-        .agent_session(&id)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let session = authorized_agent_session(&state, &auth, &id).await?;
     let names = match session.enabled_tools.clone() {
         Some(tools) => tools,
         // Legacy sessions predate mode-aware defaults: derive the mode's set
@@ -7890,6 +8020,7 @@ fn workspace_prompt_preview_session(
 ) -> crate::agent_types::AgentSessionRecord {
     crate::agent_types::AgentSessionRecord {
         id: "workspace-prompt-preview".to_owned(),
+        owner_client_id: "owner".to_owned(),
         title: "Prompt preview".to_owned(),
         workspace_path: Some(workspace_path),
         model: "preview".to_owned(),
@@ -7922,27 +8053,55 @@ fn prompt_components_json(components: &[(&str, String)]) -> Value {
 
 async fn get_agent_workspace_prompt(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Query(query): Query<AgentWorkspacePromptQuery>,
 ) -> ApiResult<Json<Value>> {
-    let workspace_path = validate_workspace_path(&state, &query.workspace_path)?
-        .display()
-        .to_string();
     let session = if let Some(id) = query.session_id {
-        let session = state
-            .db
-            .agent_session(&id)
-            .await
-            .map_err(|error| ApiError::not_found(error.to_string()))?;
+        let session = authorized_agent_session(&state, &auth, &id).await?;
         let session_key = agent_session_workspace_key(&state, &session)?;
-        if session_key.as_deref() != Some(workspace_path.as_str()) {
+        let Some(session_key) = session_key else {
+            return Err(ApiError::bad_request(
+                "agent session does not have a workspace",
+            ));
+        };
+        // A paired client must not be able to use this endpoint as a daemon-
+        // local path existence oracle. Compare its request to the already
+        // authorized, canonical session path without touching the requested
+        // path on disk.
+        if !auth.owner
+            && std::path::Path::new(&query.workspace_path) != std::path::Path::new(&session_key)
+        {
             return Err(ApiError::bad_request(
                 "agent session does not belong to this workspace",
             ));
         }
-        Some(session)
+        let workspace_path = if auth.owner {
+            validate_workspace_path(&state, &query.workspace_path)?
+                .display()
+                .to_string()
+        } else {
+            session_key.clone()
+        };
+        if workspace_path != session_key {
+            return Err(ApiError::bad_request(
+                "agent session does not belong to this workspace",
+            ));
+        }
+        (workspace_path, Some(session))
     } else {
-        None
+        if !auth.owner {
+            return Err(ApiError::forbidden(
+                "paired clients must identify one of their sessions when reading a workspace prompt",
+            ));
+        }
+        (
+            validate_workspace_path(&state, &query.workspace_path)?
+                .display()
+                .to_string(),
+            None,
+        )
     };
+    let (workspace_path, session) = session;
     state
         .db
         .remember_agent_workspace(&workspace_path)
@@ -7979,8 +8138,14 @@ async fn get_agent_workspace_prompt(
 
 async fn put_agent_workspace_prompt(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Json(request): Json<UpdateAgentWorkspacePrompt>,
 ) -> ApiResult<Json<Value>> {
+    if !auth.owner {
+        return Err(ApiError::forbidden(
+            "only the owner may change shared workspace prompts",
+        ));
+    }
     let workspace_path = validate_workspace_path(&state, &request.workspace_path)?
         .display()
         .to_string();
@@ -8020,13 +8185,10 @@ async fn put_agent_workspace_prompt(
 /// The only way an agent tool call reaches the machine.
 async fn agent_exec_tool(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Json(request): Json<crate::agent_types::ToolExecRequest>,
 ) -> ApiResult<Json<crate::agent_types::ToolExecResponse>> {
-    let session = state
-        .db
-        .agent_session(&request.session_id)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let session = authorized_agent_session(&state, &auth, &request.session_id).await?;
     if let Some(enabled) = &session.enabled_tools
         && !enabled.iter().any(|name| name == &request.tool)
     {
@@ -8062,13 +8224,10 @@ async fn agent_exec_tool(
 /// execution and artifact identifiers.
 async fn agent_exec_tool_stream(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Json(request): Json<crate::agent_types::ToolExecRequest>,
 ) -> ApiResult<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>> {
-    let session = state
-        .db
-        .agent_session(&request.session_id)
-        .await
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let session = authorized_agent_session(&state, &auth, &request.session_id).await?;
     if let Some(enabled) = &session.enabled_tools
         && !enabled.iter().any(|name| name == &request.tool)
     {
@@ -8154,6 +8313,7 @@ struct ApprovalWaitQuery {
 /// worker does not have to poll.
 async fn get_agent_approval(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Query(query): Query<ApprovalWaitQuery>,
 ) -> ApiResult<Json<crate::agent_types::AgentApproval>> {
@@ -8175,6 +8335,7 @@ async fn get_agent_approval(
             .approval(&id)
             .await
             .map_err(|error| ApiError::not_found(error.to_string()))?;
+        authorized_agent_session(&state, &auth, &approval.session_id).await?;
         if approval.status != ApprovalStatus::Pending {
             return Ok(Json(approval));
         }
@@ -8195,6 +8356,12 @@ async fn decide_agent_approval(
     Path(id): Path<String>,
     Json(request): Json<crate::agent_types::ApprovalDecisionRequest>,
 ) -> ApiResult<Json<crate::agent_types::AgentApproval>> {
+    let held = state
+        .db
+        .approval(&id)
+        .await
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    authorized_agent_session(&state, &auth, &held.session_id).await?;
     let approved = match request.decision.as_str() {
         "approve" => true,
         "deny" => false,
@@ -8204,17 +8371,12 @@ async fn decide_agent_approval(
             )));
         }
     };
-    if let Some(expected) = request.expected_execution_location.as_ref() {
-        let held = state
-            .db
-            .approval(&id)
-            .await
-            .map_err(|error| ApiError::not_found(error.to_string()))?;
-        if held.execution_location != *expected {
-            return Err(ApiError::bad_request(
-                "The approval execution location no longer matches the location shown to the user.",
-            ));
-        }
+    if let Some(expected) = request.expected_execution_location.as_ref()
+        && held.execution_location != *expected
+    {
+        return Err(ApiError::bad_request(
+            "The approval execution location no longer matches the location shown to the user.",
+        ));
     }
     let approval = state
         .db
@@ -8280,13 +8442,15 @@ async fn decide_agent_approval(
 /// Full text of a stored tool output. Truncated output is never lost.
 async fn get_agent_artifact(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
-    let (_, path, _) = state
+    let (session_id, path, _) = state
         .db
         .artifact(&id)
         .await
         .map_err(|error| ApiError::not_found(error.to_string()))?;
+    authorized_agent_session(&state, &auth, &session_id).await?;
     let body = tokio::fs::read(&path).await.map_err(ApiError::internal)?;
     Ok((
         [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"))],
@@ -8300,12 +8464,23 @@ struct WorkspaceRequest {
     path: String,
 }
 
-/// Check that a folder can serve as an agent workspace before a session uses it.
+/// Authorize a folder as an agent workspace before a session uses it.
 async fn validate_agent_workspace(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Json(request): Json<WorkspaceRequest>,
 ) -> ApiResult<Json<Value>> {
+    if !auth.owner {
+        return Err(ApiError::forbidden(
+            "only the owner may probe arbitrary workspace paths",
+        ));
+    }
     let resolved = validate_workspace_path(&state, &request.path)?;
+    state
+        .db
+        .remember_agent_workspace(&resolved.display().to_string())
+        .await
+        .map_err(ApiError::internal)?;
     let git = crate::agent_worktree::is_git_repository(&resolved).await;
     Ok(Json(json!({
         "path": resolved.display().to_string(),
@@ -8432,9 +8607,12 @@ fn validate_workspace_path(state: &AppState, raw: &str) -> ApiResult<PathBuf> {
         return Err(ApiError::bad_request(format!("{raw} is not a directory")));
     }
     for secret in crate::agent_sandbox::secret_paths(Some(&state.data_dir)) {
-        if crate::agent_policy::is_inside(&resolved, &secret) {
+        let secret = crate::agent_policy::canonical_ancestor(&secret);
+        if crate::agent_policy::is_inside(&resolved, &secret)
+            || crate::agent_policy::is_inside(&secret, &resolved)
+        {
             return Err(ApiError::bad_request(format!(
-                "{raw} is a credential or Brazier-owned path and cannot be an agent workspace"
+                "{raw} overlaps a credential or Brazier-owned path and cannot be an agent workspace"
             )));
         }
     }
@@ -8443,6 +8621,36 @@ fn validate_workspace_path(state: &AppState, raw: &str) -> ApiResult<PathBuf> {
     {
         return Err(ApiError::bad_request(
             "choose a project folder rather than the whole home directory",
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Selecting a workspace grants read access to everything below it. Only the
+/// owner may create that grant; paired Agent clients can reuse an already
+/// authorized path but cannot turn an arbitrary daemon-local directory into a
+/// workspace themselves.
+async fn authorize_agent_workspace(
+    state: &AppState,
+    auth: &AuthContext,
+    raw: &str,
+) -> ApiResult<PathBuf> {
+    let resolved = validate_workspace_path(state, raw)?;
+    let key = resolved.display().to_string();
+    if auth.owner {
+        state
+            .db
+            .remember_agent_workspace(&key)
+            .await
+            .map_err(ApiError::internal)?;
+    } else if !state
+        .db
+        .agent_workspace_is_remembered(&key)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::forbidden(
+            "the owner must authorize this workspace before a paired client can use it",
         ));
     }
     Ok(resolved)
@@ -8624,6 +8832,7 @@ mod tests {
             db,
             runtime,
             api_keys: Vec::new(),
+            local_control_key: Some("test-local-control".to_owned()),
             http,
             data_dir: data_dir.to_path_buf(),
             active_builds: Arc::new(builds::ActiveBuilds::new()),
@@ -8708,6 +8917,7 @@ mod tests {
                     .method(method)
                     .uri(uri)
                     .header("content-type", "application/json")
+                    .header("x-brazier-local-control", "test-local-control")
                     .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_000))))
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -9135,6 +9345,7 @@ mod tests {
                     .uri(uri)
                     .header("content-type", "application/json")
                     .header("authorization", format!("Bearer {api_key}"))
+                    .header("x-brazier-local-control", "test-local-control")
                     .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_001))))
                     .body(Body::from(body.to_string()))
                     .unwrap(),
@@ -9451,6 +9662,23 @@ mod tests {
             .await
             .unwrap();
         let computer_location = bootstrap_db.execution_location().await.unwrap();
+        let pairing = bootstrap_db
+            .create_pairing_request(
+                "Approval tablet",
+                &[crate::client_auth::ClientScope::Agent],
+                60,
+            )
+            .await
+            .unwrap();
+        let issued = bootstrap_db
+            .claim_pairing_request(&pairing.request.id, &pairing.code)
+            .await
+            .unwrap();
+        bootstrap_db
+            .remember_agent_workspace(&workspace.path().display().to_string())
+            .await
+            .unwrap();
+        let client_id = issued.client.id.clone();
         drop(bootstrap_db);
         tokio::fs::write(
             dir.path().join("computer_sessions.json"),
@@ -9459,6 +9687,7 @@ mod tests {
                 "sessions": [{
                     "record": {
                         "id": computer_session_id,
+                        "owner_client_id": client_id,
                         "title": "Audit computer approval",
                         "target": "browser",
                         "model_id": null,
@@ -9490,21 +9719,6 @@ mod tests {
         let mut state = test_state(dir.path()).await;
         state.api_keys = vec!["owner-key".into()];
         let daemon = state.db.execution_location().await.unwrap();
-        let pairing = state
-            .db
-            .create_pairing_request(
-                "Approval tablet",
-                &[crate::client_auth::ClientScope::Agent],
-                60,
-            )
-            .await
-            .unwrap();
-        let issued = state
-            .db
-            .claim_pairing_request(&pairing.request.id, &pairing.code)
-            .await
-            .unwrap();
-        let client_id = issued.client.id.clone();
         let app = router(state);
 
         let (status, session) = request_with_api_key(
@@ -9600,6 +9814,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paired_agent_clients_cannot_observe_or_operate_each_others_sessions() {
+        let dir = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let mut state = test_state(dir.path()).await;
+        state.api_keys = vec!["owner-key".into()];
+        let first_pairing = state
+            .db
+            .create_pairing_request("First", &[crate::client_auth::ClientScope::Agent], 60)
+            .await
+            .unwrap();
+        let first = state
+            .db
+            .claim_pairing_request(&first_pairing.request.id, &first_pairing.code)
+            .await
+            .unwrap();
+        let second_pairing = state
+            .db
+            .create_pairing_request("Second", &[crate::client_auth::ClientScope::Agent], 60)
+            .await
+            .unwrap();
+        let second = state
+            .db
+            .claim_pairing_request(&second_pairing.request.id, &second_pairing.code)
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let (status, refused) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+            &first.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+
+        let (status, authorized) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/agent/workspace",
+            json!({ "path": workspace.path().display().to_string() }),
+            "owner-key",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{authorized}");
+
+        let (_, first_agent) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+            &first.api_key,
+        )
+        .await;
+        let first_agent_id = first_agent["id"].as_str().unwrap();
+        let (status, refused) = request_with_api_key(
+            &app,
+            "GET",
+            &format!(
+                "/api/v1/agent/workspaces/prompt?workspace_path=/definitely-not-a-real-workspace&session_id={first_agent_id}"
+            ),
+            Value::Null,
+            &first.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert_eq!(
+            refused["error"]["message"],
+            "agent session does not belong to this workspace"
+        );
+        let (_, second_agent) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test"
+            }),
+            &second.api_key,
+        )
+        .await;
+        let second_agent_id = second_agent["id"].as_str().unwrap();
+        let (status, _) = request_with_api_key(
+            &app,
+            "GET",
+            &format!("/api/v1/agent/sessions/{second_agent_id}"),
+            Value::Null,
+            &first.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (_, listed) = request_with_api_key(
+            &app,
+            "GET",
+            "/api/v1/agent/sessions",
+            Value::Null,
+            &first.api_key,
+        )
+        .await;
+        assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["data"][0]["id"], first_agent_id);
+
+        let (_, first_computer) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/computer/sessions",
+            json!({ "target": "desktop" }),
+            &first.api_key,
+        )
+        .await;
+        let first_computer_id = first_computer["id"].as_str().unwrap();
+        let (_, second_computer) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/computer/sessions",
+            json!({ "target": "desktop" }),
+            &second.api_key,
+        )
+        .await;
+        let second_computer_id = second_computer["id"].as_str().unwrap();
+        let (status, _) = request_with_api_key(
+            &app,
+            "POST",
+            &format!("/api/v1/computer/sessions/{second_computer_id}/stop"),
+            Value::Null,
+            &first.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (_, listed) = request_with_api_key(
+            &app,
+            "GET",
+            "/api/v1/computer/sessions",
+            Value::Null,
+            &first.api_key,
+        )
+        .await;
+        assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["sessions"][0]["id"], first_computer_id);
+
+        let (_, owner_agents) = request_with_api_key(
+            &app,
+            "GET",
+            "/api/v1/agent/sessions",
+            Value::Null,
+            "owner-key",
+        )
+        .await;
+        assert_eq!(owner_agents["data"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn desktop_safety_authority_requires_a_local_owner() {
         let dir = tempdir().unwrap();
         let mut state = test_state(dir.path()).await;
@@ -9640,12 +10013,32 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 
+        let (status, body) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/computer/desktop-authority/revoke-all",
+            Value::Null,
+            &issued.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
         crate::computer_exec::write_safety_overlay_marker(dir.path()).unwrap();
         let (status, body) = request_with_api_key(
             &app,
             "POST",
             &format!("/api/v1/computer/sessions/{session_id}/safety-authority"),
             json!({ "active": true }),
+            "owner-key",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+        let (status, body) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/computer/desktop-authority/revoke-all",
+            Value::Null,
             "owner-key",
         )
         .await;
@@ -10266,6 +10659,33 @@ done
             "{body}"
         );
 
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agent/sessions")
+                    .header("content-type", "application/json")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_002))))
+                    .body(Body::from(
+                        json!({
+                            "workspace_path": workspace.path().display().to_string(),
+                            "model": "gguf:test",
+                            "permission_mode": "skip-permissions",
+                            "confirm_elevated_permissions": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "loopback and a confirmation bit are not local-control proof"
+        );
+
         let (status, body) = json_request(
             &app,
             "POST",
@@ -10364,7 +10784,14 @@ done
     #[tokio::test]
     async fn a_workspace_must_be_an_existing_directory_outside_brazier_state() {
         let dir = tempdir().unwrap();
-        let app = router(test_state(dir.path()).await);
+        let state = test_state(dir.path()).await;
+        let parent_result =
+            validate_workspace_path(&state, dir.path().parent().unwrap().to_str().unwrap());
+        assert!(
+            parent_result.is_err(),
+            "a workspace containing the daemon data directory must be refused"
+        );
+        let app = router(state);
         let (status, _) = json_request(
             &app,
             "POST",

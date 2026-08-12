@@ -45,10 +45,10 @@ installation so cross-origin upgrades do not replay the welcome flow.
 Public compatibility endpoints are `/v1/models`, `/v1/chat/completions`, and
 `/v1/responses`. Brazier management endpoints are versioned below `/api/v1`.
 Streaming uses Server-Sent Events. The daemon binds to loopback and requires a
-random key by default. External binding, CORS policy, and keyless access require
-explicit configuration.
-The headless CLI requires `--allow-insecure-remote` in addition to `--no-auth`
-before it will expose a keyless API beyond loopback.
+random key by default. External binding and CORS policy require explicit
+configuration. Keyless mode is restricted to loopback and cannot be combined
+with a remote listener; `--allow-insecure-remote` only acknowledges plaintext
+transport and does not disable authentication.
 
 The canonical capability record separately describes input modalities, output
 modalities, streaming, reasoning, and tools. Platform support is attached to an

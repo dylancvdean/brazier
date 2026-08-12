@@ -89,6 +89,10 @@ fn default_data_dir() -> PathBuf {
 
 fn validate_remote_transport(args: &Args) -> anyhow::Result<()> {
     anyhow::ensure!(
+        !args.no_auth || args.host.is_loopback(),
+        "--no-auth is only permitted on a loopback listener"
+    );
+    anyhow::ensure!(
         args.host.is_loopback() || args.allow_insecure_remote,
         "a non-loopback listener uses plaintext HTTP and requires --allow-insecure-remote; prefer loopback behind TLS or an encrypted private network"
     );
@@ -177,6 +181,8 @@ async fn main() -> anyhow::Result<()> {
     // appearing to still be running.
     db.interrupt_running_download_jobs().await?;
     let api_keys = resolve_api_keys(&args, &data_dir)?;
+    let local_control_key = (!args.service && args.host.is_loopback())
+        .then(|| format!("brazier_local_{}", Uuid::new_v4().simple()));
     let http = reqwest::Client::builder()
         .user_agent(format!("brazier/{}", env!("CARGO_PKG_VERSION")))
         .build()?;
@@ -206,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         runtime: Arc::clone(&runtime),
         api_keys: api_keys.clone(),
+        local_control_key: local_control_key.clone(),
         http,
         data_dir: data_dir.clone(),
         active_builds: Arc::new(builds::ActiveBuilds::new()),
@@ -257,7 +264,8 @@ async fn main() -> anyhow::Result<()> {
                 "address": address_url,
                 // The desktop's internal connection uses the first key; extra keys
                 // are passed for its configured clients, not reported here.
-                "api_key": api_keys.first()
+                "api_key": api_keys.first(),
+                "local_control_key": local_control_key
             }))?
         );
     }
@@ -357,6 +365,22 @@ mod tests {
     fn loopback_plaintext_remains_the_safe_default() {
         let args = Args::try_parse_from(["brazierd"]).unwrap();
         assert!(validate_remote_transport(&args).is_ok());
+    }
+
+    #[test]
+    fn authentication_cannot_be_disabled_on_a_remote_listener() {
+        let args = Args::try_parse_from([
+            "brazierd",
+            "--host",
+            "0.0.0.0",
+            "--no-auth",
+            "--allow-insecure-remote",
+        ])
+        .unwrap();
+        assert!(validate_remote_transport(&args).is_err());
+
+        let loopback = Args::try_parse_from(["brazierd", "--no-auth"]).unwrap();
+        assert!(validate_remote_transport(&loopback).is_ok());
     }
 
     #[test]

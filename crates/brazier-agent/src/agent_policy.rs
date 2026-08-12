@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::agent_sandbox::{SandboxBackend, SandboxProfile, secret_paths};
 use brazier_protocol::agent_types::{
     AgentElevationRequest, AgentEnvironment, AgentPermissionMode, AgentPermissionSettings,
-    RequestedPathAccess, ToolRiskLevel,
+    RequestedPathAccess, ToolRiskLevel, arguments_hash,
 };
 
 /// Static facts about a tool the daemon can execute.
@@ -248,20 +248,24 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
     // sandbox command is host execution. Route Ask/Skip through the normal host
     // approval contract; SandboxOnly refuses it below. The executor itself
     // also fails closed, so a stale sandbox approval cannot bypass this check.
-    let unsandboxed_execution =
-        spec.executes && environment == AgentEnvironment::Sandbox && !request.backend.isolated();
+    let requested_profile = if wants_network {
+        SandboxProfile::WorkspaceNetwork
+    } else if matches!(spec.risk, ToolRiskLevel::Safe | ToolRiskLevel::Read) && !spec.executes {
+        SandboxProfile::ReadOnly
+    } else {
+        SandboxProfile::Workspace
+    };
+    let unsandboxed_execution = spec.executes
+        && environment == AgentEnvironment::Sandbox
+        && !request.backend.enforces(requested_profile);
     if unsandboxed_execution {
         environment = AgentEnvironment::Host;
     }
 
     let profile = if environment == AgentEnvironment::Host {
         SandboxProfile::Workspace
-    } else if wants_network {
-        SandboxProfile::WorkspaceNetwork
-    } else if matches!(spec.risk, ToolRiskLevel::Safe | ToolRiskLevel::Read) && !spec.executes {
-        SandboxProfile::ReadOnly
     } else {
-        SandboxProfile::Workspace
+        requested_profile
     };
 
     let scope_key = scope_key(request.tool, spec, request.arguments, &paths, wants_network);
@@ -433,13 +437,9 @@ fn argument_str<'a>(arguments: &'a serde_json::Value, key: &str) -> Option<&'a s
     arguments.get(key).and_then(serde_json::Value::as_str)
 }
 
-/// Identity used for session-wide grants: the shape of the action, not its
-/// exact arguments. Shell grants cover `program` plus the first non-flag
-/// subcommand (`cargo test` ≠ `cargo build`), so approving one cargo subcommand
-/// cannot silently authorize arbitrary later argv under the same binary.
-///
-/// Paths outside the workspace are the exception: their key names the resolved
-/// path, so granting a read of one file grants that file and nothing else.
+/// Identity used for session-wide grants. Executable actions are tied to the
+/// complete canonical argument object; approving one command must never grant
+/// a different flag, shell operator, environment, or working directory.
 fn scope_key(
     tool: &str,
     spec: &ToolSpec,
@@ -450,19 +450,28 @@ fn scope_key(
     // stdin injection is scoped to the specific background process that was
     // approved, not to every process in the session.
     if tool == "shell_input" {
-        let process = argument_str(arguments, "process_id").unwrap_or("unknown");
-        return format!("shell-input:{process}");
+        return format!("shell-input:{}", arguments_hash(tool, arguments));
     }
     if spec.executes {
         let suffix = if wants_network { "+network" } else { "" };
-        let key = argument_str(arguments, "command")
-            .map(exec_scope_program)
-            .unwrap_or_else(|| tool.to_owned());
-        return format!("run:{key}{suffix}");
+        return format!("run:{}:{}{suffix}", tool, arguments_hash(tool, arguments));
     }
-    if let Some(outside) = paths.iter().find(|path| !path.inside_workspace) {
-        let verb = if outside.write { "fs-write" } else { "fs-read" };
-        return format!("{verb}:{}", outside.real.display());
+    let mut outside: Vec<_> = paths
+        .iter()
+        .filter(|path| !path.inside_workspace)
+        .map(|path| {
+            serde_json::json!({
+                "path": path.real.display().to_string(),
+                "write": path.write,
+            })
+        })
+        .collect();
+    if !outside.is_empty() {
+        outside.sort_by_key(serde_json::Value::to_string);
+        return format!(
+            "fs-access:{}",
+            arguments_hash("resolved-path-access", &serde_json::Value::Array(outside))
+        );
     }
     if paths.iter().any(|path| path.write) {
         return "fs-write:workspace".to_owned();
@@ -475,24 +484,6 @@ fn proposed_command(tool: &str, arguments: &serde_json::Value) -> Option<String>
         return None;
     }
     argument_str(arguments, "command").map(str::to_owned)
-}
-
-/// `program` or `program:subcommand` for session-scoped shell grants.
-///
-/// The first non-flag token after the program is treated as the subcommand so
-/// `cargo --locked test` and `cargo test` share a grant, while `cargo build`
-/// does not.
-fn exec_scope_program(command: &str) -> String {
-    let mut tokens = command.split_whitespace();
-    let program = tokens.next().unwrap_or("shell");
-    let basename = std::path::Path::new(program)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(program);
-    match tokens.find(|token| !token.starts_with('-')) {
-        Some(subcommand) => format!("{basename}:{subcommand}"),
-        None => basename.to_owned(),
-    }
 }
 
 /// One-line description of what will happen, shown in the approval dialog.
@@ -618,7 +609,7 @@ pub fn requested_paths(
 ) -> Vec<RequestedPath> {
     let fields: &[(&str, bool)] = match tool {
         "fs_read" | "doc_read" | "fs_list" | "fs_stat" | "fs_search" | "fs_find" | "fs_tree"
-        | "code_symbols" => &[("path", false)],
+        | "code_symbols" | "lsp_diagnostics" => &[("path", false)],
         "fs_write" | "fs_patch" | "fs_mkdir" => &[("path", true)],
         "fs_delete" => &[("path", true)],
         "fs_move" => &[("from", true), ("to", true)],
@@ -657,9 +648,12 @@ pub fn requested_paths(
                     .as_deref()
                     .map(|root| is_inside(&real, root))
                     .unwrap_or(false);
-                let secret = secrets
-                    .iter()
-                    .any(|secret| is_inside(&real, secret) || is_inside(&resolved, secret));
+                let secret = secrets.iter().any(|secret| {
+                    is_inside(&real, secret)
+                        || is_inside(&resolved, secret)
+                        || is_inside(secret, &real)
+                        || is_inside(secret, &resolved)
+                });
                 Some(RequestedPath {
                     raw: raw.to_owned(),
                     resolved,
@@ -687,9 +681,12 @@ pub fn requested_paths(
                     .as_deref()
                     .map(|root| is_inside(&real, root))
                     .unwrap_or(false);
-                let secret = secrets
-                    .iter()
-                    .any(|secret| is_inside(&real, secret) || is_inside(&resolved, secret));
+                let secret = secrets.iter().any(|secret| {
+                    is_inside(&real, secret)
+                        || is_inside(&resolved, secret)
+                        || is_inside(secret, &real)
+                        || is_inside(secret, &resolved)
+                });
                 RequestedPath {
                     raw: raw.to_owned(),
                     resolved,
@@ -717,9 +714,12 @@ pub fn requested_paths(
                 .as_deref()
                 .map(|root| is_inside(&real, root))
                 .unwrap_or(false);
-            let secret = secrets
-                .iter()
-                .any(|secret| is_inside(&real, secret) || is_inside(&resolved, secret));
+            let secret = secrets.iter().any(|secret| {
+                is_inside(&real, secret)
+                    || is_inside(&resolved, secret)
+                    || is_inside(secret, &real)
+                    || is_inside(secret, &resolved)
+            });
             Some(RequestedPath {
                 raw: raw.to_owned(),
                 resolved,
@@ -938,8 +938,14 @@ mod tests {
                 assert_eq!(
                     scope_key,
                     format!(
-                        "fs-read:{}",
-                        canonical_ancestor(Path::new("/etc/hosts")).display()
+                        "fs-access:{}",
+                        arguments_hash(
+                            "resolved-path-access",
+                            &json!([{
+                                "path": canonical_ancestor(Path::new("/etc/hosts")).display().to_string(),
+                                "write": false
+                            }])
+                        )
                     )
                 );
             }
@@ -972,7 +978,13 @@ mod tests {
                 assert!(elevation.requested_host_execution);
                 assert!(elevation.requested_network_access);
                 assert!(!allow_session_scope);
-                assert_eq!(scope_key, "run:mcp/search/web+network");
+                assert_eq!(
+                    scope_key,
+                    format!(
+                        "run:mcp/search/web:{}+network",
+                        arguments_hash("mcp/search/web", &arguments)
+                    )
+                );
                 assert!(summary.contains("network enabled"), "{summary}");
             }
             other => panic!("expected approval, got {other:?}"),
@@ -996,13 +1008,18 @@ mod tests {
         let backend = backend();
         let granted = json!({ "path": "/etc/hosts" });
         let other = json!({ "path": "/etc/passwd" });
-        let grants = vec![grant_key(
-            AgentEnvironment::Host,
-            &format!(
-                "fs-read:{}",
-                canonical_ancestor(Path::new("/etc/hosts")).display()
-            ),
-        )];
+        let key = match decide(&base(
+            "fs_read",
+            &granted,
+            Path::new("/ws"),
+            &backend,
+            Path::new("/data"),
+            &[],
+        )) {
+            PolicyDecision::RequireApproval { scope_key, .. } => scope_key,
+            other => panic!("expected approval, got {other:?}"),
+        };
+        let grants = vec![grant_key(AgentEnvironment::Host, &key)];
         assert!(matches!(
             decide(&base(
                 "fs_read",
@@ -1050,8 +1067,14 @@ mod tests {
                 assert_eq!(
                     scope_key,
                     format!(
-                        "fs-write:{}",
-                        canonical_ancestor(Path::new("/etc/hosts")).display()
+                        "fs-access:{}",
+                        arguments_hash(
+                            "resolved-path-access",
+                            &json!([{
+                                "path": canonical_ancestor(Path::new("/etc/hosts")).display().to_string(),
+                                "write": true
+                            }])
+                        )
                     )
                 );
             }
@@ -1115,10 +1138,18 @@ mod tests {
             "reason": "I need to check the system hosts file.",
             "paths": [{ "path": "/etc/hosts", "write": false }]
         });
-        let expected_key = format!(
-            "fs-read:{}",
-            canonical_ancestor(Path::new("/etc/hosts")).display()
-        );
+        let read = json!({ "path": "/etc/hosts" });
+        let expected_key = match decide(&base(
+            "fs_read",
+            &read,
+            Path::new("/ws"),
+            &backend,
+            Path::new("/data"),
+            &[],
+        )) {
+            PolicyDecision::RequireApproval { scope_key, .. } => scope_key,
+            other => panic!("expected approval, got {other:?}"),
+        };
         match decide(&base(
             "request_permission",
             &arguments,
@@ -1141,7 +1172,6 @@ mod tests {
         }
 
         let grants = vec![grant_key(AgentEnvironment::Host, &expected_key)];
-        let read = json!({ "path": "/etc/hosts" });
         assert!(matches!(
             decide(&base(
                 "fs_read",
@@ -1198,18 +1228,20 @@ mod tests {
     #[test]
     fn the_daemon_data_directory_is_always_refused() {
         let backend = backend();
-        let arguments = json!({ "path": "/data/brazier.sqlite" });
-        let request = base(
-            "fs_read",
-            &arguments,
-            Path::new("/ws"),
-            &backend,
-            Path::new("/data"),
-            &[],
-        );
-        match decide(&request) {
-            PolicyDecision::Deny { reason } => assert!(reason.contains("Brazier-owned")),
-            other => panic!("expected denial, got {other:?}"),
+        for path in ["/data/brazier.sqlite", "/"] {
+            let arguments = json!({ "path": path });
+            let request = base(
+                "fs_read",
+                &arguments,
+                Path::new("/ws"),
+                &backend,
+                Path::new("/data"),
+                &[],
+            );
+            match decide(&request) {
+                PolicyDecision::Deny { reason } => assert!(reason.contains("Brazier-owned")),
+                other => panic!("expected denial for {path}, got {other:?}"),
+            }
         }
     }
 
@@ -1389,14 +1421,20 @@ mod tests {
                     assert!(elevation.requested_host_execution);
                 }
                 assert!(elevation.requested_network_access);
-                assert_eq!(scope_key, "run:curl:https://example.com+network");
+                assert_eq!(
+                    scope_key,
+                    format!(
+                        "run:shell_run:{}+network",
+                        arguments_hash("shell_run", &arguments)
+                    )
+                );
             }
             other => panic!("expected approval, got {other:?}"),
         }
     }
 
     #[test]
-    fn shell_scope_keys_group_by_program_and_subcommand() {
+    fn shell_scope_keys_cover_only_the_exact_command() {
         let backend = backend();
         let test_cmd = json!({ "command": "cargo test" });
         let test_locked = json!({ "command": "cargo --locked test -q" });
@@ -1412,9 +1450,11 @@ mod tests {
             PolicyDecision::RequireApproval { scope_key, .. } => scope_key,
             other => panic!("expected approval, got {other:?}"),
         };
-        assert_eq!(key_of(&test_cmd), "run:cargo:test");
-        assert_eq!(key_of(&test_cmd), key_of(&test_locked));
-        assert_eq!(key_of(&build_cmd), "run:cargo:build");
+        assert_eq!(
+            key_of(&test_cmd),
+            format!("run:shell_run:{}", arguments_hash("shell_run", &test_cmd))
+        );
+        assert_ne!(key_of(&test_cmd), key_of(&test_locked));
         assert_ne!(key_of(&test_cmd), key_of(&build_cmd));
     }
 

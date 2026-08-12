@@ -2387,13 +2387,31 @@ pub async fn chat_once(
     if let Some(key) = api_key {
         request = request.bearer_auth(key);
     }
-    let response = request.send().await.context("llama-server chat request")?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+    let mut response = request.send().await.context("llama-server chat request")?;
+    let status = response.status();
+    anyhow::ensure!(
+        response
+            .content_length()
+            .is_none_or(|length| length <= 64 * 1024 * 1024),
+        "llama-server response exceeds 64 MiB"
+    );
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("read llama-server chat response")?
+    {
+        anyhow::ensure!(
+            bytes.len() + chunk.len() <= 64 * 1024 * 1024,
+            "llama-server response exceeds 64 MiB"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    if !status.is_success() {
+        let text = String::from_utf8_lossy(&bytes);
         anyhow::bail!("llama-server returned {status}: {text}");
     }
-    response.json().await.context("decode llama-server chat")
+    serde_json::from_slice(&bytes).context("decode llama-server chat")
 }
 
 /// Open a streamed chat completion against a running llama-server.
@@ -2412,13 +2430,20 @@ pub async fn open_chat_stream(
     if let Some(key) = api_key {
         request = request.bearer_auth(key);
     }
-    let response = request
+    let mut response = request
         .send()
         .await
         .context("llama-server stream request")?;
     if !response.status().is_success() {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.unwrap_or(None) {
+            if bytes.len().saturating_add(chunk.len()) > 1024 * 1024 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8_lossy(&bytes);
         anyhow::bail!("llama-server stream returned {status}: {text}");
     }
 
@@ -2427,6 +2452,7 @@ pub async fn open_chat_stream(
         use futures::StreamExt;
         let mut byte_stream = response.bytes_stream();
         let mut buffer = String::new();
+        let mut received = 0usize;
         while let Some(chunk) = byte_stream.next().await {
             let chunk = match chunk {
                 Ok(bytes) => bytes,
@@ -2439,6 +2465,17 @@ pub async fn open_chat_stream(
                     return;
                 }
             };
+            received = received.saturating_add(chunk.len());
+            if received > 128 * 1024 * 1024
+                || buffer.len().saturating_add(chunk.len()) > 2 * 1024 * 1024
+            {
+                let _ = tx
+                    .send(Err(anyhow::anyhow!(
+                        "llama-server stream exceeded its response limit"
+                    )))
+                    .await;
+                return;
+            }
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             while let Some(frame_end) = buffer.find("\n\n") {
                 let frame = buffer[..frame_end].to_owned();

@@ -6,7 +6,7 @@
 
 use std::{
     collections::HashMap,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     path::PathBuf,
     process::Stdio,
@@ -20,14 +20,196 @@ use brazier_protocol::computer_types::{
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
     process::{Child, Command},
-    sync::{Mutex, broadcast, mpsc},
+    sync::{Mutex, broadcast, mpsc, oneshot},
+    task::JoinHandle,
     time::{Duration, sleep, timeout},
 };
 use uuid::Uuid;
 
 const DRIVER_UNAVAILABLE: &str =
     "Browser computer use requires a working Chromium installation; no action was performed.";
+
+struct PublicEgressProxy {
+    address: SocketAddr,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl PublicEgressProxy {
+    async fn launch() -> Result<Self> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .context("bind browser egress proxy")?;
+        let address = listener.local_addr()?;
+        let (shutdown, mut stopped) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { break; };
+                        tokio::spawn(async move {
+                            let _ = proxy_connection(stream).await;
+                        });
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            address,
+            shutdown: Some(shutdown),
+            task,
+        })
+    }
+}
+
+impl Drop for PublicEgressProxy {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        self.task.abort();
+    }
+}
+
+async fn public_target(host: &str, port: u16) -> Result<SocketAddr> {
+    let addresses: Vec<_> = tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("resolve browser target {host}"))?
+        .collect();
+    anyhow::ensure!(
+        !addresses.is_empty(),
+        "browser target DNS returned no addresses"
+    );
+    for address in &addresses {
+        #[cfg(test)]
+        if address.ip().is_loopback() {
+            continue;
+        }
+        anyhow::ensure!(
+            navigation_ip_is_public(address.ip()),
+            "browser target resolved to non-public address {}",
+            address.ip()
+        );
+    }
+    Ok(addresses[0])
+}
+
+fn parse_proxy_authority(authority: &str, default_port: u16) -> Result<(String, u16)> {
+    let parsed = reqwest::Url::parse(&format!("http://{authority}"))
+        .context("invalid proxy target authority")?;
+    anyhow::ensure!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "URL credentials are not allowed"
+    );
+    let host = parsed
+        .host_str()
+        .context("proxy target has no host")?
+        .to_owned();
+    Ok((host, parsed.port().unwrap_or(default_port)))
+}
+
+async fn proxy_connection(mut inbound: TcpStream) -> Result<()> {
+    let mut request = Vec::with_capacity(4096);
+    loop {
+        anyhow::ensure!(
+            request.len() < 64 * 1024,
+            "proxy request headers are too large"
+        );
+        let mut chunk = [0_u8; 2048];
+        let count = timeout(Duration::from_secs(10), inbound.read(&mut chunk))
+            .await
+            .context("timed out reading proxy request")??;
+        anyhow::ensure!(count > 0, "proxy client closed before sending headers");
+        request.extend_from_slice(&chunk[..count]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+    let header =
+        std::str::from_utf8(&request[..header_end]).context("proxy headers are not UTF-8")?;
+    let first_line = header
+        .lines()
+        .next()
+        .context("proxy request has no request line")?;
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().context("proxy request has no method")?;
+    let target = parts.next().context("proxy request has no target")?;
+    let version = parts.next().context("proxy request has no version")?;
+    anyhow::ensure!(parts.next().is_none(), "invalid proxy request line");
+
+    if method.eq_ignore_ascii_case("CONNECT") {
+        let (host, port) = parse_proxy_authority(target, 443)?;
+        let target = public_target(&host, port).await?;
+        let mut outbound = TcpStream::connect(target)
+            .await
+            .context("connect browser target")?;
+        inbound
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
+        if header_end < request.len() {
+            outbound.write_all(&request[header_end..]).await?;
+        }
+        tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await?;
+        return Ok(());
+    }
+
+    let url =
+        reqwest::Url::parse(target).context("HTTP proxy request target is not an absolute URL")?;
+    anyhow::ensure!(
+        url.scheme() == "http",
+        "non-CONNECT proxy requests must use http"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "URL credentials are not allowed"
+    );
+    let host = url.host_str().context("proxy URL has no host")?;
+    let port = url
+        .port_or_known_default()
+        .context("proxy URL has no port")?;
+    let address = public_target(host, port).await?;
+    let mut outbound = TcpStream::connect(address)
+        .await
+        .context("connect browser target")?;
+    let path = match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_owned(),
+    };
+    let authority = match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
+    let mut rewritten = format!("{method} {path} {version}\r\nHost: {authority}\r\n");
+    for line in header.lines().skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("host:")
+            || lower.starts_with("proxy-authorization:")
+            || lower.starts_with("proxy-connection:")
+        {
+            continue;
+        }
+        rewritten.push_str(line);
+        rewritten.push_str("\r\n");
+    }
+    rewritten.push_str("\r\n");
+    outbound.write_all(rewritten.as_bytes()).await?;
+    if header_end < request.len() {
+        outbound.write_all(&request[header_end..]).await?;
+    }
+    tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await?;
+    Ok(())
+}
 
 /// Cooperative cancel signal for an in-flight computer action (Esc / stop).
 pub struct ActionCancel {
@@ -250,6 +432,7 @@ struct CdpBrowserSession {
     process: Child,
     profile_dir: PathBuf,
     pipe: CdpPipe,
+    _egress_proxy: PublicEgressProxy,
 }
 
 impl CdpBrowserSession {
@@ -258,6 +441,7 @@ impl CdpBrowserSession {
             find_chromium(executable).ok_or_else(|| anyhow::anyhow!(DRIVER_UNAVAILABLE))?;
         let profile_dir = std::env::temp_dir().join(format!("brazier-computer-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&profile_dir).context("create isolated Chromium profile")?;
+        let egress_proxy = PublicEgressProxy::launch().await?;
 
         // Chromium reads CDP from FD 3 and writes responses to FD 4.
         let (to_chrome_read, to_chrome_write) =
@@ -274,6 +458,10 @@ impl CdpBrowserSession {
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--remote-debugging-pipe")
+            .arg(format!("--proxy-server=http://{}", egress_proxy.address))
+            .arg("--proxy-bypass-list=<-loopback>")
+            .arg("--disable-quic")
+            .arg("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
             .arg(format!("--user-data-dir={}", profile_dir.display()))
             .arg(format!(
                 "--window-size={},{}",
@@ -329,6 +517,7 @@ impl CdpBrowserSession {
             process,
             profile_dir,
             pipe,
+            _egress_proxy: egress_proxy,
         })
     }
 
@@ -852,25 +1041,36 @@ async fn ensure_public_navigation_url(url: &str) -> Result<()> {
 fn navigation_ip_is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            !(v4.is_loopback()
+            let octets = v4.octets();
+            !(octets[0] == 0
+                || v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.is_broadcast()
+                || v4.is_multicast()
                 || v4.is_documentation()
-                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])))
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+                || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+                || octets[0] >= 240)
         }
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return navigation_ip_is_public(IpAddr::V4(v4));
             }
             let segments = v6.segments();
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (segments[0] & 0xfe00) == 0xfc00
-                || (segments[0] & 0xffc0) == 0xfe80
-                || (segments[0] == 0x2001 && segments[1] == 0xdb8))
+            // Only global-unicast 2000::/3 is useful browser egress. This also
+            // refuses local NAT64, discard-only, benchmarking, and transition
+            // prefixes that can otherwise provide surprising internal paths.
+            (segments[0] & 0xe000) == 0x2000
+                && !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    || (segments[0] & 0xfe00) == 0xfc00
+                    || (segments[0] & 0xffc0) == 0xfe80
+                    || (segments[0] == 0x2001 && segments[1] == 0xdb8))
         }
     }
 }
@@ -1061,6 +1261,42 @@ mod tests {
         ensure_public_navigation_url("about:blank")
             .await
             .expect("blank");
+    }
+
+    #[test]
+    fn egress_classifier_rejects_every_non_public_address_family() {
+        for address in [
+            "0.0.0.1",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "192.0.0.1",
+            "192.168.0.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "64:ff9b::1",
+            "fc00::1",
+            "fe80::1",
+            "ff02::1",
+            "2001:db8::1",
+        ] {
+            let ip = address.parse().unwrap();
+            assert!(!navigation_ip_is_public(ip), "{address} must be blocked");
+        }
+        assert!(navigation_ip_is_public("93.184.216.34".parse().unwrap()));
+        assert!(navigation_ip_is_public(
+            "2606:4700:4700::1111".parse().unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn egress_proxy_rejects_private_literal_targets() {
+        let error = public_target("10.0.0.1", 80).await.unwrap_err().to_string();
+        assert!(error.contains("non-public"), "{error}");
     }
 
     #[tokio::test]

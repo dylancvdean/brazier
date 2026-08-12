@@ -74,8 +74,8 @@ describe('connection profile URLs', () => {
     expect(normalizePairingDaemonBaseUrl('http://100.100.12.34:7614')).toBe(
       'http://100.100.12.34:7614'
     )
-    expect(normalizePairingDaemonBaseUrl('http://labbox.local:7614')).toBe(
-      'http://labbox.local:7614'
+    expect(() => normalizePairingDaemonBaseUrl('http://labbox.local:7614')).toThrow(
+      'requires HTTPS'
     )
     expect(() => normalizePairingDaemonBaseUrl('http://gpu.example:7614')).toThrow(
       'requires HTTPS'
@@ -101,6 +101,7 @@ describe('one-time remote pairing', () => {
       const headers = new Headers(init?.headers)
       expect(headers.get('authorization')).toBeNull()
       expect(JSON.parse(String(init?.body))).toEqual({ code: 'SECRET-CODE' })
+      expect(init?.redirect).toBe('manual')
       return new Response(JSON.stringify({ client, api_key: 'issued-client-key' }))
     }) as typeof fetch
 
@@ -242,7 +243,7 @@ describe('connection profile persistence', () => {
     const store = new ConnectionProfileStore(path, () => 'generated-id')
     const profile = store.upsert({
       name: 'Lab GPU',
-      baseUrl: 'http://labbox:7614/',
+      baseUrl: 'http://192.168.1.50:7614/',
       apiKey: 'secret'
     })
     store.select(profile.id)
@@ -257,7 +258,7 @@ describe('connection profile persistence', () => {
           id: 'generated-id',
           name: 'Lab GPU',
           kind: 'remote',
-          baseUrl: 'http://labbox:7614',
+          baseUrl: 'http://192.168.1.50:7614',
           apiKey: 'secret'
         }
       ]
@@ -360,6 +361,22 @@ describe('daemon compatibility handshake', () => {
         authorization: 'Bearer test-key'
       }
     ])
+  })
+
+  it('does not follow a redirect with a bearer or one-time pairing code', async () => {
+    const redirected = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(init?.redirect).toBe('manual')
+      return new Response(null, { status: 307, headers: { location: 'http://attacker.example' } })
+    }) as typeof fetch
+
+    await expect(
+      fetchDaemonInfo('https://gpu.example', 'secret', { fetch: redirected })
+    ).rejects.toThrow('status 307')
+    await expect(
+      claimPairingCredential('https://gpu.example', 'pairing-1', 'SECRET-CODE', {
+        fetch: redirected
+      })
+    ).rejects.toThrow('status 307')
   })
 
   it('rejects authentication failures, the wrong product, and an incompatible API major', async () => {

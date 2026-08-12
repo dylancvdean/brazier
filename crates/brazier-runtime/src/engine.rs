@@ -219,6 +219,7 @@ struct Endpoint {
     /// Which sampler names this server understands. Someone else's server gets
     /// the standard fields alone.
     dialect: llama::SamplerDialect,
+    remote: bool,
 }
 
 /// What a locally launched server calls whichever model it has loaded.
@@ -252,6 +253,7 @@ fn file_size(path: &std::path::Path) -> u64 {
 pub struct Runtime {
     data_dir: PathBuf,
     http: reqwest::Client,
+    remote_http: reqwest::Client,
     llama: Mutex<LlamaState>,
     mlx: Mutex<MlxState>,
     vllm: Mutex<VllmState>,
@@ -271,6 +273,10 @@ pub struct EngineStatusOptions {
 
 impl Runtime {
     pub fn new(data_dir: PathBuf, http: reqwest::Client) -> Arc<Self> {
+        let remote_http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build no-redirect remote HTTP client");
         let settings = runtime_settings::load(&data_dir);
         let path_env = std::env::var_os("PATH");
         let effective_target = if settings.target == crate::runtime_settings::RuntimeTarget::Auto {
@@ -305,6 +311,7 @@ impl Runtime {
         Arc::new(Self {
             data_dir,
             http,
+            remote_http,
             llama: Mutex::new(LlamaState {
                 binary: discovered,
                 server: None,
@@ -2260,6 +2267,7 @@ impl Runtime {
                     api_key: None,
                     model_alias: LOCAL_MODEL_ALIAS.to_owned(),
                     dialect: llama::SamplerDialect::LlamaCpp,
+                    remote: false,
                 })
             }
             ActiveBackend::Mlx => {
@@ -2272,6 +2280,7 @@ impl Runtime {
                     api_key: None,
                     model_alias: server.model_ref.clone(),
                     dialect: llama::SamplerDialect::Mlx,
+                    remote: false,
                 })
             }
             ActiveBackend::Vllm => {
@@ -2285,6 +2294,7 @@ impl Runtime {
                     api_key: None,
                     model_alias: server.model_ref.clone(),
                     dialect: llama::SamplerDialect::OpenAi,
+                    remote: false,
                 })
             }
             ActiveBackend::Remote {
@@ -2301,6 +2311,7 @@ impl Runtime {
                 } else {
                     llama::SamplerDialect::OpenAi
                 },
+                remote: true,
             }),
         }
     }
@@ -2496,7 +2507,11 @@ impl Engine for Runtime {
                 object.remove("tools");
             }
             let response = match llama::chat_once(
-                &self.http,
+                if endpoint.remote {
+                    &self.remote_http
+                } else {
+                    &self.http
+                },
                 &endpoint.base_url,
                 endpoint.api_key.as_deref(),
                 &body,
@@ -2907,7 +2922,11 @@ async fn stream_tool_rounds(
             body["stream_options"] = serde_json::json!({ "include_usage": true });
         }
         let mut chunks = match llama::open_chat_stream(
-            &runtime.http,
+            if endpoint.remote {
+                &runtime.remote_http
+            } else {
+                &runtime.http
+            },
             &endpoint.base_url,
             endpoint.api_key.as_deref(),
             &body,

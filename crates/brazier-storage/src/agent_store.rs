@@ -23,6 +23,7 @@ pub const APPROVAL_TTL_SECONDS: i64 = 900;
 #[derive(FromRow)]
 struct SessionRow {
     id: String,
+    owner_client_id: String,
     title: String,
     workspace_path: Option<String>,
     model: String,
@@ -63,6 +64,7 @@ impl TryFrom<SessionRow> for AgentSessionRecord {
             .context("decode agent runtime metadata")?;
         Ok(Self {
             id: row.id,
+            owner_client_id: row.owner_client_id,
             title: row.title,
             workspace_path: row.workspace_path,
             model: row.model,
@@ -149,6 +151,19 @@ impl Database {
         Ok(())
     }
 
+    pub async fn agent_workspace_is_remembered(
+        &self,
+        workspace_path: &str,
+    ) -> anyhow::Result<bool> {
+        let present: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_workspaces WHERE workspace_path = ?)",
+        )
+        .bind(workspace_path)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(present != 0)
+    }
+
     pub async fn agent_workspace_system_prompt(
         &self,
         workspace_path: &str,
@@ -185,6 +200,18 @@ impl Database {
         &self,
         request: CreateAgentSession,
     ) -> anyhow::Result<AgentSessionRecord> {
+        self.create_agent_session_owned(request, "owner").await
+    }
+
+    pub async fn create_agent_session_owned(
+        &self,
+        request: CreateAgentSession,
+        owner_client_id: &str,
+    ) -> anyhow::Result<AgentSessionRecord> {
+        anyhow::ensure!(
+            !owner_client_id.trim().is_empty(),
+            "agent session owner is required"
+        );
         let id = Uuid::new_v4().to_string();
         let settings = request.permission_settings.unwrap_or_default();
         let mode = request.permission_mode.unwrap_or(AgentPermissionMode::Ask);
@@ -197,11 +224,12 @@ impl Database {
         }
         sqlx::query(
             r#"INSERT INTO agent_sessions(
-                   id, title, workspace_path, model, runtime_id, permission_mode,
+                   id, owner_client_id, title, workspace_path, model, runtime_id, permission_mode,
                    permission_settings_json, enabled_tools_json, last_run_status)
-               VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'idle')"#,
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle')"#,
         )
         .bind(&id)
+        .bind(owner_client_id)
         .bind(request.title.unwrap_or_else(|| "Agent task".to_owned()))
         .bind(&request.workspace_path)
         .bind(&request.model)
@@ -222,7 +250,7 @@ impl Database {
 
     pub async fn agent_session(&self, id: &str) -> anyhow::Result<AgentSessionRecord> {
         let row = sqlx::query_as::<_, SessionRow>(
-            r#"SELECT id, title, workspace_path, model, runtime_id, permission_mode,
+            r#"SELECT id, owner_client_id, title, workspace_path, model, runtime_id, permission_mode,
                       permission_settings_json, enabled_tools_json, last_run_status,
                       compaction_json, runtime_metadata_json, created_at, updated_at
                FROM agent_sessions WHERE id = ?"#,
@@ -236,7 +264,7 @@ impl Database {
 
     pub async fn list_agent_sessions(&self) -> anyhow::Result<Vec<AgentSessionRecord>> {
         let rows = sqlx::query_as::<_, SessionRow>(
-            r#"SELECT id, title, workspace_path, model, runtime_id, permission_mode,
+            r#"SELECT id, owner_client_id, title, workspace_path, model, runtime_id, permission_mode,
                       permission_settings_json, enabled_tools_json, last_run_status,
                       compaction_json, runtime_metadata_json, created_at, updated_at
                FROM agent_sessions ORDER BY updated_at DESC LIMIT 100"#,
@@ -260,6 +288,12 @@ impl Database {
                 "invalid agent run status `{status}`"
             );
         }
+        let invalidate_authorization = update.workspace_path.is_some()
+            || update.model.is_some()
+            || update.permission_mode.is_some()
+            || update.permission_settings.is_some()
+            || update.enabled_tools.is_some();
+
         // Serialize before opening the transaction. A malformed value must not
         // leave earlier fields committed while a later field fails to encode.
         let permission_settings = update
@@ -287,6 +321,22 @@ impl Database {
         // distinction that a single dynamic UPDATE would lose. They share a
         // transaction so a failed patch is all-or-nothing.
         let mut tx = self.pool.begin().await?;
+        if invalidate_authorization {
+            // Session grants describe one exact model/workspace/policy/tool context.
+            // A mutation of that context invalidates both durable grants and
+            // approvals that may still be open in another client window.
+            sqlx::query("DELETE FROM agent_grants WHERE session_id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "UPDATE agent_approvals SET status = 'expired' \
+                 WHERE session_id = ? AND status IN ('pending', 'approved')",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
         if let Some(title) = update.title {
             sqlx::query("UPDATE agent_sessions SET title = ? WHERE id = ?")
                 .bind(title)
@@ -1147,6 +1197,90 @@ mod tests {
         assert_eq!(decided.scope, Some(ApprovalScope::Session));
         let grants = db.session_grants(&session.id).await.expect("grants");
         assert_eq!(grants, vec!["sandbox:run:cargo".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn changing_the_session_authorization_context_revokes_grants_and_pending_approvals() {
+        let (_dir, db) = database().await;
+        let session = db
+            .create_agent_session(session_request(Some("/ws")))
+            .await
+            .unwrap();
+        let granted = db
+            .create_approval(new_approval(&session.id, true))
+            .await
+            .unwrap();
+        db.decide_approval(
+            &granted.id,
+            true,
+            Some(ApprovalScope::Session),
+            None,
+            Some("owner"),
+        )
+        .await
+        .unwrap();
+        let pending = db
+            .create_approval(new_approval(&session.id, true))
+            .await
+            .unwrap();
+
+        db.update_agent_session(
+            &session.id,
+            UpdateAgentSession {
+                workspace_path: Some(Some("/different".to_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(db.session_grants(&session.id).await.unwrap().is_empty());
+        assert_eq!(
+            db.approval(&granted.id).await.unwrap().status,
+            ApprovalStatus::Expired
+        );
+        assert_eq!(
+            db.approval(&pending.id).await.unwrap().status,
+            ApprovalStatus::Expired
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_the_session_model_revokes_grants() {
+        let (_dir, db) = database().await;
+        let session = db
+            .create_agent_session(session_request(Some("/ws")))
+            .await
+            .unwrap();
+        let approval = db
+            .create_approval(new_approval(&session.id, true))
+            .await
+            .unwrap();
+        db.decide_approval(
+            &approval.id,
+            true,
+            Some(ApprovalScope::Session),
+            None,
+            Some("owner"),
+        )
+        .await
+        .unwrap();
+
+        db.update_agent_session(
+            &session.id,
+            UpdateAgentSession {
+                model: Some("different-model".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(db.session_grants(&session.id).await.unwrap().is_empty());
+        assert_eq!(
+            db.approval(&approval.id).await.unwrap().status,
+            ApprovalStatus::Expired
+        );
     }
 
     #[tokio::test]

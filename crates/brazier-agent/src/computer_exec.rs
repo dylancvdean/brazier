@@ -308,6 +308,23 @@ impl ComputerBroker {
         permission_mode: ComputerPermissionMode,
         viewport: Option<ComputerViewport>,
     ) -> Result<ComputerSession> {
+        self.create_session_owned(title, target, model_id, permission_mode, viewport, "owner")
+            .await
+    }
+
+    pub async fn create_session_owned(
+        &self,
+        title: Option<String>,
+        target: ComputerTarget,
+        model_id: Option<String>,
+        permission_mode: ComputerPermissionMode,
+        viewport: Option<ComputerViewport>,
+        owner_client_id: &str,
+    ) -> Result<ComputerSession> {
+        anyhow::ensure!(
+            !owner_client_id.trim().is_empty(),
+            "computer session owner is required"
+        );
         let viewport = viewport.unwrap_or_default();
         let browser_id = if target == ComputerTarget::Browser {
             Some(self.browsers.open(viewport.clone()).await?)
@@ -325,6 +342,7 @@ impl ComputerBroker {
         let id = Uuid::new_v4().to_string();
         let record = ComputerSession {
             id: id.clone(),
+            owner_client_id: owner_client_id.to_owned(),
             title: title.unwrap_or_else(|| "Computer task".into()),
             target,
             model_id,
@@ -835,6 +853,16 @@ impl ComputerBroker {
         self.approvals_changed.notify_waiters();
         Ok(Some(result))
     }
+
+    pub async fn approval_session_id(&self, approval_id: &str) -> Result<String> {
+        self.sessions
+            .lock()
+            .await
+            .values()
+            .find_map(|session| session.pending.get(approval_id))
+            .map(|approval| approval.session_id.clone())
+            .context("unknown approval")
+    }
     pub async fn screenshot(&self, session_id: &str) -> Result<ComputerActionResult> {
         self.execute(ComputerExecRequest {
             session_id: session_id.into(),
@@ -1040,12 +1068,13 @@ mod tests {
             .await
             .unwrap();
         let session = broker
-            .create_session(
+            .create_session_owned(
                 None,
                 ComputerTarget::Desktop,
                 None,
                 ComputerPermissionMode::Ask,
                 None,
+                "paired-client-42",
             )
             .await
             .unwrap();
@@ -1087,6 +1116,7 @@ mod tests {
         .await
         .unwrap();
         let restored_session = restored.get_session(&session.id).await.unwrap();
+        assert_eq!(restored_session.owner_client_id, "paired-client-42");
         assert!(!restored_session.running);
         assert_eq!(restored_session.memories, vec!["persist me"]);
         assert_eq!(restored.list_steps(&session.id).await.unwrap().len(), 1);

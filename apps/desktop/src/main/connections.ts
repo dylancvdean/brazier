@@ -132,7 +132,11 @@ type StoredConnectionProfiles = {
 }
 
 export type ConnectionProfileManagerDependencies = {
-  startLocal: () => Promise<{ address: string; api_key: string | null }>
+  startLocal: () => Promise<{
+    address: string
+    api_key: string | null
+    local_control_key?: string | null
+  }>
   stopLocal: () => void
   fetch?: typeof fetch
   handshakeTimeoutMs?: number
@@ -222,7 +226,9 @@ function privateNetworkHostname(hostname: string): boolean {
   if (host === 'localhost' || host.endsWith('.localhost')) return true
   if (isIP(host) === 4) return privateIpv4(host)
   if (isIP(host) === 6) return privateIpv6(host)
-  return !host.includes('.') || host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.home.arpa')
+  // DNS names can be rebound or later resolve publicly. Plaintext credentials
+  // are therefore limited to address literals and the special localhost name.
+  return false
 }
 
 /** Pairing over plaintext is limited to hosts that are explicitly private. */
@@ -248,12 +254,16 @@ function normalizeRemoteProfile(
   if (!validStoredId(id)) {
     throw new Error('Connection profile id is invalid or reserved.')
   }
+  const apiKey = normalizeApiKey(input.apiKey)
+  const baseUrl = apiKey
+    ? normalizePairingDaemonBaseUrl(input.baseUrl)
+    : normalizeDaemonBaseUrl(input.baseUrl)
   return {
     id,
     name: cleanName(input.name),
     kind: 'remote',
-    baseUrl: normalizeDaemonBaseUrl(input.baseUrl),
-    apiKey: normalizeApiKey(input.apiKey)
+    baseUrl,
+    apiKey
   }
 }
 
@@ -456,6 +466,41 @@ function errorForStatus(status: number): Error {
   return new Error(`The daemon handshake failed with status ${status}.`)
 }
 
+const MAX_HANDSHAKE_RESPONSE_BYTES = 1024 * 1024
+
+async function boundedJson(response: Response): Promise<Record<string, unknown> | null> {
+  const declared = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > MAX_HANDSHAKE_RESPONSE_BYTES) {
+    throw new Error('The daemon response is too large.')
+  }
+  if (!response.body) return null
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let length = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    length += value.byteLength
+    if (length > MAX_HANDSHAKE_RESPONSE_BYTES) {
+      await reader.cancel()
+      throw new Error('The daemon response is too large.')
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(length)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  try {
+    const value: unknown = JSON.parse(new TextDecoder().decode(bytes))
+    return typeof value === 'object' && value !== null ? value as Record<string, unknown> : null
+  } catch {
+    return null
+  }
+}
+
 function cleanPairingSecret(value: unknown, label: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${label} is required.`)
   const secret = value.trim()
@@ -512,6 +557,7 @@ export async function claimPairingCredential(
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
         body: JSON.stringify({ code: pairingCode }),
+        redirect: 'manual',
         signal: controller.signal
       })
     } catch (cause) {
@@ -526,7 +572,7 @@ export async function claimPairingCredential(
       }
       throw new Error(`The pairing request failed with status ${response.status}.`)
     }
-    const value = (await response.json().catch(() => null)) as Record<string, unknown> | null
+    const value = await boundedJson(response)
     const client = pairedClient(value?.client)
     const apiKey = typeof value?.api_key === 'string' ? value.api_key.trim() : ''
     if (!client || !apiKey || apiKey.length > 4_096) {
@@ -556,6 +602,7 @@ export async function fetchDaemonInfo(
       response = await fetch_(`${address}/api/v1/daemon/info`, {
         method: 'GET',
         headers,
+        redirect: 'manual',
         signal: controller.signal
       })
     } catch (cause) {
@@ -567,7 +614,7 @@ export async function fetchDaemonInfo(
       )
     }
     if (!response.ok) throw errorForStatus(response.status)
-    const value = (await response.json().catch(() => null)) as Record<string, unknown> | null
+    const value = await boundedJson(response)
     const management =
       value && typeof value.management_api === 'object' && value.management_api !== null
         ? (value.management_api as Record<string, unknown>)
@@ -630,8 +677,13 @@ export function viewConnectionProfile(profile: ConnectionProfile): ConnectionPro
  */
 export class ConnectionProfileManager {
   private activeConnection?: Promise<DaemonConnection>
-  private localConnection?: Promise<{ address: string; api_key: string | null }>
+  private localConnection?: Promise<{
+    address: string
+    api_key: string | null
+    local_control_key?: string | null
+  }>
   private resolvedLocalAddress?: string
+  private resolvedLocalControlKey?: string
   private localStarted = false
 
   constructor(
@@ -744,6 +796,7 @@ export class ConnectionProfileManager {
     this.localStarted = false
     this.localConnection = undefined
     this.resolvedLocalAddress = undefined
+    this.resolvedLocalControlKey = undefined
     this.activeConnection = undefined
   }
 
@@ -782,6 +835,21 @@ export class ConnectionProfileManager {
     return ready.api_key
   }
 
+  /** Return the independent local elevation credential only to the request interceptor. */
+  async rendererLocalControlKeyForUrl(value: string): Promise<string | null> {
+    let url: URL
+    try {
+      url = new URL(value)
+    } catch {
+      return null
+    }
+    await this.connection()
+    if (!this.resolvedLocalAddress || !sameEndpoint(url, new URL(this.resolvedLocalAddress))) {
+      return null
+    }
+    return this.resolvedLocalControlKey ?? null
+  }
+
   private async resolve(profile: ConnectionProfile): Promise<DaemonConnection> {
     const raw = profile.kind === 'local' ? await this.resolveLocal() : {
       address: profile.baseUrl,
@@ -811,19 +879,25 @@ export class ConnectionProfileManager {
     )
   }
 
-  private async resolveLocal(): Promise<{ address: string; api_key: string | null }> {
+  private async resolveLocal(): Promise<{
+    address: string
+    api_key: string | null
+    local_control_key?: string | null
+  }> {
     if (!this.localConnection) {
       this.localStarted = true
       this.localConnection = this.dependencies
         .startLocal()
         .then((connection) => {
           this.resolvedLocalAddress = normalizeDaemonBaseUrl(connection.address)
+          this.resolvedLocalControlKey = connection.local_control_key ?? undefined
           return connection
         })
         .catch((error: unknown) => {
           this.localStarted = false
           this.localConnection = undefined
           this.resolvedLocalAddress = undefined
+          this.resolvedLocalControlKey = undefined
           throw error
         })
     }

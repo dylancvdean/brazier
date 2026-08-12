@@ -368,6 +368,10 @@ pub struct OsPermissionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputerSession {
     pub id: String,
+    /// Server-side authorization principal, persisted with the session so its
+    /// ownership cannot change across a daemon restart.
+    #[serde(default = "default_computer_session_owner")]
+    pub owner_client_id: String,
     pub title: String,
     pub target: ComputerTarget,
     pub model_id: Option<String>,
@@ -383,6 +387,10 @@ pub struct ComputerSession {
     pub running: bool,
     #[serde(default)]
     pub memories: Vec<String>,
+}
+
+fn default_computer_session_owner() -> String {
+    "owner".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

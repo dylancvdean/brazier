@@ -898,6 +898,7 @@ mod tests {
     fn session(mode: AgentPermissionMode) -> AgentSessionRecord {
         AgentSessionRecord {
             id: "s1".to_owned(),
+            owner_client_id: "owner".to_owned(),
             title: "task".to_owned(),
             workspace_path: Some("/ws".to_owned()),
             model: "gguf:test".to_owned(),
