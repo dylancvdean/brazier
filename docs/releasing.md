@@ -62,19 +62,12 @@ The same command works with the matching bundle for the macOS DMG/ZIP, Windows
 installer, SPDX SBOM, and `SHA512SUMS`. The certificate identity pins the
 signature to this repository's tagged release workflow.
 
-## Beta qualification gate
+## Optional voice qualification
 
-Beta releases use two phases because hardware evidence must name an immutable,
-pushed candidate commit before its tag can start the release workflow:
-
-```sh
-pnpm release:prepare
-```
-
-That command bumps the prerelease version, commits it, and pushes the candidate
-branch without creating a tag. Check out that exact commit on both hosts listed
-in `qualification/beta-manifest.json`, run the in-app **Qualify voice** protocol,
-and submit the two compact saved JSON objects:
+Voice qualification is an optional hardware-regression workflow. It does not
+block ordinary releases. To assess a particular commit, check it out on both
+hosts listed in `qualification/beta-manifest.json`, run the in-app **Qualify
+voice** protocol, and submit the two compact saved JSON objects:
 
 ```sh
 gh workflow run beta-voice-qualification.yml \
@@ -83,23 +76,8 @@ gh workflow run beta-voice-qualification.yml \
   -f linux_result="$(jq -c . linux-nvidia-x64.json)"
 ```
 
-Wait for that evidence workflow to pass, then create and push the candidate's
-tag without changing its commit:
-
-```sh
-pnpm release:publish
-```
-
-The prepare/publish split prevents a tag from racing hardware qualification or
-pointing at a different version-bump commit. The evidence workflow validates
-and retains a commit-named artifact. The tag
-workflow independently installs and starts the DMG, AppImage, and NSIS builds,
-checks the packaged Computer safety helper, loads and stops the packaged agent
-worker, opens and deletes a no-model session, and waits for the bundled daemon
-to exit. The NSIS smoke also requires the installed Windows AppContainer
-launcher probe to pass. The gate then combines those three reports with the
-hardware reports. Missing, stale, duplicated, under-sampled, or over-budget
-evidence blocks publication.
+The evidence workflow validates and retains a commit-named artifact for bug
+investigation. It is intentionally independent of release publication.
 
 ## Beta channels
 

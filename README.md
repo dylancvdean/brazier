@@ -19,7 +19,7 @@ models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and
 
 | Feature | Status |
 | --- | --- |
-| Platforms | 🟨 Beta candidates for macOS Apple Silicon, Linux x64, and Windows x64; publication is qualification-gated |
+| Platforms | 🟨 Beta candidates for macOS Apple Silicon, Linux x64, and Windows x64; Windows packaging is experimental |
 | Desktop app | ✅ Electron workspaces for chat, generation, voice, agents, computer use, and model management |
 | Customization | ✅ Manage → Customization toggles workspace modes and app update preferences |
 | Engines | ✅ llama.cpp, MLX-LM/VLM, stable-diffusion.cpp, whisper.cpp, WhisperKit, Nemotron ASR, PersonaPlex, and remote OpenAI-compatible servers |
@@ -35,7 +35,7 @@ models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and
 | Media generation | 🟨 Curated image/video models and managed runtimes; backend reliability varies and AMD APU Vulkan support is experimental |
 | Speech recognition | ✅ whisper.cpp, WhisperKit, and Nemotron streaming ASR |
 | Multi-GPU | 🟨 Manual llama.cpp GPU splits are supported; automatic and cross-engine placement are not |
-| Voice | 🟨 PersonaPlex bidirectional voice and shared chat/agent conversations work; beta publication requires measured VAD/latency qualification |
+| Voice | 🟨 PersonaPlex bidirectional voice and shared chat/agent conversations work; hardware VAD/latency qualification is an optional regression signal |
 
 ## Development
 

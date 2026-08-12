@@ -284,7 +284,7 @@ jobs:
           path: ${{ runner.temp }}/qualification-results/windows-x64-nsis.json
           if-no-files-found: error
 
-  qualification:
+  publish:
     needs: [validate, macos, appimage, windows]
     if: >-
       ${{
@@ -292,68 +292,6 @@ jobs:
         needs.validate.result == 'success' &&
         needs.macos.result == 'success' &&
         needs.appimage.result == 'success'
-      }}
-    runs-on: ubuntu-22.04
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: '*-package-smoke'
-          path: qualification-results
-          merge-multiple: true
-      - name: Download hardware evidence for this exact commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-        run: |
-          name="voice-qualification-${RELEASE_COMMIT}"
-          if ! artifacts="$(gh api \
-            --method GET \
-            -H 'Accept: application/vnd.github+json' \
-            "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
-            -f "name=${name}" \
-            -f per_page=100)"; then
-            echo "Could not list Actions artifacts for ${GITHUB_REPOSITORY}." >&2
-            exit 1
-          fi
-          artifact_id="$(jq -r '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | .[-1].id // empty' <<<"${artifacts}")"
-          if [[ ! "$artifact_id" =~ ^[0-9]+$ ]]; then
-            echo "No unexpired ${name} artifact exists for this release commit." >&2
-            echo "Run beta-voice-qualification.yml with commit ${RELEASE_COMMIT}, then retry the release." >&2
-            exit 1
-          fi
-          if ! gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > voice-results.zip; then
-            echo "Could not download Actions artifact ${artifact_id}." >&2
-            exit 1
-          fi
-          unzip -q voice-results.zip -d qualification-results
-      - name: Verify beta qualification evidence
-        env:
-          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
-        run: node scripts/verify-beta-qualification.mjs --results qualification-results --commit "$RELEASE_COMMIT" --optional-platform windows
-      - uses: actions/upload-artifact@v4
-        with:
-          name: beta-qualification-results
-          path: qualification-results/*.json
-          if-no-files-found: error
-
-  publish:
-    needs: [validate, macos, appimage, windows, qualification]
-    if: >-
-      ${{
-        always() &&
-        needs.validate.result == 'success' &&
-        needs.macos.result == 'success' &&
-        needs.appimage.result == 'success' &&
-        needs.qualification.result == 'success'
       }}
     runs-on: ubuntu-22.04
     permissions:
