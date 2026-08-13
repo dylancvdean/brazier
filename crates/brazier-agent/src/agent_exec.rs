@@ -4524,7 +4524,7 @@ startxref
             .call(
                 "shell_run",
                 json!({
-                    "command": "test \"$(pwd)\" = /tmp/brazier-workspace && test \"$(cat pinned.txt)\" = pinned && printf pinned-mount-ok",
+                    "command": "actual_pwd=$(pwd); actual_file=$(cat pinned.txt); printf 'pwd=<%s> file=<%s>\\n' \"$actual_pwd\" \"$actual_file\"; test \"$actual_pwd\" = /tmp/brazier-workspace && test \"$actual_file\" = pinned && printf pinned-mount-ok",
                     "network": true
                 }),
             )
