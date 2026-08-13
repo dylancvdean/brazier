@@ -2226,17 +2226,20 @@ async fn build_command(
         }
     };
     #[cfg(unix)]
+    let mut wrapped = wrapped;
+    #[cfg(unix)]
     let pinned_directories: Vec<std::os::fd::OwnedFd> = {
         use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
-        wrapped
+        let pinned_directories: Vec<std::os::fd::OwnedFd> = wrapped
             .pinned_directories
             .iter()
             .map(|path| {
                 let directory = unix_open_file(path, libc::O_RDONLY | libc::O_DIRECTORY, false)?;
-                // Duplicate before fork so the pre-exec hook only invokes
-                // async-signal-safe libc calls. High descriptors cannot
-                // collide with stdio or the fixed Bubblewrap descriptors.
+                // Duplicate before fork so the pre-exec hook only invokes an
+                // async-signal-safe fcntl. Keep the descriptor close-on-exec
+                // until that specific child is ready to exec, preventing a
+                // concurrent child from inheriting an approved directory.
                 let descriptor =
                     unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
                 if descriptor < 0 {
@@ -2244,7 +2247,15 @@ async fn build_command(
                 }
                 Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor) })
             })
-            .collect::<std::io::Result<_>>()?
+            .collect::<std::io::Result<_>>()?;
+        let descriptors = pinned_directories
+            .iter()
+            .map(|descriptor| descriptor.as_raw_fd())
+            .collect::<Vec<_>>();
+        if !descriptors.is_empty() {
+            replace_pinned_descriptor_arguments(&mut wrapped.args, &descriptors)?;
+        }
+        pinned_directories
     };
     let launch_cwd = if plan.environment == AgentEnvironment::Sandbox {
         Path::new("/")
@@ -2266,8 +2277,8 @@ async fn build_command(
         use std::os::fd::AsRawFd as _;
         unsafe {
             command.pre_exec(move || {
-                for (index, descriptor) in pinned_directories.iter().enumerate() {
-                    if libc::dup2(descriptor.as_raw_fd(), 3 + index as i32) < 0 {
+                for descriptor in &pinned_directories {
+                    if libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, 0) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                 }
@@ -2276,6 +2287,44 @@ async fn build_command(
         }
     }
     Ok((command, wrapped.description))
+}
+
+#[cfg(unix)]
+fn replace_pinned_descriptor_arguments(
+    args: &mut [std::ffi::OsString],
+    descriptors: &[std::os::fd::RawFd],
+) -> anyhow::Result<()> {
+    let mut replaced = vec![false; descriptors.len()];
+    for index in 1..args.len() {
+        let Some(option) = args[index - 1].to_str() else {
+            continue;
+        };
+        if option != "--bind-fd" && option != "--ro-bind-fd" {
+            continue;
+        }
+        let placeholder = args[index]
+            .to_str()
+            .context("Bubblewrap descriptor placeholder is not UTF-8")?
+            .parse::<usize>()
+            .context("Bubblewrap descriptor placeholder is not a number")?;
+        let pinned_index = placeholder
+            .checked_sub(3)
+            .context("Bubblewrap descriptor placeholder is below 3")?;
+        let descriptor = descriptors
+            .get(pinned_index)
+            .with_context(|| format!("unknown Bubblewrap descriptor placeholder {placeholder}"))?;
+        anyhow::ensure!(
+            !replaced[pinned_index],
+            "duplicate Bubblewrap descriptor placeholder {placeholder}"
+        );
+        args[index] = std::ffi::OsString::from(descriptor.to_string());
+        replaced[pinned_index] = true;
+    }
+    anyhow::ensure!(
+        replaced.iter().all(|was_replaced| *was_replaced),
+        "Bubblewrap command did not bind every pinned directory"
+    );
+    Ok(())
 }
 
 async fn shell_run(
@@ -3663,6 +3712,29 @@ mod tests {
     use brazier_storage::db::Database;
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_directory_placeholders_use_actual_high_descriptors() {
+        let mut args = vec![
+            "--bind-fd".into(),
+            "4".into(),
+            "/tmp/brazier-scratch".into(),
+            "--ro-bind-fd".into(),
+            "3".into(),
+            "/tmp/brazier-workspace".into(),
+            "--".into(),
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf 3".into(),
+        ];
+
+        replace_pinned_descriptor_arguments(&mut args, &[64, 81]).expect("replace descriptors");
+
+        assert_eq!(args[1], "81");
+        assert_eq!(args[4], "64");
+        assert_eq!(args[9], "printf 3");
+    }
 
     #[cfg(windows)]
     #[test]

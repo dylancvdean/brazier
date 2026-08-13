@@ -140,9 +140,11 @@ pub struct WrappedCommand {
     pub args: Vec<OsString>,
     pub env: BTreeMap<String, String>,
     pub description: SandboxDescription,
-    /// Directories the launcher must pin and place at consecutive descriptors
-    /// starting at 3 before exec. Bubblewrap mounts those open descriptors
-    /// directly, so a path rename cannot change the approved root.
+    /// Directories the launcher must pin. Bubblewrap arguments use consecutive
+    /// descriptor placeholders starting at 3; the launcher replaces them with
+    /// the actual inherited descriptor numbers before spawning the command.
+    /// Bubblewrap mounts those open descriptors directly, so a path rename
+    /// cannot change the approved root.
     pub pinned_directories: Vec<PathBuf>,
 }
 
@@ -729,8 +731,10 @@ fn bubblewrap_fd_probe(bwrap: &Path, extra: &[&str]) -> bool {
     let Ok(directory) = std::fs::File::open("/") else {
         return false;
     };
-    // Duplicate before fork so the pre-exec hook only invokes async-signal-safe
-    // libc calls. A high descriptor also cannot collide with stdio setup.
+    // Use the real high descriptor in the Bubblewrap argument rather than
+    // remapping it onto fd 3, where it can collide with child-process plumbing.
+    // Keep it close-on-exec until this specific child is ready to exec so a
+    // concurrently spawned child cannot inherit the directory.
     let descriptor = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
     if descriptor < 0 {
         return false;
@@ -752,16 +756,14 @@ fn bubblewrap_fd_probe(bwrap: &Path, extra: &[&str]) -> bool {
             "--dir",
             "/tmp/brazier-fd-probe",
             "--ro-bind-fd",
-            "3",
-            "/tmp/brazier-fd-probe",
-            "--",
-            "true",
         ])
+        .arg(descriptor.as_raw_fd().to_string())
+        .args(["/tmp/brazier-fd-probe", "--", "true"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     unsafe {
         command.pre_exec(move || {
-            if libc::dup2(descriptor.as_raw_fd(), 3) < 0 {
+            if libc::fcntl(descriptor.as_raw_fd(), libc::F_SETFD, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
