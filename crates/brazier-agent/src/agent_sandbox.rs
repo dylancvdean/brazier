@@ -141,8 +141,8 @@ pub struct WrappedCommand {
     pub env: BTreeMap<String, String>,
     pub description: SandboxDescription,
     /// Directories the launcher must pin and place at consecutive descriptors
-    /// starting at 3 before exec. Bubblewrap resolves and mounts those proc-fd
-    /// paths during setup, so a path rename cannot change the approved root.
+    /// starting at 3 before exec. Bubblewrap mounts those open descriptors
+    /// directly, so a path rename cannot change the approved root.
     pub pinned_directories: Vec<PathBuf>,
 }
 
@@ -239,10 +239,17 @@ impl SandboxBackend {
         }
         if cfg!(target_os = "linux") {
             if let Some(program) = which("bwrap") {
+                if !bubblewrap_supports_secure_fd_binds(&program) {
+                    return Self::unavailable(
+                        "Bubblewrap is installed but lacks secure pinned-directory mounts \
+                         (`--bind-fd` and `--ro-bind-fd`). Upgrade to Bubblewrap 0.10 or newer, \
+                         Bubblewrap 0.6.3, or a distribution build with the secure-FD backport.",
+                    );
+                }
                 if !bubblewrap_is_usable(&program) {
                     return Self::unavailable(
-                        "Bubblewrap is installed but cannot create a user namespace on this host \
-                         (uid map denied). Agent shell commands will not be sandboxed.",
+                        "Bubblewrap is installed but the secure pinned-directory sandbox probe \
+                         failed on this host. Agent shell commands will not be sandboxed.",
                     );
                 }
                 let unshare_net = bubblewrap_supports_unshare_net(&program);
@@ -687,18 +694,88 @@ pub fn seatbelt_profile(request: &SandboxRequest<'_>) -> String {
     profile
 }
 
-fn bubblewrap_probe(bwrap: &Path, extra: &[&str]) -> bool {
+/// Secure workspace pinning requires Bubblewrap's native descriptor mount
+/// options. Older versions close or reuse inherited descriptors while
+/// resolving `/proc/self/fd/*`, which can mount the wrong directory or make
+/// every command fail after the startup probe claimed the backend was usable.
+fn bubblewrap_supports_secure_fd_binds(bwrap: &Path) -> bool {
+    let Ok(output) = std::process::Command::new(bwrap).arg("--help").output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    [stdout.as_ref(), stderr.as_ref()]
+        .iter()
+        .any(|help| bubblewrap_help_supports_secure_fd_binds(help))
+}
+
+fn bubblewrap_help_supports_secure_fd_binds(help: &str) -> bool {
+    help.contains("--bind-fd") && help.contains("--ro-bind-fd")
+}
+
+/// Exercise the same open-directory mount primitive used for real commands.
+/// Merely checking `--help` would let a broken or policy-blocked installation
+/// advertise isolation it cannot actually apply.
+#[cfg(unix)]
+fn bubblewrap_fd_probe(bwrap: &Path, extra: &[&str]) -> bool {
+    use std::os::{
+        fd::{AsRawFd as _, FromRawFd as _, OwnedFd},
+        unix::process::CommandExt as _,
+    };
+
+    let Ok(directory) = std::fs::File::open("/") else {
+        return false;
+    };
+    // Duplicate before fork so the pre-exec hook only invokes async-signal-safe
+    // libc calls. A high descriptor also cannot collide with stdio setup.
+    let descriptor = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
+    if descriptor < 0 {
+        return false;
+    }
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+
     let mut command = std::process::Command::new(bwrap);
     command
         .arg("--die-with-parent")
         .args(extra)
-        .args(["--ro-bind", "/", "/", "--dev", "/dev", "--", "true"])
+        .args([
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--dir",
+            "/tmp/brazier-fd-probe",
+            "--ro-bind-fd",
+            "3",
+            "/tmp/brazier-fd-probe",
+            "--",
+            "true",
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(descriptor.as_raw_fd(), 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     command
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn bubblewrap_fd_probe(_bwrap: &Path, _extra: &[&str]) -> bool {
+    false
 }
 
 /// Probe whether this process can create a nested Seatbelt sandbox. Merely
@@ -722,12 +799,12 @@ fn seatbelt_is_usable(sandbox_exec: &Path) -> bool {
 
 /// Probe whether Bubblewrap can enter a user namespace on this host at all.
 fn bubblewrap_is_usable(bwrap: &Path) -> bool {
-    bubblewrap_probe(bwrap, &[])
+    bubblewrap_fd_probe(bwrap, &[])
 }
 
 /// Probe whether Bubblewrap can create a network namespace on this host.
 fn bubblewrap_supports_unshare_net(bwrap: &Path) -> bool {
-    bubblewrap_probe(bwrap, &["--unshare-net"])
+    bubblewrap_fd_probe(bwrap, &["--unshare-net"])
 }
 
 /// Generate Bubblewrap arguments. Workspaces are rejected when they overlap a
@@ -778,17 +855,17 @@ pub fn bubblewrap_args(request: &SandboxRequest<'_>, unshare_net: bool) -> Vec<S
         "/tmp/brazier-workspace".into(),
         "--dir".into(),
         "/tmp/brazier-scratch".into(),
-        "--bind".into(),
-        "/proc/self/fd/4".into(),
+        "--bind-fd".into(),
+        "4".into(),
         "/tmp/brazier-scratch".into(),
     ]);
 
     if request.profile.allows_workspace_writes() {
-        args.push("--bind".into());
+        args.push("--bind-fd".into());
     } else {
-        args.push("--ro-bind".into());
+        args.push("--ro-bind-fd".into());
     }
-    args.push("/proc/self/fd/3".into());
+    args.push("3".into());
     args.push("/tmp/brazier-workspace".into());
 
     if !request.profile.allows_network() && unshare_net {
@@ -845,6 +922,19 @@ mod tests {
         assert!(!is_secret_env("PATH"));
         assert!(!is_secret_env("HOME"));
         assert!(!is_secret_env("CARGO_HOME"));
+    }
+
+    #[test]
+    fn bubblewrap_requires_both_secure_fd_bind_options() {
+        assert!(bubblewrap_help_supports_secure_fd_binds(
+            "--bind-fd FD DEST\n--ro-bind-fd FD DEST\n"
+        ));
+        assert!(!bubblewrap_help_supports_secure_fd_binds(
+            "--bind SRC DEST\n--ro-bind SRC DEST\n"
+        ));
+        assert!(!bubblewrap_help_supports_secure_fd_binds(
+            "--bind-fd FD DEST\n"
+        ));
     }
 
     #[test]
@@ -1006,7 +1096,7 @@ mod tests {
         assert!(joined.contains("--tmpfs /var/lib/brazier"));
         let data_tmpfs = joined.find("--tmpfs /var/lib/brazier").expect("data tmpfs");
         let scratch_bind = joined
-            .find("--bind /proc/self/fd/4 /tmp/brazier-scratch")
+            .find("--bind-fd 4 /tmp/brazier-scratch")
             .expect("scratch bind");
         assert!(
             scratch_bind > data_tmpfs,
@@ -1038,14 +1128,12 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.contains("--ro-bind / /"));
         assert!(joined.contains("--unshare-net"));
-        assert!(joined.contains("--bind /proc/self/fd/3 /tmp/brazier-workspace"));
+        assert!(joined.contains("--bind-fd 3 /tmp/brazier-workspace"));
         assert!(joined.contains("--tmpfs /run"));
         if let Some(home) = home_directory() {
             let tmpfs_home = format!("--tmpfs {}", home.display());
             let home_index = joined.find(&tmpfs_home).expect("home tmpfs");
-            let bind_index = joined
-                .find("--bind /proc/self/fd/3")
-                .expect("workspace bind");
+            let bind_index = joined.find("--bind-fd 3").expect("workspace bind");
             assert!(
                 bind_index > home_index,
                 "workspace must survive the home tmpfs"
@@ -1069,7 +1157,7 @@ mod tests {
             true,
         );
         let joined = args.join(" ");
-        assert!(joined.contains("--ro-bind /proc/self/fd/3 /tmp/brazier-workspace"));
+        assert!(joined.contains("--ro-bind-fd 3 /tmp/brazier-workspace"));
     }
 
     #[test]

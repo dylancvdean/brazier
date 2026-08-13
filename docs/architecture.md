@@ -364,18 +364,20 @@ attempt is recorded.
 ### Sandbox
 
 Sandboxing is per platform and reported honestly. macOS uses Seatbelt
-(`sandbox-exec`) with a generated profile; Linux uses Bubblewrap (`bwrap`) with a
-read-only root, a tmpfs over `$HOME`, and the workspace bound back in. Writes are
-confined to the workspace and a per-session scratch directory, which is also the
-only `TMPDIR` a tool sees — `/tmp` itself is not writable, so a tool that
-hardcodes it fails visibly instead of escaping. Network access is off unless the
-profile grants it.
+(`sandbox-exec`) with a generated profile; Linux uses Bubblewrap (`bwrap`) 0.10+
+(or a distribution build with the 0.6.3 secure-FD backport) with a read-only
+root, a tmpfs over `$HOME`, and the workspace bound back from an open directory
+descriptor. Writes are confined to the workspace and a per-session scratch
+directory, which is also the only `TMPDIR` a tool sees — `/tmp` itself is not
+writable, so a tool that hardcodes it fails visibly instead of escaping. Network
+access is off unless the profile grants it.
 
-Where no backend exists (Windows today, or Linux without `bwrap`), the daemon
-reports `backend: "none"`, `isolated: false`, and the UI says "No sandbox"
-verbatim. Running a program is then treated as host execution: it is refused in
-`sandbox-only` mode and needs the host opt-in elsewhere. Nothing in the stack may
-claim isolation it did not apply.
+Where no backend exists or its startup probe fails (including Linux with an old
+Bubblewrap), the daemon reports `backend: "none"`, `isolated: false`, and the UI
+says "No sandbox" verbatim. Running a program is then treated as host execution:
+it is refused in `sandbox-only` mode and needs the host opt-in elsewhere. Nothing
+in the stack may claim isolation it did not apply. Detection occurs when the
+daemon starts, so installing or upgrading the backend requires a daemon restart.
 
 Filesystem tools run in the daemon rather than the sandbox, and enforce their own
 boundary: paths are normalized, then compared in canonical form so a symlink

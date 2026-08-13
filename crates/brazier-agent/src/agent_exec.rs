@@ -2226,11 +2226,26 @@ async fn build_command(
         }
     };
     #[cfg(unix)]
-    let pinned_directories: Vec<std::fs::File> = wrapped
-        .pinned_directories
-        .iter()
-        .map(|path| unix_open_file(path, libc::O_RDONLY | libc::O_DIRECTORY, false))
-        .collect::<std::io::Result<_>>()?;
+    let pinned_directories: Vec<std::os::fd::OwnedFd> = {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+        wrapped
+            .pinned_directories
+            .iter()
+            .map(|path| {
+                let directory = unix_open_file(path, libc::O_RDONLY | libc::O_DIRECTORY, false)?;
+                // Duplicate before fork so the pre-exec hook only invokes
+                // async-signal-safe libc calls. High descriptors cannot
+                // collide with stdio or the fixed Bubblewrap descriptors.
+                let descriptor =
+                    unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
+                if descriptor < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor) })
+            })
+            .collect::<std::io::Result<_>>()?
+    };
     let launch_cwd = if plan.environment == AgentEnvironment::Sandbox {
         Path::new("/")
     } else {
@@ -2251,21 +2266,10 @@ async fn build_command(
         use std::os::fd::AsRawFd as _;
         unsafe {
             command.pre_exec(move || {
-                let mut temporary = Vec::with_capacity(pinned_directories.len());
-                for file in &pinned_directories {
-                    let fd = libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64);
-                    if fd < 0 {
+                for (index, descriptor) in pinned_directories.iter().enumerate() {
+                    if libc::dup2(descriptor.as_raw_fd(), 3 + index as i32) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
-                    temporary.push(fd);
-                }
-                for (index, fd) in temporary.iter().copied().enumerate() {
-                    if libc::dup2(fd, 3 + index as i32) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-                for fd in temporary {
-                    libc::close(fd);
                 }
                 Ok(())
             });

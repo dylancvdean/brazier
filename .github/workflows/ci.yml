@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [master]
 
 permissions:
   contents: read
@@ -20,9 +20,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Agent sandbox tests need Bubblewrap and unprivileged user namespaces.
       # Ubuntu 24 GHA images restrict userns via AppArmor.
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
+      - uses: ./.github/actions/install-bubblewrap
+      - name: Enable and probe user namespaces
+        run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
           bwrap --ro-bind / / --dev /dev --die-with-parent -- true
