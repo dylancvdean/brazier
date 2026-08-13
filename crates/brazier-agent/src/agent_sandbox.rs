@@ -880,11 +880,12 @@ pub fn bubblewrap_args(request: &SandboxRequest<'_>, unshare_net: bool) -> Vec<S
 }
 
 fn sandbox_workspace_path(request: &SandboxRequest<'_>) -> PathBuf {
-    request
-        .cwd
-        .strip_prefix(request.workspace)
-        .map(|relative| Path::new("/tmp/brazier-workspace").join(relative))
-        .unwrap_or_else(|_| PathBuf::from("/tmp/brazier-workspace"))
+    let root = PathBuf::from("/tmp/brazier-workspace");
+    match request.cwd.strip_prefix(request.workspace) {
+        Ok(relative) if relative.as_os_str().is_empty() => root,
+        Ok(relative) => root.join(relative),
+        Err(_) => root,
+    }
 }
 
 #[cfg(test)]
@@ -912,6 +913,20 @@ mod tests {
             cwd: workspace,
             data_dir,
         }
+    }
+
+    #[test]
+    fn sandbox_workspace_root_has_no_trailing_separator() {
+        let request = request(
+            SandboxProfile::Workspace,
+            Path::new("/host/workspace"),
+            Path::new("/host/scratch"),
+        );
+
+        assert_eq!(
+            sandbox_workspace_path(&request).to_str(),
+            Some("/tmp/brazier-workspace")
+        );
     }
 
     #[test]
