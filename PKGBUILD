@@ -84,11 +84,18 @@ package() {
   cat > "${pkgdir}/usr/bin/${pkgname}" <<'EOF'
 #!/bin/sh
 export BRAZIER_INSTALLED=1
-# Brazier currently uses XWayland on Linux for a reliable Chromium render path.
-# Setting this before Electron starts makes `--class` apply to the actual
-# window, allowing Plasma to associate it with brazier.desktop.
-export ELECTRON_OZONE_PLATFORM_HINT=x11
-unset WAYLAND_DISPLAY
+# Prefer native Wayland. X11 software compositing on rootless XWayland
+# fails to paint. Override with ELECTRON_OZONE_PLATFORM_HINT=x11.
+if [ -z "${ELECTRON_OZONE_PLATFORM_HINT:-}" ]; then
+  if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    export ELECTRON_OZONE_PLATFORM_HINT=wayland
+  else
+    export ELECTRON_OZONE_PLATFORM_HINT=x11
+  fi
+fi
+if [ "${ELECTRON_OZONE_PLATFORM_HINT}" = "x11" ]; then
+  unset WAYLAND_DISPLAY
+fi
 exec /usr/bin/electron --class=brazier /usr/lib/brazier "$@"
 EOF
   chmod 755 "${pkgdir}/usr/bin/${pkgname}"

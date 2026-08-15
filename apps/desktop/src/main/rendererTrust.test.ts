@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   isRendererDevelopmentOrigin,
   isSafeExternalUrl,
-  isTrustedRendererUrl
+  isTrustedRendererUrl,
+  shouldCancelRendererNetworkRequest
 } from './rendererTrust'
 
 const packagedIndexPath = '/Applications/Brazier.app/Contents/Resources/app.asar/out/renderer/index.html'
@@ -50,6 +51,38 @@ describe('renderer trust boundary', () => {
     expect(isRendererDevelopmentOrigin('http://localhost:9999/', 'http://127.0.0.1:5173')).toBe(false)
     expect(isRendererDevelopmentOrigin('https://127.0.0.1:5173/', 'http://127.0.0.1:5173')).toBe(false)
     expect(isRendererDevelopmentOrigin('http://user:secret@127.0.0.1:5173/', 'http://127.0.0.1:5173')).toBe(false)
+  })
+
+  it('does not cancel the Vite shell document even when the profile guard would', () => {
+    const allows = (): boolean => false
+    expect(
+      shouldCancelRendererNetworkRequest(
+        { url: 'http://127.0.0.1:5173/', webContentsId: 1, resourceType: 'mainFrame' },
+        'http://127.0.0.1:5173',
+        allows
+      )
+    ).toBe(false)
+    expect(
+      shouldCancelRendererNetworkRequest(
+        { url: 'http://127.0.0.1:5173/src/main.tsx', webContentsId: 1, resourceType: 'script' },
+        'http://127.0.0.1:5173',
+        allows
+      )
+    ).toBe(false)
+    expect(
+      shouldCancelRendererNetworkRequest(
+        { url: 'http://127.0.0.1:9/private', webContentsId: 1, resourceType: 'xhr' },
+        'http://127.0.0.1:5173',
+        allows
+      )
+    ).toBe(true)
+    expect(
+      shouldCancelRendererNetworkRequest(
+        { url: 'http://127.0.0.1:9/private', resourceType: 'xhr' },
+        'http://127.0.0.1:5173',
+        allows
+      )
+    ).toBe(false)
   })
 
   it('opens only credential-free HTTPS links outside the app', () => {

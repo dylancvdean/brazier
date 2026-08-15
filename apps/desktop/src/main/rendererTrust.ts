@@ -79,6 +79,24 @@ export function isTrustedRendererUrl(
   return actual.host === expected.host
 }
 
+/**
+ * Main-frame documents are already constrained by will-navigate/will-redirect.
+ * This guard is the renderer's fetch/WebSocket boundary. Cancelling the shell
+ * document itself leaves a black window and ERR_BLOCKED_BY_CLIENT.
+ */
+export function shouldCancelRendererNetworkRequest(
+  details: { url: string; webContentsId?: number; resourceType?: string },
+  developmentOrigin: string | undefined,
+  allows: (url: string, developmentOrigin?: string) => boolean
+): boolean {
+  if (!details.webContentsId) return false
+  if (details.resourceType === 'mainFrame') return false
+  if (developmentOrigin && isRendererDevelopmentOrigin(details.url, developmentOrigin)) {
+    return false
+  }
+  return !allows(details.url, developmentOrigin)
+}
+
 export function isSafeExternalUrl(candidate: string): boolean {
   try {
     const url = new URL(candidate)

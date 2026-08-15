@@ -18,6 +18,7 @@ describe('wrapLinuxExecutable', () => {
     assert.equal(existsSync(join(directory, 'brazier.bin')), true)
     const script = readFileSync(binary, 'utf8')
     assert.equal(script, linuxLauncherScript('brazier'))
+    assert.match(script, /ELECTRON_OZONE_PLATFORM_HINT=wayland/)
     assert.match(script, /ELECTRON_OZONE_PLATFORM_HINT=x11/)
     assert.match(script, /unset WAYLAND_DISPLAY/)
     assert.match(script, /brazier\.bin/)

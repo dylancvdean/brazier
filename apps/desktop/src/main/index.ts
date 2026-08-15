@@ -27,7 +27,11 @@ import {
 } from './updates'
 import { runPackageSmoke, type PackageSmokeResult } from './packageSmoke'
 import { parseNvidiaSmiMemoryGib } from './qualificationHost'
-import { isSafeExternalUrl, isTrustedRendererUrl } from './rendererTrust'
+import {
+  isSafeExternalUrl,
+  isTrustedRendererUrl,
+  shouldCancelRendererNetworkRequest
+} from './rendererTrust'
 
 declare const __BRAZIER_BUILD_COMMIT__: string
 
@@ -103,13 +107,17 @@ app.setName('Brazier')
  * sandbox. A package whose sandbox helper is misconfigured must fail visibly
  * instead of silently running web content without isolation.
  * - disable-dev-shm-usage: avoid /dev/shm
- * - force X11 (XWayland) instead of Ozone/Wayland color-management path
+ * - native Wayland when the login session is Wayland: X11 software
+ *   compositing on rootless XWayland fails XGetWindowAttributes for
+ *   window 1 and never paints
  * - software compositing to avoid the crashing GPU process
  */
 if (process.platform === 'linux') {
-  // Prefer X11 even when WAYLAND_DISPLAY is set. Electron reads the env var.
   if (!process.env.ELECTRON_OZONE_PLATFORM_HINT) {
-    process.env.ELECTRON_OZONE_PLATFORM_HINT = 'x11'
+    process.env.ELECTRON_OZONE_PLATFORM_HINT =
+      process.env.XDG_SESSION_TYPE === 'wayland' || process.env.WAYLAND_DISPLAY
+        ? 'wayland'
+        : 'x11'
   }
   if (process.env.WAYLAND_DISPLAY && process.env.ELECTRON_OZONE_PLATFORM_HINT === 'x11') {
     // Keep DISPLAY (XWayland) but stop Chromium auto-selecting Wayland.
@@ -117,6 +125,7 @@ if (process.platform === 'linux') {
   }
 
   app.commandLine.appendSwitch('disable-dev-shm-usage')
+  app.commandLine.appendSwitch('disable-features', 'LocalNetworkAccessChecks')
   app.commandLine.appendSwitch('ozone-platform-hint', process.env.ELECTRON_OZONE_PLATFORM_HINT)
   if (process.env.ELECTRON_OZONE_PLATFORM_HINT === 'x11') {
     app.commandLine.appendSwitch('ozone-platform', 'x11')
@@ -1066,19 +1075,27 @@ async function qualificationHost(): Promise<QualificationHost> {
  * profile (plus Vite's own origin in development).
  */
 function installRendererConnectionGuard(profiles: ConnectionProfileManager): void {
-  const developmentOrigin = rendererDevelopmentOrigin()
   const filter = { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }
   session.defaultSession.webRequest.onBeforeRequest(
     filter,
     (details, callback) => {
       // Updater and other main-process requests have no renderer owner and do
       // not carry profile credentials. This guard is specifically the
-      // renderer's direct daemon boundary.
-      if (!details.webContentsId) {
-        callback({ cancel: false })
-        return
+      // renderer's direct daemon boundary. Re-read the Vite origin each
+      // request so a captured empty value cannot block the shell document.
+      const developmentOrigin = rendererDevelopmentOrigin()
+      const cancel = shouldCancelRendererNetworkRequest(
+        details,
+        developmentOrigin,
+        (url, origin) => profiles.allowsRendererNetworkUrl(url, origin)
+      )
+      if (cancel) {
+        report(
+          `[brazier] blocked renderer request ${details.url} (${details.resourceType ?? 'unknown'}; dev origin ${developmentOrigin ?? 'none'})`,
+          'warn'
+        )
       }
-      callback({ cancel: !profiles.allowsRendererNetworkUrl(details.url, developmentOrigin) })
+      callback({ cancel })
     }
   )
   session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
@@ -1196,7 +1213,9 @@ async function createWindow(): Promise<void> {
     // narrow-width breakpoints keep the chrome usable down to this size.
     minWidth: 560,
     minHeight: 540,
-    show: false,
+    // Linux software compositing presents to an X11 window that does not
+    // exist while show is false, so the shell stays an unmapped black box.
+    show: process.platform === 'linux',
     backgroundColor: '#000000',
     autoHideMenuBar: true,
     ...(icon ? { icon } : {}),
@@ -1217,6 +1236,9 @@ async function createWindow(): Promise<void> {
 
   attachContextMenu(window)
 
+  if (process.platform === 'linux' && !window.isDestroyed() && !window.isVisible()) {
+    window.show()
+  }
   window.once('ready-to-show', () => {
     window.show()
     window.focus()

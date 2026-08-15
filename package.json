@@ -9,6 +9,7 @@
     "postinstall": "node scripts/ensure-electron.mjs",
     "dev": "pnpm --filter @brazier/desktop dev",
     "dev:welcome": "pnpm --filter @brazier/desktop dev:welcome",
+    "dev:x11": "pnpm --filter @brazier/desktop dev:x11",
     "dev:wayland": "pnpm --filter @brazier/desktop exec env ELECTRON_OZONE_PLATFORM_HINT=wayland electron-vite dev",
     "build": "pnpm -r build",
     "check": "pnpm -r check && cargo check --workspace",
