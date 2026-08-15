@@ -14,7 +14,7 @@
     "build:agent": "node scripts/build-agent-worker.mjs",
     "watch:agent": "node scripts/build-agent-worker.mjs --watch",
     "check": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/wrap-linux-launcher.node-test.mjs",
     "package": "pnpm run build && electron-builder --dir"
   },
   "dependencies": {
@@ -94,6 +94,7 @@
         "to": "icon.png"
       }
     ],
+    "afterPack": "./scripts/wrap-linux-launcher.mjs",
     "icon": "build/icon.png",
     "linux": {
       "target": [

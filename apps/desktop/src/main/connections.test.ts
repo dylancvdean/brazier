@@ -585,6 +585,12 @@ describe('connection profile lifecycle and switching', () => {
     expect(
       manager.allowsRendererNetworkUrl('http://127.0.0.1:5173/src/main.tsx', 'http://127.0.0.1:5173')
     ).toBe(true)
+    expect(
+      manager.allowsRendererNetworkUrl('http://localhost:5173/src/main.tsx', 'http://127.0.0.1:5173')
+    ).toBe(true)
+    expect(
+      manager.allowsRendererNetworkUrl('ws://[::1]:5173/', 'http://127.0.0.1:5173')
+    ).toBe(true)
 
     store.select('local')
     expect(manager.allowsRendererNetworkUrl('ws://127.0.0.1:9000/api/chat')).toBe(false)

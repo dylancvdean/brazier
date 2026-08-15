@@ -9,6 +9,8 @@ import {
 import { dirname } from 'node:path'
 import { isIP } from 'node:net'
 
+import { isRendererDevelopmentOrigin } from './rendererTrust'
+
 export const LOCAL_CONNECTION_PROFILE_ID = 'local'
 export const MANAGEMENT_API_MAJOR = 1
 export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000
@@ -809,7 +811,7 @@ export class ConnectionProfileManager {
       return false
     }
     if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) return true
-    if (rendererOrigin && sameEndpoint(url, new URL(rendererOrigin))) return true
+    if (rendererOrigin && isRendererDevelopmentOrigin(value, rendererOrigin)) return true
     const profile = this.store.current()
     if (profile.kind === 'local') {
       return Boolean(

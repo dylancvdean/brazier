@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { isSafeExternalUrl, isTrustedRendererUrl } from './rendererTrust'
+import {
+  isRendererDevelopmentOrigin,
+  isSafeExternalUrl,
+  isTrustedRendererUrl
+} from './rendererTrust'
 
 const packagedIndexPath = '/Applications/Brazier.app/Contents/Resources/app.asar/out/renderer/index.html'
 
@@ -27,7 +31,25 @@ describe('renderer trust boundary', () => {
     expect(isTrustedRendererUrl('http://127.0.0.1:5173/', options)).toBe(true)
     expect(isTrustedRendererUrl('http://127.0.0.1:5173.evil.test/', options)).toBe(false)
     expect(isTrustedRendererUrl('http://127.0.0.1:5173/attacker.html', options)).toBe(false)
-    expect(isTrustedRendererUrl('http://localhost:5173/', options)).toBe(false)
+    expect(isTrustedRendererUrl('http://127.0.0.1:9999/', options)).toBe(false)
+  })
+
+  it('treats loopback aliases as the same Vite document', () => {
+    const options = { developmentUrl: 'http://127.0.0.1:5173/', packagedIndexPath }
+    expect(isTrustedRendererUrl('http://localhost:5173/', options)).toBe(true)
+    expect(isTrustedRendererUrl('http://[::1]:5173/', options)).toBe(true)
+    expect(isTrustedRendererUrl('http://localhost:5173/', { developmentUrl: 'http://localhost:5173', packagedIndexPath })).toBe(true)
+    expect(isTrustedRendererUrl('http://127.0.0.1:5173/attacker.html', options)).toBe(false)
+    expect(isTrustedRendererUrl('http://localhost:9999/', options)).toBe(false)
+  })
+
+  it('allows Vite and HMR traffic across loopback aliases of the development origin', () => {
+    expect(isRendererDevelopmentOrigin('http://localhost:5173/src/main.tsx', 'http://127.0.0.1:5173')).toBe(true)
+    expect(isRendererDevelopmentOrigin('ws://[::1]:5173/', 'http://127.0.0.1:5173')).toBe(true)
+    expect(isRendererDevelopmentOrigin('http://127.0.0.1:5173/', 'http://localhost:5173')).toBe(true)
+    expect(isRendererDevelopmentOrigin('http://localhost:9999/', 'http://127.0.0.1:5173')).toBe(false)
+    expect(isRendererDevelopmentOrigin('https://127.0.0.1:5173/', 'http://127.0.0.1:5173')).toBe(false)
+    expect(isRendererDevelopmentOrigin('http://user:secret@127.0.0.1:5173/', 'http://127.0.0.1:5173')).toBe(false)
   })
 
   it('opens only credential-free HTTPS links outside the app', () => {

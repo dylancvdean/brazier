@@ -34,7 +34,10 @@ export default defineConfig({
     },
     server: {
       port: 5173,
-      strictPort: true
+      strictPort: true,
+      // `localhost` binds [::1] only on this stack. Chromium then hits
+      // 127.0.0.1:5173 and loadURL fails with ERR_FAILED.
+      host: '127.0.0.1'
     }
   }
 })
