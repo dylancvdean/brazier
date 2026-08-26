@@ -36,6 +36,8 @@ const LONG_RUNNING: WorkerCommand['type'][] = ['run']
 const SHORT_REQUEST_TIMEOUT_MS = 60_000
 /** A stop is a safety control, so a wedged runtime gets only a short grace period. */
 const CANCEL_GRACE_MS = 2_000
+const SHUTDOWN_GRACE_MS = 5_000
+const SHUTDOWN_KILL_MS = 2_000
 const DAEMON_CANCEL_TIMEOUT_MS = 5_000
 const DAEMON_PATCH_TIMEOUT_MS = 5_000
 
@@ -351,23 +353,38 @@ export class AgentSupervisor {
     const worker = this.worker
     if (!worker) return
     this.expectedExit = worker
-    const exited = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(
-        () => reject(new Error('The agent worker did not exit within 5 seconds.')),
-        5_000
-      )
-      worker.once('exit', () => {
-        clearTimeout(timeout)
-        resolve()
-      })
+    const exited = new Promise<void>((resolve) => {
+      worker.once('exit', () => resolve())
     })
+    // `send` normally has a one-minute timeout. Quit must not inherit that:
+    // after a bounded opportunity to dispose sessions/runtimes, kill the
+    // utility process so daemon cleanup and a subsequent launch can proceed.
+    let gracefulTimer: ReturnType<typeof setTimeout> | undefined
     try {
-      await this.send({ type: 'shutdown', requestId: this.requestId() })
-    } catch {
-      // A worker that cannot answer is killed below.
+      await Promise.race([
+        this.send({ type: 'shutdown', requestId: this.requestId() }).catch(() => undefined),
+        new Promise<void>((resolve) => {
+          gracefulTimer = setTimeout(resolve, SHUTDOWN_GRACE_MS)
+        })
+      ])
+    } finally {
+      if (gracefulTimer) clearTimeout(gracefulTimer)
     }
-    worker.kill()
-    await exited
+    if (this.worker === worker) worker.kill()
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        exited,
+        new Promise<never>((_, reject) => {
+          killTimer = setTimeout(
+            () => reject(new Error('The agent worker did not exit after forced shutdown.')),
+            SHUTDOWN_KILL_MS
+          )
+        })
+      ])
+    } finally {
+      if (killTimer) clearTimeout(killTimer)
+    }
     if (this.worker === worker) {
       this.worker = undefined
       this.ready = undefined
@@ -392,7 +409,7 @@ export function registerAgentIpc(
     }
     return supervisor.invoke(payload)
   })
-  ipcMain.handle('brazil:agent:status', (event) => {
+  ipcMain.handle('brazier:agent:status', (event) => {
     assertTrustedSender(event)
     return supervisor.status()
   })

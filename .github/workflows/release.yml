@@ -200,8 +200,13 @@ jobs:
           sudo apt-get install -y xvfb
           mkdir -p "$RUNNER_TEMP/qualification-results" "$RUNNER_TEMP/brazier-smoke-user"
           chmod +x apps/desktop/dist/Brazier.AppImage
-          xvfb-run -a apps/desktop/dist/Brazier.AppImage \
-            --user-data-dir="$RUNNER_TEMP/brazier-smoke-user"
+          # Exercise the same installed profile twice. The second process must
+          # not overlap a daemon/worker left behind by the first clean quit.
+          for launch in 1 2; do
+            echo "AppImage package smoke launch $launch of 2"
+            xvfb-run -a apps/desktop/dist/Brazier.AppImage \
+              --user-data-dir="$RUNNER_TEMP/brazier-smoke-user"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: appimage-release

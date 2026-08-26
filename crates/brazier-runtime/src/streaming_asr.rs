@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::Context;
+use base64::Engine as _;
 use serde::Deserialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
@@ -389,6 +390,95 @@ impl Worker {
                 None => continue,
             }
         }
+    }
+
+    /// Transcribe signed 16-bit mono PCM while its producer is still recording.
+    ///
+    /// The Python stdin reader remains free while generation runs on its own
+    /// thread, so audio commands can keep extending the feature generator. The
+    /// worker is still serialized here: Nemotron serves one decoder stream at a
+    /// time, while retaining the loaded model between utterances.
+    pub async fn transcribe_pcm(
+        &mut self,
+        sample_rate: u32,
+        lookahead: Option<u32>,
+        mut audio: mpsc::Receiver<Vec<u8>>,
+        events: &mpsc::Sender<anyhow::Result<WorkerEvent>>,
+    ) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            (8_000..=96_000).contains(&sample_rate),
+            "invalid PCM sample rate"
+        );
+        let request_id = uuid::Uuid::new_v4().to_string();
+        self.write_command(&serde_json::json!({
+            "type": "start",
+            "id": request_id,
+            "sample_rate": sample_rate,
+            "encoding": "pcm_s16le",
+            "lookahead": lookahead.unwrap_or(DEFAULT_LOOKAHEAD),
+        }))
+        .await?;
+
+        let mut finished_input = false;
+        loop {
+            tokio::select! {
+                chunk = audio.recv(), if !finished_input => {
+                    match chunk {
+                        Some(chunk) => {
+                            anyhow::ensure!(chunk.len() % 2 == 0, "PCM chunk ended mid-sample");
+                            self.write_command(&serde_json::json!({
+                                "type": "audio",
+                                "id": request_id,
+                                "data": base64::engine::general_purpose::STANDARD.encode(chunk),
+                            })).await?;
+                        }
+                        None => {
+                            finished_input = true;
+                            self.write_command(&serde_json::json!({
+                                "type": "finish",
+                                "id": request_id,
+                            })).await?;
+                        }
+                    }
+                }
+                line = self.lines.next_line() => {
+                    let line = line
+                        .context("read from streaming ASR worker")?
+                        .context("streaming ASR worker closed mid-request")?;
+                    let Some(event) = parse_event(&line)? else {
+                        continue;
+                    };
+                    let terminal = match &event {
+                        WorkerEvent::Done { text } => Some(Ok(text.clone())),
+                        WorkerEvent::Error { message } => {
+                            Some(Err(anyhow::anyhow!(message.clone())))
+                        }
+                        _ => None,
+                    };
+                    if events.send(Ok(event)).await.is_err() {
+                        // The response consumer disappeared. Killing this one
+                        // process is safer than leaving its decoder blocked on a
+                        // source nobody can finish, poisoning every later turn.
+                        let _ = self.child.start_kill();
+                        anyhow::bail!("streaming transcription consumer disconnected");
+                    }
+                    if let Some(result) = terminal {
+                        return result;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn write_command(&mut self, command: &serde_json::Value) -> anyhow::Result<()> {
+        self.stdin
+            .write_all(format!("{command}\n").as_bytes())
+            .await
+            .context("write request to streaming ASR worker")?;
+        self.stdin
+            .flush()
+            .await
+            .context("flush request to streaming ASR worker")
     }
 }
 

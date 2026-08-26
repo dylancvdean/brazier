@@ -17,10 +17,10 @@ the real architecture, and tracks the staged work.
 | Agent runtime | `apps/desktop/src/agent/` | Pi runtime in an Electron `utilityProcess`; reached from the renderer through `window.brazier.agent` (`protocol.ts` commands, `AgentEvent` stream). Survives renderer unmount. |
 | Agent UI | `components/AgentMode.tsx` | Own composer and transcript, separate from chat. |
 | Voice runtime | `crates/brazierd/src/voice.rs` | Spawns `moshi.server` (Linux CUDA) or `personaplex_mlx.local_web` (Apple Silicon) on an ephemeral loopback port. Single active session. |
-| Voice API | `/api/v1/voice/sessions` | Create / read / end. Returns `ws_url` pointing **directly at the PersonaPlex process** — the daemon does not proxy the socket. |
+| Voice API | `/api/v1/voice/sessions` | Create / read / end. Returns a one-session-ticket `ws_url` on the daemon, which proxies the PersonaPlex socket without exposing the process port. |
 | Voice transport | `renderer/src/audio/voiceStream.ts` | WebCodecs Opus + two AudioWorklets over the Moshi binary WebSocket. Tags: `0x00` handshake, `0x01` audio, `0x02` text. |
 | Voice UI | `components/VoiceMode.tsx` | Persona box, start/mute/end, level meters, transcript pane. No conversation binding. |
-| ASR | `whisper.rs`, `whisperkit.rs`, `streaming_asr.rs` | `POST /v1/audio/transcriptions` (batch, and SSE with `stream=true`). |
+| ASR | `whisper.rs`, `whisperkit.rs`, `streaming_asr.rs` | `POST /v1/audio/transcriptions` for complete audio; authenticated `/v1/audio/transcriptions/sessions/{id}/{audio,events}` channels for incremental PCM and SSE partials. |
 
 ## Where the plan met the architecture
 
@@ -31,12 +31,12 @@ Four mismatches shaped the implementation.
    what the user said. The plan's `userTranscriptFinal` event has no source in
    the existing stack. Resolved by tapping the capture worklet inside
    `VoiceStream`, segmenting utterances with bundled Silero VAD plus a
-   recoverable energy fallback, and transcribing each finished utterance through
-   the ASR endpoint the repo already exposes. Partials come from transcribing at a pause before the
-   utterance has closed, so they are per-pause rather than word-incremental; the
-   coordinator refuses to invoke the agent from partials, and the one taken at
-   the pause that turns out to end the turn is promoted to the final transcript
-   because it covers exactly the same audio.
+   recoverable energy fallback. When the gate opens, capture pre-roll and every
+   following frame continuously feed a resident ASR worker while its independent
+   SSE channel returns word-incremental partials. The coordinator refuses to
+   invoke the agent from those partials; only the worker's `done` result after
+   close becomes the final transcript. A complete-file decode remains the
+   recovery path if the live session fails.
 
 2. **PersonaPlex has per-connection prompts, not live prompt mutation.** The
    binary socket accepts client audio only, but both supported servers read

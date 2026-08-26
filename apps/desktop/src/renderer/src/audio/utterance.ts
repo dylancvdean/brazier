@@ -74,6 +74,18 @@ export type UtteranceSegmenterHandlers = {
   /** An utterance began, and audio is being kept. Not a barge-in. */
   onSpeechStart?: (utteranceId: string) => void
   /**
+   * An utterance opened, including the pre-roll retained before the VAD gate.
+   * Used by incremental ASR so its upload starts with the same unclipped audio
+   * that the eventual finished utterance contains.
+   */
+  onStreamStart?: (utterance: {
+    id: string
+    samples: Float32Array
+    sampleRate: number
+  }) => void
+  /** Every subsequent captured frame while that utterance remains open. */
+  onStreamFrame?: (utteranceId: string, samples: Float32Array, sampleRate: number) => void
+  /**
    * Speech has continued long enough to be someone talking rather than a cough,
    * a keystroke, or the assistant's own voice leaking back in. This is what
    * interrupts.
@@ -118,7 +130,7 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   threshold: SPEECH_THRESHOLD,
   adaptive: true,
   neuralSpeechThreshold: 0.5,
-  // At 20 ms per frame: 60 ms to open, 700 ms of silence to close, 200 ms of
+  // At 20 ms per frame: 60 ms to open, 500 ms of silence to close, 200 ms of
   // energy-only audio or 100 ms of Silero-confirmed audio to count as a turn,
   // 30 s cap. The lower neural floor is enough for "yes", "no", and other
   // clipped commands without making the noise fallback equally permissive.
@@ -128,9 +140,12 @@ const DEFAULTS: Required<UtteranceSegmenterOptions> = {
   // deliberately.
   framesToSustain: 15,
   guardedFactor: 4,
-  framesToClose: 35,
+  // Incremental ASR now sees speech while it is happening and receives its own
+  // decoder-flush silence, so the segmenter no longer needs a 700 ms close
+  // window to hide a snapshot decode. Keep 500 ms to tolerate normal gaps.
+  framesToClose: 25,
   // 300 ms of silence: long enough not to fire between words, short enough that
-  // the transcription overlaps most of the 700 ms close window.
+  // token output is already underway before the 500 ms close window ends.
   framesToPause: 15,
   // 250 ms of new speech before the next offer, so a hesitant sentence does not
   // queue a transcription per gap.
@@ -253,11 +268,19 @@ export class UtteranceSegmenter {
         this.counter += 1
         this.currentId = `utt-${this.counter}-${Date.now().toString(36)}`
         this.handlers.onSpeechStart?.(this.currentId)
+        this.handlers.onStreamStart?.({
+          id: this.currentId,
+          samples: this.collect(this.frames),
+          sampleRate: this.sampleRate
+        })
       }
       return
     }
 
     this.frames.push(samples.slice())
+    if (this.currentId) {
+      this.handlers.onStreamFrame?.(this.currentId, samples, this.sampleRate)
+    }
     if (loud) this.voicedFrames += 1
     if (!this.sustained && this.voicedFrames >= this.options.framesToSustain) {
       this.sustained = true
@@ -417,6 +440,27 @@ export function padSpeechForAsr(
   const padded = new Float32Array(leading + samples.length + trailing)
   padded.set(samples, leading)
   return padded
+}
+
+/** Resample one short capture frame with linear interpolation. */
+export function resamplePcm(
+  samples: Float32Array,
+  sourceRate: number,
+  targetRate: number
+): Float32Array {
+  if (sourceRate === targetRate) return samples.slice()
+  if (samples.length === 0 || sourceRate <= 0 || targetRate <= 0) return new Float32Array()
+  const length = Math.max(1, Math.round((samples.length * targetRate) / sourceRate))
+  const output = new Float32Array(length)
+  const scale = sourceRate / targetRate
+  for (let index = 0; index < length; index += 1) {
+    const position = Math.min(samples.length - 1, index * scale)
+    const before = Math.floor(position)
+    const after = Math.min(samples.length - 1, before + 1)
+    const fraction = position - before
+    output[index] = samples[before] * (1 - fraction) + samples[after] * fraction
+  }
+  return output
 }
 
 /** Wrap mono float samples as a 16-bit PCM WAV, which the ASR path accepts. */

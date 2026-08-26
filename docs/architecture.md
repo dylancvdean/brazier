@@ -75,14 +75,20 @@ collapse them into a single Audio badge meaning.
 3. **Streaming ASR** — Low-latency chunked transcription via the managed
    `streaming-asr` Python engine (NVIDIA Nemotron ASR Streaming / Transformers).
    Exposed as `audio_interfaces.streaming_asr` and
-   `POST /v1/audio/transcriptions` with `stream=true` (SSE partials). Distinct
-   from chat attachment hydration.
+   `POST /v1/audio/transcriptions` with `stream=true` for complete files. Live
+   capture creates `/v1/audio/transcriptions/sessions/{id}`, uploads signed
+   16-bit PCM on its authenticated `audio` request, and reads partials from an
+   independent authenticated `events` SSE request. The two channels avoid the
+   browser's half-duplex streaming-upload response constraint. This remains
+   distinct from chat attachment hydration.
 
-   The worker process is resident: it loads the model once and then takes one
-   request per line on stdin, because loading Nemotron costs about three seconds
-   and paying it per utterance is the difference between 3.1 s and 0.18 s a turn.
-   A worker that dies, or that holds a different model, is replaced on the next
-   request — one cold request, then warm again. Its source is put on
+   The worker process is resident: it loads the model once, then accepts file
+   requests or `start` / `audio` / `finish` NDJSON commands. A live feature
+   generator blocks for appended PCM while generation continues on its own
+   thread. Loading Nemotron costs about three seconds, and paying it per
+   utterance is the difference between 3.1 s and 0.18 s a turn. A worker that
+   dies, fails a live session, or holds a different model is replaced on the
+   next request — one cold request, then warm again. Its source is put on
    `PYTHONPATH` from the recipe directory, so the worker always matches the
    daemon shipping it rather than whatever copy the last runtime build installed.
 
@@ -221,12 +227,14 @@ adapter supplies them:
 
 - **User transcripts.** The socket's text frames are the model's own speech, so
   the user's words come from segmenting the captured microphone stream and
-  transcribing each finished utterance through `/v1/audio/transcriptions`.
-  Transcription starts at the first 300 ms pause rather than waiting for the
-  700 ms that closes the utterance, so the decoding happens inside the silence
-  window instead of after it. If the speaker carries on, the early transcript is
-  shown as a partial and discarded; if they were done, it *is* the final one,
-  byte-identical audio, and the turn starts without a second wait.
+  transcribing each utterance through a resident streaming-ASR session. Once
+  VAD opens an utterance, its pre-roll and every following 20 ms frame flow over
+  a chunked PCM upload while an independent authenticated SSE request delivers
+  word increments. The Python worker's feature generator blocks for new audio
+  instead of reopening a WAV for each snapshot. Decoder-flush silence is sent
+  through that same session at close, so the silence window is now 500 ms
+  rather than 700 ms. The complete-file endpoint remains the recovery path if a
+  live session fails or an empty short word needs the alternate recognizer.
 
   Bundled Silero VAD v5 normally decides what is speech. Its stateful 16 kHz
   windows are aligned back to the original capture frames and run locally

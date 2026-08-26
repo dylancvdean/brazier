@@ -5,7 +5,8 @@ import {
   UtteranceSegmenter,
   encodeWav,
   padSpeechForAsr,
-  padTrailingSilence
+  padTrailingSilence,
+  resamplePcm
 } from './utterance'
 
 const SAMPLE_RATE = 24000
@@ -35,6 +36,28 @@ function feedNeural(
 }
 
 describe('UtteranceSegmenter', () => {
+  it('hands incremental ASR the pre-roll once, then each open frame', () => {
+    const starts: Array<{ id: string; length: number }> = []
+    const frames: Array<{ id: string; length: number }> = []
+    const segmenter = new UtteranceSegmenter(
+      {
+        onStreamStart: ({ id, samples }) => starts.push({ id, length: samples.length }),
+        onStreamFrame: (id, samples) => frames.push({ id, length: samples.length })
+      },
+      { adaptive: false }
+    )
+
+    feed(segmenter, 0.5, 3)
+    expect(starts).toHaveLength(1)
+    expect(starts[0].length).toBe(3 * FRAME)
+    expect(frames).toHaveLength(0)
+
+    feed(segmenter, 0.5, 4)
+    expect(frames).toHaveLength(4)
+    expect(frames.every((value) => value.id === starts[0].id)).toBe(true)
+    expect(frames.every((value) => value.length === FRAME)).toBe(true)
+  })
+
   it('emits one utterance per spoken stretch', () => {
     const starts: string[] = []
     const utterances: Array<{ id: string; length: number }> = []
@@ -86,6 +109,19 @@ describe('UtteranceSegmenter', () => {
     feed(segmenter, 0.001, 10) // a breath, well under framesToClose
     feed(segmenter, 0.5, 15)
     feed(segmenter, 0.001, 40)
+    expect(utterances).toHaveLength(1)
+  })
+
+  it('closes after the 500 ms silence window', () => {
+    const utterances: unknown[] = []
+    const segmenter = new UtteranceSegmenter(
+      { onUtterance: (value) => utterances.push(value) },
+      { adaptive: false }
+    )
+    feed(segmenter, 0.5, 20)
+    feed(segmenter, 0.001, 24)
+    expect(utterances).toHaveLength(0)
+    feed(segmenter, 0.001, 1)
     expect(utterances).toHaveLength(1)
   })
 
@@ -353,6 +389,25 @@ describe('padSpeechForAsr', () => {
     expect(padded[250]).toBeCloseTo(0.4)
     expect(padded[251]).toBeCloseTo(-0.4)
     expect(padded[252]).toBe(0)
+  })
+})
+
+describe('resamplePcm', () => {
+  it('converts each 24 kHz capture frame to the 16 kHz model rate', () => {
+    const source = new Float32Array(480)
+    for (let index = 0; index < source.length; index += 1) source[index] = index / 480
+    const converted = resamplePcm(source, 24000, 16000)
+    expect(converted).toHaveLength(320)
+    expect(converted[0]).toBe(0)
+    expect(converted[1]).toBeCloseTo(1.5 / 480)
+    expect(converted[319]).toBeCloseTo(478.5 / 480)
+  })
+
+  it('returns a copy when the source already has the requested rate', () => {
+    const source = new Float32Array([0.1, -0.2])
+    const converted = resamplePcm(source, 16000, 16000)
+    expect(converted).toEqual(source)
+    expect(converted).not.toBe(source)
   })
 })
 

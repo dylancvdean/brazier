@@ -262,6 +262,7 @@ async fn main() -> anyhow::Result<()> {
             "BRAZIER_READY {}",
             serde_json::to_string(&serde_json::json!({
                 "address": address_url,
+                "pid": std::process::id(),
                 // The desktop's internal connection uses the first key; extra keys
                 // are passed for its configured clients, not reported here.
                 "api_key": api_keys.first(),

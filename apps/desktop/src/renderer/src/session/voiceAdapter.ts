@@ -19,6 +19,8 @@ import {
   endVoiceSession,
   getVoiceSession,
   transcribeAudio,
+  transcribeAudioIncrementally,
+  type IncrementalTranscription,
   type VoiceSessionInfo
 } from '../api'
 import { VoiceStream, voiceStreamSupported } from '../audio/voiceStream'
@@ -29,7 +31,8 @@ import {
   encodeWav,
   frameRms,
   padSpeechForAsr,
-  padTrailingSilence
+  padTrailingSilence,
+  resamplePcm
 } from '../audio/utterance'
 import type { VoiceAdapter, VoiceAdapterEvent, VoiceSessionHandle } from './adapters'
 import { isEchoOfSpokenText } from './echoGuard'
@@ -49,6 +52,9 @@ const CAPTURE_REPORT_MS = 1000
 
 /** How long to wait for the first microphone frame before reporting silence. */
 const CAPTURE_GRACE_MS = 2000
+
+/** Nemotron's feature extractor consumes 16 kHz mono PCM. */
+const STREAMING_ASR_SAMPLE_RATE = 16000
 
 export type PersonaPlexAdapterOptions = {
   /** PersonaPlex model to run; empty picks the daemon's default. */
@@ -110,6 +116,14 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     audioSeconds: number
     startedAt: number
     abort: AbortController
+    done: Promise<{ text: string; engine: string; engineMs: number | null; roundTripMs: number }>
+  } | null = null
+  /** An ASR upload fed from the moment an utterance opens until it closes. */
+  private incremental: {
+    utteranceId: string
+    startedAt: number
+    stream: IncrementalTranscription
+    finished: boolean
     done: Promise<{ text: string; engine: string; engineMs: number | null; roundTripMs: number }>
   } | null = null
   private captureFrames = 0
@@ -182,6 +196,10 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
           // away without ever taking the assistant's turn from it.
           console.debug(`[voice] speech detected (${utteranceId})`)
         },
+        onStreamStart: (utterance) => this.startIncremental(utterance),
+        onStreamFrame: (utteranceId, samples, sampleRate) => {
+          this.pushIncremental(utteranceId, samples, sampleRate)
+        },
         onSustainedSpeech: (utteranceId) => {
           console.debug(`[voice] sustained speech (${utteranceId}) — interrupting`)
           // An explicit stop only lasts until the person starts a new turn.
@@ -197,10 +215,12 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         onUtterance: (utterance) => {
           const seconds = (utterance.samples.length / utterance.sampleRate).toFixed(2)
           console.debug(`[voice] utterance ${utterance.id} closed, ${seconds}s — transcribing`)
+          this.finishIncremental(utterance.id)
           this.rememberUtterance(utterance.id, utterance.samples, utterance.sampleRate)
           void this.transcribe(utterance)
         },
         onDiscarded: (utteranceId, reason) => {
+          this.abandonIncremental(utteranceId)
           this.utteranceAudio.delete(utteranceId)
           console.debug(`[voice] utterance ${utteranceId} discarded: ${reason}`)
         }
@@ -374,6 +394,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     this.segmenter = null
     await this.stopVad()
     this.abandonSpeculative()
+    this.abandonIncremental()
     for (const controller of this.activeAbortControllers) controller.abort()
     this.activeAbortControllers.clear()
     await this.stream?.stop()
@@ -612,6 +633,10 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     sampleRate: number
     voicedFrames: number
   }): void {
+    // The live path has already fed every frame to the decoder and publishes
+    // word increments directly. A snapshot request here would duplicate that
+    // work and queue behind the stream it is trying to replace.
+    if (this.incremental?.utteranceId === snapshot.id) return
     // A snapshot from earlier in the same sentence is now known to be a
     // fragment. Left running it would hold the daemon's one ASR worker, and the
     // transcription that decides the turn would queue behind work already known
@@ -648,6 +673,69 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   private abandonSpeculative(): void {
     this.speculative?.abort.abort()
     this.speculative = null
+  }
+
+  /** Start feeding Nemotron as soon as the VAD has opened an utterance. */
+  private startIncremental(utterance: {
+    id: string
+    samples: Float32Array
+    sampleRate: number
+  }): void {
+    if (this.options.asrEngine?.() !== 'streaming-asr') return
+    this.abandonIncremental()
+    const startedAt = Date.now()
+    const stream = transcribeAudioIncrementally(STREAMING_ASR_SAMPLE_RATE, {
+      onPartial: (text) => {
+        if (this.incremental?.utteranceId !== utterance.id || !text) return
+        if (isEchoOfSpokenText(text, this.lastModelText)) return
+        this.publish({ type: 'userTranscriptPartial', utteranceId: utterance.id, text })
+      }
+    })
+    stream.push(resamplePcm(utterance.samples, utterance.sampleRate, STREAMING_ASR_SAMPLE_RATE))
+    const done = stream.done.then((result) => ({
+      text: result.text,
+      engine: result.engine,
+      engineMs: result.durationMs,
+      roundTripMs: Date.now() - startedAt
+    }))
+    // The utterance close adopts this promise. Attach a rejection observer now
+    // so an early setup failure is not reported as an unhandled rejection while
+    // the person is still speaking; close will fall back to the file endpoint.
+    void done.catch(() => undefined)
+    this.incremental = {
+      utteranceId: utterance.id,
+      startedAt,
+      stream,
+      finished: false,
+      done
+    }
+  }
+
+  private pushIncremental(
+    utteranceId: string,
+    samples: Float32Array,
+    sampleRate: number
+  ): void {
+    const active = this.incremental
+    if (!active || active.utteranceId !== utteranceId || active.finished) return
+    active.stream.push(resamplePcm(samples, sampleRate, STREAMING_ASR_SAMPLE_RATE))
+  }
+
+  private finishIncremental(utteranceId: string): void {
+    const active = this.incremental
+    if (!active || active.utteranceId !== utteranceId || active.finished) return
+    active.finished = true
+    // Decoder lookahead needs audio after the final phoneme before it can
+    // commit the tail. Feed silence through the same open request, then close.
+    active.stream.push(new Float32Array(STREAMING_ASR_SAMPLE_RATE))
+    void active.stream.finish()
+  }
+
+  private abandonIncremental(utteranceId?: string): void {
+    const active = this.incremental
+    if (!active || (utteranceId && active.utteranceId !== utteranceId)) return
+    this.incremental = null
+    active.stream.cancel()
   }
 
   /** Send audio for transcription, timing the round trip. */
@@ -728,20 +816,45 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     const audioSeconds = utterance.samples.length / utterance.sampleRate
     // Usable only when it covers this exact audio: same utterance, same speech,
     // same samples. Anything else describes a sentence that was still going.
+    const live = this.incremental?.utteranceId === utterance.id
+      ? this.incremental
+      : null
+    if (live) this.incremental = null
     const speculative = this.speculative
-    const reused = coversUtterance(speculative, {
+    const reusedSpeculative = coversUtterance(speculative, {
       id: utterance.id,
       voicedFrames: utterance.voicedFrames,
       sampleCount: utterance.samples.length
     })
-    if (reused) this.speculative = null
+    const reused = Boolean(live || reusedSpeculative)
+    if (reusedSpeculative) this.speculative = null
     else this.abandonSpeculative()
     try {
-      const pending =
-        reused && speculative
-          ? speculative
-          : this.startTranscription(utterance.samples, utterance.sampleRate)
-      const result = await pending.done
+      const pending = live ?? (reusedSpeculative && speculative
+        ? speculative
+        : this.startTranscription(utterance.samples, utterance.sampleRate))
+      let result
+      try {
+        result = await pending.done
+      } catch (cause) {
+        if (!live) throw cause
+        console.warn(
+          `[voice] incremental ASR failed; retrying the finished utterance: ${cause instanceof Error ? cause.message : String(cause)}`
+        )
+        result = await this.startTranscription(utterance.samples, utterance.sampleRate).done
+      }
+      if (
+        live &&
+        !result.text &&
+        utterance.samples.length / utterance.sampleRate <= 2 &&
+        this.options.shortSpeechBoost?.() !== false &&
+        this.options.asrFallbackEngine?.()
+      ) {
+        // Preserve the short-word recovery guarantee on the new live path. The
+        // file helper performs the installed-engine retry and is paid only when
+        // the incremental decoder returned no word at all.
+        result = await this.startTranscription(utterance.samples, utterance.sampleRate).done
+      }
       const text = result.text
       // Two different numbers: what the engine cost, and what the turn waited
       // for after the user stopped talking. Only the second is felt.
@@ -749,7 +862,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       console.debug(
         `[voice] ${result.engine} transcribed ${audioSeconds.toFixed(1)}s in ` +
           `${result.roundTripMs}ms, turn waited ${waitedMs}ms` +
-          (reused ? ' (started at the pause)' : '') +
+          (live ? ' (fed while speaking)' : reused ? ' (started at the pause)' : '') +
           (result.engineMs === null ? '' : ` (${result.engineMs}ms in the daemon)`)
       )
       this.publish({

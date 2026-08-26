@@ -26,6 +26,9 @@ use crate::{
 };
 
 const GITHUB_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
+const GITHUB_RELEASE_BY_TAG_API: &str =
+    "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/";
+const NIGHTLY_TAG_ASSET: &str = "nightly-tag.txt";
 const USER_AGENT: &str = "brazier-llama-manager";
 
 /// Cap stderr we surface so an OOM dump does not flood the UI.
@@ -1172,24 +1175,99 @@ pub async fn resolve_managed_release(
     client: &reqwest::Client,
     target: RuntimeTarget,
 ) -> anyhow::Result<(String, ReleaseAsset)> {
+    resolve_managed_release_from(client, target, GITHUB_API, GITHUB_RELEASE_BY_TAG_API).await
+}
+
+async fn resolve_managed_release_from(
+    client: &reqwest::Client,
+    target: RuntimeTarget,
+    latest_release_url: &str,
+    release_by_tag_url: &str,
+) -> anyhow::Result<(String, ReleaseAsset)> {
     let platform = platform_asset_tag()
         .context("managed llama.cpp binaries are not available for this platform")?;
-    let release = crate::github_releases::latest_release(client, GITHUB_API, USER_AGENT).await?;
+    let release =
+        crate::github_releases::latest_release(client, latest_release_url, USER_AGENT).await?;
+    let version = release.tag_name.clone();
+
+    if let Some(asset) = managed_asset_in_release(&release, platform, target) {
+        return Ok((version, asset));
+    }
+
+    // Since v0.3.0, llama.cpp's stable GitHub release contains a tiny
+    // `nightly-tag.txt` pointer instead of the platform archives themselves.
+    // Follow it to the build release while retaining the stable tag as the
+    // installed version. Older build-style `/latest` releases still take the
+    // direct path above.
+    let pointer = release.asset(NIGHTLY_TAG_ASSET).with_context(|| {
+        format!(
+            "no matching llama.cpp release asset for {platform}, and {NIGHTLY_TAG_ASSET} was absent"
+        )
+    })?;
+    let build_tag = download_nightly_tag(client, &pointer.browser_download_url).await?;
+    let build_release_url = format!("{release_by_tag_url}{build_tag}");
+    let build_release =
+        crate::github_releases::release_at(client, &build_release_url, USER_AGENT).await?;
+    let asset = managed_asset_in_release(&build_release, platform, target).with_context(|| {
+        format!(
+            "no matching llama.cpp release asset for {platform} in referenced build {build_tag}"
+        )
+    })?;
+    Ok((version, asset))
+}
+
+fn managed_asset_in_release(
+    release: &crate::github_releases::Release,
+    platform: &str,
+    target: RuntimeTarget,
+) -> Option<ReleaseAsset> {
     let names: Vec<String> = release.asset_names().map(str::to_owned).collect();
     let selected =
         select_release_asset_for_target(names.iter().map(String::as_str), platform, target)
-            .context("no matching llama.cpp release asset for this platform")?
-            .to_owned();
-    let asset = release
-        .asset(&selected)
-        .context("selected asset missing from release")?;
-    Ok((
-        release.tag_name.clone(),
-        ReleaseAsset {
-            name: asset.name.clone(),
-            browser_download_url: asset.browser_download_url.clone(),
-        },
-    ))
+            .map(str::to_owned)?;
+    let asset = release.asset(&selected)?;
+    Some(ReleaseAsset {
+        name: asset.name.clone(),
+        browser_download_url: asset.browser_download_url.clone(),
+    })
+}
+
+async fn download_nightly_tag(client: &reqwest::Client, url: &str) -> anyhow::Result<String> {
+    let response = client
+        .get(url)
+        .header("user-agent", USER_AGENT)
+        .send()
+        .await
+        .context("download llama.cpp build tag")?
+        .error_for_status()
+        .context("llama.cpp build tag download failed")?;
+    if response.content_length().is_some_and(|length| length > 128) {
+        anyhow::bail!("llama.cpp build tag response was unexpectedly large");
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read llama.cpp build tag")?;
+        anyhow::ensure!(
+            bytes.len().saturating_add(chunk.len()) <= 128,
+            "llama.cpp build tag response was unexpectedly large"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    let text = std::str::from_utf8(&bytes).context("llama.cpp build tag was not UTF-8")?;
+    validate_build_tag(text)
+}
+
+fn validate_build_tag(value: &str) -> anyhow::Result<String> {
+    let tag = value.trim();
+    anyhow::ensure!(
+        tag.len() >= 2
+            && tag.len() <= 32
+            && tag.starts_with('b')
+            && tag[1..].bytes().all(|byte| byte.is_ascii_digit()),
+        "llama.cpp build tag had an unexpected format"
+    );
+    Ok(tag.to_owned())
 }
 
 /// Download and extract a managed llama-server binary into the data directory.
@@ -2608,6 +2686,43 @@ mod tests {
             select_release_asset(assets, "ubuntu-x64"),
             Some("llama-b10092-bin-ubuntu-x64.tar.gz")
         );
+    }
+
+    #[test]
+    fn follows_stable_release_pointer_to_macos_build_asset() {
+        let stable = crate::github_releases::Release {
+            tag_name: "v0.3.0".into(),
+            assets: vec![crate::github_releases::ReleaseAsset {
+                name: NIGHTLY_TAG_ASSET.into(),
+                browser_download_url: "https://example.invalid/nightly-tag.txt".into(),
+            }],
+        };
+        assert!(
+            managed_asset_in_release(&stable, "macos-arm64", RuntimeTarget::Metal).is_none(),
+            "the stable release is only a pointer"
+        );
+
+        let build = crate::github_releases::Release {
+            tag_name: "b10621".into(),
+            assets: vec![crate::github_releases::ReleaseAsset {
+                name: "llama-b10621-bin-macos-arm64.tar.gz".into(),
+                browser_download_url: "https://example.invalid/metal.tar.gz".into(),
+            }],
+        };
+        let asset = managed_asset_in_release(&build, "macos-arm64", RuntimeTarget::Metal)
+            .expect("referenced build should contain the Metal archive");
+        assert_eq!(asset.name, "llama-b10621-bin-macos-arm64.tar.gz");
+    }
+
+    #[test]
+    fn validates_llama_build_pointer_tags() {
+        assert_eq!(validate_build_tag("b10621\n").unwrap(), "b10621");
+        for invalid in ["v0.3.0", "b", "b10/../../bad", "b12x", " 10621 "] {
+            assert!(
+                validate_build_tag(invalid).is_err(),
+                "accepted invalid pointer tag {invalid:?}"
+            );
+        }
     }
 
     /// Upstream publishes a Vulkan prebuilt for ARM64 Linux but no CUDA one, so

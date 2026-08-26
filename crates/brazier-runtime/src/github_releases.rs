@@ -201,6 +201,19 @@ pub async fn latest_release(
     }
 }
 
+/// A release from an arbitrary GitHub releases API URL, always contacting
+/// GitHub and falling back to the cached response on transient failure.
+///
+/// This is also used for release-by-tag lookups when an upstream `latest`
+/// release points at a separate build release containing the binaries.
+pub async fn release_at(
+    client: &reqwest::Client,
+    url: &str,
+    user_agent: &str,
+) -> anyhow::Result<Release> {
+    latest_release(client, url, user_agent).await
+}
+
 /// Whatever is cached right now, kicking off a background refresh when the
 /// entry is missing or stale — or unconditionally when `force` is set, so a
 /// manual "check for updates" can notice a release published within the cache

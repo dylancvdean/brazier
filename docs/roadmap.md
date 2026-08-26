@@ -50,7 +50,10 @@ implementation notes and follow-on work.
 - Source-build execution for llama.cpp into isolated prefixes with streamed
   logs, plus runtime inventory (managed releases, source builds, system
   binaries) with activation and deletion, in-flight build cancellation, and
-  structured failure diagnostics with preserved logs.
+  structured failure diagnostics with preserved logs. Managed installs support
+  both build-style releases with attached archives and stable releases that
+  point through `nightly-tag.txt` to their platform binary build, including the
+  Apple-Silicon Metal archive.
 - Apple-Silicon mlx-lm and mlx-vlm virtual environments (uv) and OpenAI-compatible
   server adapters, including MLX snapshot downloads and runtime activation.
 - Bundled safe tools (current time, calculator, bounded web fetch with a
@@ -80,7 +83,9 @@ implementation notes and follow-on work.
   the chat engine rejects `input_audio`.
 - **Streaming ASR** via managed Python env + NVIDIA Nemotron ASR Streaming
   snapshots; `POST /v1/audio/transcriptions` with `stream=true` emits partial
-  transcript SSE events.
+  transcript SSE events. Voice mode also uses an authenticated live-session
+  protocol: a chunked PCM upload continuously feeds the resident decoder while
+  a separate SSE channel returns word increments before capture closes.
 - **whisper.cpp managed prebuilts** on Linux/Windows (official CLI release
   assets); macOS continues to use source builds (XCFramework-only releases).
 - **stable-diffusion.cpp** image/video generation (managed + source builds),
@@ -137,18 +142,18 @@ what is left is mostly the difference between working and trustworthy.
   costing — last, average, and multiple of real time — so whether one binary
   invocation beats a resident Python worker is now a reading rather than an
   argument.
-- **Turn latency.** *Transcription moved inside the silence window; the window
-  itself is unchanged.* A turn used to wait for 700 ms of silence and then wait
-  again while the audio decoded. Transcription now starts at the first 300 ms
-  pause, and when that pause turns out to be the end of the turn — which is most
-  of them — the transcript is already in hand when the gate closes, so the
-  second wait is gone. The audio is byte-identical to what closing delivers, so
-  the early transcript can be the final one; when speech resumes instead, it is
-  shown as a partial and discarded, which is what the coordinator's unused
-  partial path was for. What each utterance waited for is measured beside what
-  it cost. Still open: continuous feeding of the streaming endpoint, which needs
-  a session protocol in the Python worker rather than a file per request, and
-  would give word-incremental partials and let the close window itself shrink.
+- **Turn latency.** *Continuous input streaming is implemented; hardware tuning
+  remains.* VAD opening now starts one authenticated session with the resident
+  Nemotron worker. The pre-roll and every following microphone frame feed a
+  blocking Python feature generator while a separate SSE request returns
+  word-incremental partials; no pause snapshot or file-per-request shim sits in
+  that path. Closing feeds decoder-flush silence through the same session, and
+  the utterance close window has consequently moved from 700 ms to 500 ms. A
+  failed live session falls back to the complete-file endpoint, and an empty
+  short word retains the alternate-recognizer retry. Each utterance still
+  reports engine time and post-close wait. Still open: validate the new close
+  threshold and its p95 end-of-turn latency on the required macOS/Linux voice
+  hosts before reducing it further.
 - **Model-based voice activity detection.** *Silero VAD v5 is bundled and in the
   live capture path.* The small ONNX model makes the normal speech/no-speech
   decision from the microphone frames already going to PersonaPlex, so a fan,
@@ -273,7 +278,9 @@ what is left is mostly the difference between working and trustworthy.
   names of anything a narrower glob would miss. A local packaged macOS app has
   started its bundled daemon, loaded that closure, opened a no-model Agent
   session, and shut down cleanly. The tag workflow repeats the installed smoke
-  against the DMG, AppImage, and NSIS candidate before publication.
+  against the DMG, AppImage, and NSIS candidate before publication. AppImage
+  qualification now runs the complete smoke twice against the same profile,
+  making clean shutdown and immediate Linux relaunch part of the release gate.
 - **Windows sandboxing is in.** Native command execution uses a per-run
   AppContainer with workspace/scratch ACLs, credential deny rules, explicit
   network capability, and a kill-on-close Job Object. Capability probing is

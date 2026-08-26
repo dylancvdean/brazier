@@ -1213,6 +1213,196 @@ export async function transcribeAudio(
   }
 }
 
+export type IncrementalTranscription = {
+  /** Append mono float PCM while capture is still in progress. */
+  push(samples: Float32Array): void
+  /** Close the upload and resolve after the decoder flushes its last token. */
+  finish(): Promise<Transcription>
+  /** Stop both upload and response consumption. */
+  cancel(): void
+  /** The same result promise as `finish`, available for early error handling. */
+  done: Promise<Transcription>
+}
+
+/** Convert normalized float samples to the wire format accepted by the daemon. */
+export function encodePcm16(samples: Float32Array): Uint8Array {
+  const bytes = new Uint8Array(samples.length * 2)
+  const view = new DataView(bytes.buffer)
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[index]))
+    view.setInt16(index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
+  }
+  return bytes
+}
+
+/**
+ * Open one authenticated incremental ASR session.
+ *
+ * Fetch request streams are half-duplex in Chromium, so upload and SSE use two
+ * authenticated requests joined by a short-lived daemon session id. That lets
+ * token deltas arrive while the PCM upload is still open.
+ */
+export function transcribeAudioIncrementally(
+  sampleRate: number,
+  options: {
+    signal?: AbortSignal
+    model?: string
+    lookahead?: number
+    onPartial?: (text: string) => void
+  } = {}
+): IncrementalTranscription {
+  const abort = new AbortController()
+  let upload: ReadableStreamDefaultController<Uint8Array> | null = null
+  let closed = false
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      upload = controller
+    },
+    cancel() {
+      closed = true
+    }
+  })
+  const cancelFromCaller = (): void => abort.abort(options.signal?.reason)
+  if (options.signal?.aborted) cancelFromCaller()
+  else options.signal?.addEventListener('abort', cancelFromCaller, { once: true })
+
+  const done = (async (): Promise<Transcription> => {
+    try {
+      const daemon = await connection()
+      const created = await daemonFetch(
+        `${daemon.address}/v1/audio/transcriptions/sessions`,
+        {
+          method: 'POST',
+          signal: abort.signal,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            sample_rate: sampleRate,
+            ...(options.model ? { model: options.model } : {}),
+            ...(options.lookahead !== undefined ? { lookahead: options.lookahead } : {})
+          })
+        }
+      )
+      if (!created.ok) {
+        const payload = (await created.json().catch(() => null)) as {
+          error?: { message?: string }
+        } | null
+        throw new Error(
+          payload?.error?.message ?? `Could not start streaming transcription (${created.status}).`
+        )
+      }
+      const session = (await created.json()) as { id?: string }
+      if (!session.id) throw new Error('The daemon returned an invalid transcription session.')
+
+      const root = `${daemon.address}/v1/audio/transcriptions/sessions/${encodeURIComponent(session.id)}`
+      // Open the event side first so no model delta can be stranded behind the
+      // browser's half-duplex upload response.
+      const responsePromise = daemonFetch(`${root}/events`, {
+        method: 'GET',
+        signal: abort.signal,
+        headers: { accept: 'text/event-stream' }
+      })
+      // `duplex` is implemented by Chromium but has not yet reached every DOM
+      // RequestInit declaration shipped with TypeScript.
+      const uploadPromise = daemonFetch(`${root}/audio`, {
+        method: 'POST',
+        signal: abort.signal,
+        headers: {
+          'content-type': 'audio/pcm; encoding=signed-integer; bits=16; channels=1'
+        },
+        body,
+        duplex: 'half'
+      } as RequestInit & { duplex: 'half' })
+      const response = await responsePromise
+      if (!response.ok || !response.body) {
+        const payload = (await response.json().catch(() => null)) as {
+          error?: { message?: string }
+        } | null
+        throw new Error(
+          payload?.error?.message ?? `Streaming transcription failed (${response.status}).`
+        )
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let fullText = ''
+      let result: Transcription | null = null
+      while (true) {
+        const { done: responseDone, value } = await reader.read()
+        if (responseDone) break
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() ?? ''
+        for (const frame of frames) {
+          const data = frame
+            .split('\n')
+            .find((line) => line.startsWith('data:'))
+            ?.slice(5)
+            .trim()
+          if (!data) continue
+          const event = JSON.parse(data) as {
+            type?: string
+            text?: string
+            engine?: string
+            duration_ms?: number
+            error?: { message?: string }
+          }
+          if (event.error?.message) throw new Error(event.error.message)
+          if (event.type === 'transcription.delta' && event.text) {
+            fullText += event.text
+            options.onPartial?.(fullText.trim())
+          }
+          if (event.type === 'transcription.done') {
+            result = {
+              text: (event.text ?? fullText).trim(),
+              engine: event.engine ?? 'streaming-asr',
+              durationMs: typeof event.duration_ms === 'number' ? event.duration_ms : null
+            }
+          }
+        }
+      }
+      const uploaded = await uploadPromise
+      if (!uploaded.ok) {
+        const payload = (await uploaded.json().catch(() => null)) as {
+          error?: { message?: string }
+        } | null
+        throw new Error(
+          payload?.error?.message ?? `Streaming audio upload failed (${uploaded.status}).`
+        )
+      }
+      if (!result) throw new Error('Streaming transcription ended without a result.')
+      return result
+    } catch (cause) {
+      abort.abort()
+      throw cause
+    } finally {
+      options.signal?.removeEventListener('abort', cancelFromCaller)
+    }
+  })()
+
+  return {
+    push(samples) {
+      if (closed || abort.signal.aborted) return
+      upload?.enqueue(encodePcm16(samples))
+    },
+    finish() {
+      if (!closed) {
+        closed = true
+        upload?.close()
+      }
+      return done
+    },
+    cancel() {
+      if (!closed) {
+        closed = true
+        upload?.close()
+      }
+      abort.abort()
+    },
+    done
+  }
+}
+
 export type ClientToolCall = {
   id: string
   name: string

@@ -1,11 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  encodePcm16,
   filenameWithExtension,
+  invalidateConnectionCache,
   messagesForCompletion,
   prefillProgressLabel,
-  reasoningAfterTranscriptBoundary
+  reasoningAfterTranscriptBoundary,
+  transcribeAudioIncrementally
 } from './api'
+import { setDaemonAvailability } from './daemonAvailability'
 import type { Message } from './types'
 
 function message(overrides: Partial<Message>): Message {
@@ -20,6 +24,105 @@ function message(overrides: Partial<Message>): Message {
     ...overrides
   }
 }
+
+describe('encodePcm16', () => {
+  it('clamps normalized float audio into little-endian signed PCM', () => {
+    const encoded = encodePcm16(new Float32Array([-2, -1, -0.5, 0, 0.5, 1, 2]))
+    const view = new DataView(encoded.buffer)
+    expect(Array.from({ length: 7 }, (_, index) => view.getInt16(index * 2, true))).toEqual([
+      -32768,
+      -32768,
+      -16384,
+      0,
+      16383,
+      32767,
+      32767
+    ])
+  })
+})
+
+describe('transcribeAudioIncrementally', () => {
+  afterEach(() => {
+    invalidateConnectionCache()
+    vi.unstubAllGlobals()
+  })
+
+  it('receives a partial before closing the independent PCM upload', async () => {
+    const encoder = new TextEncoder()
+    let eventController: ReadableStreamDefaultController<Uint8Array> | null = null
+    const uploaded: number[] = []
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/v1/audio/transcriptions/sessions')) {
+        return new Response(JSON.stringify({ id: 'stream-1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        })
+      }
+      if (url.endsWith('/stream-1/events')) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              eventController = controller
+              controller.enqueue(
+                encoder.encode(
+                  'event: transcription.delta\ndata: {"type":"transcription.delta","text":"hello "}\n\n'
+                )
+              )
+            }
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } }
+        )
+      }
+      if (url.endsWith('/stream-1/audio')) {
+        const reader = (init?.body as ReadableStream<Uint8Array>).getReader()
+        while (true) {
+          const chunk = await reader.read()
+          if (chunk.done) break
+          uploaded.push(...chunk.value)
+        }
+        eventController?.enqueue(
+          encoder.encode(
+            'event: transcription.done\ndata: {"type":"transcription.done","text":"hello world","engine":"streaming-asr","duration_ms":42}\n\n'
+          )
+        )
+        eventController?.close()
+        return new Response(null, { status: 204 })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    vi.stubGlobal('window', {
+      brazier: {
+        getConnection: vi.fn().mockResolvedValue({
+          address: 'http://127.0.0.1:9999',
+          profile: { id: 'local' }
+        })
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    setDaemonAvailability('healthy')
+    invalidateConnectionCache()
+
+    let resolvePartial: ((text: string) => void) | null = null
+    const partial = new Promise<string>((resolve) => {
+      resolvePartial = resolve
+    })
+    const transcription = transcribeAudioIncrementally(16000, {
+      onPartial: (text) => resolvePartial?.(text)
+    })
+    transcription.push(new Float32Array([0.5, -0.5]))
+
+    expect(await partial).toBe('hello')
+    // Seeing a delta cannot depend on finish; the upload is still open here.
+    expect(uploaded).toHaveLength(4)
+    const result = await transcription.finish()
+    expect(result).toEqual({
+      text: 'hello world',
+      engine: 'streaming-asr',
+      durationMs: 42
+    })
+  })
+})
 
 describe('messagesForCompletion', () => {
   it('does not send the human-only generated-media display back to the model', () => {

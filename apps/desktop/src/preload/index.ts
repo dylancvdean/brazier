@@ -110,7 +110,7 @@ const agent = {
   closeSession: (sessionId: string): Promise<unknown> =>
     invokeAgent({ type: 'close-session', sessionId }),
   status: (): Promise<{ running: boolean; crashes: number }> =>
-    ipcRenderer.invoke('brazil:agent:status'),
+    ipcRenderer.invoke('brazier:agent:status'),
   onMessage: (listener: (message: WorkerMessage) => void): (() => void) => {
     agentMessageListeners.add(listener)
     ensureAgentMessageDispatcher()

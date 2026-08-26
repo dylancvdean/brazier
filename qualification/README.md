@@ -18,7 +18,9 @@ class, and the measured fields named in `voice_budgets`. Package results record
 that the installed artifact started its bundled daemon, contained the Computer
 safety helper, loaded the Pi worker and its dependency closure, opened and
 deleted a no-model agent session, stopped the worker, and waited for the daemon
-to exit. The Windows report additionally proves that the installed
+to exit. The AppImage release job repeats that entire smoke with the same data
+and Electron profile, so Linux qualification also proves a clean second launch.
+The Windows report additionally proves that the installed
 AppContainer launcher passed its real junction/tool-access isolation probe.
 
 The verifier deliberately refuses missing, stale, duplicated, or failing

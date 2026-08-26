@@ -476,7 +476,7 @@ describe('connection profile lifecycle and switching', () => {
     const ready = await manager.connection()
     expect(ready.profile).toMatchObject({ id: remote.id, kind: 'remote', hostLabel: 'lab.example' })
     expect(startLocal).not.toHaveBeenCalled()
-    manager.shutdown()
+    await manager.shutdown()
     expect(stopLocal).not.toHaveBeenCalled()
   })
 
@@ -498,8 +498,34 @@ describe('connection profile lifecycle and switching', () => {
     await manager.select(remote.id)
     expect(startLocal).toHaveBeenCalledTimes(1)
     expect(stopLocal).not.toHaveBeenCalled()
-    manager.shutdown()
+    await manager.shutdown()
     expect(stopLocal).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not finish shutdown until the owned Local daemon has exited', async () => {
+    const store = new ConnectionProfileStore(temporarySettingsPath())
+    let finishStopping: (() => void) | undefined
+    const stopLocal = vi.fn(() => new Promise<void>((resolve) => {
+      finishStopping = resolve
+    }))
+    const manager = new ConnectionProfileManager(store, {
+      startLocal: vi.fn(async () => ({ address: 'http://127.0.0.1:7614', api_key: null })),
+      stopLocal,
+      fetch: okFetch()
+    })
+    await manager.connection()
+
+    let completed = false
+    const shutdown = manager.shutdown().then(() => {
+      completed = true
+    })
+    expect(stopLocal).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    expect(completed).toBe(false)
+    await expect(manager.connection()).rejects.toThrow('shutting down')
+    finishStopping?.()
+    await shutdown
+    expect(completed).toBe(true)
   })
 
   it('invalidates the resolved connection when the active remote profile changes', async () => {

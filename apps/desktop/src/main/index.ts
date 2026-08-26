@@ -7,6 +7,8 @@ import { join, resolve } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, safeStorage, screen, session, shell, type IpcMainInvokeEvent } from 'electron'
 
 import { AgentSupervisor, registerAgentIpc } from './agent'
+import { terminateChildAndWait } from './childLifecycle'
+import { DesktopLifecycle } from './desktopLifecycle'
 import {
   ConnectionProfileManager,
   ConnectionProfileStore,
@@ -139,10 +141,18 @@ if (process.platform === 'linux') {
   }
 }
 
+// A second desktop-file click is an activation request, not permission to run
+// another daemon and another renderer against the same data directory. This is
+// especially important on Linux where a minimized or compositor-hidden window
+// can make the first process look gone.
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+if (!hasSingleInstanceLock) app.quit()
+
 type Connection = {
   address: string
   api_key: string | null
   local_control_key: string | null
+  pid?: number
 }
 
 let computerSafetyOverlay: BrowserWindow | null = null
@@ -711,9 +721,12 @@ function generatedApiKey(): string {
 }
 
 let daemon: ChildProcessWithoutNullStreams | undefined
+let daemonProcessId: number | undefined
 let connectionProfiles: ConnectionProfileManager | undefined
 const agent = new AgentSupervisor()
 let checkForUpdates: (() => Promise<UpdateCheckResult>) | undefined
+let mainWindow: BrowserWindow | undefined
+const desktopLifecycle = new DesktopLifecycle()
 
 function repositoryRoot(): string {
   const candidates = [
@@ -851,7 +864,10 @@ function startDaemon(): Promise<Connection> {
   })
   daemon = child
   child.once('exit', () => {
-    if (daemon === child) daemon = undefined
+    if (daemon === child) {
+      daemon = undefined
+      daemonProcessId = undefined
+    }
   })
   child.stdin.end(
     daemonKeysForStdin.length > 0 ? `${daemonKeysForStdin.join('\n')}\n` : undefined
@@ -864,68 +880,68 @@ function startDaemon(): Promise<Connection> {
 
   return new Promise((resolveConnection, reject) => {
     let buffer = ''
-    const timeout = setTimeout(
-      () => reject(new Error('The Brazier daemon did not become ready in time.')),
-      30_000
-    )
-    child.once('error', (error) => {
+    let settled = false
+    const fail = (error: Error): void => {
+      if (settled) return
+      settled = true
       clearTimeout(timeout)
       reject(error)
-    })
+      if (daemon === child) daemon = undefined
+      void terminateChildAndWait(child).catch((shutdownError) => {
+        report(`[brazierd] cleanup after failed startup: ${shutdownError.message}`, 'error')
+      })
+    }
+    const timeout = setTimeout(() => {
+      fail(new Error('The Brazier daemon did not become ready in time.'))
+    }, 30_000)
+    child.once('error', fail)
     child.once('exit', (code) => {
-      if (code && code !== 0) {
-        clearTimeout(timeout)
-        reject(new Error(`The Brazier daemon exited with status ${code}.`))
-      }
+      if (!settled) fail(new Error(`The Brazier daemon exited before it was ready (status ${code ?? 'unknown'}).`))
     })
     child.stdout.on('data', (chunk) => {
       buffer += chunk.toString()
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
       for (const line of lines) {
-        if (!line.startsWith('BRAZIER_READY ')) continue
-        clearTimeout(timeout)
-        resolveConnection(JSON.parse(line.slice('BRAZIER_READY '.length)) as Connection)
+        if (!line.startsWith('BRAZIER_READY ') || settled) continue
+        try {
+          const connection = JSON.parse(line.slice('BRAZIER_READY '.length)) as Connection
+          if (!connection.address) throw new Error('readiness payload has no address')
+          if (Number.isInteger(connection.pid) && Number(connection.pid) > 0) {
+            daemonProcessId = Number(connection.pid)
+          }
+          settled = true
+          clearTimeout(timeout)
+          resolveConnection(connection)
+        } catch (cause) {
+          fail(new Error(`The Brazier daemon returned invalid readiness data: ${cause instanceof Error ? cause.message : String(cause)}`))
+        }
       }
     })
   })
 }
 
-function stopLocalDaemon(): void {
-  daemon?.kill()
-  daemon = undefined
-}
-
-/** Stop the package-smoke daemon and prove that the child actually exited. */
+/** Stop the owned daemon and prove that the child actually exited. */
 function stopLocalDaemonAndWait(timeoutMs = 10_000): Promise<void> {
   const child = daemon
-  if (!child) return Promise.reject(new Error('the local daemon was not running at shutdown'))
+  const processId = daemonProcessId
   daemon = undefined
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
-
-  return new Promise((resolveShutdown, rejectShutdown) => {
-    const cleanup = (): void => {
-      clearTimeout(timeout)
-      child.off('exit', onExit)
-      child.off('error', onError)
-    }
-    const onExit = (): void => {
-      cleanup()
-      resolveShutdown()
-    }
-    const onError = (cause: Error): void => {
-      cleanup()
-      rejectShutdown(cause)
-    }
-    const timeout = setTimeout(() => {
-      cleanup()
-      child.kill('SIGKILL')
-      rejectShutdown(new Error(`the local daemon did not exit within ${timeoutMs} ms`))
-    }, timeoutMs)
-    child.once('exit', onExit)
-    child.once('error', onError)
-    if (!child.kill('SIGTERM')) {
-      onError(new Error('the local daemon did not accept the shutdown signal'))
+  daemonProcessId = undefined
+  return terminateChildAndWait(child, {
+    gracefulTimeoutMs: timeoutMs,
+    sendSignal: (signal) => {
+      // In development the owned child is `cargo run`; signal the brazierd PID
+      // it reported, then wait for Cargo to observe that exit. Killing Cargo
+      // itself can orphan the real daemon and poison the next launch.
+      if (processId && processId !== child?.pid) {
+        try {
+          process.kill(processId, signal)
+          return true
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false
+        }
+      }
+      return child?.kill(signal) ?? true
     }
   })
 }
@@ -1205,6 +1221,10 @@ function iconPath(): string | undefined {
 }
 
 async function createWindow(): Promise<void> {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    showMainWindow()
+    return
+  }
   const icon = iconPath()
   const window = new BrowserWindow({
     width: 1280,
@@ -1232,6 +1252,10 @@ async function createWindow(): Promise<void> {
       offscreen: false,
       backgroundThrottling: false
     }
+  })
+  mainWindow = window
+  window.once('closed', () => {
+    if (mainWindow === window) mainWindow = undefined
   })
 
   attachContextMenu(window)
@@ -1334,6 +1358,17 @@ async function createWindow(): Promise<void> {
   }
 }
 
+function showMainWindow(): void {
+  const window = mainWindow
+  if (!window || window.isDestroyed()) {
+    if (app.isReady() && desktopLifecycle.canShowWindow) void createWindow()
+    return
+  }
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+}
+
 function forceWelcomeRequested(): boolean {
   if (process.env.BRAZIER_FORCE_WELCOME === '1') return true
   return process.argv.some((arg) => arg === '--welcome' || arg === '--force-welcome')
@@ -1371,11 +1406,15 @@ async function runRequestedPackageSmoke(profiles: ConnectionProfileManager): Pro
   const output = process.env.BRAZIER_PACKAGE_SMOKE_OUTPUT
   if (output) await writeFile(output, serialized, { mode: 0o600 })
   else process.stdout.write(serialized)
-  profiles.shutdown()
+  await profiles.shutdown()
   app.exit(result.passed ? 0 : 1)
 }
 
-app.whenReady().then(async () => {
+if (hasSingleInstanceLock) app.on('second-instance', () => {
+  if (desktopLifecycle.requestActivation() === 'show-window') showMainWindow()
+})
+
+if (hasSingleInstanceLock) app.whenReady().then(async () => {
   // No File/Edit/View application menu — the app is a self-contained shell.
   Menu.setApplicationMenu(null)
   // A packaged macOS app takes its dock icon from the bundle; an unpackaged one
@@ -1386,7 +1425,7 @@ app.whenReady().then(async () => {
   }
   const profiles = new ConnectionProfileManager(
     openConnectionProfileStore(),
-    { startLocal: startDaemon, stopLocal: stopLocalDaemon }
+    { startLocal: startDaemon, stopLocal: stopLocalDaemonAndWait }
   )
   connectionProfiles = profiles
   installRendererConnectionGuard(profiles)
@@ -1399,7 +1438,9 @@ app.whenReady().then(async () => {
         `[package-smoke] ${cause instanceof Error ? cause.stack ?? cause.message : String(cause)}`,
         'error'
       )
-      profiles.shutdown()
+      await profiles.shutdown().catch((error) => {
+        report(`[package-smoke] shutdown failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+      })
       app.exit(1)
     }
     return
@@ -1605,7 +1646,6 @@ app.whenReady().then(async () => {
   // Agent mode reaches the machine only through the daemon, so the worker gets
   // the loopback address and bearer token once the daemon is ready.
   registerAgentIpc(agent, assertTrustedIpcSender)
-  handleTrusted('brazier:agent:status', () => agent.status())
   handleTrusted('brazier:select-workspace', async (event) => {
     requireLocalFilesystem('The workspace picker')
     const window = BrowserWindow.fromWebContents(event.sender)
@@ -1622,19 +1662,52 @@ app.whenReady().then(async () => {
   await createWindow()
   checkForUpdates = startUpdates(report).checkForUpdates
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow()
+    showMainWindow()
   })
 })
 
-app.on('before-quit', () => {
-  computerUseActive = false
-  computerSafetyGeneration += 1
-  stopNativeComputerSafety()
-  stopComputerOverlayWatchdog()
-  globalShortcut.unregister('Escape')
-  clearSafetyOverlayMarker()
-  void agent.shutdown()
-  connectionProfiles?.shutdown()
+async function shutdownApplication(): Promise<void> {
+  report('[brazier] application shutdown started')
+  try {
+    if (computerUseActive || computerSafetyStarting || daemon) {
+      // Do not resolve a never-used Local profile merely to shut it down. If an
+      // owned daemon exists, revoke authority before terminating it.
+      await setComputerUseActive(false)
+    } else {
+      computerSafetyGeneration += 1
+      stopNativeComputerSafety()
+      stopComputerOverlayWatchdog()
+      globalShortcut.unregister('Escape')
+      clearSafetyOverlayMarker()
+    }
+  } catch (error) {
+    report(`[brazier] safety cleanup failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+  }
+  try {
+    await agent.shutdown()
+  } catch (error) {
+    report(`[brazier] agent worker shutdown failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+  }
+  try {
+    await connectionProfiles?.shutdown()
+  } catch (error) {
+    report(`[brazier] daemon shutdown failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+  }
+  report('[brazier] application shutdown complete')
+}
+
+app.on('before-quit', (event) => {
+  if (!hasSingleInstanceLock || process.env.BRAZIER_PACKAGE_SMOKE === '1') return
+  const decision = desktopLifecycle.requestQuit()
+  if (decision === 'allow-exit') return
+  event.preventDefault()
+  if (decision === 'start-cleanup') {
+    void shutdownApplication().finally(() => {
+      const { relaunch } = desktopLifecycle.cleanupFinished()
+      if (relaunch) app.relaunch()
+      app.quit()
+    })
+  }
 })
 
 app.on('window-all-closed', () => {

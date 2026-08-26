@@ -1,4 +1,11 @@
-use std::{convert::Infallible, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use anyhow::Context as _;
 use async_stream::stream;
@@ -614,6 +621,19 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             post(chat_completions).layer(DefaultBodyLimit::max(70 * 1024 * 1024)),
         )
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
+        .route(
+            "/v1/audio/transcriptions/sessions",
+            post(create_streaming_transcription),
+        )
+        .route(
+            "/v1/audio/transcriptions/sessions/{id}/audio",
+            post(upload_streaming_transcription)
+                .layer(DefaultBodyLimit::max(STREAMING_TRANSCRIPTION_MAX_BYTES)),
+        )
+        .route(
+            "/v1/audio/transcriptions/sessions/{id}/events",
+            get(streaming_transcription_events),
+        )
         .route("/v1/responses", post(responses))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
@@ -1058,7 +1078,7 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
                     "id": "streaming_asr",
                     "available": streaming_asr_available,
                     "engine": "streaming-asr",
-                    "summary": "Low-latency chunked transcription via NVIDIA Nemotron ASR Streaming (Transformers). POST /v1/audio/transcriptions with stream=true."
+                    "summary": "Low-latency transcription via NVIDIA Nemotron ASR Streaming (Transformers). File input uses POST /v1/audio/transcriptions with stream=true; live PCM uses /v1/audio/transcriptions/sessions with separate upload and SSE event channels."
                 },
                 "realtime_voice": {
                     "id": "realtime_voice",
@@ -6195,6 +6215,251 @@ struct TranscriptionRequest {
     engine: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateStreamingTranscription {
+    sample_rate: u32,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    lookahead: Option<u32>,
+}
+
+const STREAMING_TRANSCRIPTION_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+struct StreamingTranscriptionSession {
+    owner_client_id: Option<String>,
+    owner: bool,
+    started: std::time::Instant,
+    audio: tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>,
+    events: tokio::sync::Mutex<Option<StreamingAsrEventReceiver>>,
+}
+
+type StreamingAsrEventReceiver =
+    tokio::sync::mpsc::Receiver<anyhow::Result<streaming_asr::WorkerEvent>>;
+type StreamingTranscriptionSessions =
+    tokio::sync::Mutex<HashMap<String, Arc<StreamingTranscriptionSession>>>;
+
+static STREAMING_TRANSCRIPTION_SESSIONS: OnceLock<StreamingTranscriptionSessions> = OnceLock::new();
+
+fn streaming_transcription_sessions() -> &'static StreamingTranscriptionSessions {
+    STREAMING_TRANSCRIPTION_SESSIONS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
+fn owns_streaming_transcription(
+    auth: &AuthContext,
+    session: &StreamingTranscriptionSession,
+) -> bool {
+    auth.owner || (!session.owner && auth.client_id == session.owner_client_id)
+}
+
+/// Reserve a decoder session before the browser opens its independent upload
+/// and event requests. Two HTTP channels are intentional: Fetch exposes only
+/// half-duplex request streaming, so its response cannot carry live deltas.
+async fn create_streaming_transcription(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<CreateStreamingTranscription>,
+) -> ApiResult<Json<Value>> {
+    if !(8_000..=96_000).contains(&request.sample_rate) {
+        return Err(ApiError::bad_request(
+            "sample_rate must be between 8000 and 96000",
+        ));
+    }
+    let settings = state.runtime.settings().await;
+    streaming_asr::resolve_python(
+        &state.data_dir,
+        settings.streaming_asr_python.as_deref(),
+    )
+    .ok_or_else(|| {
+        ApiError::bad_request(
+            "Streaming ASR requires a built streaming-asr Python environment. Install it under Runtimes.",
+        )
+    })?;
+    let model_path = streaming_asr::resolve_model_path(
+        &state.data_dir,
+        request
+            .model
+            .as_deref()
+            .or(settings.streaming_asr_model.as_deref()),
+    )
+    .ok_or_else(|| {
+        ApiError::bad_request(
+            "Streaming ASR requires a downloaded Nemotron ASR Streaming snapshot from Discover.",
+        )
+    })?;
+
+    let id = Uuid::new_v4().to_string();
+    let (audio_tx, audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let (event_tx, events) = tokio::sync::mpsc::channel(64);
+    let session = Arc::new(StreamingTranscriptionSession {
+        owner_client_id: auth.client_id.clone(),
+        owner: auth.owner,
+        started: std::time::Instant::now(),
+        audio: tokio::sync::Mutex::new(Some(audio_tx)),
+        events: tokio::sync::Mutex::new(Some(events)),
+    });
+    streaming_transcription_sessions()
+        .lock()
+        .await
+        .insert(id.clone(), session.clone());
+
+    let runtime = state.runtime.clone();
+    let sample_rate = request.sample_rate;
+    let lookahead = request.lookahead;
+    let cleanup_id = id.clone();
+    tokio::spawn(async move {
+        let _ = runtime
+            .transcribe_streaming_pcm(&model_path, sample_rate, lookahead, audio_rx, event_tx)
+            .await;
+        streaming_transcription_sessions()
+            .lock()
+            .await
+            .remove(&cleanup_id);
+    });
+    // A renderer that creates a session and disappears before opening either
+    // channel must not leave the worker waiting forever.
+    let expiry_id = id.clone();
+    let expiry_session = Arc::downgrade(&session);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let unopened = if let Some(session) = expiry_session.upgrade() {
+            session.audio.lock().await.is_some()
+        } else {
+            false
+        };
+        if unopened {
+            streaming_transcription_sessions()
+                .lock()
+                .await
+                .remove(&expiry_id);
+        }
+    });
+
+    Ok(Json(json!({ "id": id })))
+}
+
+async fn streaming_transcription_session(
+    id: &str,
+    auth: &AuthContext,
+) -> ApiResult<Arc<StreamingTranscriptionSession>> {
+    let session = streaming_transcription_sessions()
+        .lock()
+        .await
+        .get(id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("streaming transcription session not found"))?;
+    if !owns_streaming_transcription(auth, &session) {
+        return Err(ApiError::forbidden(
+            "streaming transcription belongs to another client",
+        ));
+    }
+    Ok(session)
+}
+
+async fn upload_streaming_transcription(
+    Path(id): Path<String>,
+    Extension(auth): Extension<AuthContext>,
+    request: Request,
+) -> ApiResult<StatusCode> {
+    let session = streaming_transcription_session(&id, &auth).await?;
+    let audio = session
+        .audio
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| ApiError::bad_request("streaming audio upload already started"))?;
+    let mut body = request.into_body().into_data_stream();
+    let mut received = 0_usize;
+    let mut pending_byte = None;
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(ApiError::bad_request)?;
+        received = received
+            .checked_add(chunk.len())
+            .filter(|total| *total <= STREAMING_TRANSCRIPTION_MAX_BYTES)
+            .ok_or_else(|| ApiError::bad_request("streaming audio exceeds the 4 MiB limit"))?;
+        let mut chunk = chunk.to_vec();
+        if let Some(byte) = pending_byte.take() {
+            chunk.insert(0, byte);
+        }
+        if chunk.len() % 2 != 0 {
+            pending_byte = chunk.pop();
+        }
+        if chunk.is_empty() {
+            continue;
+        }
+        audio
+            .send(chunk)
+            .await
+            .map_err(|_| ApiError::bad_request("streaming transcription ended"))?;
+    }
+    if pending_byte.is_some() {
+        return Err(ApiError::bad_request("streaming PCM ended mid-sample"));
+    }
+    // Sender drops here; the runtime translates that into the worker's finish
+    // command after every preceding chunk has crossed stdin.
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn streaming_transcription_events(
+    Path(id): Path<String>,
+    Extension(auth): Extension<AuthContext>,
+) -> ApiResult<Response> {
+    let session = streaming_transcription_session(&id, &auth).await?;
+    let mut events = session
+        .events
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| ApiError::bad_request("streaming event channel already opened"))?;
+    let started = session.started;
+    let stream_events = stream! {
+        while let Some(item) = events.recv().await {
+            match item {
+                Ok(streaming_asr::WorkerEvent::Status { phase, message, latency_ms }) => {
+                    yield Ok::<Event, Infallible>(Event::default()
+                        .event("transcription.status")
+                        .data(json!({
+                            "type": "transcription.status",
+                            "phase": phase,
+                            "message": message,
+                            "latency_ms": latency_ms,
+                        }).to_string()));
+                }
+                Ok(streaming_asr::WorkerEvent::Delta { text }) => {
+                    yield Ok::<Event, Infallible>(Event::default()
+                        .event("transcription.delta")
+                        .data(json!({ "type": "transcription.delta", "text": text }).to_string()));
+                }
+                Ok(streaming_asr::WorkerEvent::Done { text }) => {
+                    yield Ok::<Event, Infallible>(Event::default()
+                        .event("transcription.done")
+                        .data(json!({
+                            "type": "transcription.done",
+                            "text": text,
+                            "engine": streaming_asr::ENGINE,
+                            "duration_ms": started.elapsed().as_millis() as u64,
+                        }).to_string()));
+                }
+                Ok(streaming_asr::WorkerEvent::Error { message }) => {
+                    yield Ok::<Event, Infallible>(Event::default()
+                        .event("error")
+                        .data(json!({ "error": { "message": message } }).to_string()));
+                    break;
+                }
+                Err(error) => {
+                    yield Ok::<Event, Infallible>(Event::default()
+                        .event("error")
+                        .data(json!({ "error": { "message": error.to_string() } }).to_string()));
+                    break;
+                }
+            }
+        }
+    };
+    Ok(Sse::new(stream_events)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
 async fn resolve_transcription_blob(
     state: &AppState,
     request: &TranscriptionRequest,
@@ -9546,6 +9811,22 @@ mod tests {
         let rejected = require_voice_session_owner(&second_auth, &session_owner).unwrap_err();
         assert_eq!(rejected.status, StatusCode::FORBIDDEN);
         assert!(require_voice_session_owner(&AuthContext::owner("owner"), &session_owner).is_ok());
+
+        let (audio, _audio_rx) = tokio::sync::mpsc::channel(1);
+        let (_event_tx, events) = tokio::sync::mpsc::channel(1);
+        let streaming = StreamingTranscriptionSession {
+            owner_client_id: first_auth.client_id.clone(),
+            owner: false,
+            started: std::time::Instant::now(),
+            audio: tokio::sync::Mutex::new(Some(audio)),
+            events: tokio::sync::Mutex::new(Some(events)),
+        };
+        assert!(owns_streaming_transcription(&first_auth, &streaming));
+        assert!(!owns_streaming_transcription(&second_auth, &streaming));
+        assert!(owns_streaming_transcription(
+            &AuthContext::owner("owner"),
+            &streaming
+        ));
     }
 
     #[tokio::test]

@@ -1539,6 +1539,57 @@ impl Runtime {
         }
     }
 
+    /// Feed live PCM into the resident streaming ASR worker.
+    ///
+    /// Unlike `transcribe_streaming`, the receiver is consumed concurrently
+    /// with decoder output. This is the input-streaming path used by voice mode;
+    /// no temporary WAV or repeated snapshot is involved.
+    pub async fn transcribe_streaming_pcm(
+        &self,
+        model: &std::path::Path,
+        sample_rate: u32,
+        lookahead: Option<u32>,
+        audio: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        events: tokio::sync::mpsc::Sender<anyhow::Result<streaming_asr::WorkerEvent>>,
+    ) -> anyhow::Result<String> {
+        let package_dir =
+            crate::build_recipe::ensure_recipe_files(&self.data_dir)?.join("streaming_asr_pkg");
+        let mut state = self.streaming_asr.lock().await;
+        let python = state
+            .python
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("streaming ASR interpreter is not installed"))?;
+        let reusable = state
+            .worker
+            .as_mut()
+            .is_some_and(|worker| worker.serves(&python, model));
+        if !reusable {
+            state.worker = Some(
+                streaming_asr::Worker::start(
+                    &python,
+                    model,
+                    &package_dir,
+                    lookahead.unwrap_or(streaming_asr::DEFAULT_LOOKAHEAD),
+                )
+                .await?,
+            );
+        }
+        let worker = state.worker.as_mut().expect("worker present above");
+        match worker
+            .transcribe_pcm(sample_rate, lookahead, audio, &events)
+            .await
+        {
+            Ok(text) => Ok(text),
+            Err(error) => {
+                // A live decoder may still own a generation thread even when
+                // Python managed to report an error. Replace it after any live
+                // failure so the next utterance never inherits a busy source.
+                state.worker = None;
+                Err(error)
+            }
+        }
+    }
+
     /// Discover an existing binary or download a managed release.
     pub async fn ensure_llama_binary(&self) -> anyhow::Result<PathBuf> {
         self.ensure_llama_binary_with_progress(None, false, Box::new(|_| {}))

@@ -139,7 +139,7 @@ export type ConnectionProfileManagerDependencies = {
     api_key: string | null
     local_control_key?: string | null
   }>
-  stopLocal: () => void
+  stopLocal: () => void | Promise<void>
   fetch?: typeof fetch
   handshakeTimeoutMs?: number
 }
@@ -687,6 +687,8 @@ export class ConnectionProfileManager {
   private resolvedLocalAddress?: string
   private resolvedLocalControlKey?: string
   private localStarted = false
+  private stopped = false
+  private shutdownPromise?: Promise<void>
 
   constructor(
     readonly store: ConnectionProfileStore,
@@ -702,6 +704,7 @@ export class ConnectionProfileManager {
   }
 
   async connection(): Promise<DaemonConnection> {
+    this.assertRunning()
     if (!this.activeConnection) {
       const pending = this.resolve(this.store.current()).catch((error: unknown) => {
         if (this.activeConnection === pending) this.activeConnection = undefined
@@ -713,6 +716,7 @@ export class ConnectionProfileManager {
   }
 
   async test(idOrProfile: string | RemoteConnectionProfileInput): Promise<DaemonConnection> {
+    this.assertRunning()
     const profile = typeof idOrProfile === 'string'
       ? this.store.get(idOrProfile)
       : this.normalizeRemoteInput(idOrProfile)
@@ -721,6 +725,7 @@ export class ConnectionProfileManager {
   }
 
   async upsert(input: RemoteConnectionProfileInput): Promise<RemoteConnectionProfile> {
+    this.assertRunning()
     const activeId = this.store.current().id
     const candidate = this.normalizeRemoteInput(input)
     const ready = candidate.id === activeId ? await this.resolve(candidate) : undefined
@@ -730,6 +735,7 @@ export class ConnectionProfileManager {
   }
 
   async claimAndSave(input: PairingClaimInput): Promise<ClaimedConnection> {
+    this.assertRunning()
     if (!this.store.canPersistRemoteCredentials()) {
       throw new Error('Unlock secure credential storage before claiming a one-time pairing code.')
     }
@@ -765,6 +771,7 @@ export class ConnectionProfileManager {
   }
 
   async delete(id: string): Promise<boolean> {
+    this.assertRunning()
     const wasActive = this.store.current().id === id
     if (wasActive) {
       // Prove the Local replacement is usable before changing the durable
@@ -777,6 +784,7 @@ export class ConnectionProfileManager {
   }
 
   async select(id: string): Promise<DaemonConnection> {
+    this.assertRunning()
     const profile = this.store.get(id)
     if (!profile) throw new Error('Connection profile does not exist.')
     if (profile.id === this.store.current().id) return this.connection()
@@ -792,14 +800,24 @@ export class ConnectionProfileManager {
     this.activeConnection = undefined
   }
 
-  shutdown(): void {
-    if (!this.localStarted) return
-    this.dependencies.stopLocal()
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise
+    this.stopped = true
+    const stopLocal = this.localStarted
     this.localStarted = false
     this.localConnection = undefined
     this.resolvedLocalAddress = undefined
     this.resolvedLocalControlKey = undefined
     this.activeConnection = undefined
+    // Promise.resolve calls a synchronous dependency before returning, which
+    // preserves immediate ownership release while allowing normal app quit to
+    // wait for the daemon's real exit.
+    try {
+      this.shutdownPromise = Promise.resolve(stopLocal ? this.dependencies.stopLocal() : undefined)
+    } catch (error) {
+      this.shutdownPromise = Promise.reject(error)
+    }
+    return this.shutdownPromise
   }
 
   /** Main-process network guard for renderer-direct fetch/WebSocket traffic. */
@@ -886,11 +904,13 @@ export class ConnectionProfileManager {
     api_key: string | null
     local_control_key?: string | null
   }> {
+    this.assertRunning()
     if (!this.localConnection) {
       this.localStarted = true
       this.localConnection = this.dependencies
         .startLocal()
         .then((connection) => {
+          if (this.stopped) throw new Error('The connection manager is shutting down.')
           this.resolvedLocalAddress = normalizeDaemonBaseUrl(connection.address)
           this.resolvedLocalControlKey = connection.local_control_key ?? undefined
           return connection
@@ -904,6 +924,10 @@ export class ConnectionProfileManager {
         })
     }
     return this.localConnection
+  }
+
+  private assertRunning(): void {
+    if (this.stopped) throw new Error('The connection manager is shutting down.')
   }
 }
 
