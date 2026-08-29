@@ -899,7 +899,7 @@ fn create_appcontainer_process(
 
     let application = wide_os(executable.as_os_str());
     let mut command_line = encode_command_line(executable.as_os_str(), args);
-    let cwd = wide_os(cwd.as_os_str());
+    let cwd = wide_os(win32_process_path(cwd).as_os_str());
     let mut process = PROCESS_INFORMATION::default();
     let created = unsafe {
         CreateProcessW(
@@ -1097,6 +1097,19 @@ fn wide_os(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(Some(0)).collect()
 }
 
+/// `CreateProcessW` accepts `\\?\` paths, but `cmd.exe` treats a verbatim
+/// `lpCurrentDirectory` as UNC and refuses to start there.
+fn win32_process_path(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest.as_ref())
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn create_directory_junction(link: &Path, target: &Path) -> anyhow::Result<()> {
     let output = Command::new("cmd.exe")
         .args(["/D", "/C", "mklink", "/J"])
@@ -1231,6 +1244,22 @@ mod tests {
         assert_eq!(quoted("two words"), "\"two words\"");
         assert_eq!(quoted("say\"hi"), "\"say\\\"hi\"");
         assert_eq!(quoted(r"C:\path with space\"), r#""C:\path with space\\""#);
+    }
+
+    #[test]
+    fn create_process_cwd_strips_the_verbatim_namespace_prefix() {
+        assert_eq!(
+            win32_process_path(Path::new(r"\\?\C:\Users\me\ws")),
+            Path::new(r"C:\Users\me\ws")
+        );
+        assert_eq!(
+            win32_process_path(Path::new(r"\\?\UNC\server\share\ws")),
+            Path::new(r"\\server\share\ws")
+        );
+        assert_eq!(
+            win32_process_path(Path::new(r"C:\Users\me\ws")),
+            Path::new(r"C:\Users\me\ws")
+        );
     }
 
     #[test]

@@ -1532,6 +1532,32 @@ fn secure_remove_tree(_path: &Path) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 
+/// Resolve a daemon data directory through prefix symlinks (macOS `/var` →
+/// `/private/var`) so later `O_NOFOLLOW` opens do not see a symlink component.
+fn real_data_dir(data_dir: &Path) -> PathBuf {
+    std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf())
+}
+
+fn ensure_agent_subdir(data_dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let path = real_data_dir(data_dir).join("agent").join(name);
+    #[cfg(unix)]
+    secure_create_dir_all(&path)?;
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+fn create_agent_file(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        secure_open_write(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::create(path)
+    }
+}
+
 async fn doc_read(
     context: &BrokerContext<'_>,
     plan: &CallPlan,
@@ -1563,14 +1589,13 @@ async fn doc_read(
                 input.metadata()?.len() <= 64 * 1024 * 1024,
                 "documents are limited to 64 MiB"
             );
-            let staging = context.data_dir.join("agent").join("document-staging");
-            secure_create_dir_all(&staging)?;
+            let staging = ensure_agent_subdir(context.data_dir, "document-staging")?;
             let suffix = source
                 .extension()
                 .and_then(|value| value.to_str())
                 .unwrap_or("bin");
             let staged = staging.join(format!("{}.{}", Uuid::new_v4(), suffix));
-            let mut output = secure_open_write(&staged)?;
+            let mut output = create_agent_file(&staged)?;
             std::io::copy(&mut input, &mut output)?;
             output.sync_all()?;
             (staged.clone(), Some(staged))
@@ -3752,7 +3777,8 @@ mod tests {
         std::fs::create_dir(dir.path().join("nested")).expect("mkdir");
         std::fs::write(dir.path().join("nested").join("beta.txt"), "b").expect("write nested");
 
-        let entries = secure_directory_entries(dir.path()).expect("list");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize tempdir");
+        let entries = secure_directory_entries(&root).expect("list");
         let mut names: Vec<_> = entries
             .iter()
             .map(|(name, _)| name.to_string_lossy().into_owned())
@@ -3977,6 +4003,7 @@ mod tests {
         assert!(error.to_string().contains("could not detect"), "{error}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn writes_and_reads_round_trip_inside_the_workspace() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4144,6 +4171,7 @@ startxref
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn ambiguous_patches_are_refused() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4301,6 +4329,7 @@ startxref
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn ask_mode_requires_approval_for_writes_and_then_honours_it() {
         let harness = Harness::new(AgentPermissionMode::Ask).await;
@@ -4437,6 +4466,7 @@ startxref
         assert!(harness.workspace.path().exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn search_finds_matches_and_skips_heavy_directories() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4467,6 +4497,7 @@ startxref
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn search_can_filter_by_name() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4513,6 +4544,7 @@ startxref
         assert!(records.iter().all(|record| record.sandbox.is_some()));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn large_output_is_truncated_and_stored_as_an_artifact() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;

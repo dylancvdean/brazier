@@ -1110,7 +1110,10 @@ mod tests {
                 // The reason comes from the tool's own argument, not from a
                 // caller-supplied one, and the summary states the access asked
                 // for without repeating itself.
-                assert!(summary.contains("/opt/sdk (read)"), "{summary}");
+                assert!(
+                    summary.contains(&format!("{} (read)", Path::new("/opt/sdk").display())),
+                    "{summary}"
+                );
                 assert!(summary.contains("outbound network"), "{summary}");
                 assert_eq!(summary.matches("network").count(), 1, "{summary}");
                 // Host execution was requested, so no standing grant is offered.
@@ -1122,9 +1125,9 @@ mod tests {
                     elevation
                         .requested_filesystem_paths
                         .iter()
-                        .map(|entry| entry.path.as_str())
+                        .map(|entry| entry.path.clone())
                         .collect::<Vec<_>>(),
-                    ["/opt/sdk"]
+                    vec![Path::new("/opt/sdk").display().to_string()]
                 );
             }
             other => panic!("expected approval, got {other:?}"),
