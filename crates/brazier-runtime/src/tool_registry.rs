@@ -202,10 +202,10 @@ fn decode_json_value(text: &str) -> Option<Value> {
     if let Ok(value) = serde_json::from_str::<Value>(text) {
         return Some(value);
     }
-    if let Some(object) = outermost_json_object(text) {
-        if let Ok(value) = serde_json::from_str::<Value>(object) {
-            return Some(value);
-        }
+    if let Some(object) = outermost_json_object(text)
+        && let Ok(value) = serde_json::from_str::<Value>(object)
+    {
+        return Some(value);
     }
     None
 }
