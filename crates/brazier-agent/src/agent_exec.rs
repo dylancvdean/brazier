@@ -945,20 +945,17 @@ fn walk_boundary(root: &Path, workspace: Option<&Path>) -> Option<PathBuf> {
 /// Enumerate a directory through a pinned handle and open each child with the
 /// component-by-component no-symlink routine. A concurrent symlink swap can
 /// make an entry disappear from the result, but cannot redirect the walk.
+///
+/// Names come from `fdopendir`/`readdir` on a duplicate of the pinned fd.
+/// `/proc/self/fd/N` works as a directory on Linux, but macOS `/dev/fd/N` is a
+/// character device, so `read_dir` there fails with ENOTDIR.
 #[cfg(unix)]
 fn secure_directory_entries(
     path: &Path,
 ) -> std::io::Result<Vec<(std::ffi::OsString, std::fs::Metadata)>> {
-    use std::os::fd::AsRawFd as _;
     let directory = unix_open_file(path, libc::O_RDONLY | libc::O_DIRECTORY, false)?;
-    #[cfg(target_os = "linux")]
-    let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
-    #[cfg(not(target_os = "linux"))]
-    let descriptor_path = PathBuf::from(format!("/dev/fd/{}", directory.as_raw_fd()));
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(descriptor_path)? {
-        let entry = entry?;
-        let name = entry.file_name();
+    for name in unix_directory_child_names(&directory)? {
         let logical = path.join(&name);
         let Ok(child) = secure_open_read(&logical) else {
             continue;
@@ -1242,6 +1239,40 @@ fn secure_remove(path: &Path, directory: bool) -> std::io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// Child names of a pinned directory fd. `fdopendir` consumes the duplicate
+/// descriptor; `.` and `..` are omitted the same way `std::fs::read_dir` does.
+#[cfg(unix)]
+fn unix_directory_child_names(
+    directory: &std::fs::File,
+) -> std::io::Result<Vec<std::ffi::OsString>> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        unsafe { libc::close(duplicate) };
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut names = Vec::new();
+    loop {
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        names.push(std::ffi::OsString::from_vec(name.to_bytes().to_vec()));
+    }
+    unsafe { libc::closedir(stream) };
+    Ok(names)
 }
 
 #[cfg(unix)]
@@ -3715,6 +3746,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn secure_directory_entries_lists_children_through_a_pinned_handle() {
+        let dir = TempDir::new().expect("dir");
+        std::fs::write(dir.path().join("alpha.txt"), "a").expect("write file");
+        std::fs::create_dir(dir.path().join("nested")).expect("mkdir");
+        std::fs::write(dir.path().join("nested").join("beta.txt"), "b").expect("write nested");
+
+        let entries = secure_directory_entries(dir.path()).expect("list");
+        let mut names: Vec<_> = entries
+            .iter()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["alpha.txt".to_owned(), "nested".to_owned()]);
+        assert!(
+            entries
+                .iter()
+                .any(|(name, metadata)| name == "alpha.txt" && metadata.is_file())
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|(name, metadata)| name == "nested" && metadata.is_dir())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn pinned_directory_placeholders_use_actual_high_descriptors() {
         let mut args = vec![
             "--bind-fd".into(),
@@ -4508,7 +4566,9 @@ startxref
         assert!(failure.is_error);
     }
 
-    #[cfg(unix)]
+    /// Bubblewrap remounts the session workspace at `/tmp/brazier-workspace`.
+    /// Seatbelt on macOS keeps the real path, so this assertion is Linux-only.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn network_sandbox_uses_the_pinned_workspace_mount() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;

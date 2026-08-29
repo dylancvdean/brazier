@@ -1533,21 +1533,7 @@ pub fn binary_appears_runnable(binary: &Path) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some(dir) = binary.parent() {
-        #[cfg(unix)]
-        {
-            let key = if cfg!(target_os = "macos") {
-                "DYLD_LIBRARY_PATH"
-            } else {
-                "LD_LIBRARY_PATH"
-            };
-            let mut paths = vec![dir.to_path_buf()];
-            if let Some(existing) = std::env::var_os(key) {
-                paths.extend(std::env::split_paths(&existing));
-            }
-            if let Ok(joined) = std::env::join_paths(paths) {
-                command.env(key, joined);
-            }
-        }
+        prepend_library_path(&mut command, dir);
     }
     matches!(command.status(), Ok(status) if status.success() || status.code() == Some(0))
 }
@@ -2335,7 +2321,7 @@ impl LlamaServer {
         });
         // Managed releases ship companion .so files next to llama-server.
         if let Some(dir) = binary.parent() {
-            prepend_library_path(&mut command, dir);
+            prepend_library_path(command.as_std_mut(), dir);
         }
         let mut child = command
             .spawn()
@@ -2658,7 +2644,7 @@ pub fn loopback_url(addr: SocketAddr) -> String {
     format!("http://{addr}")
 }
 
-fn prepend_library_path(command: &mut Command, dir: &Path) {
+fn prepend_library_path(command: &mut std::process::Command, dir: &Path) {
     #[cfg(unix)]
     {
         let key = if cfg!(target_os = "macos") {
