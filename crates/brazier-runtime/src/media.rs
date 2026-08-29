@@ -1021,19 +1021,30 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
         }];
-        prepare_messages(&ctx, &mut messages, None).await.unwrap();
-        let text = messages[0].content[0]["text"].as_str().unwrap();
-        assert!(text.contains("Attached PDF document"), "{text}");
-        assert!(
-            text.contains(crate::documents::short_document_id(&stored.sha256)),
-            "{text}"
-        );
-        assert!(
-            !text.contains(&stored.sha256),
-            "full digest should not be shown: {text}"
-        );
-        assert!(text.contains("doc_read"), "{text}");
-        assert!(!text.contains("[Contents of"), "{text}");
+        match prepare_messages(&ctx, &mut messages, None).await {
+            Ok(()) => {
+                let text = messages[0].content[0]["text"].as_str().unwrap();
+                assert!(text.contains("Attached PDF document"), "{text}");
+                assert!(
+                    text.contains(crate::documents::short_document_id(&stored.sha256)),
+                    "{text}"
+                );
+                assert!(
+                    !text.contains(&stored.sha256),
+                    "full digest should not be shown: {text}"
+                );
+                assert!(text.contains("doc_read"), "{text}");
+                assert!(!text.contains("[Contents of"), "{text}");
+            }
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    crate::documents::poppler_missing_message().is_some(),
+                    "unexpected PDF prepare failure: {message}"
+                );
+                assert!(message.contains("Poppler"), "{message}");
+            }
+        }
     }
 
     #[tokio::test]

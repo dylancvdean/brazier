@@ -1104,7 +1104,7 @@ fn win32_process_path(path: &Path) -> PathBuf {
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
     } else if let Some(rest) = text.strip_prefix(r"\\?\") {
-        PathBuf::from(rest.as_ref())
+        PathBuf::from(rest)
     } else {
         path.to_path_buf()
     }
