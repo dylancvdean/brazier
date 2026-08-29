@@ -1103,6 +1103,25 @@ impl Runtime {
             }
         }
         {
+            let mut sdcpp = self.sdcpp.lock().await;
+            if sdcpp.binary.as_deref() == Some(path) {
+                sdcpp.binary = None;
+            }
+        }
+        {
+            let mut voice_state = self.voice.lock().await;
+            let served_from_deleted = voice_state
+                .server
+                .as_ref()
+                .is_some_and(|server| server.python == path);
+            if served_from_deleted && let Some(mut server) = voice_state.server.take() {
+                let _ = server.stop().await;
+            }
+            if voice_state.python.as_deref() == Some(path) {
+                voice_state.python = None;
+            }
+        }
+        {
             let mut vllm_state = self.vllm.lock().await;
             let served_from_deleted = vllm_state
                 .server
@@ -1150,6 +1169,14 @@ impl Runtime {
         }
         if settings.streaming_asr_python.as_deref() == Some(&path.display().to_string()) {
             settings.streaming_asr_python = None;
+            changed = true;
+        }
+        if settings.sdcpp_binary.as_deref() == Some(&path.display().to_string()) {
+            settings.sdcpp_binary = None;
+            changed = true;
+        }
+        if settings.voice_python.as_deref() == Some(&path.display().to_string()) {
+            settings.voice_python = None;
             changed = true;
         }
         if changed {
@@ -1440,12 +1467,78 @@ impl Runtime {
         Ok(())
     }
 
+    /// Activate the runtime this model is paired with.
+    ///
+    /// A deleted, renamed, or broken runtime must not fail the next request:
+    /// try another runtime of the same engine (or a related voice backend) and
+    /// persist that so the pairing does not keep pointing at a ghost. If the
+    /// paired runtime is already active, do nothing — re-pinning would bounce
+    /// a live llama-server on every message.
     async fn apply_model_binding(&self, model_id: &str) -> anyhow::Result<()> {
         let bindings = model_bindings::load(&self.data_dir);
-        let Some(runtime_id) = bindings.get(model_id) else {
+        let Some(runtime_id) = bindings.get(model_id).map(str::to_owned) else {
             return Ok(());
         };
-        self.activate_runtime_by_id(runtime_id).await
+        let path_env = std::env::var("PATH").ok();
+        let active = self.active_runtimes().await;
+        let entries = runtimes::list(&self.data_dir, &active, path_env.as_deref(), false);
+
+        if let Some(entry) = entries.iter().find(|entry| entry.id == runtime_id) {
+            if entry.active {
+                return Ok(());
+            }
+            match self.activate_runtime_entry(entry).await {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!(
+                        model_id,
+                        runtime_id = %runtime_id,
+                        %error,
+                        "paired runtime failed to activate; trying another"
+                    );
+                }
+            }
+        } else {
+            tracing::info!(
+                model_id,
+                from = %runtime_id,
+                "paired runtime is gone; falling back"
+            );
+        }
+
+        let fallbacks = runtimes::engine_for_model_id(model_id)
+            .map(|engine| runtimes::fallbacks_for_engine(&entries, engine))
+            .unwrap_or_default();
+        for entry in fallbacks {
+            if entry.id == runtime_id {
+                continue;
+            }
+            if entry.active {
+                let _ = model_bindings::set_binding(&self.data_dir, model_id, &entry.id).await;
+                return Ok(());
+            }
+            match self.activate_runtime_entry(entry).await {
+                Ok(_) => {
+                    let _ = model_bindings::set_binding(&self.data_dir, model_id, &entry.id).await;
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        model_id,
+                        runtime_id = %entry.id,
+                        %error,
+                        "fallback runtime failed to activate"
+                    );
+                }
+            }
+        }
+        tracing::info!(
+            model_id,
+            from = %runtime_id,
+            "paired runtime is gone; using the active engine runtime"
+        );
+        let _ = model_bindings::clear_binding(&self.data_dir, model_id).await;
+        Ok(())
     }
 
     async fn prepare_with_recovery(
@@ -1715,6 +1808,21 @@ impl Runtime {
         // an uncovered pairing hangs the GPU instead of erroring.
         if target == RuntimeTarget::Rocm {
             self.verify_rocm_target(&path)?;
+        }
+        if force {
+            // Replacing files under a running llama-server leaves the old
+            // binary mapped. Stop it so the next request starts the new build.
+            let mut guard = self.llama.lock().await;
+            let serving = guard
+                .server
+                .as_ref()
+                .is_some_and(|server| server.binary == path);
+            if serving && let Some(mut server) = guard.server.take() {
+                let _ = server.stop().await;
+            }
+            if serving || guard.binary.as_deref() == Some(path.as_path()) {
+                guard.binary = Some(path.clone());
+            }
         }
         if target_override.is_none() {
             let mut guard = self.llama.lock().await;
@@ -3680,6 +3788,34 @@ mod tests {
             };
             assert_eq!(still_active, None, "{engine} remained active");
         }
+    }
+
+    #[tokio::test]
+    async fn releasing_a_runtime_clears_sdcpp_and_voice_slots() {
+        let dir = tempdir().unwrap();
+        let runtime = Runtime::new(dir.path().to_path_buf(), reqwest::Client::new());
+        let sdcpp = dir.path().join("sd-cli");
+        let voice = dir.path().join("python");
+        {
+            let mut settings = runtime.settings.lock().await;
+            settings.sdcpp_binary = Some(sdcpp.display().to_string());
+            settings.voice_python = Some(voice.display().to_string());
+        }
+        runtime.sdcpp.lock().await.binary = Some(sdcpp.clone());
+        runtime.voice.lock().await.python = Some(voice.clone());
+
+        runtime.release_runtime(&sdcpp).await.unwrap();
+        assert!(runtime.sdcpp.lock().await.binary.is_none());
+        assert!(runtime.settings.lock().await.sdcpp_binary.is_none());
+        assert_eq!(
+            runtime.voice.lock().await.python.as_deref(),
+            Some(voice.as_path()),
+            "releasing sd.cpp must not touch an unrelated voice interpreter"
+        );
+
+        runtime.release_runtime(&voice).await.unwrap();
+        assert!(runtime.voice.lock().await.python.is_none());
+        assert!(runtime.settings.lock().await.voice_python.is_none());
     }
 
     #[tokio::test]

@@ -390,7 +390,20 @@ pub struct CreateAgentSession {
 /// Stock agent modes the daemon advertises.
 pub const AGENT_RUNTIME_SIMPLE: &str = "simple";
 pub const AGENT_RUNTIME_POWERFUL: &str = "powerful";
+/// Sessions created before Simple/Powerful modes existed stored `pi`.
+pub const AGENT_RUNTIME_PI_ALIAS: &str = "pi";
 pub const DEFAULT_AGENT_RUNTIME_ID: &str = AGENT_RUNTIME_SIMPLE;
+
+/// Map a stored or requested agent runtime id onto a live catalog id.
+///
+/// Unknown or retired ids become Simple so restoring a session cannot fail
+/// every tool call because a mode was renamed or removed.
+pub fn canonicalize_agent_runtime_id(runtime_id: &str) -> &str {
+    match runtime_id.trim() {
+        "" | AGENT_RUNTIME_PI_ALIAS | "balanced" => AGENT_RUNTIME_SIMPLE,
+        other => other,
+    }
+}
 
 /// Partial session update. Absent fields keep their stored value.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -582,5 +595,23 @@ mod tests {
         assert_eq!(absent.workspace_path, None);
         assert_eq!(cleared.workspace_path, Some(None));
         assert_eq!(changed.workspace_path, Some(Some("/work".to_owned())));
+    }
+
+    #[test]
+    fn canonicalize_agent_runtime_id_heals_retired_aliases() {
+        assert_eq!(canonicalize_agent_runtime_id("pi"), AGENT_RUNTIME_SIMPLE);
+        assert_eq!(canonicalize_agent_runtime_id(""), AGENT_RUNTIME_SIMPLE);
+        assert_eq!(
+            canonicalize_agent_runtime_id("balanced"),
+            AGENT_RUNTIME_SIMPLE
+        );
+        assert_eq!(
+            canonicalize_agent_runtime_id("powerful"),
+            AGENT_RUNTIME_POWERFUL
+        );
+        assert_eq!(
+            canonicalize_agent_runtime_id("simple"),
+            AGENT_RUNTIME_SIMPLE
+        );
     }
 }

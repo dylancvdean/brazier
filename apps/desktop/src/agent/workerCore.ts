@@ -11,7 +11,7 @@ import { BrokerClient } from './core/brokerClient'
 import { inferModelCapabilities } from './core/modelCompat'
 import type { WorkerCommand, WorkerMessage } from './core/protocol'
 import type { AgentRuntime, AgentSession, AgentToolDefinition } from './core/types'
-import { createRuntime, DEFAULT_RUNTIME_ID } from './registry'
+import { createRuntime, DEFAULT_RUNTIME_ID, normalizeRuntimeId } from './registry'
 
 export type PostMessage = (message: WorkerMessage) => void
 
@@ -150,7 +150,7 @@ export class AgentWorkerCore {
 
   private runtimeFor(runtimeId: string): AgentRuntime {
     const broker = this.requireBroker()
-    const id = runtimeId.trim() || DEFAULT_RUNTIME_ID
+    const id = normalizeRuntimeId(runtimeId)
     let runtime = this.runtimes.get(id)
     if (!runtime) {
       runtime = this.runtimeFactory(broker, id)
@@ -187,7 +187,7 @@ export class AgentWorkerCore {
 
     const broker = this.requireBroker()
     const remote = await broker.session(sessionId)
-    const runtime = this.runtimeFor(remote.session.runtime_id || DEFAULT_RUNTIME_ID)
+    const runtime = this.runtimeFor(remote.session.runtime_id)
     const prompt = await broker.systemPrompt(sessionId)
     // MCP configuration can change while the utility process remains alive.
     // Refresh when opening a session so newly enabled server tools do not

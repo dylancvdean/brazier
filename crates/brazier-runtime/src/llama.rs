@@ -314,6 +314,25 @@ pub fn managed_installed_version(data_dir: &Path, target: RuntimeTarget) -> Opti
         .filter(|value| !value.is_empty())
 }
 
+/// Whether a managed install should offer an update.
+///
+/// A pointer-style `/latest` release (`nightly-tag.txt`) is not "up to date"
+/// until the build tag it names is known. That is how a v0.3.0 install still
+/// notices b11000 without anyone bumping a stable tag in this repository.
+pub fn managed_update_available(
+    installed_version: Option<&str>,
+    latest_version: Option<&str>,
+    pointer_unresolved: bool,
+) -> bool {
+    let Some(installed) = installed_version.filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    match latest_version.filter(|value| !value.is_empty()) {
+        Some(latest) => installed != latest || pointer_unresolved,
+        None => false,
+    }
+}
+
 /// Directory that must appear on `LD_LIBRARY_PATH` / `PATH` for managed builds.
 pub fn managed_lib_dir(data_dir: &Path) -> PathBuf {
     managed_engine_dir(data_dir).join("bin")
@@ -886,14 +905,8 @@ pub fn parse_stream_chunk(data: &str) -> ChunkParse {
                         .get("id")
                         .and_then(serde_json::Value::as_str)
                         .map(ToOwned::to_owned),
-                    name: call
-                        .pointer("/function/name")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToOwned::to_owned),
-                    arguments: call
-                        .pointer("/function/arguments")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToOwned::to_owned),
+                    name: tool_call_name(call).map(ToOwned::to_owned),
+                    arguments: json_arguments_fragment(tool_call_arguments(call)),
                 })
                 .collect()
         })
@@ -992,6 +1005,59 @@ impl ToolCallAccumulator {
     }
 }
 
+/// Serialize a tool-call `arguments` field to the JSON string the executor expects.
+///
+/// Some engines (and some models) emit a parsed object instead of a string.
+/// Treating that as missing produced `{}` and the tool then failed for want of
+/// its real parameters.
+fn json_arguments_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "{}".to_owned(),
+        serde_json::Value::String(text) => {
+            if text.trim().is_empty() {
+                "{}".to_owned()
+            } else {
+                text.clone()
+            }
+        }
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned())
+        }
+        other => other.to_string(),
+    }
+}
+
+fn tool_call_name(call: &serde_json::Value) -> Option<&str> {
+    call.pointer("/function/name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            call.get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.is_empty())
+        })
+}
+
+fn tool_call_arguments(call: &serde_json::Value) -> &serde_json::Value {
+    static NULL: serde_json::Value = serde_json::Value::Null;
+    call.pointer("/function/arguments")
+        .or_else(|| call.get("arguments"))
+        .unwrap_or(&NULL)
+}
+
+/// Streaming deltas are usually string fragments. An object (rare) is emitted
+/// whole so later fragments can still concatenate.
+fn json_arguments_fragment(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+            serde_json::to_string(value).ok()
+        }
+        other => Some(other.to_string()),
+    }
+}
+
 /// Extract complete tool calls from a non-streamed chat completion body.
 pub fn extract_tool_calls(body: &serde_json::Value) -> Vec<AccumulatedToolCall> {
     body.pointer("/choices/0/message/tool_calls")
@@ -1001,9 +1067,7 @@ pub fn extract_tool_calls(body: &serde_json::Value) -> Vec<AccumulatedToolCall> 
                 .iter()
                 .enumerate()
                 .filter_map(|(index, call)| {
-                    let name = call
-                        .pointer("/function/name")
-                        .and_then(serde_json::Value::as_str)?;
+                    let name = tool_call_name(call)?;
                     Some(AccumulatedToolCall {
                         id: call
                             .get("id")
@@ -1011,11 +1075,7 @@ pub fn extract_tool_calls(body: &serde_json::Value) -> Vec<AccumulatedToolCall> 
                             .map(ToOwned::to_owned)
                             .unwrap_or_else(|| format!("call_{index}")),
                         name: crate::harmony::logical_tool_name(name),
-                        arguments: call
-                            .pointer("/function/arguments")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("{}")
-                            .to_owned(),
+                        arguments: json_arguments_to_string(tool_call_arguments(call)),
                     })
                 })
                 .collect()
@@ -1188,23 +1248,31 @@ async fn resolve_managed_release_from(
         .context("managed llama.cpp binaries are not available for this platform")?;
     let release =
         crate::github_releases::latest_release(client, latest_release_url, USER_AGENT).await?;
-    let version = release.tag_name.clone();
 
     if let Some(asset) = managed_asset_in_release(&release, platform, target) {
-        return Ok((version, asset));
+        return Ok((release.effective_tag().to_owned(), asset));
     }
 
     // Since v0.3.0, llama.cpp's stable GitHub release contains a tiny
     // `nightly-tag.txt` pointer instead of the platform archives themselves.
-    // Follow it to the build release while retaining the stable tag as the
-    // installed version. Older build-style `/latest` releases still take the
-    // direct path above.
-    let pointer = release.asset(NIGHTLY_TAG_ASSET).with_context(|| {
-        format!(
-            "no matching llama.cpp release asset for {platform}, and {NIGHTLY_TAG_ASSET} was absent"
-        )
-    })?;
-    let build_tag = download_nightly_tag(client, &pointer.browser_download_url).await?;
+    // Follow it to the build release and record that build tag as the
+    // installed version so a later nightly is offered without waiting for
+    // the stable tag to bump.
+    let build_tag = if let Some(tag) = release
+        .resolved_build_tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+    {
+        validate_build_tag(tag)?
+    } else {
+        let pointer = release.asset(NIGHTLY_TAG_ASSET).with_context(|| {
+            format!(
+                "no matching llama.cpp release asset for {platform}, and {NIGHTLY_TAG_ASSET} was absent"
+            )
+        })?;
+        download_nightly_tag(client, &pointer.browser_download_url).await?
+    };
     let build_release_url = format!("{release_by_tag_url}{build_tag}");
     let build_release =
         crate::github_releases::release_at(client, &build_release_url, USER_AGENT).await?;
@@ -1213,7 +1281,7 @@ async fn resolve_managed_release_from(
             "no matching llama.cpp release asset for {platform} in referenced build {build_tag}"
         )
     })?;
-    Ok((version, asset))
+    Ok((build_tag, asset))
 }
 
 fn managed_asset_in_release(
@@ -2696,6 +2764,7 @@ mod tests {
                 name: NIGHTLY_TAG_ASSET.into(),
                 browser_download_url: "https://example.invalid/nightly-tag.txt".into(),
             }],
+            ..crate::github_releases::Release::default()
         };
         assert!(
             managed_asset_in_release(&stable, "macos-arm64", RuntimeTarget::Metal).is_none(),
@@ -2708,6 +2777,7 @@ mod tests {
                 name: "llama-b10621-bin-macos-arm64.tar.gz".into(),
                 browser_download_url: "https://example.invalid/metal.tar.gz".into(),
             }],
+            ..crate::github_releases::Release::default()
         };
         let asset = managed_asset_in_release(&build, "macos-arm64", RuntimeTarget::Metal)
             .expect("referenced build should contain the Metal archive");
@@ -2723,6 +2793,73 @@ mod tests {
                 "accepted invalid pointer tag {invalid:?}"
             );
         }
+    }
+
+    #[test]
+    fn managed_updates_compare_build_tags_not_stable_tags() {
+        assert!(!managed_update_available(
+            Some("b10621"),
+            Some("b10621"),
+            false
+        ));
+        assert!(managed_update_available(
+            Some("b10621"),
+            Some("b11000"),
+            false
+        ));
+        assert!(managed_update_available(
+            Some("v0.3.0"),
+            Some("b10621"),
+            false
+        ));
+        // Pointer not yet resolved: do not claim the stable tag is current.
+        assert!(managed_update_available(
+            Some("v0.3.0"),
+            Some("v0.3.0"),
+            true
+        ));
+        assert!(!managed_update_available(None, Some("b10621"), false));
+        assert!(!managed_update_available(Some("b10621"), None, false));
+    }
+
+    #[test]
+    fn extract_tool_calls_accepts_object_arguments() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": { "expression": "6*7" }
+                        }
+                    }]
+                }
+            }]
+        });
+        let calls = extract_tool_calls(&body);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "calculator");
+        assert_eq!(calls[0].arguments, r#"{"expression":"6*7"}"#);
+    }
+
+    #[test]
+    fn extract_tool_calls_accepts_top_level_name_and_arguments() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "name": "calculator",
+                        "arguments": { "expression": "1+1" }
+                    }]
+                }
+            }]
+        });
+        let calls = extract_tool_calls(&body);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "calculator");
+        assert_eq!(calls[0].arguments, r#"{"expression":"1+1"}"#);
     }
 
     /// Upstream publishes a Vulkan prebuilt for ARM64 Linux but no CUDA one, so

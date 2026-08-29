@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     convert::Infallible,
     net::SocketAddr,
     path::PathBuf,
@@ -2087,14 +2087,7 @@ async fn load_default_agent_runtime_id(state: &AppState) -> ApiResult<String> {
         .map_err(ApiError::internal)?
         .and_then(|value| value["default_runtime_id"].as_str().map(str::to_owned))
         .unwrap_or_else(|| crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned());
-    let known = agent_runtime_catalog()
-        .iter()
-        .any(|entry| entry["id"].as_str() == Some(stored.as_str()));
-    Ok(if known {
-        stored
-    } else {
-        crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned()
-    })
+    Ok(live_agent_runtime_id(&stored))
 }
 
 async fn load_enabled_power_tools(state: &AppState) -> ApiResult<Vec<String>> {
@@ -2129,12 +2122,7 @@ async fn agent_preference(State(state): State<AppState>) -> ApiResult<Json<Value
     let default_runtime_id = stored
         .as_ref()
         .and_then(|value| value["default_runtime_id"].as_str())
-        .map(str::to_owned)
-        .filter(|runtime_id| {
-            agent_runtime_catalog()
-                .iter()
-                .any(|entry| entry["id"].as_str() == Some(runtime_id.as_str()))
-        })
+        .map(live_agent_runtime_id)
         .unwrap_or_else(|| crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned());
     let power_tools = load_enabled_power_tools(&state).await?;
     Ok(Json(json!({
@@ -2147,7 +2135,9 @@ async fn update_agent_preference(
     State(state): State<AppState>,
     Json(preference): Json<UpdateAgentPreference>,
 ) -> ApiResult<Json<Value>> {
-    let runtime_id = preference.default_runtime_id.trim().to_owned();
+    let runtime_id =
+        crate::agent_types::canonicalize_agent_runtime_id(&preference.default_runtime_id)
+            .to_owned();
     let catalog = agent_runtime_catalog();
     let entry = catalog
         .iter()
@@ -2230,9 +2220,33 @@ fn agent_runtime_catalog() -> Vec<Value> {
 
 fn resolve_agent_runtime_id(requested: Option<String>, default_id: &str) -> String {
     requested
-        .map(|value| value.trim().to_owned())
+        .map(|value| crate::agent_types::canonicalize_agent_runtime_id(&value).to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default_id.to_owned())
+}
+
+/// Runtime id a stored session or preference should use now.
+///
+/// Retired aliases (`pi`) become Simple. A mode that is no longer in the
+/// catalog also becomes Simple so restoring the session cannot fail every
+/// tool call.
+fn live_agent_runtime_id(runtime_id: &str) -> String {
+    let canonical = crate::agent_types::canonicalize_agent_runtime_id(runtime_id);
+    let available = agent_runtime_catalog().iter().any(|entry| {
+        entry["id"].as_str() == Some(canonical) && entry["available"].as_bool() != Some(false)
+    });
+    if available {
+        canonical.to_owned()
+    } else {
+        crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned()
+    }
+}
+
+fn present_agent_session(
+    mut session: crate::agent_types::AgentSessionRecord,
+) -> crate::agent_types::AgentSessionRecord {
+    session.runtime_id = live_agent_runtime_id(&session.runtime_id);
+    session
 }
 
 fn validate_agent_runtime_id(runtime_id: &str) -> ApiResult<Value> {
@@ -3232,14 +3246,59 @@ async fn delete_runtime(
     State(state): State<AppState>,
     Json(request): Json<RuntimeIdRequest>,
 ) -> ApiResult<Json<Value>> {
+    let path_env = std::env::var("PATH").ok();
+    let active = state.runtime.active_runtimes().await;
+    let entry = runtimes::find(
+        &state.data_dir,
+        path_env.as_deref(),
+        &request.id,
+        false,
+        &active,
+    );
+    let was_active = entry.as_ref().is_some_and(|entry| entry.active);
+    let engine = entry.as_ref().map(|entry| entry.engine.clone());
     let removed = runtimes::delete(&state.data_dir, &request.id).map_err(ApiError::bad_request)?;
     state
         .runtime
         .release_runtime(&removed)
         .await
         .map_err(ApiError::internal)?;
+    let remaining = runtimes::list(
+        &state.data_dir,
+        &state.runtime.active_runtimes().await,
+        path_env.as_deref(),
+        false,
+    );
+    let fallbacks = engine
+        .as_deref()
+        .map(|engine| {
+            runtimes::fallbacks_for_engine(&remaining, engine)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if was_active {
+        for fallback in &fallbacks {
+            match state.runtime.activate_runtime_entry(fallback).await {
+                Ok(_) => break,
+                Err(error) => {
+                    tracing::warn!(
+                        runtime_id = %fallback.id,
+                        %error,
+                        "could not activate fallback runtime after deletion"
+                    );
+                }
+            }
+        }
+    }
+    let fallback = fallbacks.into_iter().next();
+    let _ = reconcile_model_bindings(&state).await;
     state.invalidate_runtimes_cache().await;
-    Ok(Json(json!({ "deleted": request.id })))
+    Ok(Json(json!({
+        "deleted": request.id,
+        "fallback_runtime_id": fallback.map(|entry| entry.id),
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3262,13 +3321,31 @@ async fn delete_local_model(
     state.runtime.release_model(&request.model_id).await;
     models_store::delete_model(&state.data_dir, &request.model_id, &extra_paths)
         .map_err(ApiError::bad_request)?;
+    let _ = model_bindings::clear_binding(&state.data_dir, &request.model_id).await;
     state.invalidate_models_cache().await;
     Ok(Json(json!({ "deleted": request.model_id })))
 }
 
 async fn model_bindings_list(State(state): State<AppState>) -> Json<Value> {
-    let bindings = model_bindings::load(&state.data_dir);
+    let bindings = reconcile_model_bindings(&state).await;
     Json(json!({ "bindings": bindings.bindings }))
+}
+
+async fn reconcile_model_bindings(state: &AppState) -> model_bindings::ModelRuntimeBindings {
+    let path_env = std::env::var("PATH").ok();
+    let active = state.runtime.active_runtimes().await;
+    let entries = runtimes::list(&state.data_dir, &active, path_env.as_deref(), false);
+    let known: HashSet<String> = entries.iter().map(|entry| entry.id.clone()).collect();
+    let mut bindings = model_bindings::load(&state.data_dir);
+    let changed = bindings.reconcile(&known, |model_id| {
+        runtimes::engine_for_model_id(model_id)
+            .and_then(|engine| runtimes::fallback_for_engine(&entries, engine))
+            .map(|entry| entry.id.clone())
+    });
+    if changed {
+        let _ = model_bindings::save(&state.data_dir, &bindings).await;
+    }
+    bindings
 }
 
 #[derive(Debug, Deserialize)]
@@ -4569,6 +4646,20 @@ struct ManagedStatusQuery {
     force: bool,
 }
 
+fn managed_release_status(
+    cached: crate::github_releases::CachedRelease,
+) -> (Option<String>, bool, bool) {
+    let pointer_unresolved = cached
+        .release
+        .as_ref()
+        .is_some_and(|release| release.needs_build_pointer_resolution());
+    let latest_tag = cached
+        .release
+        .as_ref()
+        .map(|release| release.effective_tag().to_owned());
+    (latest_tag, cached.refreshing, pointer_unresolved)
+}
+
 fn progress_channel() -> (
     mpsc::UnboundedSender<ProgressEvent>,
     mpsc::UnboundedReceiver<ProgressEvent>,
@@ -4605,7 +4696,7 @@ async fn managed_llama_status(
     // Local install state answers immediately; the upstream tag is filled in
     // from cache, with `latest_pending` telling the UI a check is still running.
     let cached = llama::cached_release_tag(&state.http, query.force);
-    let latest_tag = cached.release.map(|release| release.tag_name);
+    let (latest_tag, latest_pending, pointer_unresolved) = managed_release_status(cached);
 
     let target_specs = [
         ("cpu", RuntimeTarget::Cpu),
@@ -4619,10 +4710,11 @@ async fn managed_llama_status(
         .map(|(id, target)| {
             let installed = llama::managed_is_installed(&state.data_dir, *target);
             let installed_version = llama::managed_installed_version(&state.data_dir, *target);
-            let update_available = installed
-                && latest_tag
-                    .as_deref()
-                    .is_some_and(|latest| Some(latest) != installed_version.as_deref());
+            let update_available = llama::managed_update_available(
+                installed_version.as_deref(),
+                latest_tag.as_deref(),
+                pointer_unresolved,
+            );
             json!({
                 "target": id,
                 "installed": installed,
@@ -4635,7 +4727,7 @@ async fn managed_llama_status(
 
     Ok(Json(json!({
         "latest_version": latest_tag,
-        "latest_pending": cached.refreshing,
+        "latest_pending": latest_pending,
         "targets": targets,
     })))
 }
@@ -4714,17 +4806,18 @@ async fn managed_whisper_status(
             refreshing: false,
         }
     };
-    let latest_tag = cached.release.map(|release| release.tag_name);
+    let (latest_tag, latest_pending, pointer_unresolved) = managed_release_status(cached);
     let target_specs = [("cpu", RuntimeTarget::Cpu), ("cuda", RuntimeTarget::Cuda)];
     let targets: Vec<Value> = target_specs
         .iter()
         .map(|(id, target)| {
             let installed = whisper::managed_is_installed(&state.data_dir, *target);
             let installed_version = whisper::managed_installed_version(&state.data_dir, *target);
-            let update_available = installed
-                && latest_tag
-                    .as_deref()
-                    .is_some_and(|latest| Some(latest) != installed_version.as_deref());
+            let update_available = llama::managed_update_available(
+                installed_version.as_deref(),
+                latest_tag.as_deref(),
+                pointer_unresolved,
+            );
             json!({
                 "target": id,
                 "installed": installed,
@@ -4738,7 +4831,7 @@ async fn managed_whisper_status(
         .collect();
     Ok(Json(json!({
         "latest_version": latest_tag,
-        "latest_pending": cached.refreshing,
+        "latest_pending": latest_pending,
         "managed_supported": supported,
         "targets": targets,
         "note": if supported {
@@ -4814,7 +4907,7 @@ async fn managed_sdcpp_status(
     use crate::runtime_settings::RuntimeTarget;
 
     let cached = sdcpp::cached_release_tag(&state.http, query.force);
-    let latest_tag = cached.release.map(|release| release.tag_name);
+    let (latest_tag, latest_pending, pointer_unresolved) = managed_release_status(cached);
     let target_specs = [
         ("cpu", RuntimeTarget::Cpu),
         ("cuda", RuntimeTarget::Cuda),
@@ -4826,10 +4919,11 @@ async fn managed_sdcpp_status(
         .map(|(id, target)| {
             let installed = sdcpp::managed_is_installed(&state.data_dir, *target);
             let installed_version = sdcpp::managed_installed_version(&state.data_dir, *target);
-            let update_available = installed
-                && latest_tag
-                    .as_deref()
-                    .is_some_and(|latest| Some(latest) != installed_version.as_deref());
+            let update_available = llama::managed_update_available(
+                installed_version.as_deref(),
+                latest_tag.as_deref(),
+                pointer_unresolved,
+            );
             json!({
                 "target": id,
                 "installed": installed,
@@ -4841,7 +4935,7 @@ async fn managed_sdcpp_status(
         .collect();
     Ok(Json(json!({
         "latest_version": latest_tag,
-        "latest_pending": cached.refreshing,
+        "latest_pending": latest_pending,
         "targets": targets,
     })))
 }
@@ -7804,7 +7898,7 @@ async fn authorized_agent_session(
         .await
         .map_err(|error| ApiError::not_found(error.to_string()))?;
     require_agent_session_owner(auth, &session)?;
-    Ok(session)
+    Ok(present_agent_session(session))
 }
 
 async fn list_agent_sessions(
@@ -7819,6 +7913,7 @@ async fn list_agent_sessions(
     if !auth.owner {
         sessions.retain(|session| session.owner_client_id == auth.decision_actor_id());
     }
+    let sessions: Vec<_> = sessions.into_iter().map(present_agent_session).collect();
     Ok(Json(json!({ "data": sessions })))
 }
 
@@ -10648,6 +10743,36 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    }
+
+    #[tokio::test]
+    async fn agent_pi_runtime_alias_becomes_simple() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let (status, body) = json_request(
+            &app,
+            "PUT",
+            "/api/v1/preferences/agent",
+            json!({ "default_runtime_id": "pi" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["default_runtime_id"], "simple");
+
+        let workspace = tempdir().unwrap();
+        let (status, session) = json_request(
+            &app,
+            "POST",
+            "/api/v1/agent/sessions",
+            json!({
+                "workspace_path": workspace.path().display().to_string(),
+                "model": "gguf:test",
+                "runtime_id": "pi"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        assert_eq!(session["runtime_id"], "simple");
     }
 
     #[tokio::test]

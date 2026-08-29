@@ -428,7 +428,19 @@ pub async fn execute_with_context(
     name: &str,
     arguments: &str,
 ) -> ToolInvocation {
-    let parsed: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+    let parsed: Value = match crate::tool_registry::parse_json_arguments(arguments) {
+        Ok(value) => crate::tool_registry::unwrap_builtin_argument_wrappers(value),
+        Err(error) => {
+            return ToolInvocation {
+                call_id: call_id.to_owned(),
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+                output: format!("Error: {error:#}"),
+                is_error: true,
+                media: Vec::new(),
+            };
+        }
+    };
     let result: anyhow::Result<ToolOutput> = match name {
         "doc_read" => match data_dir {
             Some(dir) => doc_read_tool(dir, &parsed, documents).await,
@@ -1281,6 +1293,42 @@ mod tests {
         let result = execute(&client, "call_1", "calculator", "{\"expression\": \"6*7\"}").await;
         assert!(!result.is_error);
         assert_eq!(result.output, "42");
+    }
+
+    #[tokio::test]
+    async fn execute_calculator_accepts_fenced_json() {
+        let client = reqwest::Client::new();
+        let result = execute(
+            &client,
+            "call_1",
+            "calculator",
+            "```json\n{\"expression\":\"2+2\"}\n```",
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.output);
+        assert_eq!(result.output, "4");
+    }
+
+    #[tokio::test]
+    async fn execute_calculator_accepts_wrapped_parameters() {
+        let client = reqwest::Client::new();
+        let result = execute(
+            &client,
+            "call_1",
+            "calculator",
+            "{\"parameters\":{\"expression\":\"8/2\"}}",
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.output);
+        assert_eq!(result.output, "4");
+    }
+
+    #[tokio::test]
+    async fn execute_reports_malformed_arguments_instead_of_missing_fields() {
+        let client = reqwest::Client::new();
+        let result = execute(&client, "call_1", "calculator", "not json").await;
+        assert!(result.is_error);
+        assert!(result.output.contains("valid JSON"), "{}", result.output);
     }
 
     #[tokio::test]

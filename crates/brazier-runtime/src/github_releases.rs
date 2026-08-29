@@ -23,6 +23,22 @@ use serde::{Deserialize, Serialize};
 /// Install/update paths always re-fetch regardless of this TTL.
 const CACHE_TTL: Duration = Duration::from_secs(2 * 24 * 60 * 60);
 const CACHE_FILE: &str = "github-releases.json";
+/// llama.cpp's stable GitHub release ships this pointer instead of binaries.
+const BUILD_POINTER_ASSET: &str = "nightly-tag.txt";
+const BUILD_POINTER_MAX_BYTES: usize = 128;
+
+fn parse_build_pointer_tag(value: &str) -> Option<String> {
+    let tag = value.trim();
+    if tag.len() >= 2
+        && tag.len() <= 32
+        && tag.starts_with('b')
+        && tag[1..].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Some(tag.to_owned())
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseAsset {
@@ -30,10 +46,16 @@ pub struct ReleaseAsset {
     pub browser_download_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Release {
     pub tag_name: String,
+    #[serde(default)]
     pub assets: Vec<ReleaseAsset>,
+    /// Build tag named by `nightly-tag.txt`, when the GitHub `/latest` release
+    /// is a pointer rather than the binaries. Status views compare this to the
+    /// installed VERSION so llama.cpp updates do not wait on a stable tag bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_build_tag: Option<String>,
 }
 
 impl Release {
@@ -44,6 +66,22 @@ impl Release {
 
     pub fn asset_names(&self) -> impl Iterator<Item = &str> {
         self.assets.iter().map(|asset| asset.name.as_str())
+    }
+
+    /// Tag that identifies the bits on disk: the nightly pointer when present,
+    /// otherwise the GitHub release tag.
+    pub fn effective_tag(&self) -> &str {
+        self.resolved_build_tag
+            .as_deref()
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .unwrap_or(&self.tag_name)
+    }
+
+    /// True when `/latest` is a pointer release we have not resolved yet.
+    /// Status views must not claim "up to date" in this state.
+    pub fn needs_build_pointer_resolution(&self) -> bool {
+        self.resolved_build_tag.is_none() && self.asset(BUILD_POINTER_ASSET).is_some()
     }
 }
 
@@ -158,8 +196,36 @@ fn is_refreshing(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+async fn fetch_small_text(
+    client: &reqwest::Client,
+    url: &str,
+    user_agent: &str,
+) -> anyhow::Result<String> {
+    let response = client
+        .get(url)
+        .header("user-agent", user_agent)
+        .send()
+        .await
+        .context("download release pointer")?
+        .error_for_status()
+        .context("release pointer download failed")?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > BUILD_POINTER_MAX_BYTES as u64)
+    {
+        anyhow::bail!("release pointer response was unexpectedly large");
+    }
+    let bytes = response.bytes().await.context("read release pointer")?;
+    anyhow::ensure!(
+        bytes.len() <= BUILD_POINTER_MAX_BYTES,
+        "release pointer response was unexpectedly large"
+    );
+    let text = std::str::from_utf8(&bytes).context("release pointer was not UTF-8")?;
+    Ok(text.trim().to_owned())
+}
+
 async fn fetch(client: &reqwest::Client, url: &str, user_agent: &str) -> anyhow::Result<Release> {
-    let release: Release = client
+    let mut release: Release = client
         .get(url)
         .header("user-agent", user_agent)
         .send()
@@ -170,6 +236,23 @@ async fn fetch(client: &reqwest::Client, url: &str, user_agent: &str) -> anyhow:
         .json()
         .await
         .context("decode GitHub release")?;
+    let pointer_url = release
+        .asset(BUILD_POINTER_ASSET)
+        .map(|asset| asset.browser_download_url.clone());
+    if let Some(pointer_url) = pointer_url {
+        match fetch_small_text(client, &pointer_url, user_agent).await {
+            Ok(tag) => match parse_build_pointer_tag(&tag) {
+                Some(tag) => release.resolved_build_tag = Some(tag),
+                None if !tag.is_empty() => {
+                    tracing::debug!(%url, tag, "build pointer had an unexpected format");
+                }
+                None => {}
+            },
+            Err(error) => {
+                tracing::debug!(%url, %error, "build pointer lookup failed");
+            }
+        }
+    }
     store(url, release.clone());
     Ok(release)
 }
@@ -254,6 +337,7 @@ mod tests {
         let release = Release {
             tag_name: "b1".into(),
             assets: Vec::new(),
+            ..Release::default()
         };
         let fresh = Entry {
             fetched_at: now_unix(),
@@ -280,6 +364,7 @@ mod tests {
                 name: "llama-b6100-bin-macos-arm64.zip".into(),
                 browser_download_url: "https://example.invalid/a.zip".into(),
             }],
+            ..Release::default()
         };
         assert!(release.asset("llama-b6100-bin-macos-arm64.zip").is_some());
         assert!(release.asset("llama-b6100-bin-ubuntu-x64.zip").is_none());
@@ -287,6 +372,39 @@ mod tests {
             release.asset_names().collect::<Vec<_>>(),
             vec!["llama-b6100-bin-macos-arm64.zip"]
         );
+    }
+
+    #[test]
+    fn effective_tag_follows_a_resolved_nightly_pointer() {
+        let unresolved = Release {
+            tag_name: "v0.3.0".into(),
+            assets: vec![ReleaseAsset {
+                name: BUILD_POINTER_ASSET.into(),
+                browser_download_url: "https://example.invalid/nightly-tag.txt".into(),
+            }],
+            ..Release::default()
+        };
+        assert_eq!(unresolved.effective_tag(), "v0.3.0");
+        assert!(unresolved.needs_build_pointer_resolution());
+
+        let resolved = Release {
+            resolved_build_tag: Some("b10621".into()),
+            ..unresolved
+        };
+        assert_eq!(resolved.effective_tag(), "b10621");
+        assert!(!resolved.needs_build_pointer_resolution());
+    }
+
+    #[test]
+    fn build_pointer_tags_must_be_llama_build_ids() {
+        assert_eq!(
+            parse_build_pointer_tag("b10621\n").as_deref(),
+            Some("b10621")
+        );
+        assert_eq!(parse_build_pointer_tag("  b1  ").as_deref(), Some("b1"));
+        for invalid in ["", "v0.3.0", "b", "b12x", "nightly"] {
+            assert_eq!(parse_build_pointer_tag(invalid), None, "{invalid:?}");
+        }
     }
 
     #[test]
@@ -308,6 +426,7 @@ mod tests {
             Release {
                 tag_name: "b1".into(),
                 assets: Vec::new(),
+                ..Release::default()
             },
         );
 

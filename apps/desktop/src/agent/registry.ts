@@ -11,32 +11,51 @@ import type { BrokerClient } from './core/brokerClient'
 import type { AgentRuntime, AgentRuntimeDescriptor } from './core/types'
 import { PiAgentRuntime } from './pi/piRuntime'
 
-export type AgentRuntimeFactory = (broker: BrokerClient) => AgentRuntime
+export type AgentRuntimeFactory = (broker: BrokerClient, id: string) => AgentRuntime
 
 const FACTORIES = new Map<string, AgentRuntimeFactory>([
-  ['simple', (broker) => new PiAgentRuntime(broker)],
-  ['powerful', (broker) => new PiAgentRuntime(broker)]
+  ['simple', (broker, id) => new PiAgentRuntime(broker, id)],
+  ['powerful', (broker, id) => new PiAgentRuntime(broker, id)]
 ])
 
 export const DEFAULT_RUNTIME_ID = 'simple'
+
+/** Retired aliases from before Simple/Powerful modes existed. */
+const ALIASES: Record<string, string> = {
+  pi: 'simple',
+  balanced: 'simple'
+}
+
+/**
+ * Map a stored session runtime id onto a live adapter.
+ *
+ * Unknown or deleted modes become Simple so restoring a task cannot fail
+ * every tool call because a catalog entry went away.
+ */
+export function normalizeRuntimeId(id: string | null | undefined): string {
+  const trimmed = (id ?? '').trim()
+  if (!trimmed) return DEFAULT_RUNTIME_ID
+  const aliased = ALIASES[trimmed] ?? trimmed
+  if (FACTORIES.has(aliased)) return aliased
+  return DEFAULT_RUNTIME_ID
+}
 
 export function registerRuntime(id: string, factory: AgentRuntimeFactory): void {
   FACTORIES.set(id, factory)
 }
 
 export function createRuntime(id: string, broker: BrokerClient): AgentRuntime {
-  const factory = FACTORIES.get(id)
+  const normalized = normalizeRuntimeId(id)
+  const factory = FACTORIES.get(normalized)
   if (!factory) {
-    throw new Error(`Unknown agent runtime \`${id}\`. Available: ${[...FACTORIES.keys()].join(', ')}`)
+    return new PiAgentRuntime(broker, DEFAULT_RUNTIME_ID)
   }
-  return factory(broker)
+  return factory(broker, normalized)
 }
 
-let cachedDescriptors: AgentRuntimeDescriptor[] | undefined
-
 export function availableRuntimes(broker: BrokerClient): AgentRuntimeDescriptor[] {
-  return [...FACTORIES.values()].map((factory) => {
-    const runtime = factory(broker)
+  return [...FACTORIES.entries()].map(([id, factory]) => {
+    const runtime = factory(broker, id)
     try {
       return runtime.descriptor
     } finally {

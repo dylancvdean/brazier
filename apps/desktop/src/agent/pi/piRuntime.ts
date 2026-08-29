@@ -59,9 +59,7 @@ import type {
 /** Messages kept verbatim when compaction rewrites the transcript. */
 const COMPACTION_KEEP_TAIL = 6
 
-const DESCRIPTOR: AgentRuntimeDescriptor = {
-  id: 'pi',
-  name: 'Pi',
+const BASE_DESCRIPTOR = {
   version: '0.82.1',
   capabilities: {
     streaming: true,
@@ -70,6 +68,13 @@ const DESCRIPTOR: AgentRuntimeDescriptor = {
     cancellation: true,
     sessionRestore: true
   }
+} as const
+
+function descriptorFor(runtimeId: string): AgentRuntimeDescriptor {
+  if (runtimeId === 'powerful') {
+    return { id: 'powerful', name: 'Powerful', ...BASE_DESCRIPTOR }
+  }
+  return { id: 'simple', name: 'Simple', ...BASE_DESCRIPTOR }
 }
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -930,7 +935,7 @@ function truncate(text: string): string {
 
 /** Pi-backed runtime. Constructed by the worker, never by the UI. */
 export class PiAgentRuntime implements AgentRuntime {
-  readonly descriptor = DESCRIPTOR
+  readonly descriptor: AgentRuntimeDescriptor
   private readonly broker: BrokerClient
   private readonly sessions = new Map<string, PiAgentSession>()
   /** In-flight child session ids keyed by parent session id. */
@@ -939,8 +944,9 @@ export class PiAgentRuntime implements AgentRuntime {
   private readonly childLlamaSlots = new Map<string, number>()
   private sandbox?: SandboxDescription
 
-  constructor(broker: BrokerClient) {
+  constructor(broker: BrokerClient, runtimeId = 'simple') {
     this.broker = broker
+    this.descriptor = descriptorFor(runtimeId)
   }
 
   private async sandboxDescription(): Promise<SandboxDescription> {
@@ -1321,7 +1327,7 @@ export class PiAgentRuntime implements AgentRuntime {
       title: remote.session.title,
       workspacePath: remote.session.workspace_path ?? null,
       model: options.model,
-      runtimeId: DESCRIPTOR.id,
+      runtimeId: this.descriptor.id,
       messages: messages ?? [],
       toolExecutions: remote.tool_executions,
       permissionMode: remote.session.permission_mode,
