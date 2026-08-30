@@ -573,35 +573,38 @@ struct AclDeny {
 impl AclDeny {
     fn apply(path: &Path, sid: &str) -> anyhow::Result<Self> {
         let recursive = path.is_dir();
-        let principal = if recursive {
-            format!("*{sid}:(OI)(CI)(F)")
-        } else {
-            format!("*{sid}:(F)")
-        };
-        let mut command = Command::new("icacls.exe");
-        command.arg(path).args(["/deny", &principal]);
-        if recursive {
-            command.arg("/T");
-        }
-        let output = command
-            .args(["/L", "/Q"])
-            .output()
-            .with_context(|| format!("start icacls for credential path {}", path.display()))?;
+        let principal = format!("*{sid}");
         let denial = Self {
             path: path.to_path_buf(),
             sid: sid.to_owned(),
             recursive,
         };
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            drop(denial); // Remove any ACEs applied before icacls failed.
-            bail!(
-                "icacls could not mask credential path {}: stdout={} stderr={}",
-                path.display(),
-                stdout,
-                stderr
-            );
+        // Workspace Modify is inherited as FILE_DELETE_CHILD on this
+        // directory, so `cmd.exe` `>` can replace a file that itself denies
+        // DELETE. icacls `/T` with (OI)(CI) is also invalid on files and
+        // silently skips them. Break inheritance, strip the package grant,
+        // then deny with a file-safe ACE.
+        let result = (|| {
+            icacls(path, recursive, &["/inheritance:d"], false)?;
+            icacls(path, recursive, &["/remove:g", &principal], true)?;
+            if recursive {
+                icacls(
+                    path,
+                    false,
+                    &["/deny", &format!("{principal}:(OI)(CI)(N)")],
+                    false,
+                )?;
+                icacls(path, true, &["/deny", &format!("{principal}:(N)")], false)?;
+            } else {
+                icacls(path, false, &["/deny", &format!("{principal}:(N)")], false)?;
+            }
+            anyhow::Ok(())
+        })();
+        if let Err(error) = result {
+            drop(denial);
+            return Err(error).with_context(|| {
+                format!("icacls could not mask credential path {}", path.display())
+            });
         }
         Ok(denial)
     }
@@ -610,18 +613,39 @@ impl AclDeny {
 impl Drop for AclDeny {
     fn drop(&mut self) {
         let principal = format!("*{}", self.sid);
-        let mut command = Command::new("icacls.exe");
-        command.arg(&self.path).args(["/remove:d", &principal]);
-        if self.recursive {
-            command.arg("/T");
-        }
-        let _ = command
-            .args(["/C", "/L", "/Q"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = icacls(&self.path, self.recursive, &["/remove:d", &principal], true);
+        let _ = icacls(&self.path, self.recursive, &["/inheritance:e"], true);
     }
+}
+
+fn icacls(
+    path: &Path,
+    recursive: bool,
+    extra: &[&str],
+    continue_on_error: bool,
+) -> anyhow::Result<()> {
+    let mut command = Command::new("icacls.exe");
+    command.arg(path);
+    command.args(extra);
+    if recursive {
+        command.arg("/T");
+    }
+    if continue_on_error {
+        command.arg("/C");
+    }
+    let output = command
+        .args(["/L", "/Q"])
+        .output()
+        .with_context(|| format!("start icacls for {}", path.display()))?;
+    if continue_on_error || output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "icacls {} failed: stdout={} stderr={}",
+        extra.join(" "),
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 }
 
 struct Capabilities {
