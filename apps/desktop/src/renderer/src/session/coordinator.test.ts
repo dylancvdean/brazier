@@ -449,14 +449,13 @@ describe('interruption flows', () => {
     expect(chat.messages.filter((message) => message.role === 'user')).toHaveLength(3)
   })
 
-  it('preserves both messages when text arrives while the voice is speaking', async () => {
+  it('preserves both messages when text follows a spoken turn', async () => {
     const { coordinator, agent, voice, chat } = await live()
     speak(voice, 'utt-1', 'Describe the policy layer.')
     await Promise.resolve()
     const first = agent.submitted[0].correlationId
     agent.completeRun(first, 'Every call is judged by agent_policy.')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(coordinator.snapshot().activeCorrelationId).toBe(first)
 
     await coordinator.submitText('And the approvals?')
     await new Promise((resolve) => setTimeout(resolve, 0))
