@@ -581,11 +581,12 @@ impl AclDeny {
         };
         // Workspace Modify is inherited as FILE_DELETE_CHILD on this
         // directory, so `cmd.exe` `>` can replace a file that itself denies
-        // DELETE. icacls `/T` with (OI)(CI) is invalid on files and skips
-        // them; `/deny (N)` is rejected as an invalid parameter. Strip the
-        // package grant, deny the directory with inherit flags, then stamp
-        // a file-safe Full deny on every child.
+        // DELETE. `/remove:g` cannot strip inherited ACEs; disable
+        // inheritance so those grants become explicit, remove them, then
+        // deny. icacls `/T` with (OI)(CI) is invalid on files, and `/deny
+        // (N)` is rejected, so stamp (F) on children without container flags.
         let result = (|| {
+            icacls(path, recursive, &["/inheritance:d"], false)?;
             icacls(path, recursive, &["/remove:g", &principal], true)?;
             if recursive {
                 icacls(
@@ -614,6 +615,7 @@ impl Drop for AclDeny {
     fn drop(&mut self) {
         let principal = format!("*{}", self.sid);
         let _ = icacls(&self.path, self.recursive, &["/remove:d", &principal], true);
+        let _ = icacls(&self.path, self.recursive, &["/inheritance:e"], true);
     }
 }
 
@@ -1626,7 +1628,13 @@ mod tests {
         )
         .expect("run credential-boundary AppContainer");
         assert_eq!(code, 0);
-        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "do-not-leak");
+        assert_eq!(
+            std::fs::read_to_string(&secret).unwrap(),
+            "do-not-leak",
+            "credential file must stay immutable; leak={:?} marker={}",
+            std::fs::read_to_string(&leak).ok(),
+            marker.is_file()
+        );
         assert!(
             !std::fs::read_to_string(&leak)
                 .unwrap_or_default()
