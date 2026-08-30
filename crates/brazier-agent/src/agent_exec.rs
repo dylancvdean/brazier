@@ -4198,6 +4198,7 @@ startxref
         assert!(response.is_error);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_symlink_out_of_the_workspace_does_not_widen_access() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4207,10 +4208,7 @@ startxref
             .await
             .expect("write");
         let link = harness.workspace.path().join("link.txt");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&secret, &link).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         // Following the link leaves the workspace, so it is treated as host
         // access and held for approval instead of being read.
@@ -4229,9 +4227,9 @@ startxref
             1,
             "the target outside the workspace is named in the request"
         );
-        let _ = link;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fs_search_does_not_follow_symlinks_out_of_the_workspace() {
         let harness = Harness::new(AgentPermissionMode::SandboxOnly).await;
@@ -4241,10 +4239,7 @@ startxref
             .await
             .expect("write");
         let link = harness.workspace.path().join("escape.txt");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&secret, &link).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         let response = harness
             .call("fs_search", json!({ "query": "classified-search-marker" }))
@@ -4267,6 +4262,7 @@ startxref
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fs_list_names_but_does_not_descend_escaping_symlinks() {
         let harness = Harness::new(AgentPermissionMode::SandboxOnly).await;
@@ -4277,10 +4273,7 @@ startxref
             .await
             .expect("write");
         let link = harness.workspace.path().join("out");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&nested, &link).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         let response = harness
             .call("fs_list", json!({ "path": ".", "depth": 3 }))
@@ -4299,6 +4292,7 @@ startxref
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fs_search_follows_symlinks_that_stay_in_the_workspace() {
         let harness = Harness::new(AgentPermissionMode::SandboxOnly).await;
@@ -4308,10 +4302,7 @@ startxref
             .await
             .expect("write");
         let link = harness.workspace.path().join("alias");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&target_dir, &link).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         let response = harness
             .call("fs_search", json!({ "query": "workspace-link-marker" }))

@@ -898,6 +898,8 @@ fn create_appcontainer_process(
     startup.lpAttributeList = attributes.ptr;
 
     let application = wide_os(executable.as_os_str());
+    // `CreateProcessW` can launch a `\\?\` image path, but argv0 still has to
+    // be a Win32 path: `cmd.exe` treats `?` as a wildcard and will not see `/C`.
     let mut command_line = encode_command_line(executable.as_os_str(), args);
     let cwd = wide_os(win32_process_path(cwd).as_os_str());
     let mut process = PROCESS_INFORMATION::default();
@@ -1050,6 +1052,16 @@ fn resolve_executable(program: &OsStr) -> anyhow::Result<PathBuf> {
 }
 
 fn encode_command_line(program: &OsStr, args: &[OsString]) -> Vec<u16> {
+    let stripped = win32_process_path(Path::new(program));
+    let program = stripped.as_os_str();
+    if is_cmd_executable(program) {
+        encode_cmd_command_line(program, args)
+    } else {
+        encode_argv_command_line(program, args)
+    }
+}
+
+fn encode_argv_command_line(program: &OsStr, args: &[OsString]) -> Vec<u16> {
     let mut command = quote_windows_arg(program);
     for argument in args {
         command.push(' ' as u16);
@@ -1057,6 +1069,65 @@ fn encode_command_line(program: &OsStr, args: &[OsString]) -> Vec<u16> {
     }
     command.push(0);
     command
+}
+
+/// `cmd.exe` re-parses `GetCommandLineW` itself. Win32 `\"` escaping inside a
+/// `/C` argument is left in the command text, so paths like `"C:\file"` become
+/// `\"C:\file\"` and fail with ERROR_INVALID_NAME. `/S` plus a single outer
+/// quote pair lets cmd strip that wrapper and keep the command's own quotes.
+fn encode_cmd_command_line(program: &OsStr, args: &[OsString]) -> Vec<u16> {
+    let mut command = quote_windows_arg(program);
+    let mut saw_s = false;
+    let mut c_index = None;
+    for (index, arg) in args.iter().enumerate() {
+        let text = arg.to_string_lossy();
+        if text.eq_ignore_ascii_case("/S") {
+            saw_s = true;
+        }
+        if text.eq_ignore_ascii_case("/C") || text.eq_ignore_ascii_case("/K") {
+            c_index = Some(index);
+            break;
+        }
+    }
+    let Some(c_index) = c_index else {
+        for argument in args {
+            command.push(' ' as u16);
+            command.extend(quote_windows_arg(argument));
+        }
+        command.push(0);
+        return command;
+    };
+    for argument in &args[..c_index] {
+        command.push(' ' as u16);
+        command.extend(quote_windows_arg(argument));
+    }
+    if !saw_s {
+        command.push(' ' as u16);
+        command.extend(quote_windows_arg(OsStr::new("/S")));
+    }
+    command.push(' ' as u16);
+    command.extend(quote_windows_arg(&args[c_index]));
+    if let Some(payload) = args.get(c_index + 1) {
+        command.push(' ' as u16);
+        command.push('"' as u16);
+        command.extend(payload.encode_wide());
+        command.push('"' as u16);
+    }
+    for argument in args.iter().skip(c_index + 2) {
+        command.push(' ' as u16);
+        command.extend(quote_windows_arg(argument));
+    }
+    command.push(0);
+    command
+}
+
+fn is_cmd_executable(program: &OsStr) -> bool {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("cmd.exe") || name.eq_ignore_ascii_case("cmd")
+        })
 }
 
 fn quote_windows_arg(argument: &OsStr) -> Vec<u16> {
@@ -1098,7 +1169,7 @@ fn wide_os(value: &OsStr) -> Vec<u16> {
 }
 
 /// `CreateProcessW` accepts `\\?\` paths, but `cmd.exe` treats a verbatim
-/// `lpCurrentDirectory` as UNC and refuses to start there.
+/// `lpCurrentDirectory` as UNC and a verbatim argv0 `?` as a wildcard.
 fn win32_process_path(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
@@ -1108,6 +1179,15 @@ fn win32_process_path(path: &Path) -> PathBuf {
     } else {
         path.to_path_buf()
     }
+}
+
+fn cmd_quoted_path(path: &Path) -> String {
+    format!(
+        "\"{}\"",
+        win32_process_path(path)
+            .to_string_lossy()
+            .replace('"', "\"\"")
+    )
 }
 
 fn create_directory_junction(link: &Path, target: &Path) -> anyhow::Result<()> {
@@ -1154,13 +1234,13 @@ fn probe_full_isolation() -> anyhow::Result<i32> {
     let linked_copy = workspace.join("linked-copy.txt");
     let escaped = outside.join("escaped.txt");
     let command = format!(
-        "type \"{}\" > \"{}\" 2>nul & echo escaped > \"{}\" 2>nul & echo inside > \"{}\" & type \"{}\" > \"{}\"",
-        outside.join("secret.txt").display(),
-        leak.display(),
-        escaped.display(),
-        inside.display(),
-        linked_workspace.join("source.txt").display(),
-        linked_copy.display(),
+        "type {} > {} 2>nul & echo escaped > {} 2>nul & echo inside > {} & type {} > {}",
+        cmd_quoted_path(&outside.join("secret.txt")),
+        cmd_quoted_path(&leak),
+        cmd_quoted_path(&escaped),
+        cmd_quoted_path(&inside),
+        cmd_quoted_path(&linked_workspace.join("source.txt")),
+        cmd_quoted_path(&linked_copy),
     );
     let result = run_isolated(
         SandboxProfile::Workspace,
@@ -1244,6 +1324,47 @@ mod tests {
         assert_eq!(quoted("two words"), "\"two words\"");
         assert_eq!(quoted("say\"hi"), "\"say\\\"hi\"");
         assert_eq!(quoted(r"C:\path with space\"), r#""C:\path with space\\""#);
+    }
+
+    fn decode_command_line(program: &str, args: &[&str]) -> String {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let encoded = encode_command_line(OsStr::new(program), &args);
+        let end = encoded
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(encoded.len());
+        String::from_utf16(&encoded[..end]).unwrap()
+    }
+
+    #[test]
+    fn create_process_command_line_strips_the_verbatim_namespace_prefix() {
+        assert_eq!(
+            decode_command_line(r"\\?\C:\tools\cargo.exe", &["test"]),
+            r"C:\tools\cargo.exe test"
+        );
+        assert_eq!(
+            decode_command_line(r"\\?\UNC\server\share\tool.exe", &["--help"]),
+            r"\\server\share\tool.exe --help"
+        );
+    }
+
+    #[test]
+    fn cmd_c_command_line_keeps_inner_quotes_and_adds_slash_s() {
+        assert_eq!(
+            decode_command_line(
+                r"\\?\C:\Windows\System32\cmd.exe",
+                &["/D", "/C", r#"echo ok>"C:\Temp\a.txt""#]
+            ),
+            r#"C:\Windows\System32\cmd.exe /D /S /C "echo ok>"C:\Temp\a.txt"""#
+        );
+        assert_eq!(
+            decode_command_line(r"C:\Windows\System32\cmd.exe", &["/C", "echo hello"]),
+            r#"C:\Windows\System32\cmd.exe /S /C "echo hello""#
+        );
+        assert_eq!(
+            decode_command_line(r"C:\Windows\System32\cmd.exe", &["/S", "/C", "echo hello"]),
+            r#"C:\Windows\System32\cmd.exe /S /C "echo hello""#
+        );
     }
 
     #[test]
@@ -1406,7 +1527,7 @@ mod tests {
             &[
                 OsString::from("/D"),
                 OsString::from("/C"),
-                OsString::from(format!("echo ok>\"{}\"", marker.display())),
+                OsString::from("echo ok>toolchain-ran.txt"),
             ],
         )
         .expect("run copied user-toolchain executable in AppContainer");
@@ -1425,9 +1546,9 @@ mod tests {
         let scratch_file = scratch.join("scratch.txt");
         std::fs::write(&protected, "original").unwrap();
         let command = format!(
-            "echo changed > \"{}\" 2>nul & echo scratch > \"{}\"",
-            protected.display(),
-            scratch_file.display()
+            "echo changed > {} 2>nul & echo scratch > {}",
+            cmd_quoted_path(&protected),
+            cmd_quoted_path(&scratch_file)
         );
         let code = run_isolated(
             SandboxProfile::ReadOnly,
@@ -1461,11 +1582,11 @@ mod tests {
         let marker = scratch.join("marker.txt");
         std::fs::write(&secret, "do-not-leak").unwrap();
         let command = format!(
-            "type \"{}\" > \"{}\" 2>nul & echo changed > \"{}\" 2>nul & echo ok > \"{}\"",
-            secret.display(),
-            leak.display(),
-            secret.display(),
-            marker.display(),
+            "type {} > {} 2>nul & echo changed > {} 2>nul & echo ok > {}",
+            cmd_quoted_path(&secret),
+            cmd_quoted_path(&leak),
+            cmd_quoted_path(&secret),
+            cmd_quoted_path(&marker),
         );
         let code = run_isolated(
             SandboxProfile::Workspace,

@@ -1107,11 +1107,14 @@ mod tests {
                 allow_session_scope,
                 ..
             } => {
+                // Match the policy resolver rather than the raw JSON spelling:
+                // Windows lexically normalizes `/opt/sdk` to `\opt\sdk`.
+                let named_path = resolve_path(Some(Path::new("/ws")), "/opt/sdk");
                 // The reason comes from the tool's own argument, not from a
                 // caller-supplied one, and the summary states the access asked
                 // for without repeating itself.
                 assert!(
-                    summary.contains(&format!("{} (read)", Path::new("/opt/sdk").display())),
+                    summary.contains(&format!("{} (read)", named_path.display())),
                     "{summary}"
                 );
                 assert!(summary.contains("outbound network"), "{summary}");
@@ -1127,7 +1130,7 @@ mod tests {
                         .iter()
                         .map(|entry| entry.path.clone())
                         .collect::<Vec<_>>(),
-                    vec![Path::new("/opt/sdk").display().to_string()]
+                    vec![named_path.display().to_string()]
                 );
             }
             other => panic!("expected approval, got {other:?}"),

@@ -640,7 +640,10 @@ pub async fn execute_desktop_action(
         linux_action(action, cancel).await
     };
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let execution: Result<(), String> = Err("unsupported platform".into());
+    let execution: Result<(), String> = {
+        let _ = viewport;
+        Err("unsupported platform".into())
+    };
     match execution {
         Ok(()) => {
             if settle_delay_ms > 0
