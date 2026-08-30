@@ -10540,11 +10540,27 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{done}");
-        assert_eq!(done["status"], "completed", "{done}");
-        assert_eq!(
-            std::fs::read_to_string(workspace.path().join("hello.txt")).unwrap(),
-            "hi"
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(done["status"], "completed", "{done}");
+            assert_eq!(
+                std::fs::read_to_string(workspace.path().join("hello.txt")).unwrap(),
+                "hi"
+            );
+        }
+        #[cfg(windows)]
+        {
+            // Handle-relative writes are Unix-only; the approval round-trip
+            // still holds the call and records the refused execution.
+            assert_eq!(done["status"], "failed", "{done}");
+            assert!(
+                done["output"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("unavailable on Windows"),
+                "{done}"
+            );
+        }
 
         // The ledger holds one row for the call that ran, pointing at the
         // approval that authorized it. The held attempt lives in the approval
@@ -10556,9 +10572,16 @@ mod tests {
         .await;
         let rows = executions["data"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "{executions}");
-        assert_eq!(rows[0]["status"], "completed");
+        #[cfg(unix)]
+        {
+            assert_eq!(rows[0]["status"], "completed");
+            assert_eq!(rows[0]["changed_paths"], json!(["hello.txt"]));
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(rows[0]["status"], "failed");
+        }
         assert_eq!(rows[0]["approval_id"], json!(approval_id));
-        assert_eq!(rows[0]["changed_paths"], json!(["hello.txt"]));
     }
 
     #[tokio::test]
