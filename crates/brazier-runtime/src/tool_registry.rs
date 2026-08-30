@@ -168,6 +168,98 @@ pub fn can_execute(name: &str) -> bool {
     crate::tools::is_builtin(&logical) || mcp::parse_tool_name(&logical).is_some()
 }
 
+/// Parse a tool-call arguments payload into JSON.
+///
+/// Models wrap objects in Markdown fences, append commentary, double-encode a
+/// JSON string, or send a one-element array. Repairing that here keeps the
+/// executor from treating the call as `null` and then failing for a missing
+/// required field.
+pub fn parse_json_arguments(arguments: &str) -> anyhow::Result<Value> {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return Ok(json!({}));
+    }
+    let cleaned = strip_markdown_fences(trimmed);
+    if let Some(value) = decode_json_value(cleaned) {
+        return Ok(unwrap_encoding(value));
+    }
+    anyhow::bail!(
+        "tool arguments were not valid JSON. Resend the call with a JSON object matching the tool schema"
+    )
+}
+
+const ARGUMENT_WRAPPER_KEYS: &[&str] = &[
+    "input",
+    "arguments",
+    "args",
+    "parameters",
+    "params",
+    "tool_input",
+    "kwargs",
+];
+
+fn decode_json_value(text: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        return Some(value);
+    }
+    if let Some(object) = outermost_json_object(text)
+        && let Ok(value) = serde_json::from_str::<Value>(object)
+    {
+        return Some(value);
+    }
+    None
+}
+
+/// Unwrap JSON-encoding mistakes (a string of JSON, a 1-element array).
+fn unwrap_encoding(value: Value) -> Value {
+    let mut current = value;
+    for _ in 0..3 {
+        current = match current {
+            Value::String(text) => match decode_json_value(text.trim()) {
+                Some(parsed) => parsed,
+                None => return Value::String(text),
+            },
+            Value::Array(mut items) if items.len() == 1 && items[0].is_object() => items.remove(0),
+            other => return other,
+        };
+    }
+    current
+}
+
+/// Unwrap `{ "parameters": { ... } }` style envelopes common from small models.
+///
+/// Only the bundled tools use this: an MCP server may declare `input` as a real
+/// property, so the MCP client leaves the object alone.
+pub fn unwrap_builtin_argument_wrappers(value: Value) -> Value {
+    let Value::Object(map) = &value else {
+        return value;
+    };
+    if map.len() == 1
+        && let Some((key, inner)) = map.iter().next()
+        && ARGUMENT_WRAPPER_KEYS.contains(&key.as_str())
+        && inner.is_object()
+    {
+        return inner.clone();
+    }
+    value
+}
+
+fn strip_markdown_fences(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+    let rest = rest.trim_start();
+    rest.strip_suffix("```").map(str::trim_end).unwrap_or(rest)
+}
+
+fn outermost_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (end > start).then_some(&text[start..=end])
+}
+
 pub async fn execute(
     ctx: &ToolContext<'_>,
     call_id: &str,
@@ -257,6 +349,38 @@ mod context_tests {
     fn a_text_only_conversation_offers_no_images() {
         let request = request_with(serde_json::json!([{ "type": "text", "text": "hello" }]));
         assert!(conversation_images(&request).is_empty());
+    }
+
+    #[test]
+    fn parse_json_arguments_repairs_fences_and_trailing_prose() {
+        assert_eq!(parse_json_arguments("").unwrap(), json!({}));
+        assert_eq!(
+            parse_json_arguments("```json\n{\"expression\":\"6*7\"}\n```").unwrap(),
+            json!({ "expression": "6*7" })
+        );
+        assert_eq!(
+            parse_json_arguments("{\"expression\":\"1+1\"} — done").unwrap(),
+            json!({ "expression": "1+1" })
+        );
+        assert_eq!(
+            parse_json_arguments("{\"parameters\":{\"expression\":\"6*7\"}}").unwrap(),
+            json!({ "parameters": { "expression": "6*7" } })
+        );
+        assert_eq!(
+            unwrap_builtin_argument_wrappers(
+                parse_json_arguments("{\"parameters\":{\"expression\":\"6*7\"}}").unwrap()
+            ),
+            json!({ "expression": "6*7" })
+        );
+        assert_eq!(
+            parse_json_arguments("\"{\\\"expression\\\":\\\"1+1\\\"}\"").unwrap(),
+            json!({ "expression": "1+1" })
+        );
+        assert_eq!(
+            parse_json_arguments("[{\"expression\":\"3\"}]").unwrap(),
+            json!({ "expression": "3" })
+        );
+        assert!(parse_json_arguments("not json at all").is_err());
     }
 
     #[test]

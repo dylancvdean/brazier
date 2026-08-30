@@ -1,7 +1,7 @@
 //! Per-model runtime bindings.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -24,6 +24,39 @@ impl ModelRuntimeBindings {
 
     pub fn remove(&mut self, model_id: &str) -> Option<String> {
         self.bindings.remove(model_id)
+    }
+
+    /// Re-point or drop bindings whose runtime is no longer installed.
+    ///
+    /// Returns true when anything changed. `fallback_for_model` should return
+    /// another runtime of the same engine, or `None` to leave the model on
+    /// whatever is currently active.
+    pub fn reconcile(
+        &mut self,
+        known_runtime_ids: &HashSet<String>,
+        fallback_for_model: impl Fn(&str) -> Option<String>,
+    ) -> bool {
+        let stale: Vec<(String, String)> = self
+            .bindings
+            .iter()
+            .filter(|(_, runtime_id)| !known_runtime_ids.contains(*runtime_id))
+            .map(|(model_id, runtime_id)| (model_id.clone(), runtime_id.clone()))
+            .collect();
+        if stale.is_empty() {
+            return false;
+        }
+        for (model_id, previous) in stale {
+            match fallback_for_model(&model_id) {
+                Some(fallback) if fallback != previous => {
+                    self.set(&model_id, fallback);
+                }
+                Some(_) => {}
+                None => {
+                    self.remove(&model_id);
+                }
+            }
+        }
+        true
     }
 }
 
@@ -84,5 +117,25 @@ mod tests {
             loaded.get("gguf:acme/model/file.gguf"),
             Some("source-abc123")
         );
+    }
+
+    #[test]
+    fn reconcile_falls_back_or_clears_missing_runtimes() {
+        let mut bindings = ModelRuntimeBindings::default();
+        bindings.set("gguf:one/a.gguf", "source-gone");
+        bindings.set("gguf:two/b.gguf", "managed");
+        bindings.set("mlx:acme/model", "mlx-lm-source-old");
+        let known = ["managed".to_owned()].into_iter().collect();
+        let changed = bindings.reconcile(&known, |model_id| {
+            if model_id.starts_with("gguf:") {
+                Some("managed".to_owned())
+            } else {
+                None
+            }
+        });
+        assert!(changed);
+        assert_eq!(bindings.get("gguf:one/a.gguf"), Some("managed"));
+        assert_eq!(bindings.get("gguf:two/b.gguf"), Some("managed"));
+        assert_eq!(bindings.get("mlx:acme/model"), None);
     }
 }

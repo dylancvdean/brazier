@@ -7,8 +7,10 @@ import {
 } from './AgentMode'
 
 const RUNTIME_LABELS: Record<string, string> = {
+  simple: 'Simple',
+  pi: 'Simple',
   powerful: 'Powerful',
-  balanced: 'Balanced'
+  balanced: 'Simple'
 }
 
 function runtimeLabel(runtimeId: string | null | undefined): string {

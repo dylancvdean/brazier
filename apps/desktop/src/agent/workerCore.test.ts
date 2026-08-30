@@ -49,6 +49,7 @@ function installBrokerAndRuntime(
 ): void {
   ;(core as unknown as { broker: typeof broker }).broker = broker
   ;(core as unknown as { runtimes: Map<string, AgentRuntime> }).runtimes = new Map([
+    ['simple', runtime],
     ['pi', runtime]
   ])
   ;(core as unknown as { tools: [] }).tools = []

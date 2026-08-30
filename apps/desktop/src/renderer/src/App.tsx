@@ -3285,6 +3285,10 @@ export function App(): React.JSX.Element {
           onSelectModel={selectModel}
           modelBindings={modelBindings}
           onSetModelBinding={(modelId, runtimeId) => void updateModelBinding(modelId, runtimeId)}
+          onRuntimesChanged={() => {
+            void prefetchRuntimes()
+            void fetchModelBindings().then(setModelBindings).catch(() => {})
+          }}
           settings={runtime}
           onSettingsSaved={setRuntime}
           hardware={hardware}

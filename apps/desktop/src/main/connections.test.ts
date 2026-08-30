@@ -248,7 +248,9 @@ describe('connection profile persistence', () => {
     })
     store.select(profile.id)
 
-    expect(statSync(path).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') {
+      expect(statSync(path).mode & 0o777).toBe(0o600)
+    }
     expect(readdirSync(join(path, '..')).filter((name) => name.endsWith('.tmp'))).toEqual([])
     expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({
       version: 1,

@@ -203,6 +203,10 @@ export function runtimeNoticeForModel(
   if (boundId) {
     const bound = runtimes.find((entry) => entry.id === boundId)
     if (bound) return null
+    const fallback = fallbackRuntimeForEngine(runtimes, engine)
+    if (fallback) {
+      return `The paired runtime was removed. This model will use ${fallback.label}.`
+    }
     return 'The paired runtime is missing. Choose another runtime below.'
   }
   const active = runtimes.some((entry) => entry.engine === engine && entry.active)
@@ -214,6 +218,18 @@ export function runtimeNoticeForModel(
     return `This model needs ${engineLabel(engine)}. Open Manage → Runtimes to build and activate it.`
   }
   return null
+}
+
+/** Active runtime of this engine, else a managed install, else any remaining one. */
+export function fallbackRuntimeForEngine(
+  runtimes: RuntimeEntry[],
+  engine: string
+): RuntimeEntry | undefined {
+  return (
+    runtimes.find((entry) => entry.engine === engine && entry.active) ??
+    runtimes.find((entry) => entry.engine === engine && entry.kind === 'managed') ??
+    runtimes.find((entry) => entry.engine === engine)
+  )
 }
 
 export function runtimesForModel(

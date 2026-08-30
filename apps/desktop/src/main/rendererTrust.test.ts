@@ -1,3 +1,5 @@
+import { pathToFileURL } from 'node:url'
+
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -7,23 +9,17 @@ import {
   shouldCancelRendererNetworkRequest
 } from './rendererTrust'
 
-const packagedIndexPath = '/Applications/Brazier.app/Contents/Resources/app.asar/out/renderer/index.html'
+const packagedIndexPath =
+  process.platform === 'win32'
+    ? 'C:\\Program Files\\Brazier\\resources\\app.asar\\out\\renderer\\index.html'
+    : '/Applications/Brazier.app/Contents/Resources/app.asar/out/renderer/index.html'
 
 describe('renderer trust boundary', () => {
   it('accepts only the exact packaged renderer file, with an optional hash', () => {
     const options = { packagedIndexPath }
-    expect(
-      isTrustedRendererUrl(
-        'file:///Applications/Brazier.app/Contents/Resources/app.asar/out/renderer/index.html',
-        options
-      )
-    ).toBe(true)
-    expect(
-      isTrustedRendererUrl(
-        'file:///Applications/Brazier.app/Contents/Resources/app.asar/out/renderer/index.html#voice',
-        options
-      )
-    ).toBe(true)
+    const packaged = pathToFileURL(packagedIndexPath).href
+    expect(isTrustedRendererUrl(packaged, options)).toBe(true)
+    expect(isTrustedRendererUrl(`${packaged}#voice`, options)).toBe(true)
     expect(isTrustedRendererUrl('file:///tmp/attacker.html', options)).toBe(false)
   })
 

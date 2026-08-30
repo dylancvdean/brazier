@@ -945,20 +945,17 @@ fn walk_boundary(root: &Path, workspace: Option<&Path>) -> Option<PathBuf> {
 /// Enumerate a directory through a pinned handle and open each child with the
 /// component-by-component no-symlink routine. A concurrent symlink swap can
 /// make an entry disappear from the result, but cannot redirect the walk.
+///
+/// Names come from `fdopendir`/`readdir` on a duplicate of the pinned fd.
+/// `/proc/self/fd/N` works as a directory on Linux, but macOS `/dev/fd/N` is a
+/// character device, so `read_dir` there fails with ENOTDIR.
 #[cfg(unix)]
 fn secure_directory_entries(
     path: &Path,
 ) -> std::io::Result<Vec<(std::ffi::OsString, std::fs::Metadata)>> {
-    use std::os::fd::AsRawFd as _;
     let directory = unix_open_file(path, libc::O_RDONLY | libc::O_DIRECTORY, false)?;
-    #[cfg(target_os = "linux")]
-    let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
-    #[cfg(not(target_os = "linux"))]
-    let descriptor_path = PathBuf::from(format!("/dev/fd/{}", directory.as_raw_fd()));
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(descriptor_path)? {
-        let entry = entry?;
-        let name = entry.file_name();
+    for name in unix_directory_child_names(&directory)? {
         let logical = path.join(&name);
         let Ok(child) = secure_open_read(&logical) else {
             continue;
@@ -1244,6 +1241,40 @@ fn secure_remove(path: &Path, directory: bool) -> std::io::Result<()> {
     }
 }
 
+/// Child names of a pinned directory fd. `fdopendir` consumes the duplicate
+/// descriptor; `.` and `..` are omitted the same way `std::fs::read_dir` does.
+#[cfg(unix)]
+fn unix_directory_child_names(
+    directory: &std::fs::File,
+) -> std::io::Result<Vec<std::ffi::OsString>> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        unsafe { libc::close(duplicate) };
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut names = Vec::new();
+    loop {
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        names.push(std::ffi::OsString::from_vec(name.to_bytes().to_vec()));
+    }
+    unsafe { libc::closedir(stream) };
+    Ok(names)
+}
+
 #[cfg(unix)]
 fn unix_remove_directory_contents(directory: &std::fs::File) -> std::io::Result<()> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
@@ -1501,6 +1532,32 @@ fn secure_remove_tree(_path: &Path) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 
+/// Resolve a daemon data directory through prefix symlinks (macOS `/var` →
+/// `/private/var`) so later `O_NOFOLLOW` opens do not see a symlink component.
+fn real_data_dir(data_dir: &Path) -> PathBuf {
+    std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf())
+}
+
+fn ensure_agent_subdir(data_dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let path = real_data_dir(data_dir).join("agent").join(name);
+    #[cfg(unix)]
+    secure_create_dir_all(&path)?;
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
+fn create_agent_file(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        secure_open_write(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::create(path)
+    }
+}
+
 async fn doc_read(
     context: &BrokerContext<'_>,
     plan: &CallPlan,
@@ -1532,14 +1589,13 @@ async fn doc_read(
                 input.metadata()?.len() <= 64 * 1024 * 1024,
                 "documents are limited to 64 MiB"
             );
-            let staging = context.data_dir.join("agent").join("document-staging");
-            secure_create_dir_all(&staging)?;
+            let staging = ensure_agent_subdir(context.data_dir, "document-staging")?;
             let suffix = source
                 .extension()
                 .and_then(|value| value.to_str())
                 .unwrap_or("bin");
             let staged = staging.join(format!("{}.{}", Uuid::new_v4(), suffix));
-            let mut output = secure_open_write(&staged)?;
+            let mut output = create_agent_file(&staged)?;
             std::io::copy(&mut input, &mut output)?;
             output.sync_all()?;
             (staged.clone(), Some(staged))
@@ -3715,6 +3771,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn secure_directory_entries_lists_children_through_a_pinned_handle() {
+        let dir = TempDir::new().expect("dir");
+        std::fs::write(dir.path().join("alpha.txt"), "a").expect("write file");
+        std::fs::create_dir(dir.path().join("nested")).expect("mkdir");
+        std::fs::write(dir.path().join("nested").join("beta.txt"), "b").expect("write nested");
+
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize tempdir");
+        let entries = secure_directory_entries(&root).expect("list");
+        let mut names: Vec<_> = entries
+            .iter()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["alpha.txt".to_owned(), "nested".to_owned()]);
+        assert!(
+            entries
+                .iter()
+                .any(|(name, metadata)| name == "alpha.txt" && metadata.is_file())
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|(name, metadata)| name == "nested" && metadata.is_dir())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn pinned_directory_placeholders_use_actual_high_descriptors() {
         let mut args = vec![
             "--bind-fd".into(),
@@ -3919,6 +4003,7 @@ mod tests {
         assert!(error.to_string().contains("could not detect"), "{error}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn writes_and_reads_round_trip_inside_the_workspace() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4086,6 +4171,7 @@ startxref
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn ambiguous_patches_are_refused() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4112,6 +4198,7 @@ startxref
         assert!(response.is_error);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_symlink_out_of_the_workspace_does_not_widen_access() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4121,10 +4208,7 @@ startxref
             .await
             .expect("write");
         let link = harness.workspace.path().join("link.txt");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&secret, &link).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         // Following the link leaves the workspace, so it is treated as host
         // access and held for approval instead of being read.
@@ -4143,9 +4227,9 @@ startxref
             1,
             "the target outside the workspace is named in the request"
         );
-        let _ = link;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fs_search_does_not_follow_symlinks_out_of_the_workspace() {
         let harness = Harness::new(AgentPermissionMode::SandboxOnly).await;
@@ -4155,10 +4239,7 @@ startxref
             .await
             .expect("write");
         let link = harness.workspace.path().join("escape.txt");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&secret, &link).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         let response = harness
             .call("fs_search", json!({ "query": "classified-search-marker" }))
@@ -4181,6 +4262,7 @@ startxref
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fs_list_names_but_does_not_descend_escaping_symlinks() {
         let harness = Harness::new(AgentPermissionMode::SandboxOnly).await;
@@ -4191,10 +4273,7 @@ startxref
             .await
             .expect("write");
         let link = harness.workspace.path().join("out");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&nested, &link).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         let response = harness
             .call("fs_list", json!({ "path": ".", "depth": 3 }))
@@ -4213,6 +4292,7 @@ startxref
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fs_search_follows_symlinks_that_stay_in_the_workspace() {
         let harness = Harness::new(AgentPermissionMode::SandboxOnly).await;
@@ -4222,10 +4302,7 @@ startxref
             .await
             .expect("write");
         let link = harness.workspace.path().join("alias");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&target_dir, &link).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         let response = harness
             .call("fs_search", json!({ "query": "workspace-link-marker" }))
@@ -4243,6 +4320,7 @@ startxref
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn ask_mode_requires_approval_for_writes_and_then_honours_it() {
         let harness = Harness::new(AgentPermissionMode::Ask).await;
@@ -4379,6 +4457,7 @@ startxref
         assert!(harness.workspace.path().exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn search_finds_matches_and_skips_heavy_directories() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4409,6 +4488,7 @@ startxref
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn search_can_filter_by_name() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4455,6 +4535,7 @@ startxref
         assert!(records.iter().all(|record| record.sandbox.is_some()));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn large_output_is_truncated_and_stored_as_an_artifact() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
@@ -4508,7 +4589,9 @@ startxref
         assert!(failure.is_error);
     }
 
-    #[cfg(unix)]
+    /// Bubblewrap remounts the session workspace at `/tmp/brazier-workspace`.
+    /// Seatbelt on macOS keeps the real path, so this assertion is Linux-only.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn network_sandbox_uses_the_pinned_workspace_mount() {
         let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;

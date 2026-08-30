@@ -539,6 +539,7 @@ mod tests {
             ["init"][..].as_ref(),
             ["config", "user.email", "test@example.com"].as_ref(),
             ["config", "user.name", "Test"].as_ref(),
+            ["config", "core.autocrlf", "false"].as_ref(),
         ] {
             let status = Command::new("git")
                 .args(args)
@@ -600,6 +601,7 @@ mod tests {
             ["init"][..].as_ref(),
             ["config", "user.email", "test@example.com"].as_ref(),
             ["config", "user.name", "Test"].as_ref(),
+            ["config", "core.autocrlf", "false"].as_ref(),
         ] {
             assert!(
                 Command::new("git")
@@ -646,6 +648,7 @@ mod tests {
             ["init"][..].as_ref(),
             ["config", "user.email", "test@example.com"].as_ref(),
             ["config", "user.name", "Test"].as_ref(),
+            ["config", "core.autocrlf", "false"].as_ref(),
         ] {
             assert!(
                 Command::new("git")

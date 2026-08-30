@@ -534,8 +534,24 @@ pub async fn call_tool(
             media: Vec::new(),
         };
     }
-    let parsed_args: Value =
-        serde_json::from_str(arguments).unwrap_or_else(|_| json!({ "input": arguments }));
+    let parsed_args: Value = match crate::tool_registry::parse_json_arguments(arguments) {
+        Ok(value) => value,
+        Err(error) => {
+            let looks_like_json =
+                arguments.trim_start().starts_with('{') || arguments.trim_start().starts_with('[');
+            if looks_like_json {
+                return ToolInvocation {
+                    call_id,
+                    name: openai_tool_name(server_id, tool_name),
+                    arguments: arguments.to_owned(),
+                    output: format!("Error: {error:#}"),
+                    is_error: true,
+                    media: Vec::new(),
+                };
+            }
+            json!({ "input": arguments })
+        }
+    };
     match JsonRpcClient::connect(server).await {
         Ok(mut client) => match client.call_tool(tool_name, parsed_args).await {
             Ok(result) => {

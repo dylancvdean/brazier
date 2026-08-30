@@ -469,6 +469,8 @@ type ManagePanelProps = {
   onPendingBuildConsumed?: () => void
   /** Fired after workspace mode toggles are saved. */
   onWorkspaceModesChange?: (modes: WorkspaceModesPreference) => void
+  /** Fired after a runtime is installed, activated, or deleted. */
+  onRuntimesChanged?: () => void
   /** The user asked Settings to run a dreaming pass with the current model. */
   onDreamRequest?: () => void
 }
@@ -5062,6 +5064,10 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   const [managedStatuses, setManagedStatuses] = useState<ManagedLlamaTargetStatus[] | null>(
     null
   )
+  const [whisperStatuses, setWhisperStatuses] = useState<ManagedLlamaTargetStatus[] | null>(
+    null
+  )
+  const [sdcppStatuses, setSdcppStatuses] = useState<ManagedLlamaTargetStatus[] | null>(null)
   /** Set while the daemon is still checking upstream for newer releases. */
   const [updateCheckPending, setUpdateCheckPending] = useState(false)
   const logRef = useRef<HTMLPreElement>(null)
@@ -5124,12 +5130,11 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         fetchManagedSdcppStatus(force).catch(() => null)
       ])
       setManagedStatuses(llama.targets)
+      setWhisperStatuses(whisper?.targets ?? null)
+      setSdcppStatuses(sdcpp?.targets ?? null)
       setUpdateCheckPending(
         Boolean(llama.latest_pending || whisper?.latest_pending || sdcpp?.latest_pending)
       )
-      // Surface whisper/sd.cpp availability in the install helper copy via statuses.
-      void whisper
-      void sdcpp
     } catch {
       setManagedStatuses(null)
       setUpdateCheckPending(false)
@@ -5144,10 +5149,11 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     return () => window.clearTimeout(timer)
   }, [updateCheckPending, managedStatuses])
 
-  async function refreshRuntimes(): Promise<void> {
+  async function refreshRuntimes(notifyParent = false): Promise<void> {
     try {
       const response = await listRuntimes()
       setRuntimes(response.data)
+      if (notifyParent) props.onRuntimesChanged?.()
     } catch (cause) {
       if (props.initialRuntimes?.length) {
         setRuntimes(props.initialRuntimes)
@@ -5205,7 +5211,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     props.onError(null)
     try {
       await activateRuntime(id)
-      await refreshRuntimes()
+      await refreshRuntimes(true)
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -5217,7 +5223,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     setBusyRuntime(id)
     try {
       await deactivateRuntime(id)
-      await refreshRuntimes()
+      await refreshRuntimes(true)
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -5230,7 +5236,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     props.onError(null)
     try {
       await deleteRuntime(id)
-      await refreshRuntimes()
+      await refreshRuntimes(true)
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -5290,7 +5296,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         },
         { target, force }
       )
-      await refreshRuntimes()
+      await refreshRuntimes(true)
       await refreshManagedStatuses()
     } catch (cause) {
       props.onError(errorText(cause))
@@ -5357,7 +5363,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         percent: 100,
         phase: 'done'
       }))
-      await refreshRuntimes()
+      await refreshRuntimes(true)
     } catch (cause) {
       const diagnostics =
         cause instanceof Error
@@ -5580,28 +5586,61 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
           {runtimeTab === 'speech' &&
             (() => {
               const installed = managedEngineInstalled(runtimeList, 'whisper.cpp')
-              const installing = installingTarget === 'cpu'
+              const installing = installingTarget === 'cpu' || installingTarget === 'cuda'
+              const status =
+                whisperStatuses?.find((entry) => entry.installed) ??
+                managedTargetStatus('cpu', whisperStatuses)
+              const updateAvailable = status?.update_available ?? false
+              const installedVersion = status?.installed_version
+              const latestVersion = status?.latest_version
+              const versionLine = [
+                'Official CLI prebuilts on Linux/Windows. macOS releases are XCFramework-only — build from source there.',
+                runtimeArch ? `Built for ${runtimeArch}` : null,
+                installed && installedVersion ? `Installed · ${installedVersion}` : null,
+                updateAvailable && latestVersion ? `Latest · ${latestVersion}` : null,
+                installed && !latestVersion && updateCheckPending ? 'Checking for updates…' : null
+              ]
+                .filter(Boolean)
+                .join(' · ')
               return (
                 <article className="runtime-offer">
                   <div className="runtime-offer-info">
                     <strong>
                       whisper.cpp · managed
-                      {installed && <span className="installed-badge">Installed</span>}
+                      {installed && !updateAvailable && (
+                        <span className="installed-badge">
+                          {latestVersion ? 'Up to date' : 'Installed'}
+                        </span>
+                      )}
+                      {updateAvailable && <span className="installed-badge">Update</span>}
                     </strong>
-                    <span>
-                      Official CLI prebuilts on Linux/Windows. macOS releases are XCFramework-only —
-                      build from source there.
-                    </span>
-                    {runtimeArch && <span className="runtime-offer-arch">Built for {runtimeArch}</span>}
+                    <span>{versionLine}</span>
                   </div>
                   <button
                     className="chip-button"
-                    disabled={installed || installing}
-                    title={installed ? 'Managed whisper-cli installed' : 'Download managed whisper-cli'}
-                    onClick={() => void installManaged('cpu', false, 'whisper.cpp')}
+                    disabled={installing || (installed && !updateAvailable)}
+                    title={
+                      updateAvailable
+                        ? `Update to ${latestVersion ?? 'latest'}`
+                        : installed
+                          ? `Installed (${installedVersion ?? 'unknown version'})`
+                          : 'Download managed whisper-cli'
+                    }
+                    onClick={() =>
+                      void installManaged(
+                        (status?.target as RuntimeTarget | undefined) ?? 'cpu',
+                        updateAvailable,
+                        'whisper.cpp'
+                      )
+                    }
                   >
                     {installing ? (
                       <LoaderCircle className="spin" size={13} />
+                    ) : updateAvailable ? (
+                      <>
+                        <Download size={13} />
+                        Update
+                      </>
                     ) : installed ? (
                       <>
                         <Check size={13} />
@@ -5620,28 +5659,65 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
           {runtimeTab === 'media' &&
             (() => {
               const installed = managedEngineInstalled(runtimeList, 'stable-diffusion.cpp')
-              const installing = installingTarget === 'cpu'
+              const installing =
+                installingTarget === 'cpu' ||
+                installingTarget === 'cuda' ||
+                installingTarget === 'rocm' ||
+                installingTarget === 'vulkan'
+              const status =
+                sdcppStatuses?.find((entry) => entry.installed) ??
+                managedTargetStatus('cpu', sdcppStatuses)
+              const updateAvailable = status?.update_available ?? false
+              const installedVersion = status?.installed_version
+              const latestVersion = status?.latest_version
+              const versionLine = [
+                'Prebuilt sd-cli follows the latest upstream release; build from source to use a specific revision.',
+                runtimeArch ? `Built for ${runtimeArch}` : null,
+                installed && installedVersion ? `Installed · ${installedVersion}` : null,
+                updateAvailable && latestVersion ? `Latest · ${latestVersion}` : null,
+                installed && !latestVersion && updateCheckPending ? 'Checking for updates…' : null
+              ]
+                .filter(Boolean)
+                .join(' · ')
               return (
                 <article className="runtime-offer">
                   <div className="runtime-offer-info">
                     <strong>
                       stable-diffusion.cpp · managed
-                      {installed && <span className="installed-badge">Installed</span>}
+                      {installed && !updateAvailable && (
+                        <span className="installed-badge">
+                          {latestVersion ? 'Up to date' : 'Installed'}
+                        </span>
+                      )}
+                      {updateAvailable && <span className="installed-badge">Update</span>}
                     </strong>
-                    <span>
-                      Prebuilt sd-cli follows the latest upstream release; build from source to
-                      use a specific revision.
-                    </span>
-                    {runtimeArch && <span className="runtime-offer-arch">Built for {runtimeArch}</span>}
+                    <span>{versionLine}</span>
                   </div>
                   <button
                     className="chip-button"
-                    disabled={installed || installing}
-                    title={installed ? 'Managed sd-cli installed' : 'Download managed sd-cli'}
-                    onClick={() => void installManaged('cpu', false, 'stable-diffusion.cpp')}
+                    disabled={installing || (installed && !updateAvailable)}
+                    title={
+                      updateAvailable
+                        ? `Update to ${latestVersion ?? 'latest'}`
+                        : installed
+                          ? `Installed (${installedVersion ?? 'unknown version'})`
+                          : 'Download managed sd-cli'
+                    }
+                    onClick={() =>
+                      void installManaged(
+                        (status?.target as RuntimeTarget | undefined) ?? 'cpu',
+                        updateAvailable,
+                        'stable-diffusion.cpp'
+                      )
+                    }
                   >
                     {installing ? (
                       <LoaderCircle className="spin" size={13} />
+                    ) : updateAvailable ? (
+                      <>
+                        <Download size={13} />
+                        Update
+                      </>
                     ) : installed ? (
                       <>
                         <Check size={13} />

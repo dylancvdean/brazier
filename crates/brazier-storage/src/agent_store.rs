@@ -20,6 +20,22 @@ use brazier_protocol::agent_types::{
 /// How long a pending approval stays answerable.
 pub const APPROVAL_TTL_SECONDS: i64 = 900;
 
+fn canonical_workspace_key(workspace_path: &str) -> String {
+    std::fs::canonicalize(workspace_path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| workspace_path.to_owned())
+}
+
+async fn workspace_row_exists(db: &Database, workspace_path: &str) -> anyhow::Result<bool> {
+    let present: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM agent_workspaces WHERE workspace_path = ?)",
+    )
+    .bind(workspace_path)
+    .fetch_one(&db.pool)
+    .await?;
+    Ok(present != 0)
+}
+
 #[derive(FromRow)]
 struct SessionRow {
     id: String,
@@ -144,6 +160,7 @@ pub struct NewApproval {
 
 impl Database {
     pub async fn remember_agent_workspace(&self, workspace_path: &str) -> anyhow::Result<()> {
+        let workspace_path = canonical_workspace_key(workspace_path);
         sqlx::query("INSERT OR IGNORE INTO agent_workspaces(workspace_path) VALUES (?)")
             .bind(workspace_path)
             .execute(&self.pool)
@@ -155,13 +172,19 @@ impl Database {
         &self,
         workspace_path: &str,
     ) -> anyhow::Result<bool> {
-        let present: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM agent_workspaces WHERE workspace_path = ?)",
-        )
-        .bind(workspace_path)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(present != 0)
+        let key = canonical_workspace_key(workspace_path);
+        if workspace_row_exists(self, &key).await? {
+            return Ok(true);
+        }
+        if workspace_path != key && workspace_row_exists(self, workspace_path).await? {
+            return Ok(true);
+        }
+        let stored: Vec<String> = sqlx::query_scalar("SELECT workspace_path FROM agent_workspaces")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(stored
+            .iter()
+            .any(|path| canonical_workspace_key(path) == key))
     }
 
     pub async fn agent_workspace_system_prompt(
@@ -171,7 +194,7 @@ impl Database {
         Ok(sqlx::query_scalar(
             "SELECT system_prompt FROM agent_workspaces WHERE workspace_path = ?",
         )
-        .bind(workspace_path)
+        .bind(canonical_workspace_key(workspace_path))
         .fetch_optional(&self.pool)
         .await?
         .flatten())
@@ -189,7 +212,7 @@ impl Database {
                    system_prompt = excluded.system_prompt,
                    updated_at = datetime('now')"#,
         )
-        .bind(workspace_path)
+        .bind(canonical_workspace_key(workspace_path))
         .bind(system_prompt)
         .execute(&self.pool)
         .await?;
@@ -1013,6 +1036,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(db.agent_workspace_system_prompt("/ws").await.unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remembered_workspaces_match_across_directory_symlinks() {
+        let (dir, db) = database().await;
+        let real = dir.path().join("project");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        db.remember_agent_workspace(link.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            db.agent_workspace_is_remembered(real.to_str().unwrap())
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.agent_workspace_is_remembered(link.to_str().unwrap())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

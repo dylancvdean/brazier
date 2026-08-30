@@ -5,6 +5,7 @@
 //! client, and Wayland requires compositor-approved tools/portals.  Nothing is
 //! silently emulated when the required integration is absent.
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use brazier_protocol::computer_types::{
     ComputerAction, ComputerActionResult, ComputerActionStatus, ComputerViewport,
@@ -274,29 +275,36 @@ fn png_device_pixel_ratio(bytes: &[u8]) -> Option<f32> {
 }
 
 async fn screenshot() -> Result<ComputerActionResult, String> {
-    #[cfg(target_os = "macos")]
-    let bytes = mac_screenshot_bytes().await?;
-    #[cfg(target_os = "linux")]
-    let bytes = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        crate::computer_portal::screenshot().await?
-    } else {
-        tokio::task::spawn_blocking(crate::computer_x11::screenshot)
-            .await
-            .map_err(|error| error.to_string())??
-    };
-    Ok(ComputerActionResult {
-        status: ComputerActionStatus::Ok,
-        message: None,
-        screenshot_base64: Some(STANDARD.encode(&bytes)),
-        mime_type: Some("image/png".into()),
-        viewport: png_viewport(&bytes),
-        url: None,
-        title: None,
-        needs_approval: false,
-        approval_id: None,
-        execution_location: None,
-        decided_by_client_id: None,
-    })
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        return Err("Desktop computer use is not implemented on this platform.".into());
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        #[cfg(target_os = "macos")]
+        let bytes = mac_screenshot_bytes().await?;
+        #[cfg(target_os = "linux")]
+        let bytes = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            crate::computer_portal::screenshot().await?
+        } else {
+            tokio::task::spawn_blocking(crate::computer_x11::screenshot)
+                .await
+                .map_err(|error| error.to_string())??
+        };
+        Ok(ComputerActionResult {
+            status: ComputerActionStatus::Ok,
+            message: None,
+            screenshot_base64: Some(STANDARD.encode(&bytes)),
+            mime_type: Some("image/png".into()),
+            viewport: png_viewport(&bytes),
+            url: None,
+            title: None,
+            needs_approval: false,
+            approval_id: None,
+            execution_location: None,
+            decided_by_client_id: None,
+        })
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -632,7 +640,10 @@ pub async fn execute_desktop_action(
         linux_action(action, cancel).await
     };
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let execution: Result<(), String> = Err("unsupported platform".into());
+    let execution: Result<(), String> = {
+        let _ = viewport;
+        Err("unsupported platform".into())
+    };
     match execution {
         Ok(()) => {
             if settle_delay_ms > 0

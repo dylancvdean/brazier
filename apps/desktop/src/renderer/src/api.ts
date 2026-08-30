@@ -1617,7 +1617,7 @@ export async function streamCompletion(
               index?: number
               id?: string
               type?: string
-              function?: { name?: string; arguments?: string }
+              function?: { name?: string; arguments?: string | Record<string, unknown> | unknown[] }
             }>
           }
           finish_reason?: string | null
@@ -1672,10 +1672,14 @@ export async function streamCompletion(
       if (finishReason === 'tool_calls' && toolCalls?.length) {
         for (const call of toolCalls) {
           if (call.id && call.function?.name) {
+            const rawArgs = call.function.arguments
             clientToolCalls.push({
               id: call.id,
               name: call.function.name,
-              arguments: call.function.arguments ?? ''
+              arguments:
+                typeof rawArgs === 'string'
+                  ? rawArgs
+                  : JSON.stringify(rawArgs ?? {})
             })
           }
         }
@@ -2842,7 +2846,9 @@ export async function checkRuntimeUpdates(): Promise<SourceRuntimeUpdate[]> {
   ).data
 }
 
-export function deleteRuntime(id: string): Promise<{ deleted: string }> {
+export function deleteRuntime(
+  id: string
+): Promise<{ deleted: string; fallback_runtime_id?: string | null }> {
   return request('/api/v1/runtimes', {
     method: 'DELETE',
     body: JSON.stringify({ id })

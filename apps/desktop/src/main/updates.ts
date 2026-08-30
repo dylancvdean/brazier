@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { app, dialog } from 'electron'
 import { autoUpdater } from 'electron-updater'
+import { pickReleaseManifestUrl, versionLooksLikePrerelease, type GithubRelease } from './updateFeed'
 
 type Report = (line: string, level?: 'log' | 'warn' | 'error') => void
 
@@ -28,17 +29,6 @@ const DEFAULT_STORED: StoredUpdateSettings = {
 
 const GITHUB_RELEASES_API = 'https://api.github.com/repos/dylancvdean/brazier/releases?per_page=100'
 
-type GithubReleaseAsset = {
-  name: string
-  browser_download_url: string
-}
-
-type GithubRelease = {
-  draft: boolean
-  prerelease: boolean
-  assets: GithubReleaseAsset[]
-}
-
 function updaterManifestName(): string {
   if (process.platform === 'darwin') return 'latest-mac.yml'
   if (process.platform === 'linux') return 'latest-linux.yml'
@@ -52,25 +42,24 @@ function updaterManifestName(): string {
  */
 async function configurePlatformUpdateFeed(report: Report): Promise<void> {
   const manifest = updaterManifestName()
+  const includePrerelease = versionLooksLikePrerelease(app.getVersion())
+  autoUpdater.allowPrerelease = includePrerelease
   try {
     const response = await fetch(GITHUB_RELEASES_API, {
       headers: { Accept: 'application/vnd.github+json' }
     })
     if (!response.ok) throw new Error(`GitHub releases request failed (${response.status})`)
     const releases = (await response.json()) as GithubRelease[]
-    const asset = releases
-      .filter((release) => !release.draft && !release.prerelease)
-      .flatMap((release) => release.assets)
-      .find((candidate) => candidate.name === manifest)
-    if (!asset) {
+    const url = pickReleaseManifestUrl(releases, manifest, includePrerelease)
+    if (!url) {
       report(`[updater] no published release contains ${manifest}; using the embedded GitHub feed`, 'warn')
       return
     }
-    const slash = asset.browser_download_url.lastIndexOf('/')
-    if (slash < 0) throw new Error(`invalid updater manifest URL: ${asset.browser_download_url}`)
+    const slash = url.lastIndexOf('/')
+    if (slash < 0) throw new Error(`invalid updater manifest URL: ${url}`)
     autoUpdater.setFeedURL({
       provider: 'generic',
-      url: asset.browser_download_url.slice(0, slash + 1)
+      url: url.slice(0, slash + 1)
     })
   } catch (error) {
     // Retain electron-builder's embedded GitHub feed if the release listing

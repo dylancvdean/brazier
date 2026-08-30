@@ -733,6 +733,104 @@ pub fn find(
         .find(|entry| entry.id == id)
 }
 
+/// Engine a model id is served by, from its prefix.
+pub fn engine_for_model_id(model_id: &str) -> Option<&'static str> {
+    if model_id.starts_with("gguf:") || model_id.starts_with("gguf-ext:") {
+        Some(ENGINE)
+    } else if model_id.starts_with("mlx-vlm:") || model_id.starts_with("mlx-vlm-ext:") {
+        Some("mlx-vlm")
+    } else if model_id.starts_with("mlx:") || model_id.starts_with("mlx-ext:") {
+        Some("mlx-lm")
+    } else if model_id.starts_with("vllm:") {
+        Some("vllm")
+    } else if model_id.starts_with("whisper:") {
+        Some(crate::whisper::ENGINE)
+    } else if model_id.starts_with("whisperkit:") {
+        Some(crate::whisperkit::ENGINE)
+    } else if model_id.starts_with("streaming-asr:") {
+        Some("streaming-asr")
+    } else if model_id.starts_with("sdcpp-image:") || model_id.starts_with("sdcpp-video:") {
+        Some(crate::sdcpp::ENGINE)
+    } else if model_id.starts_with("personaplex:") {
+        Some(crate::voice::ENGINE)
+    } else {
+        None
+    }
+}
+
+/// Engines that can stand in for each other when the preferred one is gone.
+///
+/// PersonaPlex (Moshi) and PersonaPlex MLX speak the same wire protocol, so a
+/// voice model bound to a deleted Moshi venv can keep running on the MLX
+/// install (and the other way around).
+fn related_engines(engine: &str) -> &'static [&'static str] {
+    match engine {
+        crate::voice::ENGINE | crate::voice::ENGINE_MLX => {
+            &[crate::voice::ENGINE, crate::voice::ENGINE_MLX]
+        }
+        _ => &[],
+    }
+}
+
+fn ordered_for_engine<'a>(entries: &'a [RuntimeEntry], engine: &str) -> Vec<&'a RuntimeEntry> {
+    let mut active = None;
+    let mut managed = Vec::new();
+    let mut others = Vec::new();
+    for entry in entries {
+        if entry.engine != engine {
+            continue;
+        }
+        if entry.active {
+            active = Some(entry);
+        } else if entry.kind == "managed" {
+            managed.push(entry);
+        } else {
+            others.push(entry);
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(entry) = active {
+        out.push(entry);
+    }
+    out.extend(managed);
+    out.extend(others);
+    out
+}
+
+/// Replacements for a missing runtime of `engine`, preferred first.
+///
+/// Same-engine entries come first (active, then managed, then any). Voice
+/// runtimes may then fall through to the other PersonaPlex backend.
+pub fn fallbacks_for_engine<'a>(
+    entries: &'a [RuntimeEntry],
+    engine: &str,
+) -> Vec<&'a RuntimeEntry> {
+    let mut out = ordered_for_engine(entries, engine);
+    for related in related_engines(engine) {
+        if *related == engine {
+            continue;
+        }
+        for extra in ordered_for_engine(entries, related) {
+            if !out.iter().any(|entry| entry.id == extra.id) {
+                out.push(extra);
+            }
+        }
+    }
+    out
+}
+
+/// Replacement for a missing runtime of `engine`.
+///
+/// Prefer the currently active runtime, then a managed install, then any
+/// remaining entry. Models bound to a deleted runtime use this instead of
+/// failing the next request.
+pub fn fallback_for_engine<'a>(
+    entries: &'a [RuntimeEntry],
+    engine: &str,
+) -> Option<&'a RuntimeEntry> {
+    fallbacks_for_engine(entries, engine).into_iter().next()
+}
+
 /// Find an installed runtime that matches a README fork hint.
 pub fn find_for_fork(
     data_dir: &Path,
@@ -935,12 +1033,13 @@ mod tests {
     fn lists_managed_flavors_and_source_builds() {
         let dir = tempdir().unwrap();
         let engine_dir = llama::managed_engine_dir(dir.path());
-        touch(&engine_dir.join("bin").join("llama-server"));
+        let server = llama::binary_name();
+        touch(&engine_dir.join("bin").join(server));
         std::fs::write(engine_dir.join("VERSION"), "b100\n").unwrap();
-        touch(&engine_dir.join("cuda").join("bin").join("llama-server"));
+        touch(&engine_dir.join("cuda").join("bin").join(server));
 
         let build_root = builds::builds_root(dir.path(), ENGINE).join("main-1");
-        let build_binary = build_root.join("install").join("bin").join("llama-server");
+        let build_binary = build_root.join("install").join("bin").join(server);
         touch(&build_binary);
         std::fs::write(
             build_root.join("build.json"),
@@ -985,7 +1084,10 @@ mod tests {
     fn delete_removes_source_build_directory() {
         let dir = tempdir().unwrap();
         let build_root = builds::builds_root(dir.path(), ENGINE).join("main-1");
-        let build_binary = build_root.join("install").join("bin").join("llama-server");
+        let build_binary = build_root
+            .join("install")
+            .join("bin")
+            .join(llama::binary_name());
         touch(&build_binary);
         std::fs::write(build_root.join("build.json"), b"{}").unwrap();
 
@@ -1004,6 +1106,87 @@ mod tests {
         ));
         assert!(!looks_like_commit_sha("main"));
         assert!(!looks_like_commit_sha("v1.2.3"));
+    }
+
+    fn entry(id: &str, engine: &str, kind: &str, active: bool) -> RuntimeEntry {
+        RuntimeEntry {
+            id: id.to_owned(),
+            engine: engine.to_owned(),
+            kind: kind.to_owned(),
+            label: id.to_owned(),
+            target: None,
+            version: None,
+            repository: None,
+            path: format!("/tmp/{id}"),
+            active,
+            deletable: true,
+        }
+    }
+
+    #[test]
+    fn engine_for_model_id_uses_the_id_prefix() {
+        assert_eq!(engine_for_model_id("gguf:acme/a.gguf"), Some(ENGINE));
+        assert_eq!(engine_for_model_id("mlx-vlm:acme/vision"), Some("mlx-vlm"));
+        assert_eq!(engine_for_model_id("mlx:acme/text"), Some("mlx-lm"));
+        assert_eq!(
+            engine_for_model_id("whisperkit:tiny"),
+            Some(crate::whisperkit::ENGINE)
+        );
+        assert_eq!(
+            engine_for_model_id("sdcpp-image:acme/flux"),
+            Some(crate::sdcpp::ENGINE)
+        );
+        assert_eq!(engine_for_model_id("remote:openai/gpt"), None);
+    }
+
+    #[test]
+    fn voice_fallback_can_use_the_other_personaplex_backend() {
+        let entries = vec![entry(
+            "personaplex-mlx-source-1",
+            "personaplex-mlx",
+            "source",
+            true,
+        )];
+        assert_eq!(
+            fallback_for_engine(&entries, "personaplex").map(|entry| entry.id.as_str()),
+            Some("personaplex-mlx-source-1")
+        );
+        let both = vec![
+            entry("personaplex-source-1", "personaplex", "source", false),
+            entry(
+                "personaplex-mlx-source-1",
+                "personaplex-mlx",
+                "source",
+                true,
+            ),
+        ];
+        assert_eq!(
+            fallback_for_engine(&both, "personaplex").map(|entry| entry.id.as_str()),
+            Some("personaplex-source-1"),
+            "same-engine replacements still win over the related backend"
+        );
+    }
+
+    #[test]
+    fn fallback_prefers_active_then_managed() {
+        let entries = vec![
+            entry("source-old", ENGINE, "source", false),
+            entry("managed", ENGINE, "managed", true),
+            entry("mlx-lm-source-1", "mlx-lm", "source", true),
+        ];
+        assert_eq!(
+            fallback_for_engine(&entries, ENGINE).map(|entry| entry.id.as_str()),
+            Some("managed")
+        );
+        let inactive = vec![
+            entry("source-old", ENGINE, "source", false),
+            entry("managed-cuda", ENGINE, "managed", false),
+        ];
+        assert_eq!(
+            fallback_for_engine(&inactive, ENGINE).map(|entry| entry.id.as_str()),
+            Some("managed-cuda")
+        );
+        assert!(fallback_for_engine(&entries, "vllm").is_none());
     }
 
     #[test]
