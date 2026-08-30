@@ -759,7 +759,6 @@ export type PipelineFeatures = {
 export type CapabilitiesResponse = {
   schema_version: number
   features: Record<string, unknown> & {
-    asr?: boolean
     video_preprocess?: boolean
     audio_interfaces?: {
       batch_asr?: { available?: boolean; summary?: string }

@@ -1,20 +1,5 @@
 /**
- * Session coordinator: one conversation shared by text chat, voice, and the
- * agent.
- *
- * The rules it exists to enforce:
- *
- * - The agent session stays authoritative for tools, task state, and facts.
- *   PersonaPlex acknowledges and renders; it never decides an outcome.
- * - Exactly one subsystem owns the substantive answer to a turn, and ownership
- *   is recorded rather than inferred from timing.
- * - Stopping speech, cancelling a response, and cancelling the agent task are
- *   three different operations and are never conflated.
- * - Voice and text turns go through one submission path into one agent session.
- *
- * It runs in the renderer because that is the only process holding all three
- * edges (audio devices, the agent IPC bridge, the conversation API). The agent
- * run itself lives in the worker process, so a task outlives this object.
+ * Session coordinator: one conversation shared by text chat, voice, and the agent.
  */
 
 import type {
@@ -71,25 +56,11 @@ export type CoordinatorSnapshot = {
   queue: QueuedTurn[]
   task: TaskState | null
   summary: string
-  /** In-flight authoritative text, for the streaming bubble. */
   streamingText: string
-  /** Latest unstable user transcript; display only, never submitted. */
   partialTranscript: string
-  /** What PersonaPlex said on its own. Shown in the voice pane, never stored. */
   voiceModelText: string
   speakingCorrelationId: string | null
-  /**
-   * Where the microphone has got to. Voice has more silent steps than any other
-   * surface — speech detection, transcription, routing — and each one looks
-   * exactly like nobody having spoken.
-   */
   hearing: 'idle' | 'speaking' | 'transcribing'
-  /**
-   * What the microphone has delivered: total frames, and the loudest recent
-   * frame on the same scale as the speech gate. Zero frames means the capture
-   * graph is not running; frames with a peak under the gate means the room or
-   * the gain is too quiet.
-   */
   capture: {
     frames: number
     peak: number
@@ -104,32 +75,11 @@ export type CoordinatorSnapshot = {
     vadQueueLagP95Ms: number
     vadProcessedWindows: number
   }
-  /**
-   * What transcription is costing, per interface that has served an utterance
-   * this session. Which one should transcribe a spoken turn is an open
-   * question — a whisper.cpp invocation per utterance against a resident
-   * Nemotron worker — and this is the number that answers it, on the machine
-   * the answer has to hold for.
-   */
   transcription: TranscriptionCost[]
-  /**
-   * A tool call the permission broker is holding, and what was said about it.
-   *
-   * Present in the snapshot so the voice pane can show what is waiting: the
-   * approval itself lives in the agent panel, which the person talking is very
-   * likely not looking at.
-   */
   pendingApproval: PendingApproval | null
-  /**
-   * The last thing the coordinator wanted to tell the user: agent status, or a
-   * failure that did not stop the session. It is in the snapshot as well as on
-   * the chat adapter because a host that shows no chat transcript would
-   * otherwise drop it, and a turn failing silently looks like nothing happened.
-   */
   notice: string | null
 }
 
-/** A held tool call awaiting a spoken or clicked answer. */
 export type PendingApproval = {
   approvalId: string
   correlationId: string
@@ -138,31 +88,17 @@ export type PendingApproval = {
   risk: string
   environment: 'sandbox' | 'host'
   executionLocation: ExecutionLocation
-  /** Whether the question was read out, so the UI does not repeat it silently. */
   spoken: boolean
   askedAt: number
 }
 
-/** Rolling transcription cost for one ASR interface. */
 export type TranscriptionCost = {
   engine: string
   utterances: number
-  /** Most recent round trip, in milliseconds. */
   lastMs: number
-  /** Mean round trip over the session. */
   averageMs: number
-  /**
-   * Mean wait after the user stopped talking — the part of the round trip a
-   * person actually sits through. Far below `averageMs` means transcription is
-   * mostly finishing inside the silence window rather than after it.
-   */
   averageWaitMs: number
-  /** Utterances whose transcription began at a pause, before the close. */
   startedAtPause: number
-  /**
-   * Mean round trip divided by the length of the audio. Below 1 the interface
-   * transcribes faster than people speak, which is what a conversation needs.
-   */
   realTimeFactor: number
 }
 
@@ -288,7 +224,6 @@ export class SessionCoordinator {
     this.persona = deps.persona ?? 'You are a helpful assistant.'
     instances += 1
     this.id = `coord-${instances}`
-    console.debug(`[voice] ${this.id} constructed`)
   }
 
   /**
@@ -305,9 +240,7 @@ export class SessionCoordinator {
       this.deps.agent.subscribe((event) => this.onAgentEvent(event)),
       this.deps.voice.subscribe((event) => this.onVoiceEvent(event))
     ]
-    console.debug(`[voice] ${this.id} connected to its adapters`)
     return () => {
-      console.debug(`[voice] ${this.id} disconnected from its adapters`)
       for (const unsubscribe of unsubscribes) unsubscribe()
     }
   }
@@ -946,9 +879,6 @@ export class SessionCoordinator {
           vadQueueLagP95Ms: event.vadQueueLagP95Ms,
           vadProcessedWindows: event.vadProcessedWindows
         }
-        console.debug(
-          `[voice] ${this.id} sees ${event.frames} frames, peak ${event.peak.toFixed(3)}`
-        )
         this.publish()
         return
       }
@@ -991,9 +921,7 @@ export class SessionCoordinator {
         this.hearing = 'idle'
         this.releasePersonaPlexRoutingHold()
         this.report(
-          this.config.shortSpeechBoost
-            ? 'That came back with no words even after short-speech recovery. Try it once more or switch ASR engines.'
-            : 'That came back with no words. Enable Short speech boost or try speaking a little longer.'
+          'That came back with no words even after short-speech recovery. Try it once more or switch ASR engines.'
         )
         return
       }

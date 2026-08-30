@@ -744,16 +744,6 @@ export function VoiceMode(props: Props): React.JSX.Element {
               <label>
                 <input
                   type="checkbox"
-                  checked={config.shortSpeechBoost}
-                  onChange={(event) =>
-                    session.setConfig({ ...config, shortSpeechBoost: event.target.checked })
-                  }
-                />
-                Short speech boost (100 ms floor, ASR padding, alternate retry)
-              </label>
-              <label>
-                <input
-                  type="checkbox"
                   checked={config.interruptCancelsAgent}
                   onChange={(event) =>
                     session.setConfig({ ...config, interruptCancelsAgent: event.target.checked })

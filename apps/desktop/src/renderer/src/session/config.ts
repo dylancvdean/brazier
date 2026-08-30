@@ -1,15 +1,4 @@
-/**
- * Where a live voice session sends what the user says.
- *
- * - `chat` — the chat model; the turn joins the conversation. The default.
- * - `agent` — the agent session bound to the conversation; a turn with none
- *   bound is refused rather than quietly answered by the chat model.
- * - `neither` — nothing is recorded and nothing is invoked. PersonaPlex answers
- *   in its own voice, as it does with voice mode used on its own.
- *
- * Each names one destination on purpose. A setting that could route to either
- * place left no way to tell which had answered, or to aim the next turn.
- */
+/** Where a live voice session sends what the user says. */
 import type {
   PersonaPlexHandoffStrategy,
   PersonaPlexPreHandoffMode
@@ -35,8 +24,6 @@ export type IntegrationConfig = {
    */
   voiceBackgroundRouting: VoiceBackgroundRouting
   asrPreference: AsrPreference
-  /** Accept very short speech and condition it for ASR, with an alternate-engine retry. */
-  shortSpeechBoost: boolean
   showVoiceTranscripts: boolean
   /**
    * Experimental path used to give a completed background result back to
@@ -61,7 +48,6 @@ export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
   voiceSessionTarget: 'chat',
   voiceBackgroundRouting: 'auto',
   asrPreference: 'auto',
-  shortSpeechBoost: true,
   showVoiceTranscripts: true,
   personaplexHandoffStrategy: 'continuous',
   personaplexPreHandoffMode: 'mute-on-route',

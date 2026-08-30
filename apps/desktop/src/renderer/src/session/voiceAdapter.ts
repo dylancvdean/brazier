@@ -1,18 +1,4 @@
-/**
- * Voice adapter: the existing PersonaPlex stack, normalized.
- *
- * Two things the plan assumes are not in the Moshi protocol, and this is where
- * they are supplied:
- *
- * - **User transcripts.** The socket's text frames are the *model's* speech.
- *   The user's words come from segmenting the captured microphone stream and
- *   transcribing each finished utterance through the daemon's ASR endpoint.
- * - **Background-result experiments.** PersonaPlex has no supported in-place
- *   prompt mutation. We can keep its loaded process and reconnect with a new
- *   per-connection prompt, optionally replaying the exact utterance, or restart
- *   the process as a control. Platform TTS is intentionally not part of this
- *   adapter: PersonaPlex is the only audible voice.
- */
+/** PersonaPlex voice adapter: capture, ASR, and Moshi session control. */
 
 import {
   createVoiceSession,
@@ -69,8 +55,6 @@ export type PersonaPlexAdapterOptions = {
    * comes back empty. Null means there is no distinct fallback.
    */
   asrFallbackEngine?: () => { engine?: string } | null
-  /** Accept and specially condition one-syllable / clipped turns. */
-  shortSpeechBoost?: () => boolean
   /** Meters for the voice UI. */
   onInputLevel?: (level: number) => void
   onOutputLevel?: (level: number) => void
@@ -187,49 +171,28 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     }
     this.sessionInfo = session
 
-    // Logged at each boundary: an utterance that opens and is then discarded for
-    // being too short looks the same from outside as speech never detected.
-    this.segmenter = new UtteranceSegmenter(
-      {
-        onSpeechStart: (utteranceId) => {
-          // Capturing, not interrupting. A cough gets recorded and then thrown
-          // away without ever taking the assistant's turn from it.
-          console.debug(`[voice] speech detected (${utteranceId})`)
-        },
-        onStreamStart: (utterance) => this.startIncremental(utterance),
-        onStreamFrame: (utteranceId, samples, sampleRate) => {
-          this.pushIncremental(utteranceId, samples, sampleRate)
-        },
-        onSustainedSpeech: (utteranceId) => {
-          console.debug(`[voice] sustained speech (${utteranceId}) — interrupting`)
-          // An explicit stop only lasts until the person starts a new turn.
-          this.modelAudioEnabled = true
-          this.applyModelAudioGate()
-          this.publish({ type: 'userSpeechStarted', utteranceId })
-        },
-        onPause: (snapshot) => {
-          const seconds = (snapshot.samples.length / snapshot.sampleRate).toFixed(2)
-          console.debug(`[voice] pause in ${snapshot.id} at ${seconds}s — transcribing ahead`)
-          this.onPause(snapshot)
-        },
-        onUtterance: (utterance) => {
-          const seconds = (utterance.samples.length / utterance.sampleRate).toFixed(2)
-          console.debug(`[voice] utterance ${utterance.id} closed, ${seconds}s — transcribing`)
-          this.finishIncremental(utterance.id)
-          this.rememberUtterance(utterance.id, utterance.samples, utterance.sampleRate)
-          void this.transcribe(utterance)
-        },
-        onDiscarded: (utteranceId, reason) => {
-          this.abandonIncremental(utteranceId)
-          this.utteranceAudio.delete(utteranceId)
-          console.debug(`[voice] utterance ${utteranceId} discarded: ${reason}`)
-        }
+    this.segmenter = new UtteranceSegmenter({
+      onStreamStart: (utterance) => this.startIncremental(utterance),
+      onStreamFrame: (utteranceId, samples, sampleRate) => {
+        this.pushIncremental(utteranceId, samples, sampleRate)
       },
-      {
-        // Standard retains the former 200 ms floor as an A/B control.
-        minimumNeuralFrames: this.options.shortSpeechBoost?.() === false ? 10 : 5
+      onSustainedSpeech: (utteranceId) => {
+        // An explicit stop only lasts until the person starts a new turn.
+        this.modelAudioEnabled = true
+        this.applyModelAudioGate()
+        this.publish({ type: 'userSpeechStarted', utteranceId })
+      },
+      onPause: (snapshot) => this.onPause(snapshot),
+      onUtterance: (utterance) => {
+        this.finishIncremental(utterance.id)
+        this.rememberUtterance(utterance.id, utterance.samples, utterance.sampleRate)
+        void this.transcribe(utterance)
+      },
+      onDiscarded: (utteranceId) => {
+        this.abandonIncremental(utteranceId)
+        this.utteranceAudio.delete(utteranceId)
       }
-    )
+    })
     await this.startVad()
     if (generation !== this.handoffGeneration) {
       await bailBeforeStream(session)
@@ -262,12 +225,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     setTimeout(() => {
       if (this.stream !== stream) return
       const status = stream.inputStatus()
-      // Logged either way: a working capture path is worth confirming, and the
-      // console does not depend on the banner's conditions being right.
-      if (this.captureFrames > 0) {
-        console.debug(`[voice] capture running: ${this.captureFrames} frames, ${status}`)
-        return
-      }
+      if (this.captureFrames > 0) return
       const error = `No microphone audio after ${CAPTURE_GRACE_MS / 1000}s — ${status}`
       console.warn(`[voice] ${error}`)
       this.publish({ type: 'sessionError', error, fatal: false })
@@ -534,7 +492,6 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
 
   /** Load the bundled model before capture starts, falling back without failing voice. */
   private async startVad(): Promise<void> {
-    const startedAt = performance.now()
     try {
       const model = await SileroVadModel.create()
       this.vadHealthy = true
@@ -543,7 +500,6 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         (frame) => this.onVadFrame(frame),
         (error) => this.onVadError(error)
       )
-      console.debug(`[voice] Silero VAD ready in ${Math.round(performance.now() - startedAt)}ms`)
     } catch (cause) {
       this.onVadError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -750,11 +706,8 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     const startedAt = Date.now()
     const abort = new AbortController()
     this.activeAbortControllers.add(abort)
-    const boosted = this.options.shortSpeechBoost?.() !== false
     const short = samples.length / sampleRate <= 2
-    // Boosted audio has decoder context before a clipped first syllable as well
-    // as after the last token. Standard is retained as the tuning control.
-    const audio = boosted && short
+    const audio = short
       ? padSpeechForAsr(samples, sampleRate)
       : padTrailingSilence(samples, sampleRate)
     const wav = encodeWav(audio, sampleRate)
@@ -769,7 +722,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       // installed, one alternate decode is cheaper than asking the person to
       // repeat themselves verbosely. Successful turns never pay this cost.
       const fallback =
-        boosted && short && !first.text
+        short && !first.text
           ? this.options.asrFallbackEngine?.() ?? null
           : null
       if (fallback) {
@@ -782,9 +735,6 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
           first.durationMs === null || retried.durationMs === null
             ? null
             : first.durationMs + retried.durationMs
-        console.debug(
-          `[voice] empty ${first.engine} short transcript retried with ${retried.engine}`
-        )
       }
       return {
         text: result.text,
@@ -847,24 +797,12 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         live &&
         !result.text &&
         utterance.samples.length / utterance.sampleRate <= 2 &&
-        this.options.shortSpeechBoost?.() !== false &&
         this.options.asrFallbackEngine?.()
       ) {
-        // Preserve the short-word recovery guarantee on the new live path. The
-        // file helper performs the installed-engine retry and is paid only when
-        // the incremental decoder returned no word at all.
         result = await this.startTranscription(utterance.samples, utterance.sampleRate).done
       }
       const text = result.text
-      // Two different numbers: what the engine cost, and what the turn waited
-      // for after the user stopped talking. Only the second is felt.
       const waitedMs = Date.now() - closedAt
-      console.debug(
-        `[voice] ${result.engine} transcribed ${audioSeconds.toFixed(1)}s in ` +
-          `${result.roundTripMs}ms, turn waited ${waitedMs}ms` +
-          (live ? ' (fed while speaking)' : reused ? ' (started at the pause)' : '') +
-          (result.engineMs === null ? '' : ` (${result.engineMs}ms in the daemon)`)
-      )
       this.publish({
         type: 'transcriptionMeasured',
         utteranceId: utterance.id,

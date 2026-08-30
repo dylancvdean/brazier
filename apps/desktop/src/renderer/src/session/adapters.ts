@@ -1,11 +1,4 @@
-/**
- * The integration boundary.
- *
- * The coordinator talks to the three existing subsystems only through these
- * interfaces, so it holds no knowledge of the Moshi wire protocol, the agent
- * worker IPC, or the daemon's REST shapes. Method names follow the integration
- * plan; the implementations in this directory map them onto the real APIs.
- */
+/** Adapters between the coordinator and chat, voice, and the agent. */
 
 import type {
   ConversationMessage,

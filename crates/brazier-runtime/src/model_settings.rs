@@ -195,10 +195,6 @@ pub struct TextProfile {
     // --- agent ---
     /// Model id for `spawn_subagent` children. `None` means the parent's model.
     pub subagent_model: Option<String>,
-    /// Legacy setting accepted while loading old profiles. llama.cpp slots are
-    /// equal-sized, so children now always inherit the parent context.
-    #[serde(skip_serializing)]
-    pub subagent_context_size: Option<u32>,
     /// Max concurrent subagents a parent may run. Default 2 when unset.
     pub max_subagents: Option<u32>,
     /// When true, llama-server starts with `--parallel = 1 + max_subagents` so

@@ -20,24 +20,11 @@ const FACTORIES = new Map<string, AgentRuntimeFactory>([
 
 export const DEFAULT_RUNTIME_ID = 'simple'
 
-/** Retired aliases from before Simple/Powerful modes existed. */
-const ALIASES: Record<string, string> = {
-  pi: 'simple',
-  balanced: 'simple'
-}
-
-/**
- * Map a stored session runtime id onto a live adapter.
- *
- * Unknown or deleted modes become Simple so restoring a task cannot fail
- * every tool call because a catalog entry went away.
- */
+/** Unknown or deleted modes become Simple so restoring a task cannot fail. */
 export function normalizeRuntimeId(id: string | null | undefined): string {
   const trimmed = (id ?? '').trim()
-  if (!trimmed) return DEFAULT_RUNTIME_ID
-  const aliased = ALIASES[trimmed] ?? trimmed
-  if (FACTORIES.has(aliased)) return aliased
-  return DEFAULT_RUNTIME_ID
+  if (!trimmed || !FACTORIES.has(trimmed)) return DEFAULT_RUNTIME_ID
+  return trimmed
 }
 
 export function registerRuntime(id: string, factory: AgentRuntimeFactory): void {

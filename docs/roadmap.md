@@ -107,10 +107,10 @@ implementation notes and follow-on work.
   result prompt and optionally replays the exact triggering utterance. The
   background submission itself is selectable: Auto uses a local no-model
   classifier to leave lightweight conversation with PersonaPlex, Always keeps
-  the original behavior, and Explicit requires a work cue. Short speech boost
-  accepts Silero-confirmed 100 ms bursts, pads both sides for ASR, and retries
-  an empty short result with the other recognizer when available. The streaming
-  ASR worker keeps its model loaded
+  the original behavior, and Explicit requires a work cue. Short speech is
+  recovered by retaining Silero-confirmed 100 ms bursts, padding both sides for
+  ASR, and retrying an empty short result with the other recognizer when
+  available. The streaming ASR worker keeps its model loaded
   between utterances (3.1 s to 0.18 s a turn).
 - **Agent mode** — interactive coding and system agent as a fourth workspace
   mode. Agent frameworks are modular stock runtimes selected by `runtime_id`
@@ -187,10 +187,9 @@ what is left is mostly the difference between working and trustworthy.
   begins but do not support mutating the prompt of an active generation. Trial
   reports should identify the selected strategy, whether PersonaPlex first
   acknowledged or answered independently, restart/reconnect delay, and how
-  faithfully it used the checked result. Hardware tuning should use the new
-  background-routing, pre-handoff mute timing, and short-speech controls
-  independently; current trial feedback favors the full process restart over
-  same-process reconnects.
+  faithfully it used the checked result. Hardware tuning should use the
+  background-routing and pre-handoff mute timing independently; current trial
+  feedback favors the full process restart over same-process reconnects.
 
 ## Remote daemon clients — medium term
 

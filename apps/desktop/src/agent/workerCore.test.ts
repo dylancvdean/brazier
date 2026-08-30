@@ -10,7 +10,7 @@ function mockSession(id: string, disposed = false): AgentSession {
     title: 'Task',
     workspacePath: '/tmp',
     model: { id: 'model-a', name: 'model-a' },
-    runtimeId: 'pi',
+    runtimeId: 'simple',
     messages: [],
     toolExecutions: [],
     permissionMode: 'ask',
@@ -49,8 +49,7 @@ function installBrokerAndRuntime(
 ): void {
   ;(core as unknown as { broker: typeof broker }).broker = broker
   ;(core as unknown as { runtimes: Map<string, AgentRuntime> }).runtimes = new Map([
-    ['simple', runtime],
-    ['pi', runtime]
+    ['simple', runtime]
   ])
   ;(core as unknown as { tools: [] }).tools = []
 }
@@ -67,7 +66,7 @@ describe('AgentWorkerCore.openSession', () => {
           id: 'sess-1',
           title: 'Task',
           model: 'model-a',
-          runtime_id: 'pi',
+          runtime_id: 'simple',
           permission_mode: 'ask',
           permission_settings: {
             auto_approve_host_actions: false,
@@ -99,7 +98,7 @@ describe('AgentWorkerCore.openSession', () => {
       runtimeInferenceSettings: vi.fn(async () => ({ context_size: 4096 }))
     }
     const runtime = {
-      descriptor: { id: 'pi', name: 'Pi', version: '0', capabilities: {} },
+      descriptor: { id: 'simple', name: 'Simple', version: '0', capabilities: {} },
       createSession: vi.fn(),
       restoreSession: vi.fn(),
       dispose: vi.fn()
@@ -131,7 +130,7 @@ describe('AgentWorkerCore.openSession', () => {
           id: 'sess-2',
           title: 'Task',
           model: 'model-a',
-          runtime_id: 'pi',
+          runtime_id: 'simple',
           permission_mode: 'ask',
           permission_settings: {
             auto_approve_host_actions: false,
@@ -165,7 +164,7 @@ describe('AgentWorkerCore.openSession', () => {
     const created = mockSession('sess-2')
     const createSession = vi.fn(async () => created)
     const runtime = {
-      descriptor: { id: 'pi', name: 'Pi', version: '0', capabilities: {} },
+      descriptor: { id: 'simple', name: 'Simple', version: '0', capabilities: {} },
       createSession,
       restoreSession: vi.fn(),
       dispose: vi.fn()

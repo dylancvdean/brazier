@@ -95,13 +95,11 @@ export function useSessionCoordinator(
       asrEngine: () =>
         resolveAsrEngine(configRef.current.asrPreference, latest.current.asrAvailable),
       asrFallbackEngine: () => {
-        if (!configRef.current.shortSpeechBoost) return null
         const available = latest.current.asrAvailable
         if (!available.batch || !available.streaming) return null
         const primary = resolveAsrEngine(configRef.current.asrPreference, available)
         return primary === 'streaming-asr' ? {} : { engine: 'streaming-asr' }
       },
-      shortSpeechBoost: () => configRef.current.shortSpeechBoost,
       onInputLevel: setInputLevel,
       onOutputLevel: setOutputLevel
     })
@@ -133,9 +131,9 @@ export function useSessionCoordinator(
       // right or a component being mounted. Voice has too many steps that end
       // in silence to leave the banner as the only place a failure appears.
       log: (record) => {
-        const line = `[voice] ${record.eventType} ${record.correlationId}`
-        if (record.errorCategory) console.warn(line, record)
-        else console.debug(line, record)
+        if (record.errorCategory) {
+          console.warn(`[voice] ${record.eventType} ${record.correlationId}`, record)
+        }
       }
     })
     return { adapters: { agent, voice }, coordinator: instance }
