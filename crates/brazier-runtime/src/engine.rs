@@ -3543,7 +3543,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(error.contains("is not a llama-server binary"), "{error}");
+        assert!(
+            error.contains(&format!("is not a {} binary", llama::binary_name())),
+            "{error}"
+        );
         assert!(runtime.active_binary().await.is_none());
     }
 

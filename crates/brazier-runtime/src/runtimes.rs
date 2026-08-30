@@ -1033,12 +1033,13 @@ mod tests {
     fn lists_managed_flavors_and_source_builds() {
         let dir = tempdir().unwrap();
         let engine_dir = llama::managed_engine_dir(dir.path());
-        touch(&engine_dir.join("bin").join("llama-server"));
+        let server = llama::binary_name();
+        touch(&engine_dir.join("bin").join(server));
         std::fs::write(engine_dir.join("VERSION"), "b100\n").unwrap();
-        touch(&engine_dir.join("cuda").join("bin").join("llama-server"));
+        touch(&engine_dir.join("cuda").join("bin").join(server));
 
         let build_root = builds::builds_root(dir.path(), ENGINE).join("main-1");
-        let build_binary = build_root.join("install").join("bin").join("llama-server");
+        let build_binary = build_root.join("install").join("bin").join(server);
         touch(&build_binary);
         std::fs::write(
             build_root.join("build.json"),
@@ -1083,7 +1084,10 @@ mod tests {
     fn delete_removes_source_build_directory() {
         let dir = tempdir().unwrap();
         let build_root = builds::builds_root(dir.path(), ENGINE).join("main-1");
-        let build_binary = build_root.join("install").join("bin").join("llama-server");
+        let build_binary = build_root
+            .join("install")
+            .join("bin")
+            .join(llama::binary_name());
         touch(&build_binary);
         std::fs::write(build_root.join("build.json"), b"{}").unwrap();
 

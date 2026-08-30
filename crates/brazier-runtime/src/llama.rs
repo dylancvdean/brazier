@@ -2966,7 +2966,7 @@ mod tests {
         let data = PathBuf::from("/tmp/brazier-data");
         let candidates = discovery_candidates(&data, Some("/usr/bin:/opt/bin"));
         assert_eq!(candidates[0], managed_binary_path(&data));
-        assert!(candidates.iter().any(|p| p.ends_with("llama-server")));
+        assert!(candidates.iter().any(|p| p.ends_with(binary_name())));
     }
 
     #[test]
