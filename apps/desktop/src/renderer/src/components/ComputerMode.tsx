@@ -42,7 +42,6 @@ import type { AgentComposerControls } from './AgentMode'
 import {
   buildComputerHistory,
   computerActionLabel,
-  computerModelOutput,
   computerScreenshotDataUrl,
   continuationForResult,
   observationError,
@@ -488,7 +487,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
           enableReasoning: false
         }
       )
-      responseText = computerModelOutput(completion.responseText || responseText, completion.reasoningText)
+      responseText = completion.responseText || responseText
       if (controller.signal.aborted) return
 
       const parsed = await parseModelOutput(responseText)

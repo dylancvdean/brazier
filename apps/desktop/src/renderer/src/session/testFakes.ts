@@ -22,13 +22,8 @@ import type {
   ConversationMessage,
   MessagePatch,
   NewMessage,
-  SpeechRequest,
   VoiceContext
 } from './types'
-import type {
-  PersonaPlexHandoffRequest,
-  PersonaPlexHandoffStrategy
-} from './personaplexHandoff'
 
 export class FakeChat implements ChatAdapter {
   messages: ConversationMessage[] = []
@@ -157,20 +152,12 @@ export class FakeAgent implements AgentAdapter {
 }
 
 export class FakeVoice implements VoiceAdapter {
-  spoken: SpeechRequest[] = []
-  handoffs: Array<{
-    request: PersonaPlexHandoffRequest
-    strategy: PersonaPlexHandoffStrategy
-  }> = []
-  stopped: Array<string | undefined> = []
+  stopped = 0
   contexts: VoiceContext[] = []
   sessions: string[] = []
   ended = 0
-  speakable = true
   /** Whether PersonaPlex's own audio is audible. */
   modelAudioEnabled = true
-  /** Set to reject the next `speak`. */
-  failSpeak: string | null = null
   /** Set to reject the next `startSession`. */
   failStart: string | null = null
   private readonly listeners = new Set<(event: VoiceAdapterEvent) => void>()
@@ -195,29 +182,9 @@ export class FakeVoice implements VoiceAdapter {
     this.contexts.push(context)
   }
 
-  async handoffResult(
-    request: PersonaPlexHandoffRequest,
-    strategy: PersonaPlexHandoffStrategy
-  ): Promise<VoiceSessionHandle | null> {
-    this.handoffs.push({ request, strategy })
-    // The production adapter stops the old stream before reopening output on
-    // the replacement that receives the checked result.
-    if (strategy !== 'continuous') this.modelAudioEnabled = true
-    return null
-  }
-
-  async speak(request: SpeechRequest): Promise<void> {
-    if (this.failSpeak) {
-      const message = this.failSpeak
-      this.failSpeak = null
-      throw new Error(message)
-    }
-    this.spoken.push(request)
-    this.emit({ type: 'speechStarted', correlationId: request.correlationId })
-  }
-
-  async stopSpeaking(correlationId?: string): Promise<void> {
-    this.stopped.push(correlationId)
+  async stopSpeaking(): Promise<void> {
+    this.stopped += 1
+    this.modelAudioEnabled = false
   }
 
   setModelAudioEnabled(enabled: boolean): void {
@@ -228,10 +195,6 @@ export class FakeVoice implements VoiceAdapter {
     this.ended += 1
   }
 
-  canSpeak(): boolean {
-    return this.speakable
-  }
-
   subscribe(listener: (event: VoiceAdapterEvent) => void): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
@@ -239,11 +202,6 @@ export class FakeVoice implements VoiceAdapter {
 
   emit(event: VoiceAdapterEvent): void {
     for (const listener of [...this.listeners]) listener(event)
-  }
-
-  /** Requests of kind `authoritative`, i.e. real answers. */
-  authoritative(): SpeechRequest[] {
-    return this.spoken.filter((request) => request.kind === 'authoritative')
   }
 }
 

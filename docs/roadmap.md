@@ -101,17 +101,16 @@ implementation notes and follow-on work.
   as untrusted output, and stopping speech, dropping an answer, and cancelling a
   task stay three separate controls. Voice supplies the two things the Moshi
   protocol lacks: user transcripts, by segmenting the microphone and
-  transcribing each utterance, plus an experimental result handoff. PersonaPlex
-  is the only audible voice; the background answer remains in chat while a
-  selectable strategy leaves the stream alone or reconnects/restarts it with a
-  result prompt and optionally replays the exact triggering utterance. The
-  background submission itself is selectable: Auto uses a local no-model
-  classifier to leave lightweight conversation with PersonaPlex, Always keeps
-  the original behavior, and Explicit requires a work cue. Short speech is
-  recovered by retaining Silero-confirmed 100 ms bursts, padding both sides for
-  ASR, and retrying an empty short result with the other recognizer when
-  available. The streaming ASR worker keeps its model loaded
-  between utterances (3.1 s to 0.18 s a turn).
+  transcribing each utterance. PersonaPlex is the only audible voice; a
+  transcript that needs the chat or agent model mutes the live stream until
+  that turn finishes. The background answer remains in chat. The background
+  submission itself is selectable: Auto uses a local no-model classifier to
+  leave lightweight conversation with PersonaPlex, Always keeps the original
+  behavior, and Explicit requires a work cue. Short speech is recovered by
+  retaining Silero-confirmed 100 ms bursts, padding both sides for ASR, and
+  retrying an empty short result with the other recognizer when available. The
+  streaming ASR worker keeps its model loaded between utterances (3.1 s to
+  0.18 s a turn).
 - **Agent mode** — interactive coding and system agent as a fourth workspace
   mode. Agent frameworks are modular stock runtimes selected by `runtime_id`
   (default `simple`). Pi (`@earendil-works/pi-*`, MIT) is the broker-sandboxed
@@ -178,18 +177,6 @@ what is left is mostly the difference between working and trustworthy.
   do is cover a session set to skip permissions: nothing is held there.
   Removing the warning would also need the transcript
   itself to be trustworthy, which is the VAD and latency work above.
-- **PersonaPlex result-handoff experiments.** *Ready for hardware-backed
-  comparison.* Platform TTS is gone, so PersonaPlex never competes with a second
-  voice. A dropdown compares continuous conversation against same-process
-  reconnects with direct or service-style result prompts, with and without
-  realtime replay of the correlated utterance, plus a full process restart as a
-  control. The upstream servers accept a new prompt when a WebSocket connection
-  begins but do not support mutating the prompt of an active generation. Trial
-  reports should identify the selected strategy, whether PersonaPlex first
-  acknowledged or answered independently, restart/reconnect delay, and how
-  faithfully it used the checked result. Hardware tuning should use the
-  background-routing and pre-handoff mute timing independently; current trial
-  feedback favors the full process restart over same-process reconnects.
 
 ## Remote daemon clients — medium term
 

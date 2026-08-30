@@ -37,8 +37,6 @@ export type MessagePatch = {
 
 export type ResponseOwner = 'chat' | 'agent'
 
-export type DeliveryTarget = 'text' | 'voice' | 'both'
-
 export type ResponseStatus =
   | 'pending'
   | 'running'
@@ -47,16 +45,12 @@ export type ResponseStatus =
   | 'failed'
   | 'superseded'
 
-export type SpokenStatus = 'none' | 'requested' | 'speaking' | 'completed' | 'interrupted' | 'failed'
-
 export type ResponseState = {
   correlationId: string
   owner: ResponseOwner
-  deliveryTargets: DeliveryTarget
   status: ResponseStatus
   cancellable: boolean
   authoritativeMessageId?: string
-  spokenStatus: SpokenStatus
   originSource: MessageSource
   userText: string
   utteranceId?: string
@@ -89,10 +83,6 @@ export type SessionEventType =
   | 'TOOL_STARTED'
   | 'TOOL_COMPLETED'
   | 'TOOL_FAILED'
-  | 'VOICE_RESPONSE_REQUESTED'
-  | 'VOICE_RESPONSE_STARTED'
-  | 'VOICE_RESPONSE_COMPLETED'
-  | 'VOICE_RESPONSE_INTERRUPTED'
   | 'RESPONSE_CANCEL_REQUESTED'
   | 'SESSION_SUMMARY_UPDATED'
   | 'VOICE_SESSION_RENEWED'
@@ -120,15 +110,6 @@ export type VoiceContext = {
   activeTaskSummary: string
   currentStatus: string
   responseDirective: string
-}
-
-export type SpeechRequest = {
-  correlationId: string
-  text: string
-  kind: 'authoritative' | 'status' | 'error'
-  brevityTargetChars?: number
-  pronunciationHints?: Array<{ written: string; spoken: string }>
-  speakingStyle?: string
 }
 
 export type DiagnosticRecord = {

@@ -1,8 +1,4 @@
 /** Where a live voice session sends what the user says. */
-import type {
-  PersonaPlexHandoffStrategy,
-  PersonaPlexPreHandoffMode
-} from './personaplexHandoff'
 import type { VoiceBackgroundRouting } from './backgroundRouting'
 
 export type VoiceSessionTarget = 'agent' | 'chat' | 'neither'
@@ -25,19 +21,10 @@ export type IntegrationConfig = {
   voiceBackgroundRouting: VoiceBackgroundRouting
   asrPreference: AsrPreference
   showVoiceTranscripts: boolean
-  /**
-   * Experimental path used to give a completed background result back to
-   * PersonaPlex. `continuous` never changes the running voice session.
-   */
-  personaplexHandoffStrategy: PersonaPlexHandoffStrategy
-  /** What the old PersonaPlex stream may say while a background turn runs. */
-  personaplexPreHandoffMode: PersonaPlexPreHandoffMode
   /** Renew the PersonaPlex session after this long. */
   voiceSessionMaxDurationMs: number
   voiceContextRecentTurnLimit: number
   voiceContextSummaryLimitChars: number
-  /** Speaking over PersonaPlex stops the audio. */
-  interruptStopsSpeech: boolean
   /** Speaking over PersonaPlex does **not** cancel the agent. Only an explicit
    *  request does, so a long task survives a barge-in. */
   interruptCancelsAgent: boolean
@@ -49,12 +36,9 @@ export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
   voiceBackgroundRouting: 'auto',
   asrPreference: 'auto',
   showVoiceTranscripts: true,
-  personaplexHandoffStrategy: 'continuous',
-  personaplexPreHandoffMode: 'mute-on-route',
   voiceSessionMaxDurationMs: 20 * 60 * 1000,
   voiceContextRecentTurnLimit: 6,
   voiceContextSummaryLimitChars: 1200,
-  interruptStopsSpeech: true,
   interruptCancelsAgent: false
 }
 
@@ -78,13 +62,31 @@ export function resolveAsrEngine(
 
 const STORAGE_KEY = 'brazier.voiceIntegration'
 
+const CONFIG_KEYS: readonly (keyof IntegrationConfig)[] = [
+  'voiceEnabled',
+  'voiceSessionTarget',
+  'voiceBackgroundRouting',
+  'asrPreference',
+  'showVoiceTranscripts',
+  'voiceSessionMaxDurationMs',
+  'voiceContextRecentTurnLimit',
+  'voiceContextSummaryLimitChars',
+  'interruptCancelsAgent'
+]
+
 /** Persisted subset of the configuration, merged over the defaults. */
 export function readIntegrationConfig(): IntegrationConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return DEFAULT_INTEGRATION_CONFIG
     const parsed = JSON.parse(raw) as Partial<IntegrationConfig>
-    return { ...DEFAULT_INTEGRATION_CONFIG, ...parsed }
+    const config = { ...DEFAULT_INTEGRATION_CONFIG }
+    for (const key of CONFIG_KEYS) {
+      if (parsed[key] !== undefined) {
+        Object.assign(config, { [key]: parsed[key] })
+      }
+    }
+    return config
   } catch {
     return DEFAULT_INTEGRATION_CONFIG
   }

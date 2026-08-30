@@ -166,15 +166,6 @@ fn constrain_target_to_platform(target: RuntimeTarget) -> RuntimeTarget {
 }
 
 /// Choose the best prebuilt release asset for this host/target combination.
-///
-/// - macOS arm64: asset name contains `Darwin` and `arm64`.
-/// - Linux x64 CPU: contains `Linux` + `x86_64`, without `vulkan`/`rocm`/`cuda`.
-/// - Linux x64 Vulkan: contains `vulkan`.
-/// - Linux x64 ROCm: contains `rocm`.
-/// - Windows CPU: `win-cpu-x64`, or `win` + `cpu` + `x64`.
-/// - Windows CUDA: `win-cuda`, or `cuda12` + `win`.
-/// - Windows Vulkan: `win-vulkan`, or `win` + `vulkan`.
-///
 /// `cudart` redistributable packages are always skipped.
 pub fn select_release_asset_for_target<'a>(
     asset_names: impl IntoIterator<Item = &'a str>,

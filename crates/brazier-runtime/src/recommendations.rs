@@ -1,24 +1,5 @@
-//! What to install on this machine, and whether that answer has changed.
-//!
-//! A new installation is a list of engines and an empty model library, which is
-//! the point at which someone who has never run a local model has to decide
-//! which of several thousand to download and at which of a dozen quantisations.
-//! That is the question this module answers: given how much memory a machine
-//! has, one named model per thing you might want to do.
-//!
-//! Recommendations are data, not code — see `model-recipes/recommendations.json`
-//! — so they can be corrected as models are released without touching the
-//! application, and a copy in the data directory overrides the shipped one
-//! entirely.
-//!
-//! Two things are deliberately resolved late rather than written down:
-//!
-//! - **Which quantisation.** A file that fits one machine does not fit another,
-//!   and quant ladders differ per repository, so the choice is made against the
-//!   repository's real file sizes at the moment it is shown.
-//! - **Whether it changed.** Each entry carries an id; installing through the
-//!   flow records the id that was installed, and a later id for the same
-//!   category is what makes an update worth mentioning.
+//! Model recommendations from `model-recipes/recommendations.json`.
+//! A copy in the data directory overrides the shipped catalogue.
 
 use std::path::{Path, PathBuf};
 
@@ -42,17 +23,8 @@ pub const WEIGHT_MEMORY_FRACTION: f64 = 0.60;
 /// enough there, so the weight budget is deliberately tighter.
 pub const COMPUTER_USE_WEIGHT_FRACTION: f64 = 0.45;
 
-/// Quantisations in the order they would be preferred if memory were free,
-/// each with the filename fragments that mean the same rung.
-///
-/// Unsloth's dynamic builds are named for the bits they average rather than for
-/// the uniform quant they replace — `UD-Q4_K_XL` is a dynamic build of Q4, not a
-/// rung of its own — so matching on the plain name alone would miss exactly the
-/// files most worth preferring.
-///
-/// Stopping at Q2_K is deliberate: below it a model is usually worse than a
-/// smaller model at a higher quant, so a machine that cannot hold Q2_K is better
-/// served by a different recommendation than by a one-bit build of this one.
+/// Quantisations in preference order. Unsloth dynamic builds (`UD-Q4_K_XL`)
+/// match the rung they average, not a separate step. Stop at Q2_K.
 const QUANT_LADDER: [(&str, &[&str]); 6] = [
     ("Q8_0", &["q8_0", "q8_k_xl"]),
     ("Q6_K", &["q6_k"]),

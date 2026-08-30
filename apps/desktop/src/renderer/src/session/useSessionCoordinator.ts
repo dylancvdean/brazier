@@ -54,8 +54,6 @@ export type SessionCoordinatorHandle = {
   snapshot: CoordinatorSnapshot
   config: IntegrationConfig
   setConfig: (config: IntegrationConfig) => void
-  /** True when spoken delivery is possible on this host. */
-  canSpeak: boolean
   /** Raw local measurements for an explicitly saved qualification report. */
   metrics: () => SessionMetrics
   inputLevel: number
@@ -219,7 +217,6 @@ export function useSessionCoordinator(
     snapshot,
     config,
     setConfig,
-    canSpeak: adapters.voice.canSpeak(),
     metrics: useCallback(() => coordinator.metrics(), [coordinator]),
     inputLevel,
     outputLevel,

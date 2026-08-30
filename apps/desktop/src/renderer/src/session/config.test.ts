@@ -32,6 +32,5 @@ describe('resolveAsrEngine', () => {
   it('defaults to automatic', () => {
     expect(DEFAULT_INTEGRATION_CONFIG.asrPreference).toBe('auto')
     expect(DEFAULT_INTEGRATION_CONFIG.voiceBackgroundRouting).toBe('auto')
-    expect(DEFAULT_INTEGRATION_CONFIG.personaplexPreHandoffMode).toBe('mute-on-route')
   })
 })

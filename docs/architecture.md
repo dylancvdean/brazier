@@ -251,20 +251,11 @@ adapter supplies them:
   tool, current-fact, and active-task language, and Explicit requires a concrete
   work cue. Skipped turns invoke and record nothing; the voice pane reports the
   decision so the classifier can be tuned from real sessions.
-- **Experimentally handing back a result.** PersonaPlex is the only audible
-  voice; platform TTS is not used. Both supported servers accept `text_prompt`
-  when a WebSocket connection begins, although neither can mutate the prompt of
-  an active generation. The adapter can therefore leave the current stream
-  continuous, reconnect to the same loaded process with direct or service-style
-  result information, optionally replay the exact correlated utterance at
-  realtime pace, or restart the process as a comparison. The background answer
-  remains authoritative in chat regardless of what PersonaPlex says. A separate
-  pre-handoff timing control can leave the old stream audible, mute it when a
-  speculative or final transcript routes to background work, or mute it as soon
-  as sustained speech begins. A local or empty final transcript reopens the old
-  stream; a background turn remains silent until the adapter has stopped it and
-  opened the replacement, preventing the unchecked answer from leaking during
-  the restart.
+- **Mute while background work runs.** PersonaPlex is the only audible voice;
+  platform TTS is not used. A speculative or final transcript that routes to
+  chat or the agent silences the live stream. Local and empty turns reopen it.
+  The background answer remains authoritative in chat; PersonaPlex is not
+  reseeded with it.
 
 Voice-session renewal (duration, context size, a runtime restart) replaces the
 PersonaPlex process at a safe conversational boundary and re-seeds it from the

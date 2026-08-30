@@ -10,7 +10,6 @@
 import captureWorkletUrl from './captureWorklet.js?url'
 import { OggOpusDemuxer, OggOpusMuxer, parseOpusHead } from './oggOpus'
 import playbackWorkletUrl from './playbackWorklet.js?url'
-import { resampleFrame } from './sileroVad'
 
 const TAG_HANDSHAKE = 0x00
 const TAG_AUDIO = 0x01
@@ -392,48 +391,6 @@ export class VoiceStream {
     }
   }
 
-  /**
-   * Feed recorded microphone audio into a fresh PersonaPlex stream.
-   *
-   * Frames are paced at capture speed instead of dumped into the socket in one
-   * burst. PersonaPlex is a realtime model and its text/audio alignment depends
-   * on that clock. This path deliberately does not report capture callbacks, so
-   * replay cannot create a duplicate user turn in the coordinator.
-   */
-  async replayAudio(
-    samples: Float32Array,
-    sampleRate: number,
-    shouldContinue: () => boolean = () => true
-  ): Promise<void> {
-    const audio = resampleFrame(samples, sampleRate, SAMPLE_RATE)
-    for (let offset = 0; offset < audio.length; offset += FRAME_SAMPLES) {
-      if (this.stopped || !shouldContinue()) return
-      const frame = new Float32Array(FRAME_SAMPLES)
-      frame.set(audio.subarray(offset, Math.min(audio.length, offset + FRAME_SAMPLES)))
-      this.encodeReplayFrame(frame)
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 20))
-    }
-    await this.encoder?.flush().catch(() => undefined)
-  }
-
-  private encodeReplayFrame(samples: Float32Array<ArrayBuffer>): void {
-    if (!this.encoder || this.encoder.state !== 'configured') return
-    const data = new AudioData({
-      format: 'f32-planar',
-      sampleRate: SAMPLE_RATE,
-      numberOfFrames: samples.length,
-      numberOfChannels: 1,
-      timestamp: this.timestamp,
-      data: samples
-    })
-    this.timestamp += Math.round((samples.length * 1_000_000) / SAMPLE_RATE)
-    try {
-      this.encoder.encode(data)
-    } finally {
-      data.close()
-    }
-  }
-
   private sendEncoded(chunk: EncodedAudioChunk): void {
     const socket = this.socket
     if (!socket || socket.readyState !== WebSocket.OPEN) return
@@ -446,10 +403,9 @@ export class VoiceStream {
   /**
    * Open or shut the model's audio output.
    *
-   * PersonaPlex is a speech-to-speech model: it answers on its own, and it
-   * cannot be told to hold a thought. When the agent owns a turn, its audio is
-   * shut off and the authoritative answer is spoken instead, so the user never
-   * hears two different replies to one question.
+   * PersonaPlex answers on its own and cannot be told to hold a thought. While
+   * a transcript is routed to chat or the agent, this gate silences the live
+   * stream so two different replies are not heard at once.
    */
   setOutputGate(open: boolean): void {
     this.outputOpen = open
@@ -492,9 +448,9 @@ export class VoiceStream {
     if (this.stopped) return
     this.stopped = true
     // Flush the encoder and emit the terminating Ogg page (EOS) while the
-    // socket is still OPEN, mirroring `replayAudio`. Closing the encoder
-    // without flushing drops the last frames; without a final page the server
-    // sees a truncated, unterminated stream with no last-page granule.
+    // socket is still OPEN. Closing the encoder without flushing drops the last
+    // frames; without a final page the server sees a truncated, unterminated
+    // stream with no last-page granule.
     const encoder = this.encoder
     this.encoder = null
     if (encoder && encoder.state === 'configured') {
