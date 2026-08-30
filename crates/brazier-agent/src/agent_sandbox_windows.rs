@@ -581,22 +581,22 @@ impl AclDeny {
         };
         // Workspace Modify is inherited as FILE_DELETE_CHILD on this
         // directory, so `cmd.exe` `>` can replace a file that itself denies
-        // DELETE. icacls `/T` with (OI)(CI) is also invalid on files and
-        // silently skips them. Break inheritance, strip the package grant,
-        // then deny with a file-safe ACE.
+        // DELETE. icacls `/T` with (OI)(CI) is invalid on files and skips
+        // them; `/deny (N)` is rejected as an invalid parameter. Strip the
+        // package grant, deny the directory with inherit flags, then stamp
+        // a file-safe Full deny on every child.
         let result = (|| {
-            icacls(path, recursive, &["/inheritance:d"], false)?;
             icacls(path, recursive, &["/remove:g", &principal], true)?;
             if recursive {
                 icacls(
                     path,
                     false,
-                    &["/deny", &format!("{principal}:(OI)(CI)(N)")],
+                    &["/deny", &format!("{principal}:(OI)(CI)(F)")],
                     false,
                 )?;
-                icacls(path, true, &["/deny", &format!("{principal}:(N)")], false)?;
+                icacls(path, true, &["/deny", &format!("{principal}:(F)")], false)?;
             } else {
-                icacls(path, false, &["/deny", &format!("{principal}:(N)")], false)?;
+                icacls(path, false, &["/deny", &format!("{principal}:(F)")], false)?;
             }
             anyhow::Ok(())
         })();
@@ -614,7 +614,6 @@ impl Drop for AclDeny {
     fn drop(&mut self) {
         let principal = format!("*{}", self.sid);
         let _ = icacls(&self.path, self.recursive, &["/remove:d", &principal], true);
-        let _ = icacls(&self.path, self.recursive, &["/inheritance:e"], true);
     }
 }
 
@@ -625,7 +624,7 @@ fn icacls(
     continue_on_error: bool,
 ) -> anyhow::Result<()> {
     let mut command = Command::new("icacls.exe");
-    command.arg(path);
+    command.arg(win32_process_path(path));
     command.args(extra);
     if recursive {
         command.arg("/T");
