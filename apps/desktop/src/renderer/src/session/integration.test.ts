@@ -292,7 +292,6 @@ describe('coordinator over the real agent adapter', () => {
     expect(chat.assistantMessages()).toHaveLength(1)
     expect(chat.assistantMessages()[0].content).toBe('oggOpus failed.')
     expect(chat.assistantMessages()[0].source).toBe('assistant_agent')
-    expect(voice.spoken).toHaveLength(0)
     expect(coordinator.metrics().duplicateEventsIgnored).toBe(1)
   })
 

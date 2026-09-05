@@ -1,11 +1,4 @@
-/**
- * The integration boundary.
- *
- * The coordinator talks to the three existing subsystems only through these
- * interfaces, so it holds no knowledge of the Moshi wire protocol, the agent
- * worker IPC, or the daemon's REST shapes. Method names follow the integration
- * plan; the implementations in this directory map them onto the real APIs.
- */
+/** Adapters between the coordinator and chat, voice, and the agent. */
 
 import type {
   ConversationMessage,
@@ -14,10 +7,6 @@ import type {
   NewMessage,
   VoiceContext
 } from './types'
-import type {
-  PersonaPlexHandoffRequest,
-  PersonaPlexHandoffStrategy
-} from './personaplexHandoff'
 import type { ExecutionLocation } from '../../../agent/core/types'
 
 // --- Chat -------------------------------------------------------------------
@@ -199,9 +188,6 @@ export type VoiceAdapterEvent =
    * indistinguishable from a pipeline that stopped working.
    */
   | { type: 'transcriptionEmpty'; utteranceId: string }
-  | { type: 'speechStarted'; correlationId: string }
-  | { type: 'speechCompleted'; correlationId: string }
-  | { type: 'speechInterrupted'; correlationId: string }
   /** Text PersonaPlex generated on its own. Never authoritative. */
   | { type: 'modelText'; text: string }
   | { type: 'sessionError'; error: string; fatal: boolean }
@@ -210,16 +196,8 @@ export type VoiceAdapterEvent =
 export interface VoiceAdapter {
   startSession(context: VoiceContext): Promise<VoiceSessionHandle>
   updateContext(context: VoiceContext): Promise<void>
-  /**
-   * Experimentally feed one background result back to PersonaPlex. A returned
-   * handle means the strategy replaced the daemon session/process.
-   */
-  handoffResult(
-    request: PersonaPlexHandoffRequest,
-    strategy: PersonaPlexHandoffStrategy
-  ): Promise<VoiceSessionHandle | null>
-  /** Stop audio for one turn, or all audio when no id is given. */
-  stopSpeaking(correlationId?: string): Promise<void>
+  /** Stop PersonaPlex output. Capture and the background task keep running. */
+  stopSpeaking(): Promise<void>
   /**
    * Let PersonaPlex's own voice be heard, or silence it.
    *
@@ -228,7 +206,5 @@ export interface VoiceAdapter {
    */
   setModelAudioEnabled(enabled: boolean): void
   endSession(): Promise<void>
-  /** Whether realtime PersonaPlex audio can run on this host. */
-  canSpeak(): boolean
   subscribe(listener: (event: VoiceAdapterEvent) => void): () => void
 }

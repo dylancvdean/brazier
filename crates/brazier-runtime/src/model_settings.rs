@@ -1,21 +1,5 @@
-//! Per-model configuration: the advanced settings one model should be run
-//! with, rather than the ones every model shares.
-//!
-//! [`crate::runtime_settings::RuntimeSettings`] holds what the whole
-//! installation does — which acceleration target, how large a context, which
-//! sampling defaults. That is the right shape for a preference and the wrong
-//! shape for a model: a 4-step distilled diffusion model needs CFG 1.0, a
-//! reasoning GGUF wants a different repetition penalty from a chat one, and a
-//! LoRA belongs to the model it was trained against and to nothing else.
-//!
-//! So every field here is optional and means *override*: unset falls through to
-//! the global settings and then to the engine's own default. What can be set
-//! depends on the kind of model, because the flags are the engine's, and an
-//! image model has no context window any more than a chat model has a scheduler.
-//!
-//! Nothing here is validated against a particular engine build. Options move
-//! between llama.cpp releases, so an unrecognised flag is reported by the engine
-//! when it starts rather than guessed at here.
+//! Per-model overrides of [`crate::runtime_settings::RuntimeSettings`].
+//! Unset fields fall through to global settings, then the engine default.
 
 use std::{
     collections::BTreeMap,
@@ -195,10 +179,6 @@ pub struct TextProfile {
     // --- agent ---
     /// Model id for `spawn_subagent` children. `None` means the parent's model.
     pub subagent_model: Option<String>,
-    /// Legacy setting accepted while loading old profiles. llama.cpp slots are
-    /// equal-sized, so children now always inherit the parent context.
-    #[serde(skip_serializing)]
-    pub subagent_context_size: Option<u32>,
     /// Max concurrent subagents a parent may run. Default 2 when unset.
     pub max_subagents: Option<u32>,
     /// When true, llama-server starts with `--parallel = 1 + max_subagents` so

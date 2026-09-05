@@ -124,8 +124,8 @@ Modified:
       correlation IDs, source attribution, one submission path for voice and
       text, conversation ↔ agent-session association.
 - [x] **Phase 2 — agent-to-voice delivery.** Authoritative responses are stored
-      once in chat and can drive a selected PersonaPlex reconnect/replay
-      experiment without creating a duplicate assistant message.
+      once in chat. PersonaPlex stays continuous; it is not reseeded with the
+      background result.
 - [x] **Phase 3 — interruptions and cancellation.** Separate
       `cancel_voice_output` / `cancel_current_response` / `cancel_agent_task`,
       utterance classification, queued follow-ups, superseded responses,
@@ -135,17 +135,13 @@ Modified:
       session untouched.
 - [x] **Phase 5 — hardening.** Event deduplication, error-state handling,
       structured diagnostics, configuration controls, integration tests.
-- [x] **Phase 6 — PersonaPlex experiment harness and neural VAD.** PersonaPlex
-      is the only audible voice; selectable continuous, reconnect, replay, and
-      full-restart strategies compare prompt/data handoffs. Bundled Silero VAD
-      v5 runs on the existing capture stream with an energy fallback.
+- [x] **Phase 6 — neural VAD.** PersonaPlex is the only audible voice. Bundled
+      Silero VAD v5 runs on the existing capture stream with an energy fallback.
 - [x] **Phase 7 — local fast path and short-speech recovery.** Auto / Always /
       Explicit background routing can keep lightweight turns entirely inside
-      PersonaPlex without adding another classifier model. Short speech boost
-      accepts Silero-confirmed 100 ms turns, conditions their ASR audio, and
-      retries an empty result on an alternate installed recognizer.
-- [x] **Phase 8 — pre-handoff output timing.** Selectable natural,
-      route-detected mute, and immediate mute modes compare response leakage
-      against local-turn latency. Only reconnect/restart experiments engage the
-      gate, and the checked-result replacement reopens it after the old stream
-      has stopped.
+      PersonaPlex without adding another classifier model. Short speech is
+      recovered by retaining Silero-confirmed 100 ms turns, padding ASR audio,
+      and retrying an empty result on an alternate installed recognizer.
+- [x] **Phase 8 — mute-on-route.** A speculative or final transcript that
+      routes to chat or the agent silences PersonaPlex. Local and empty turns
+      reopen the stream. The background answer stays in chat.

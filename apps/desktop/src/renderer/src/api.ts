@@ -759,7 +759,6 @@ export type PipelineFeatures = {
 export type CapabilitiesResponse = {
   schema_version: number
   features: Record<string, unknown> & {
-    asr?: boolean
     video_preprocess?: boolean
     audio_interfaces?: {
       batch_asr?: { available?: boolean; summary?: string }
@@ -1168,14 +1167,6 @@ export function deleteConversation(conversationId: string): Promise<void> {
   return request(`/api/v1/conversations/${conversationId}`, { method: 'DELETE' })
 }
 
-/**
- * Transcribe one finished utterance through the daemon's ASR path.
- *
- * `engine` picks between the installed interfaces: `streaming-asr` runs the
- * Nemotron worker, and omitting it takes the daemon's default, which is
- * whisper.cpp or WhisperKit. The utterance is already complete either way, so
- * this asks for the collected text rather than an SSE stream.
- */
 export type Transcription = {
   text: string
   /**

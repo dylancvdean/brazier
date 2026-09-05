@@ -4,7 +4,6 @@ import type { ComputerActionResult, ComputerSession, ComputerStep } from '../api
 import {
   buildComputerHistory,
   computerActionLabel,
-  computerModelOutput,
   computerSystemPrompt,
   continuationForResult,
   MAX_COMPUTER_HISTORY_IMAGES,
@@ -57,15 +56,6 @@ describe('computer history', () => {
     expect(
       computerActionLabel({ type: 'error', error: 'parse_error', raw: '{ malformed' })
     ).toContain('Parse error: parse_error')
-  })
-
-  it('uses reasoning output only as a compatibility fallback for old Fara sessions', () => {
-    expect(computerModelOutput('<tool_call>content</tool_call>', '<tool_call>reasoning</tool_call>')).toBe(
-      '<tool_call>content</tool_call>'
-    )
-    expect(computerModelOutput('', '<tool_call>reasoning</tool_call>')).toBe(
-      '<tool_call>reasoning</tool_call>'
-    )
   })
 
   it('uses Fara grounding dimensions and critical-point safety instructions', () => {

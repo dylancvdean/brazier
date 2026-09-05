@@ -1,15 +1,8 @@
 /**
- * Utterance segmentation for voice input.
+ * Split microphone audio into utterances for transcription.
  *
- * PersonaPlex sends back its own speech as text, never the user's, so the
- * shared-conversation mode has to produce the user transcript itself. This
- * splits the captured microphone stream into utterances on speech probability
- * and silence and hands each finished one to the caller, which transcribes it
- * through the daemon's ASR endpoint.
- *
- * Silero VAD is the normal speech decision. RMS remains as a fallback when the
- * small ONNX model cannot load, as a meter, and as an echo guard while the
- * assistant is speaking. Hold-in and hold-out counters still own turn shape.
+ * Silero VAD is the speech decision; RMS remains as a fallback, meter, and
+ * echo guard while the assistant is speaking.
  */
 
 import { NoiseFloorTracker } from './noiseFloor'

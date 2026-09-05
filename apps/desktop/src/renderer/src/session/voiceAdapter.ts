@@ -1,18 +1,4 @@
-/**
- * Voice adapter: the existing PersonaPlex stack, normalized.
- *
- * Two things the plan assumes are not in the Moshi protocol, and this is where
- * they are supplied:
- *
- * - **User transcripts.** The socket's text frames are the *model's* speech.
- *   The user's words come from segmenting the captured microphone stream and
- *   transcribing each finished utterance through the daemon's ASR endpoint.
- * - **Background-result experiments.** PersonaPlex has no supported in-place
- *   prompt mutation. We can keep its loaded process and reconnect with a new
- *   per-connection prompt, optionally replaying the exact utterance, or restart
- *   the process as a control. Platform TTS is intentionally not part of this
- *   adapter: PersonaPlex is the only audible voice.
- */
+/** PersonaPlex voice adapter: capture, ASR, and Moshi session control. */
 
 import {
   createVoiceSession,
@@ -36,13 +22,6 @@ import {
 } from '../audio/utterance'
 import type { VoiceAdapter, VoiceAdapterEvent, VoiceSessionHandle } from './adapters'
 import { isEchoOfSpokenText } from './echoGuard'
-import {
-  buildPersonaPlexHandoffPrompt,
-  handoffReplaysAudio,
-  handoffRestartsProcess,
-  type PersonaPlexHandoffRequest,
-  type PersonaPlexHandoffStrategy
-} from './personaplexHandoff'
 import { coversUtterance } from './speculativeTranscript'
 import type { VoiceContext } from './types'
 import { renderVoicePrompt } from './voiceContext'
@@ -69,8 +48,6 @@ export type PersonaPlexAdapterOptions = {
    * comes back empty. Null means there is no distinct fallback.
    */
   asrFallbackEngine?: () => { engine?: string } | null
-  /** Accept and specially condition one-syllable / clipped turns. */
-  shortSpeechBoost?: () => boolean
   /** Meters for the voice UI. */
   onInputLevel?: (level: number) => void
   onOutputLevel?: (level: number) => void
@@ -97,14 +74,9 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   /** PersonaPlex output is the only voice; this gate supports an explicit stop. */
   private modelAudioEnabled = true
   private muted = false
-  private handoffGeneration = 0
+  private sessionGeneration = 0
   private sessionInfo: VoiceSessionInfo | null = null
   private lastModelText = ''
-  /** Exact utterances retained until their corresponding background result lands. */
-  private readonly utteranceAudio = new Map<
-    string,
-    { samples: Float32Array; sampleRate: number }
-  >()
   /**
    * A transcription started at a pause, before the utterance closed. Kept so
    * the close can adopt it instead of paying for the same audio twice.
@@ -149,10 +121,6 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     for (const listener of [...this.listeners]) listener(event)
   }
 
-  canSpeak(): boolean {
-    return voiceStreamSupported()
-  }
-
   async startSession(context: VoiceContext): Promise<VoiceSessionHandle> {
     if (!voiceStreamSupported()) {
       throw new Error('This build lacks the WebCodecs Opus support realtime voice needs.')
@@ -166,12 +134,11 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       await this.endSession()
     }
 
-    // Capture a generation token so an `endSession` or `handoffResult` that
-    // lands while we are awaiting the daemon, the VAD, or the socket can be
-    // detected before assigning `this.stream`. Without this check, the stream
-    // we build here is orphaned: nobody can stop it, and the Silero model it
-    // loaded stays resident.
-    const generation = ++this.handoffGeneration
+    // Capture a generation token so an `endSession` that lands while we are
+    // awaiting the daemon, the VAD, or the socket can be detected before
+    // assigning `this.stream`. Without this check, the stream we build here is
+    // orphaned: nobody can stop it, and the Silero model it loaded stays resident.
+    const generation = ++this.sessionGeneration
     const bailBeforeStream = async (session: VoiceSessionInfo | null) => {
       await this.stopVad()
       if (session) await endVoiceSession(session.id).catch(() => undefined)
@@ -181,57 +148,34 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     // guidance PersonaPlex accepts.
     const persona = renderVoicePrompt(context)
     const session = await this.openSession(persona)
-    if (generation !== this.handoffGeneration) {
+    if (generation !== this.sessionGeneration) {
       await bailBeforeStream(session)
       throw new Error('Voice session was cancelled before it started.')
     }
     this.sessionInfo = session
 
-    // Logged at each boundary: an utterance that opens and is then discarded for
-    // being too short looks the same from outside as speech never detected.
-    this.segmenter = new UtteranceSegmenter(
-      {
-        onSpeechStart: (utteranceId) => {
-          // Capturing, not interrupting. A cough gets recorded and then thrown
-          // away without ever taking the assistant's turn from it.
-          console.debug(`[voice] speech detected (${utteranceId})`)
-        },
-        onStreamStart: (utterance) => this.startIncremental(utterance),
-        onStreamFrame: (utteranceId, samples, sampleRate) => {
-          this.pushIncremental(utteranceId, samples, sampleRate)
-        },
-        onSustainedSpeech: (utteranceId) => {
-          console.debug(`[voice] sustained speech (${utteranceId}) — interrupting`)
-          // An explicit stop only lasts until the person starts a new turn.
-          this.modelAudioEnabled = true
-          this.applyModelAudioGate()
-          this.publish({ type: 'userSpeechStarted', utteranceId })
-        },
-        onPause: (snapshot) => {
-          const seconds = (snapshot.samples.length / snapshot.sampleRate).toFixed(2)
-          console.debug(`[voice] pause in ${snapshot.id} at ${seconds}s — transcribing ahead`)
-          this.onPause(snapshot)
-        },
-        onUtterance: (utterance) => {
-          const seconds = (utterance.samples.length / utterance.sampleRate).toFixed(2)
-          console.debug(`[voice] utterance ${utterance.id} closed, ${seconds}s — transcribing`)
-          this.finishIncremental(utterance.id)
-          this.rememberUtterance(utterance.id, utterance.samples, utterance.sampleRate)
-          void this.transcribe(utterance)
-        },
-        onDiscarded: (utteranceId, reason) => {
-          this.abandonIncremental(utteranceId)
-          this.utteranceAudio.delete(utteranceId)
-          console.debug(`[voice] utterance ${utteranceId} discarded: ${reason}`)
-        }
+    this.segmenter = new UtteranceSegmenter({
+      onStreamStart: (utterance) => this.startIncremental(utterance),
+      onStreamFrame: (utteranceId, samples, sampleRate) => {
+        this.pushIncremental(utteranceId, samples, sampleRate)
       },
-      {
-        // Standard retains the former 200 ms floor as an A/B control.
-        minimumNeuralFrames: this.options.shortSpeechBoost?.() === false ? 10 : 5
+      onSustainedSpeech: (utteranceId) => {
+        // An explicit stop only lasts until the person starts a new turn.
+        this.modelAudioEnabled = true
+        this.applyModelAudioGate()
+        this.publish({ type: 'userSpeechStarted', utteranceId })
+      },
+      onPause: (snapshot) => this.onPause(snapshot),
+      onUtterance: (utterance) => {
+        this.finishIncremental(utterance.id)
+        void this.transcribe(utterance)
+      },
+      onDiscarded: (utteranceId) => {
+        this.abandonIncremental(utteranceId)
       }
-    )
+    })
     await this.startVad()
-    if (generation !== this.handoffGeneration) {
+    if (generation !== this.sessionGeneration) {
       await bailBeforeStream(session)
       throw new Error('Voice session was cancelled before it started.')
     }
@@ -245,7 +189,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       await endVoiceSession(session.id).catch(() => undefined)
       throw cause
     }
-    if (generation !== this.handoffGeneration) {
+    if (generation !== this.sessionGeneration) {
       await stream.stop()
       await this.stopVad()
       await endVoiceSession(session.id).catch(() => undefined)
@@ -262,12 +206,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     setTimeout(() => {
       if (this.stream !== stream) return
       const status = stream.inputStatus()
-      // Logged either way: a working capture path is worth confirming, and the
-      // console does not depend on the banner's conditions being right.
-      if (this.captureFrames > 0) {
-        console.debug(`[voice] capture running: ${this.captureFrames} frames, ${status}`)
-        return
-      }
+      if (this.captureFrames > 0) return
       const error = `No microphone audio after ${CAPTURE_GRACE_MS / 1000}s — ${status}`
       console.warn(`[voice] ${error}`)
       this.publish({ type: 'sessionError', error, fatal: false })
@@ -307,76 +246,12 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     // Intentionally a no-op. See `SessionCoordinator.requestRenewal`.
   }
 
-  async handoffResult(
-    request: PersonaPlexHandoffRequest,
-    strategy: PersonaPlexHandoffStrategy
-  ): Promise<VoiceSessionHandle | null> {
-    if (strategy === 'continuous') return null
-    const generation = ++this.handoffGeneration
-    const prompt = buildPersonaPlexHandoffPrompt(strategy, request)
-    const recorded = request.utteranceId
-      ? this.utteranceAudio.get(request.utteranceId) ?? null
-      : null
-    if (request.utteranceId) this.utteranceAudio.delete(request.utteranceId)
-
-    let replacement: VoiceSessionHandle | null = null
-    let session = this.sessionInfo
-    if (handoffRestartsProcess(strategy)) {
-      const previousStream = this.stream
-      this.stream = null
-      await previousStream?.stop()
-      const previousId = this.sessionId
-      this.sessionId = null
-      this.sessionInfo = null
-      if (previousId) await endVoiceSession(previousId).catch(() => undefined)
-      session = await createVoiceSession({
-        model_id: this.options.modelId?.() || undefined,
-        persona_text: prompt
-      })
-      this.sessionId = session.id
-      this.sessionInfo = session
-      replacement = { id: session.id, startedAt: Date.now() }
-    }
-    if (!session) throw new Error('No PersonaPlex session is available for the handoff.')
-
-    await this.replaceStream(session, prompt, generation)
-    if (
-      handoffReplaysAudio(strategy) &&
-      recorded &&
-      this.stream &&
-      generation === this.handoffGeneration
-    ) {
-      const stream = this.stream
-      stream.setMuted(true)
-      // The model's downlink audio must stay silent for the wall-clock paced
-      // replay: the server is now hearing the user's recorded utterance again,
-      // so the user should hear the same question, not the start of the new
-      // reply the model is already generating. Reopen only on the same
-      // generation check `replayAudio` used to decide whether to continue.
-      stream.setOutputGate(false)
-      const trailingSilence = new Float32Array(Math.round(recorded.sampleRate * 0.8))
-      const replay = new Float32Array(recorded.samples.length + trailingSilence.length)
-      replay.set(recorded.samples)
-      replay.set(trailingSilence, recorded.samples.length)
-      await stream.replayAudio(
-        replay,
-        recorded.sampleRate,
-        () => this.stream === stream && generation === this.handoffGeneration
-      )
-      if (this.stream === stream && generation === this.handoffGeneration) {
-        stream.setMuted(this.muted)
-        stream.setOutputGate(this.modelAudioEnabled)
-      }
-    }
-    return replacement
-  }
-
   setModelAudioEnabled(enabled: boolean): void {
     this.modelAudioEnabled = enabled
     this.applyModelAudioGate()
   }
 
-  async stopSpeaking(_correlationId?: string): Promise<void> {
+  async stopSpeaking(): Promise<void> {
     // Stop PersonaPlex output without ending capture or the background task.
     // The next sustained user turn reopens it.
     this.modelAudioEnabled = false
@@ -388,7 +263,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     // Cleared first so the socket closing is not reported as a session failure.
     this.sessionId = null
     this.sessionInfo = null
-    this.handoffGeneration += 1
+    this.sessionGeneration += 1
     this.stopCaptureReports()
     this.segmenter?.flush()
     this.segmenter = null
@@ -399,7 +274,6 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     this.activeAbortControllers.clear()
     await this.stream?.stop()
     this.stream = null
-    this.utteranceAudio.clear()
     if (sessionId) await endVoiceSession(sessionId).catch(() => undefined)
   }
 
@@ -434,19 +308,6 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
 
   private applyModelAudioGate(): void {
     this.stream?.setOutputGate(this.modelAudioEnabled)
-  }
-
-  private rememberUtterance(
-    utteranceId: string,
-    samples: Float32Array,
-    sampleRate: number
-  ): void {
-    this.utteranceAudio.set(utteranceId, { samples: samples.slice(), sampleRate })
-    while (this.utteranceAudio.size > 8) {
-      const oldest = this.utteranceAudio.keys().next().value
-      if (oldest === undefined) break
-      this.utteranceAudio.delete(oldest)
-    }
   }
 
   /** Add the per-connection prompt accepted by both PersonaPlex backends. */
@@ -504,37 +365,8 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     return stream
   }
 
-  /**
-   * Replace only the browser-side stream. The daemon session keeps the loaded
-   * PersonaPlex process unless the selected strategy explicitly restarted it.
-   */
-  private async replaceStream(
-    session: VoiceSessionInfo,
-    prompt: string,
-    generation: number
-  ): Promise<void> {
-    const previous = this.stream
-    this.stream = null
-    await previous?.stop()
-    if (generation !== this.handoffGeneration) return
-    // The old stream is now gone, so reopening cannot leak its independent
-    // answer. The replacement needs to be audible for the checked-result replay.
-    this.modelAudioEnabled = true
-    const stream = this.createStream()
-    await stream.start(this.wsUrl(session, prompt), session.ws_protocol)
-    if (generation !== this.handoffGeneration) {
-      await stream.stop()
-      return
-    }
-    this.stream = stream
-    stream.setMuted(this.muted)
-    this.applyModelAudioGate()
-    this.startCaptureReports(stream)
-  }
-
   /** Load the bundled model before capture starts, falling back without failing voice. */
   private async startVad(): Promise<void> {
-    const startedAt = performance.now()
     try {
       const model = await SileroVadModel.create()
       this.vadHealthy = true
@@ -543,7 +375,6 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         (frame) => this.onVadFrame(frame),
         (error) => this.onVadError(error)
       )
-      console.debug(`[voice] Silero VAD ready in ${Math.round(performance.now() - startedAt)}ms`)
     } catch (cause) {
       this.onVadError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -750,11 +581,8 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     const startedAt = Date.now()
     const abort = new AbortController()
     this.activeAbortControllers.add(abort)
-    const boosted = this.options.shortSpeechBoost?.() !== false
     const short = samples.length / sampleRate <= 2
-    // Boosted audio has decoder context before a clipped first syllable as well
-    // as after the last token. Standard is retained as the tuning control.
-    const audio = boosted && short
+    const audio = short
       ? padSpeechForAsr(samples, sampleRate)
       : padTrailingSilence(samples, sampleRate)
     const wav = encodeWav(audio, sampleRate)
@@ -769,7 +597,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       // installed, one alternate decode is cheaper than asking the person to
       // repeat themselves verbosely. Successful turns never pay this cost.
       const fallback =
-        boosted && short && !first.text
+        short && !first.text
           ? this.options.asrFallbackEngine?.() ?? null
           : null
       if (fallback) {
@@ -782,9 +610,6 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
           first.durationMs === null || retried.durationMs === null
             ? null
             : first.durationMs + retried.durationMs
-        console.debug(
-          `[voice] empty ${first.engine} short transcript retried with ${retried.engine}`
-        )
       }
       return {
         text: result.text,
@@ -847,24 +672,12 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         live &&
         !result.text &&
         utterance.samples.length / utterance.sampleRate <= 2 &&
-        this.options.shortSpeechBoost?.() !== false &&
         this.options.asrFallbackEngine?.()
       ) {
-        // Preserve the short-word recovery guarantee on the new live path. The
-        // file helper performs the installed-engine retry and is paid only when
-        // the incremental decoder returned no word at all.
         result = await this.startTranscription(utterance.samples, utterance.sampleRate).done
       }
       const text = result.text
-      // Two different numbers: what the engine cost, and what the turn waited
-      // for after the user stopped talking. Only the second is felt.
       const waitedMs = Date.now() - closedAt
-      console.debug(
-        `[voice] ${result.engine} transcribed ${audioSeconds.toFixed(1)}s in ` +
-          `${result.roundTripMs}ms, turn waited ${waitedMs}ms` +
-          (live ? ' (fed while speaking)' : reused ? ' (started at the pause)' : '') +
-          (result.engineMs === null ? '' : ` (${result.engineMs}ms in the daemon)`)
-      )
       this.publish({
         type: 'transcriptionMeasured',
         utteranceId: utterance.id,

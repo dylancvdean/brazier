@@ -174,8 +174,7 @@ function profileStorageKey(base: string, profileId: string): string {
 
 function readGenerateHistory(profileId: string): GenerateHistoryEntry[] {
   try {
-    const value = localStorage.getItem(profileStorageKey(GENERATE_HISTORY_KEY, profileId)) ??
-      (profileId === 'local' ? localStorage.getItem(GENERATE_HISTORY_KEY) : null)
+    const value = localStorage.getItem(profileStorageKey(GENERATE_HISTORY_KEY, profileId))
     const parsed = value ? (JSON.parse(value) as unknown) : []
     return Array.isArray(parsed) ? (parsed as GenerateHistoryEntry[]) : []
   } catch {
@@ -223,8 +222,7 @@ function dreamStatusForLoad(event: { phase: string; message: string }): string {
 
 function readEnabledTools(profileId: string): string[] {
   try {
-    const raw = localStorage.getItem(profileStorageKey(ENABLED_TOOLS_KEY, profileId)) ??
-      (profileId === 'local' ? localStorage.getItem(ENABLED_TOOLS_KEY) : null)
+    const raw = localStorage.getItem(profileStorageKey(ENABLED_TOOLS_KEY, profileId))
     if (!raw) return []
     const parsed = JSON.parse(raw) as unknown
     return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
@@ -745,7 +743,7 @@ export function App(): React.JSX.Element {
       const payload = await fetchCapabilities()
       const audio = payload.features.audio_interfaces
       setPipelineFeatures({
-        asr: Boolean(payload.features.asr ?? audio?.batch_asr?.available),
+        asr: Boolean(audio?.batch_asr?.available),
         video_preprocess: Boolean(payload.features.video_preprocess),
         whisper_cpp_engine: Boolean(payload.features.whisper_cpp_engine),
         native_model_audio: Boolean(audio?.native_model_audio?.available),

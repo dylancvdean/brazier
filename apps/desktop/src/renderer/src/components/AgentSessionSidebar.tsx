@@ -8,9 +8,7 @@ import {
 
 const RUNTIME_LABELS: Record<string, string> = {
   simple: 'Simple',
-  pi: 'Simple',
-  powerful: 'Powerful',
-  balanced: 'Simple'
+  powerful: 'Powerful'
 }
 
 function runtimeLabel(runtimeId: string | null | undefined): string {

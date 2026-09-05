@@ -445,14 +445,6 @@ fn same_draft_family(model: &Path, draft: &Path) -> bool {
 /// group-128 tensor table always fails with "tensor data is inconsistent";
 /// only PrismML's own llama.cpp fork can load it. The engine must never
 /// auto-attach such a drafter to a mainline build.
-/// Draft companions that mainline llama.cpp cannot load, identified by family.
-///
-/// PrismML ships a dspark drafter beside the Bonsai weights that embeds the
-/// target's legacy group-128 embedding. Mainline llama.cpp's Q2_0 is a
-/// group-64 layout (18 bytes per 64 weights), so reading the drafter's
-/// group-128 tensor table always fails with "tensor data is inconsistent";
-/// only PrismML's own llama.cpp fork can load it. The engine must never
-/// auto-attach such a drafter to a mainline build.
 pub fn is_mainline_incompatible_draft(path: &Path) -> bool {
     draft_family_prefix(path).is_some_and(|prefix| prefix.contains("bonsai-27b"))
 }

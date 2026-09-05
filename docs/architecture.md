@@ -35,10 +35,9 @@ content-addressed stores under the application data directory. Credentials and
 Hugging Face tokens belong in the operating-system credential store, never in
 SQLite or renderer storage. Application preferences that must span renderer
 origins also live in SQLite; onboarding completion, for example, is shared by
-the development HTTP renderer and packaged `file://` renderer. The renderer
-promotes the previous localStorage flag on first read for upgrade compatibility,
-and migration 10 treats an already-existing database as an onboarded
-installation so cross-origin upgrades do not replay the welcome flow.
+the development HTTP renderer and packaged `file://` renderer. Migration 10
+treats an already-existing database as an onboarded installation so cross-origin
+upgrades do not replay the welcome flow.
 
 ## APIs
 
@@ -62,8 +61,8 @@ collapse them into a single Audio badge meaning.
 1. **Batch ASR (preprocess)** — Implemented via `whisper.cpp`. An attached
    audio file is transcribed offline; the transcript is injected as text into
    the chat request. Works with ordinary text chat models. Exposed as
-   `features.asr` / `features.audio_interfaces.batch_asr` and
-   `POST /v1/audio/transcriptions`.
+  `features.audio_interfaces.batch_asr` and
+  `POST /v1/audio/transcriptions`.
 
 2. **Native model audio** — The selected chat model accepts audio tokens or
    OpenAI-style `input_audio` parts (`capabilities.audio_input = "native"`).
@@ -241,11 +240,10 @@ adapter supplies them:
   through ONNX Runtime Web. The earlier adaptive energy gate remains as an echo
   guard and as a recoverable fallback when model initialization fails. The
   active detector and its current reading are shown in the voice pane, because a
-  session that has stopped hearing you should be able to say why. With short
-  speech boost enabled, a Silero-confirmed 100 ms burst is retained rather than
-  discarded, ASR receives deterministic leading and trailing silence, and an
-  empty clip is tried once on the other installed recognizer. Standard mode
-  keeps the former 200 ms / trailing-only behavior as an A/B control.
+  session that has stopped hearing you should be able to say why. Silero-confirmed
+  100 ms bursts are retained rather than discarded, ASR receives deterministic
+  leading and trailing silence, and an empty clip is tried once on the other
+  installed recognizer.
 - **Routing without another router model.** PersonaPlex has already heard every
   utterance. A local lexical gate decides whether the transcript also needs the
   selected chat or agent model: Always preserves the original behavior, Auto
@@ -253,20 +251,11 @@ adapter supplies them:
   tool, current-fact, and active-task language, and Explicit requires a concrete
   work cue. Skipped turns invoke and record nothing; the voice pane reports the
   decision so the classifier can be tuned from real sessions.
-- **Experimentally handing back a result.** PersonaPlex is the only audible
-  voice; platform TTS is not used. Both supported servers accept `text_prompt`
-  when a WebSocket connection begins, although neither can mutate the prompt of
-  an active generation. The adapter can therefore leave the current stream
-  continuous, reconnect to the same loaded process with direct or service-style
-  result information, optionally replay the exact correlated utterance at
-  realtime pace, or restart the process as a comparison. The background answer
-  remains authoritative in chat regardless of what PersonaPlex says. A separate
-  pre-handoff timing control can leave the old stream audible, mute it when a
-  speculative or final transcript routes to background work, or mute it as soon
-  as sustained speech begins. A local or empty final transcript reopens the old
-  stream; a background turn remains silent until the adapter has stopped it and
-  opened the replacement, preventing the unchecked answer from leaking during
-  the restart.
+- **Mute while background work runs.** PersonaPlex is the only audible voice;
+  platform TTS is not used. A speculative or final transcript that routes to
+  chat or the agent silences the live stream. Local and empty turns reopen it.
+  The background answer remains authoritative in chat; PersonaPlex is not
+  reseeded with it.
 
 Voice-session renewal (duration, context size, a runtime restart) replaces the
 PersonaPlex process at a safe conversational boundary and re-seeds it from the
@@ -309,8 +298,7 @@ share the Pi adapter today (`default simple`):
   tracking, cancellation, and completion detection. Reached exclusively through
   `apps/desktop/src/agent/pi/`. Everything else — tool definitions, permission
   policy, sandboxing, execution, persistence, and the event stream — is Brazier's
-  under `apps/desktop/src/agent/core/`. `pi` remains a legacy alias so sessions
-  created before modes existed still open.
+  under `apps/desktop/src/agent/core/`.
 
 The daemon decides each session's tool set at creation from its mode: `simple`
 gets the base catalog, `powerful` adds the power tools the operator enabled. An

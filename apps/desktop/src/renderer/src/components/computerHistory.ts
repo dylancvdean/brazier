@@ -53,16 +53,6 @@ export function observationError(result: ComputerActionResult | null | undefined
   return result?.message || 'Could not capture the current computer screenshot.'
 }
 
-/**
- * Fara actions must be parsed from normal completion content. Older local
- * sessions may have been run with thinking enabled, which caused llama.cpp to
- * classify the whole XML response as reasoning content; retain that text as a
- * compatibility fallback instead of silently ending the task.
- */
-export function computerModelOutput(responseText: string, reasoningText: string): string {
-  return responseText.trim() ? responseText : reasoningText
-}
-
 function historyMessage(role: Message['role'], content: string | ContentPart[], id: string): Message {
   return {
     id: `computer-history-${id}`,

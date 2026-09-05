@@ -1059,8 +1059,6 @@ async fn capabilities(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             "model_download_queue": true,
             "model_download_cancel": true,
             "model_trust_acknowledgement": true,
-            // Legacy aliases — prefer audio_interfaces below.
-            "asr": features_pipeline.asr,
             "video_preprocess": features_pipeline.video_preprocess,
             "audio_interfaces": {
                 "batch_asr": {
@@ -2087,7 +2085,7 @@ async fn load_default_agent_runtime_id(state: &AppState) -> ApiResult<String> {
         .map_err(ApiError::internal)?
         .and_then(|value| value["default_runtime_id"].as_str().map(str::to_owned))
         .unwrap_or_else(|| crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned());
-    Ok(live_agent_runtime_id(&stored))
+    Ok(present_agent_runtime_id(&stored))
 }
 
 async fn load_enabled_power_tools(state: &AppState) -> ApiResult<Vec<String>> {
@@ -2122,7 +2120,7 @@ async fn agent_preference(State(state): State<AppState>) -> ApiResult<Json<Value
     let default_runtime_id = stored
         .as_ref()
         .and_then(|value| value["default_runtime_id"].as_str())
-        .map(live_agent_runtime_id)
+        .map(present_agent_runtime_id)
         .unwrap_or_else(|| crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned());
     let power_tools = load_enabled_power_tools(&state).await?;
     Ok(Json(json!({
@@ -2135,9 +2133,12 @@ async fn update_agent_preference(
     State(state): State<AppState>,
     Json(preference): Json<UpdateAgentPreference>,
 ) -> ApiResult<Json<Value>> {
-    let runtime_id =
-        crate::agent_types::canonicalize_agent_runtime_id(&preference.default_runtime_id)
-            .to_owned();
+    let runtime_id = preference.default_runtime_id.trim().to_owned();
+    if runtime_id.is_empty() {
+        return Err(ApiError::bad_request(
+            "default_runtime_id is required. Available: simple, powerful",
+        ));
+    }
     let catalog = agent_runtime_catalog();
     let entry = catalog
         .iter()
@@ -2220,23 +2221,25 @@ fn agent_runtime_catalog() -> Vec<Value> {
 
 fn resolve_agent_runtime_id(requested: Option<String>, default_id: &str) -> String {
     requested
-        .map(|value| crate::agent_types::canonicalize_agent_runtime_id(&value).to_owned())
+        .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default_id.to_owned())
 }
 
-/// Runtime id a stored session or preference should use now.
-///
-/// Retired aliases (`pi`) become Simple. A mode that is no longer in the
-/// catalog also becomes Simple so restoring the session cannot fail every
-/// tool call.
-fn live_agent_runtime_id(runtime_id: &str) -> String {
-    let canonical = crate::agent_types::canonicalize_agent_runtime_id(runtime_id);
+/// Present a stored runtime id. Unknown catalog entries become Simple so a
+/// deleted mode cannot fail every tool call on restore.
+fn present_agent_runtime_id(runtime_id: &str) -> String {
+    let trimmed = runtime_id.trim();
+    let id = if trimmed.is_empty() {
+        crate::agent_types::DEFAULT_AGENT_RUNTIME_ID
+    } else {
+        trimmed
+    };
     let available = agent_runtime_catalog().iter().any(|entry| {
-        entry["id"].as_str() == Some(canonical) && entry["available"].as_bool() != Some(false)
+        entry["id"].as_str() == Some(id) && entry["available"].as_bool() != Some(false)
     });
     if available {
-        canonical.to_owned()
+        id.to_owned()
     } else {
         crate::agent_types::DEFAULT_AGENT_RUNTIME_ID.to_owned()
     }
@@ -2245,7 +2248,7 @@ fn live_agent_runtime_id(runtime_id: &str) -> String {
 fn present_agent_session(
     mut session: crate::agent_types::AgentSessionRecord,
 ) -> crate::agent_types::AgentSessionRecord {
-    session.runtime_id = live_agent_runtime_id(&session.runtime_id);
+    session.runtime_id = present_agent_runtime_id(&session.runtime_id);
     session
 }
 
@@ -8306,8 +8309,6 @@ async fn agent_system_prompt(
     let session = authorized_agent_session(&state, &auth, &id).await?;
     let names = match session.enabled_tools.clone() {
         Some(tools) => tools,
-        // Legacy sessions predate mode-aware defaults: derive the mode's set
-        // from the stored runtime id so power tools never leak into Simple.
         None => {
             let enabled_power_tools = match session.runtime_id.as_str() {
                 crate::agent_types::AGENT_RUNTIME_POWERFUL => {
@@ -10769,7 +10770,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_pi_runtime_alias_becomes_simple() {
+    async fn agent_unknown_runtime_is_rejected() {
         let dir = tempdir().unwrap();
         let app = router(test_state(dir.path()).await);
         let (status, body) = json_request(
@@ -10779,8 +10780,7 @@ mod tests {
             json!({ "default_runtime_id": "pi" }),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["default_runtime_id"], "simple");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
         let workspace = tempdir().unwrap();
         let (status, session) = json_request(
@@ -10794,8 +10794,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{session}");
-        assert_eq!(session["runtime_id"], "simple");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{session}");
     }
 
     #[tokio::test]

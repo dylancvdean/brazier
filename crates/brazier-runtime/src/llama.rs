@@ -3421,22 +3421,6 @@ mod tests {
         );
         assert_eq!(one_large_stream.parallel, 1);
         assert_ne!(plan.key(false), one_large_stream.key(false));
-
-        let legacy_child_context = LaunchPlan::resolve(
-            &settings,
-            Some(&TextProfile {
-                subagent_context_size: Some(262_144),
-                parallel_subagents: Some(true),
-                max_subagents: Some(2),
-                ..TextProfile::default()
-            }),
-            Vec::new(),
-            RuntimeTarget::Cpu,
-            false,
-            None,
-            None,
-        );
-        assert_eq!(legacy_child_context.aggregate_context_size(), 393_216);
     }
 
     #[test]

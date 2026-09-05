@@ -980,6 +980,30 @@ impl Database {
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
+            version = 15;
+        }
+
+        if version < 16 {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(
+                "UPDATE agent_sessions SET runtime_id = 'simple' \
+                 WHERE runtime_id IN ('pi', 'balanced', '')",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"UPDATE application_preferences
+                   SET value_json = json_set(value_json, '$.default_runtime_id', 'simple')
+                   WHERE key = 'agent'
+                     AND json_extract(value_json, '$.default_runtime_id')
+                         IN ('pi', 'balanced', '')"#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_migrations(version) VALUES (16)")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
         }
 
         Ok(())
@@ -2005,6 +2029,7 @@ mod tests {
         sqlx::query(
             "CREATE TABLE agent_sessions (\
                  id TEXT PRIMARY KEY, \
+                 runtime_id TEXT NOT NULL DEFAULT 'simple', \
                  updated_at TEXT NOT NULL DEFAULT (datetime('now'))\
              )",
         )
@@ -2017,6 +2042,74 @@ mod tests {
         assert_eq!(
             db.application_preference("welcome").await.unwrap(),
             Some(json!({ "completed": true }))
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_rewrites_retired_agent_runtime_ids() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("existing.sqlite");
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO schema_migrations(version) VALUES (15)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE agent_sessions (id TEXT PRIMARY KEY, runtime_id TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE application_preferences (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_sessions(id, runtime_id) VALUES ('s1', 'pi'), ('s2', 'balanced')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO application_preferences(key, value_json)
+             VALUES ('agent', '{\"default_runtime_id\":\"pi\"}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let db = Database::open(&path).await.unwrap();
+        let ids: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, runtime_id FROM agent_sessions ORDER BY id")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                ("s1".to_owned(), "simple".to_owned()),
+                ("s2".to_owned(), "simple".to_owned())
+            ]
+        );
+        assert_eq!(
+            db.application_preference("agent").await.unwrap(),
+            Some(json!({ "default_runtime_id": "simple" }))
         );
     }
 

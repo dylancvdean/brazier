@@ -89,23 +89,20 @@ describe('basic flows', () => {
       'assistant_agent'
     ])
     expect(chat.assistantMessages()).toHaveLength(1)
-    expect(voice.spoken).toHaveLength(0)
-    expect(voice.handoffs).toHaveLength(0)
     expect(chat.assistantMessages()[0].correlationId).toBe(correlationId)
   })
 
-  it('hands a tool-backed result to the selected PersonaPlex experiment', async () => {
-    const { coordinator, agent, voice } = await live({
-      personaplexHandoffStrategy: 'reconnect-service-replay'
-    })
+  it('mutes PersonaPlex while a background turn runs and unmutes when the answer lands', async () => {
+    const { coordinator, agent, voice } = await live()
     speak(voice, 'utt-1', 'Run the tests and tell me what broke.')
     await Promise.resolve()
     const correlationId = agent.submitted[0].correlationId
+    expect(voice.modelAudioEnabled).toBe(false)
 
     agent.emit({ type: 'runStarted', correlationId })
     agent.emit({ type: 'toolStarted', correlationId, toolCallId: 'c1', tool: 'shell' })
     await Promise.resolve()
-    expect(voice.handoffs).toHaveLength(0)
+    expect(voice.modelAudioEnabled).toBe(false)
 
     agent.emit({
       type: 'toolCompleted',
@@ -115,21 +112,11 @@ describe('basic flows', () => {
       outcome: '1 test failed'
     })
     expect(coordinator.snapshot().task?.confirmedResults).toEqual(['1 test failed'])
-    expect(voice.handoffs).toHaveLength(0)
 
     agent.emit({ type: 'responseFinal', correlationId, text: 'One test failed: oggOpus.' })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(voice.spoken).toHaveLength(0)
-    expect(voice.handoffs).toHaveLength(1)
-    expect(voice.handoffs[0]).toMatchObject({
-      strategy: 'reconnect-service-replay',
-      request: {
-        correlationId,
-        utteranceId: 'utt-1',
-        userText: 'Run the tests and tell me what broke.',
-        resultText: 'One test failed: oggOpus.'
-      }
-    })
+    expect(voice.modelAudioEnabled).toBe(true)
+    expect(coordinator.snapshot().messages.at(-1)?.content).toBe('One test failed: oggOpus.')
   })
 
   it('routes typed input to the same agent session without speaking it', async () => {
@@ -142,18 +129,15 @@ describe('basic flows', () => {
 
     expect(agent.submitted).toHaveLength(1)
     expect(chat.messages[0].source).toBe('user_text')
-    // Default: text-originated answers are shown, not spoken.
-    expect(voice.authoritative()).toHaveLength(0)
     expect(chat.assistantMessages()).toHaveLength(1)
   })
 
-  it('never sends typed answers to platform TTS', async () => {
+  it('never injects typed answers into PersonaPlex', async () => {
     const { coordinator, agent, voice } = await live()
     await coordinator.submitText('Summarize the diff.')
     agent.completeRun(agent.submitted[0].correlationId, 'Three files changed.')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(voice.spoken).toHaveLength(0)
-    expect(voice.handoffs).toHaveLength(0)
+    expect(voice.modelAudioEnabled).toBe(true)
   })
 
   it('uses one agent session for voice and text in the same conversation', async () => {
@@ -320,7 +304,6 @@ describe('what the voice session is connected to', () => {
     expect(agent.submitted).toHaveLength(0)
     // PersonaPlex is the only voice there is, so its audio stays audible.
     expect(voice.modelAudioEnabled).toBe(true)
-    expect(voice.spoken).toHaveLength(0)
   })
 
   it('keeps PersonaPlex as the only audible voice for every destination', async () => {
@@ -330,19 +313,9 @@ describe('what the voice session is connected to', () => {
 
     coordinator.setConfig({ ...base, voiceSessionTarget: 'chat' })
     expect(voice.modelAudioEnabled).toBe(true)
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(voice.spoken).toHaveLength(0)
 
     coordinator.setConfig({ ...base, voiceSessionTarget: 'neither' })
     expect(voice.modelAudioEnabled).toBe(true)
-  })
-
-  it('leaves PersonaPlex audible when this host cannot speak answers', async () => {
-    const context = harness({ voiceSessionTarget: 'chat' })
-    context.voice.speakable = false
-    await context.coordinator.attach('conv-1')
-    await context.coordinator.startVoiceSession()
-    expect(context.voice.modelAudioEnabled).toBe(true)
   })
 
   it('still routes typed turns to the agent when voice is chat-only', async () => {
@@ -354,36 +327,23 @@ describe('what the voice session is connected to', () => {
   })
 })
 
-describe('PersonaPlex before a background handoff', () => {
-  const restart = {
-    personaplexHandoffStrategy: 'restart-service-replay' as const,
-    voiceBackgroundRouting: 'auto' as const
-  }
-
-  it('can leave the old stream audible as the control', async () => {
-    const { voice } = await live({
-      ...restart,
-      personaplexPreHandoffMode: 'respond'
-    })
+describe('PersonaPlex mute-on-route', () => {
+  it('does not mute on speech start alone', async () => {
+    const { voice } = await live({ voiceBackgroundRouting: 'auto' })
     voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-1' })
-    voice.emit({ type: 'userTranscriptPartial', utteranceId: 'utt-1', text: 'Run the tests' })
     expect(voice.modelAudioEnabled).toBe(true)
   })
 
   it('mutes a speculative transcript that looks background-bound', async () => {
-    const { voice } = await live({
-      ...restart,
-      personaplexPreHandoffMode: 'mute-on-route'
-    })
+    const { voice } = await live({ voiceBackgroundRouting: 'auto' })
     voice.emit({ type: 'userTranscriptPartial', utteranceId: 'utt-1', text: 'Run the tests' })
     expect(voice.modelAudioEnabled).toBe(false)
   })
 
   it('reopens a speculative mute when the final turn stays local', async () => {
     const { agent, voice } = await live({
-      ...restart,
-      voiceSessionTarget: 'chat',
-      personaplexPreHandoffMode: 'mute-on-route'
+      voiceBackgroundRouting: 'auto',
+      voiceSessionTarget: 'chat'
     })
     voice.emit({ type: 'userTranscriptPartial', utteranceId: 'utt-1', text: 'Check the thing' })
     expect(voice.modelAudioEnabled).toBe(false)
@@ -394,39 +354,16 @@ describe('PersonaPlex before a background handoff', () => {
     expect(voice.modelAudioEnabled).toBe(true)
   })
 
-  it('can mute before transcription and reopen on the fresh handoff', async () => {
-    const { agent, voice } = await live({
-      ...restart,
-      personaplexPreHandoffMode: 'mute-on-speech'
-    })
+  it('does not mute when voice is connected to nothing', async () => {
+    const { voice } = await live({ voiceSessionTarget: 'neither' })
     voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-1' })
-    expect(voice.modelAudioEnabled).toBe(false)
-
-    speak(voice, 'utt-1', 'Run the tests')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(voice.modelAudioEnabled).toBe(false)
-
-    agent.completeRun(agent.submitted[0].correlationId, 'All tests passed.')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(voice.handoffs).toHaveLength(1)
+    voice.emit({ type: 'userTranscriptPartial', utteranceId: 'utt-1', text: 'Run the tests' })
     expect(voice.modelAudioEnabled).toBe(true)
   })
 
-  it('does not mute when no replacement handoff is selected', async () => {
-    const { voice } = await live({
-      personaplexHandoffStrategy: 'continuous',
-      personaplexPreHandoffMode: 'mute-on-speech'
-    })
-    voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-1' })
-    expect(voice.modelAudioEnabled).toBe(true)
-  })
-
-  it('reopens an immediate mute when transcription returns no words', async () => {
-    const { voice } = await live({
-      ...restart,
-      personaplexPreHandoffMode: 'mute-on-speech'
-    })
-    voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-1' })
+  it('reopens a mute when transcription returns no words', async () => {
+    const { voice } = await live({ voiceBackgroundRouting: 'auto' })
+    voice.emit({ type: 'userTranscriptPartial', utteranceId: 'utt-1', text: 'Run the tests' })
     expect(voice.modelAudioEnabled).toBe(false)
 
     voice.emit({ type: 'transcriptionEmpty', utteranceId: 'utt-1' })
@@ -446,7 +383,7 @@ describe('interruption flows', () => {
     voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-2' })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(voice.stopped).toHaveLength(0)
+    expect(voice.stopped).toBe(0)
     expect(agent.cancelled).toHaveLength(0)
     expect(coordinator.metrics().agentTasksCancelledByInterruption).toBe(0)
     // The answer stays in the chat even though its delivery was cut short.
@@ -512,14 +449,13 @@ describe('interruption flows', () => {
     expect(chat.messages.filter((message) => message.role === 'user')).toHaveLength(3)
   })
 
-  it('preserves both messages when text arrives while the voice is speaking', async () => {
+  it('preserves both messages when text follows a spoken turn', async () => {
     const { coordinator, agent, voice, chat } = await live()
     speak(voice, 'utt-1', 'Describe the policy layer.')
     await Promise.resolve()
     const first = agent.submitted[0].correlationId
     agent.completeRun(first, 'Every call is judged by agent_policy.')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(coordinator.snapshot().speakingCorrelationId).toBeNull()
 
     await coordinator.submitText('And the approvals?')
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -560,7 +496,7 @@ describe('interruption flows', () => {
 
     // Muting the voice must not end anything else.
     await coordinator.cancelVoiceOutput()
-    expect(voice.stopped).toContain(undefined)
+    expect(voice.stopped).toBe(1)
     expect(agent.cancelled).toHaveLength(0)
     // Cancelling delivery after the answer was stored keeps it in the chat.
     expect(chat.assistantMessages()).toHaveLength(1)
@@ -573,7 +509,6 @@ describe('interruption flows', () => {
     await Promise.resolve()
     const correlationId = agent.submitted[0].correlationId
     agent.emit({ type: 'runStarted', correlationId })
-    voice.emit({ type: 'speechStarted', correlationId })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-2' })
@@ -606,7 +541,7 @@ describe('queueing', () => {
 })
 
 describe('session flows', () => {
-  it('renews at a safe boundary when the PersonaPlex experiment prompt changes', async () => {
+  it('renews at a safe boundary when background routing changes the voice role', async () => {
     const { coordinator, voice } = await live()
     expect(voice.contexts[0].behavioralRules.join(' ')).toContain('background assistant')
 
@@ -614,12 +549,12 @@ describe('session flows', () => {
       ...DEFAULT_INTEGRATION_CONFIG,
       voiceEnabled: true,
       voiceSessionTarget: 'agent',
-      personaplexHandoffStrategy: 'reconnect-service-replay'
+      voiceBackgroundRouting: 'auto'
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(voice.sessions).toHaveLength(2)
-    expect(voice.contexts.at(-1)?.behavioralRules.join(' ')).toContain('fresh prompt')
+    expect(voice.contexts.at(-1)?.behavioralRules.join(' ')).toContain('Lightweight turns')
   })
 
   it('renews the voice session at its limit without restarting the agent', async () => {
@@ -629,7 +564,6 @@ describe('session flows', () => {
     const correlationId = agent.submitted[0].correlationId
     agent.completeRun(correlationId, 'Noted: the failing oggOpus test.')
     await new Promise((resolve) => setTimeout(resolve, 0))
-    voice.emit({ type: 'speechCompleted', correlationId })
 
     clock.advance(DEFAULT_INTEGRATION_CONFIG.voiceSessionMaxDurationMs + 1)
     await coordinator.tick()
@@ -664,8 +598,6 @@ describe('session flows', () => {
 
     agent.emit({ type: 'responseFinal', correlationId, text: 'Finished.' })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    voice.emit({ type: 'speechCompleted', correlationId })
-    await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(voice.sessions).toHaveLength(2)
   })
@@ -686,7 +618,6 @@ describe('session flows', () => {
 
     // The answer still lands in the chat; nothing was spoken.
     expect(chat.assistantMessages()[0].content).toBe('Still finished the job.')
-    expect(voice.authoritative()).toHaveLength(0)
   })
 
   it('restores a conversation and its agent binding after a reload', async () => {
@@ -733,7 +664,6 @@ describe('failure flows', () => {
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(voice.authoritative()).toHaveLength(0)
     expect(coordinator.events.eventsOfType('TOOL_FAILED')).toHaveLength(1)
   })
 
@@ -747,24 +677,20 @@ describe('failure flows', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(chat.assistantMessages()).toHaveLength(0)
-    expect(voice.authoritative()).toHaveLength(0)
-    expect(voice.spoken).toHaveLength(0)
     expect(coordinator.snapshot().notice).toContain('The model engine crashed')
     expect(coordinator.snapshot().responses[0].status).toBe('failed')
   })
 
-  it('keeps the answer in chat and never calls the legacy speech renderer', async () => {
+  it('keeps the answer in chat', async () => {
     const { coordinator, agent, voice, chat } = await live()
     speak(voice, 'utt-1', 'Anything.')
     await Promise.resolve()
     const correlationId = agent.submitted[0].correlationId
-    voice.failSpeak = 'No speech synthesizer on this host.'
     agent.completeRun(correlationId, 'Here is the answer.')
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(chat.assistantMessages()[0].content).toBe('Here is the answer.')
-    expect(coordinator.snapshot().responses[0].spokenStatus).toBe('none')
-    expect(voice.spoken).toHaveLength(0)
+    expect(coordinator.snapshot().responses[0].status).toBe('delivered')
   })
 
   it('surfaces a failed submission instead of hanging the turn', async () => {
@@ -848,9 +774,7 @@ describe('failure flows', () => {
   })
 
   it('ignores a duplicate final agent response', async () => {
-    const { coordinator, agent, voice, chat } = await live({
-      personaplexHandoffStrategy: 'reconnect-direct-replay'
-    })
+    const { coordinator, agent, voice, chat } = await live()
     speak(voice, 'utt-1', 'Answer me.')
     await Promise.resolve()
     const correlationId = agent.submitted[0].correlationId
@@ -860,7 +784,7 @@ describe('failure flows', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(chat.assistantMessages()).toHaveLength(1)
-    expect(voice.handoffs).toHaveLength(1)
+    expect(coordinator.metrics().duplicateEventsIgnored).toBe(1)
   })
 
   it('treats a partial transcript as display only', async () => {
@@ -898,19 +822,6 @@ describe('trust boundary', () => {
     // Visible in the voice pane only, so the user can see what was said.
     expect(coordinator.snapshot().voiceModelText).toContain('the build passed')
   })
-
-  it('does not speak when the host has no speech path', async () => {
-    const { coordinator, agent, voice, chat } = await live()
-    voice.speakable = false
-    speak(voice, 'utt-1', 'Say something.')
-    await Promise.resolve()
-    agent.completeRun(agent.submitted[0].correlationId, 'Text only.')
-    await new Promise((resolve) => setTimeout(resolve, 0))
-
-    expect(voice.spoken).toHaveLength(0)
-    expect(chat.assistantMessages()[0].content).toBe('Text only.')
-    expect(coordinator.snapshot().responses[0].spokenStatus).toBe('none')
-  })
 })
 
 describe('spoken confirmation', () => {
@@ -935,9 +846,8 @@ describe('spoken confirmation', () => {
     return { ...context, correlationId }
   }
 
-  it('shows the action before it happens without platform TTS', async () => {
-    const { coordinator, voice } = await holdACall()
-    expect(voice.spoken).toHaveLength(0)
+  it('shows the action before it happens', async () => {
+    const { coordinator } = await holdACall()
     expect(coordinator.snapshot().notice).toContain('Run rm -rf build')
     expect(coordinator.snapshot().pendingApproval?.approvalId).toBe('apv-1')
     expect(coordinator.snapshot().pendingApproval?.executionLocation).toEqual(EXECUTION_LOCATION)
@@ -1008,11 +918,10 @@ describe('spoken confirmation', () => {
     expect(coordinator.snapshot().pendingApproval).toBeNull()
   })
 
-  it('does not speak over a typed request, but still shows what is held', async () => {
-    const { coordinator, agent, voice } = await live()
+  it('still shows a held call on a typed request', async () => {
+    const { coordinator, agent } = await live()
     await coordinator.submitText('Clean up the build directory.')
     const correlationId = agent.submitted[0].correlationId
-    const before = voice.spoken.length
     agent.emit({
       type: 'approvalRequired',
       correlationId,
@@ -1024,7 +933,6 @@ describe('spoken confirmation', () => {
       executionLocation: EXECUTION_LOCATION
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(voice.spoken).toHaveLength(before)
     expect(coordinator.snapshot().pendingApproval?.approvalId).toBe('apv-2')
   })
 })
@@ -1045,11 +953,8 @@ describe('observability', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(coordinator.metrics().responseToSpeechStartMs).toEqual([])
 
-    clock.advance(30)
     voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-2' })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    clock.advance(15)
-    voice.emit({ type: 'speechInterrupted', correlationId })
     expect(coordinator.metrics().interruptToSpeechStopMs).toEqual([])
   })
 

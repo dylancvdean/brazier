@@ -51,7 +51,6 @@ export type VoiceContextInput = {
     | 'voiceContextSummaryLimitChars'
     | 'voiceSessionTarget'
     | 'voiceBackgroundRouting'
-    | 'personaplexHandoffStrategy'
   >
 }
 
@@ -76,13 +75,11 @@ export function buildVoiceContext(input: VoiceContextInput): VoiceContext {
     if (input.config.voiceBackgroundRouting !== 'always') {
       behavioralRules.unshift(
         'You are the only audible voice and the immediate conversational assistant. Lightweight turns may stay entirely with you; answer those naturally and never imply that background work is running.',
-        'For requests that need files, tools, or checked facts, briefly say you are checking rather than inventing an outcome. A fresh prompt may later give you confirmed information to explain.'
+        'For requests that need files, tools, or checked facts, briefly say you are checking rather than inventing an outcome. A background assistant independently puts a checked answer on screen; never claim you saw its work.'
       )
     } else {
       behavioralRules.unshift(
-        input.config.personaplexHandoffStrategy === 'continuous'
-          ? 'You are the only audible voice. Answer the user naturally yourself. A background assistant independently puts a checked answer on screen; never claim you saw its work.'
-          : 'You are the only audible voice. For requests that need files, tools, or checked facts, briefly say you are checking rather than inventing an outcome. A fresh prompt may later give you confirmed information to explain.'
+        'You are the only audible voice. Answer the user naturally yourself. A background assistant independently puts a checked answer on screen; never claim you saw its work.'
       )
     }
   }

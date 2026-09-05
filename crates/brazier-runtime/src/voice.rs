@@ -1,12 +1,7 @@
 //! Moshi-protocol and PersonaPlex full-duplex realtime voice engine.
 //!
-//! PersonaPlex (NVIDIA) and the open-source Moshi runtime it builds on
-//! (Kyutai Labs) implement full-duplex speech-to-speech conversation: audio
-//! streamed in and audio (plus an inner-monologue text transcript) streamed
-//! back out over a single WebSocket, in real time. This module manages the
-//! isolated Python environment and the `moshi.server` process lifecycle,
-//! plus a minimal single-session layer. It intentionally does not proxy the
-//! WebSocket itself — that belongs in the HTTP/WS layer alongside axum.
+//! Manages the isolated Python environment and `moshi.server` process. The
+//! WebSocket itself is proxied from the HTTP layer, not here.
 //!
 //! ## Moshi WebSocket wire protocol
 //!

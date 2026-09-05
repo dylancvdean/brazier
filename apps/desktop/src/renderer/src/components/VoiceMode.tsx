@@ -20,10 +20,6 @@ import { primeVoiceAudio } from '../audio/voiceStream'
 import { modelDisplayName } from '../model-utils'
 import { VOICE_BACKGROUND_ROUTING_OPTIONS } from '../session/backgroundRouting'
 import type { VoiceSessionTarget } from '../session/config'
-import {
-  PERSONAPLEX_HANDOFF_OPTIONS,
-  PERSONAPLEX_PRE_HANDOFF_OPTIONS
-} from '../session/personaplexHandoff'
 import type { SessionCoordinatorHandle } from '../session/useSessionCoordinator'
 import {
   VOICE_QUALIFICATION_PHRASES,
@@ -99,7 +95,7 @@ const TARGETS: Array<[VoiceSessionTarget, string, string]> = [
 
 export function VoiceMode(props: Props): React.JSX.Element {
   const { session } = props
-  const { snapshot, config } = session
+  const { snapshot, config, outputLevel } = session
   const [muted, setMuted] = useState(false)
   const [busy, setBusy] = useState(false)
   const [resolvingApproval, setResolvingApproval] = useState(false)
@@ -122,7 +118,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
   const starting = snapshot.voiceStatus === 'starting' || busy
   const selected = props.models.find((model) => model.id === props.modelId)
   const task = snapshot.task
-  const speaking = snapshot.speakingCorrelationId !== null
+  const speaking = outputLevel > 0.02
   const working = snapshot.activeCorrelationId !== null
   /**
    * Why a conversation cannot start, in the order the user would fix them.
@@ -445,7 +441,6 @@ export function VoiceMode(props: Props): React.JSX.Element {
                 : `in the sandbox on ${snapshot.pendingApproval.executionLocation.daemon_display_name}`}
               {' · '}{snapshot.pendingApproval.executionLocation.platform}/
               {snapshot.pendingApproval.executionLocation.arch}
-              {snapshot.pendingApproval.spoken ? ' · read out to you' : ''}
             </span>
             <span className="voice-approval-hint">
               Say <strong>yes</strong> to allow it or <strong>no</strong> to stop. Anything else
@@ -687,69 +682,6 @@ export function VoiceMode(props: Props): React.JSX.Element {
                     )?.detail
                   }
                 </small>
-              </label>
-              <label className="voice-field">
-                <span>Background result → PersonaPlex experiment</span>
-                <select
-                  value={config.personaplexHandoffStrategy}
-                  onChange={(event) =>
-                    session.setConfig({
-                      ...config,
-                      personaplexHandoffStrategy: event.target
-                        .value as typeof config.personaplexHandoffStrategy
-                    })
-                  }
-                >
-                  {PERSONAPLEX_HANDOFF_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <small>
-                  {
-                    PERSONAPLEX_HANDOFF_OPTIONS.find(
-                      (option) => option.value === config.personaplexHandoffStrategy
-                    )?.detail
-                  }
-                </small>
-              </label>
-              <label className="voice-field">
-                <span>PersonaPlex before background handoff</span>
-                <select
-                  value={config.personaplexPreHandoffMode}
-                  disabled={config.personaplexHandoffStrategy === 'continuous'}
-                  onChange={(event) =>
-                    session.setConfig({
-                      ...config,
-                      personaplexPreHandoffMode: event.target
-                        .value as typeof config.personaplexPreHandoffMode
-                    })
-                  }
-                >
-                  {PERSONAPLEX_PRE_HANDOFF_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <small>
-                  {config.personaplexHandoffStrategy === 'continuous'
-                    ? 'No reconnect or restart is selected, so there is no fresh handoff to wait for.'
-                    : PERSONAPLEX_PRE_HANDOFF_OPTIONS.find(
-                        (option) => option.value === config.personaplexPreHandoffMode
-                      )?.detail}
-                </small>
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={config.shortSpeechBoost}
-                  onChange={(event) =>
-                    session.setConfig({ ...config, shortSpeechBoost: event.target.checked })
-                  }
-                />
-                Short speech boost (100 ms floor, ASR padding, alternate retry)
               </label>
               <label>
                 <input

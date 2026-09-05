@@ -33,10 +33,4 @@ describe('profile-scoped renderer inventory', () => {
     expect(readCachedModels('local')).toEqual([{ id: 'local-model' }])
     expect(readCachedModels('remote-gpu')).toEqual([{ id: 'remote-model' }])
   })
-
-  it('reads legacy cache keys only for the reserved Local profile', () => {
-    localStorage.setItem('brazier.models.v1', JSON.stringify([{ id: 'legacy-local' }]))
-    expect(readCachedModels('local')).toEqual([{ id: 'legacy-local' }])
-    expect(readCachedModels('remote-gpu')).toEqual([])
-  })
 })

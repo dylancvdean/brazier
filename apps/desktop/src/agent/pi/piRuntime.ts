@@ -1,15 +1,4 @@
-/**
- * Pi runtime adapter.
- *
- * This is the ONLY file in the application that imports Pi. Everything outside
- * it speaks the application's own types (`../core/types.ts`), so replacing the
- * runtime means writing a sibling of this file and nothing else. A test
- * (`../boundary.test.ts`) enforces that rule.
- *
- * Division of labour: Pi owns the orchestration loop, tool-call parsing,
- * streaming, and completion detection. The application owns tools, policy,
- * sandboxing, execution, persistence, and the event stream.
- */
+/** Pi runtime adapter — the only file that imports Pi. See `../boundary.test.ts`. */
 
 import { Agent, type AgentEvent as PiAgentEvent, type AgentTool } from '@earendil-works/pi-agent-core'
 import type {
