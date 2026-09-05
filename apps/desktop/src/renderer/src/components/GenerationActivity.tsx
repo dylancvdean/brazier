@@ -3,9 +3,11 @@ import { useEffect, useState } from 'react'
 import {
   cancelGeneration,
   fetchActiveGeneration,
-  fetchBlobObjectUrl,
   type ActiveGeneration
 } from '../api'
+import { useConnectionProfile } from '../connectionProfile'
+import { startPolling } from '../polling'
+import { useBlobUrls } from '../useBlobUrls'
 
 function elapsedLabel(seconds: number): string {
   if (seconds < 60) return `${seconds}s`
@@ -27,70 +29,17 @@ export function GenerationActivity({
   onStopped?: () => void
 }): React.JSX.Element | null {
   const [active, setActive] = useState<ActiveGeneration | null>(null)
-  const [initImageUrl, setInitImageUrl] = useState<string | null>(null)
   const [stopping, setStopping] = useState(false)
+  const profile = useConnectionProfile()
 
   useEffect(() => {
-    let cancelled = false
-    void fetchActiveGeneration()
-      .then((current) => {
-        if (!cancelled) setActive(current)
-      })
-      .catch(() => {
-        // Daemon may be restarting; the next tick retries.
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!active) return
-    let cancelled = false
-    const timer = window.setInterval(() => {
-      void fetchActiveGeneration()
-        .then((current) => {
-          if (!cancelled) setActive(current)
-        })
-        .catch(() => {
-          // Daemon may be restarting; the next tick retries.
-        })
-    }, 1000)
-    return () => {
-      cancelled = true
-    }
-  }, [active])
-
-  useEffect(() => {
-    if (!active) return
-    const timer = window.setInterval(() => {
-      void fetchActiveGeneration()
-        .then(setActive)
-        .catch(() => undefined)
-    }, 1000)
-    return () => {
-      window.clearInterval(timer)
-    }
-  }, [active])
+    setActive(null)
+    return startPolling(fetchActiveGeneration, setActive, 1000)
+  }, [profile.id])
 
   const initBlob = active?.init_image_blob ?? null
-  useEffect(() => {
-    if (!initBlob) {
-      setInitImageUrl(null)
-      return
-    }
-    let cancelled = false
-    void fetchBlobObjectUrl(initBlob)
-      .then((url) => {
-        if (!cancelled) setInitImageUrl(url)
-      })
-      .catch(() => {
-        // The thumbnail is a nicety; the prompt is the part that matters.
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [initBlob])
+  const { urls } = useBlobUrls(initBlob ? [initBlob] : [])
+  const initImageUrl = initBlob ? urls[initBlob] : undefined
 
   useEffect(() => {
     // Once the job is gone, let the surface refresh whatever it produced.

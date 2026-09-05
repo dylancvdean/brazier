@@ -1,7 +1,8 @@
 import { Download, RefreshCw } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 
-import { fetchBlobObjectUrl, saveBlobToDisk } from '../api'
+import { saveBlobToDisk } from '../api'
+import { useBlobUrls } from '../useBlobUrls'
 import { MediaFullscreenExit, MediaFullscreenIcon, useFullscreen } from './FullscreenButton'
 
 export type MessageBlob = {
@@ -33,7 +34,9 @@ function MessageMediaItem({
   const isAudio = blob.mime_type.startsWith('audio/')
   return (
     <figure className="message-media-item">
-      {url && isImage ? (
+      {!isImage && !isVideo && !isAudio ? (
+        <div className="message-media-placeholder">Save this file to open it.</div>
+      ) : url && isImage ? (
         <div
           className={`message-media-preview${active ? ' media-fullscreen' : ''}`}
           ref={setRef}
@@ -70,7 +73,7 @@ function MessageMediaItem({
           onClick={() => onSave(blob)}
         >
           <Download size={12} />
-          {saved ? 'Saved' : 'Save'}
+          {saving ? 'Saving…' : saved ? 'Saved' : 'Save'}
         </button>
       </figcaption>
     </figure>
@@ -92,55 +95,30 @@ export function MessageMedia({
   blobs: MessageBlob[]
   onError?: (message: string) => void
 }): React.JSX.Element | null {
-  const [urls, setUrls] = useState<Record<string, string>>({})
-  const [failed, setFailed] = useState<Record<string, boolean>>({})
-  const [saving, setSaving] = useState<string | null>(null)
+  const [saving, setSaving] = useState<Record<string, boolean>>({})
   const [saved, setSaved] = useState<Record<string, boolean>>({})
   const [retries, setRetries] = useState(0)
 
-  const keys = blobs.map((blob) => blob.sha256).join(',')
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      for (const blob of blobs) {
-        if (urls[blob.sha256] || failed[blob.sha256]) continue
-        try {
-          const url = await fetchBlobObjectUrl(blob.sha256)
-          if (cancelled) return
-          setUrls((current) => ({ ...current, [blob.sha256]: url }))
-        } catch {
-          if (cancelled) return
-          setFailed((current) => ({ ...current, [blob.sha256]: true }))
-        }
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keys, retries])
+  const { urls, failed } = useBlobUrls(
+    blobs.filter((blob) => /^(image|video|audio)\//.test(blob.mime_type)).map((blob) => blob.sha256),
+    retries
+  )
 
   if (blobs.length === 0) return null
 
   async function save(blob: MessageBlob): Promise<void> {
-    setSaving(blob.sha256)
+    setSaving((current) => ({ ...current, [blob.sha256]: true }))
     try {
       const path = await saveBlobToDisk(blob.sha256, blob.mime_type, blob.original_name)
       if (path) setSaved((current) => ({ ...current, [blob.sha256]: true }))
     } catch (cause) {
       onError?.(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setSaving(null)
+      setSaving((current) => ({ ...current, [blob.sha256]: false }))
     }
   }
 
-  function retry(blob: MessageBlob): void {
-    setFailed((current) => {
-      if (!current[blob.sha256]) return current
-      const next = { ...current }
-      delete next[blob.sha256]
-      return next
-    })
+  function retry(): void {
     setRetries((value) => value + 1)
   }
 
@@ -152,10 +130,10 @@ export function MessageMedia({
           blob={blob}
           url={urls[blob.sha256]}
           failed={Boolean(failed[blob.sha256])}
-          saving={saving === blob.sha256}
+          saving={Boolean(saving[blob.sha256])}
           saved={Boolean(saved[blob.sha256])}
           onSave={(target) => void save(target)}
-          onRetry={(target) => retry(target)}
+          onRetry={retry}
         />
       ))}
     </div>

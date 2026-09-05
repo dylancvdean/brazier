@@ -1,7 +1,8 @@
 import { Image, Search, Video } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 
-import { fetchBlobObjectUrl, type GenerateBlobResult } from '../api'
+import type { GenerateBlobResult } from '../api'
+import { useBlobUrls } from '../useBlobUrls'
 
 export type GenerateHistoryEntry = {
   id: string
@@ -20,7 +21,6 @@ type Props = {
 
 export function GenerateHistorySidebar({ entries, activeId, onSelect }: Props): React.JSX.Element {
   const [search, setSearch] = useState('')
-  const [urls, setUrls] = useState<Record<string, string>>({})
   const query = search.trim().toLowerCase()
   const visible = useMemo(
     () =>
@@ -30,26 +30,7 @@ export function GenerateHistorySidebar({ entries, activeId, onSelect }: Props): 
     [entries, query]
   )
 
-  useEffect(() => {
-    const missing = visible.filter((entry) => !urls[entry.result.blob.sha256])
-    if (missing.length === 0) return
-    let cancelled = false
-    void Promise.all(
-      missing.map(
-        async (entry) =>
-          [entry.result.blob.sha256, await fetchBlobObjectUrl(entry.result.blob.sha256)] as const
-      )
-    )
-      .then((loaded) => {
-        if (!cancelled) setUrls((current) => ({ ...current, ...Object.fromEntries(loaded) }))
-      })
-      .catch(() => {
-        // A missing historical blob should not prevent the rest of the list.
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [visible, urls])
+  const { urls } = useBlobUrls(visible.map((entry) => entry.result.blob.sha256))
 
   return (
     <>

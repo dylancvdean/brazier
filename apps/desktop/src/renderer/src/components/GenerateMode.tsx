@@ -3,7 +3,6 @@ import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { MediaFullscreenExit, MediaFullscreenIcon, useFullscreen } from './FullscreenButton'
 import {
   cancelGeneration,
-  fetchBlobObjectUrl,
   fetchModelSettings,
   generateImage,
   generateVideo,
@@ -24,6 +23,7 @@ import {
   usesIntegratedGpuVulkanDefaults
 } from '../runtime-defaults'
 import type { GenerateHistoryEntry } from './GenerateHistorySidebar'
+import { useBlobUrls } from '../useBlobUrls'
 
 type Modality = 'image' | 'video'
 
@@ -49,12 +49,14 @@ function errorText(cause: unknown): string {
 function GenerateCard({
   result,
   url,
+  failed,
   saving,
   saved,
   onSave
 }: {
   result: GenerateBlobResult
   url?: string
+  failed: boolean
   saving: boolean
   saved: boolean
   onSave: (result: GenerateBlobResult) => void
@@ -64,7 +66,9 @@ function GenerateCard({
   return (
     <figure className="generate-card">
       {!url ? (
-        <div className="manage-placeholder">Loading…</div>
+        <div className="manage-placeholder">
+          {failed ? 'Preview unavailable. You can still save this file.' : 'Loading…'}
+        </div>
       ) : isVideo ? (
         <video ref={setRef} src={url} controls playsInline />
       ) : (
@@ -117,7 +121,6 @@ export function GenerateMode(props: Props) {
   const [saving, setSaving] = useState<string | null>(null)
   const [saved, setSaved] = useState<Record<string, string>>({})
   const [results, setResults] = useState<GenerateBlobResult[]>([])
-  const [urls, setUrls] = useState<Record<string, string>>({})
   const [defaultsByModel, setDefaultsByModel] = useState<Record<string, SdcppDefaults>>({})
   const [bundlesByModel, setBundlesByModel] = useState<Record<string, SdcppBundle>>({})
   const [configuredByModel, setConfiguredByModel] = useState<Record<string, DiffusionProfile>>({})
@@ -138,27 +141,7 @@ export function GenerateMode(props: Props) {
   const [refAudios, setRefAudios] = useState<StoredBlob[]>([])
   const [uploading, setUploading] = useState<string | null>(null)
 
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      const next: Record<string, string> = {}
-      for (const result of results) {
-        if (urls[result.blob.sha256]) {
-          next[result.blob.sha256] = urls[result.blob.sha256]
-          continue
-        }
-        try {
-          next[result.blob.sha256] = await fetchBlobObjectUrl(result.blob.sha256)
-        } catch {
-          // ignore individual load failures
-        }
-      }
-      if (!cancelled) setUrls((current) => ({ ...current, ...next }))
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [results])
+  const { urls, failed } = useBlobUrls(results.map((result) => result.blob.sha256))
 
   // What this model has been configured with, which outranks the curated
   // defaults below: a size or step count chosen for a model is a decision, and
@@ -806,6 +789,7 @@ export function GenerateMode(props: Props) {
               key={result.blob.sha256}
               result={result}
               url={urls[result.blob.sha256]}
+              failed={Boolean(failed[result.blob.sha256])}
               saving={saving === result.blob.sha256}
               saved={Boolean(saved[result.blob.sha256])}
               onSave={(target) => void save(target)}

@@ -1,9 +1,9 @@
 import type { ContentPart, Conversation, HubModel, Memory, Message, Role } from './types'
-import { daemonFetch, setDaemonAvailability } from './daemonAvailability'
+import { daemonFetch } from './daemonAvailability'
+import { connection, rememberConnectionProfile, request } from './daemonClient'
+import { readSseData } from './sse'
 
-type Connection = Awaited<ReturnType<typeof window.brazier.getConnection>>
-let connectionPromise: Promise<Connection> | undefined
-const ACTIVE_CONNECTION_PROFILE_KEY = 'brazier.activeConnectionProfile.v1'
+export { invalidateConnectionCache, rememberedConnectionProfileId } from './daemonClient'
 
 export type ConnectionProfile = Awaited<
   ReturnType<typeof window.brazier.listConnectionProfiles>
@@ -11,48 +11,6 @@ export type ConnectionProfile = Awaited<
 export type ConnectionProfileSummary = Awaited<
   ReturnType<typeof window.brazier.getCurrentConnectionProfile>
 >
-
-export function invalidateConnectionCache(): void {
-  connectionPromise = undefined
-}
-
-function rememberConnectionProfile(profile: ConnectionProfileSummary): void {
-  try {
-    localStorage.setItem(ACTIVE_CONNECTION_PROFILE_KEY, profile.id)
-  } catch {
-    // Profile-scoped caches are best-effort just like the cached data itself.
-  }
-}
-
-export function rememberedConnectionProfileId(): string {
-  try {
-    return localStorage.getItem(ACTIVE_CONNECTION_PROFILE_KEY) || 'local'
-  } catch {
-    return 'local'
-  }
-}
-
-if (typeof window !== 'undefined' && window.brazier?.onConnectionProfileChanged) {
-  window.brazier.onConnectionProfileChanged((profile) => {
-    invalidateConnectionCache()
-    rememberConnectionProfile(profile)
-    setDaemonAvailability('checking')
-  })
-}
-
-async function connection(): Promise<Connection> {
-  connectionPromise ??= window.brazier.getConnection()
-  const pending = connectionPromise
-  try {
-    const ready = await pending
-    rememberConnectionProfile(ready.profile)
-    return ready
-  } catch (error) {
-    if (connectionPromise === pending) connectionPromise = undefined
-    setDaemonAvailability('offline')
-    throw error
-  }
-}
 
 export function listConnectionProfiles(): Promise<ConnectionProfile[]> {
   return window.brazier.listConnectionProfiles()
@@ -138,25 +96,6 @@ export function isPendingDaemonPairing(
     pairing.expires_at > nowSeconds &&
     pairing.attempts < pairing.max_attempts
   )
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const daemon = await connection()
-  const headers = new Headers(init?.headers)
-  headers.set('content-type', 'application/json')
-  const response = await daemonFetch(`${daemon.address}${path}`, { ...init, headers })
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as {
-      error?: { message?: string }
-    } | null
-    throw new Error(payload?.error?.message ?? `Request failed with status ${response.status}.`)
-  }
-  // Successful commands such as stop and safety-authority intentionally use
-  // 204 No Content. Calling Response.json() for those responses throws
-  // "Unexpected end of JSON input" and can make a completed control-plane
-  // operation look like an inference failure.
-  if (response.status === 204 || response.status === 205) return undefined as T
-  return response.json() as Promise<T>
 }
 
 export function createDaemonPairing(input: {
@@ -488,18 +427,7 @@ export async function updateComputerSession(
 }
 
 export async function deleteComputerSession(id: string): Promise<void> {
-  const daemon = await connection()
-  const headers = new Headers({ 'content-type': 'application/json' })
-  const response = await daemonFetch(
-    `${daemon.address}/api/v1/computer/sessions/${encodeURIComponent(id)}`,
-    { method: 'DELETE', headers }
-  )
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as {
-      error?: { message?: string }
-    } | null
-    throw new Error(payload?.error?.message ?? `Request failed with status ${response.status}.`)
-  }
+  await request(`/api/v1/computer/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export async function listComputerSteps(sessionId: string): Promise<ComputerStep[]> {
@@ -589,24 +517,8 @@ export async function streamComputerPreview(
   if (!response.ok || !response.body) {
     throw new Error(`Preview stream failed with status ${response.status}.`)
   }
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    let separator = buffer.indexOf('\n\n')
-    while (separator >= 0) {
-      const frame = buffer.slice(0, separator)
-      buffer = buffer.slice(separator + 2)
-      const line = frame.split('\n').find((entry) => entry.startsWith('data:'))
-      if (line) {
-        const payload = line.slice(5).trimStart()
-        if (payload) onFrame(payload)
-      }
-      separator = buffer.indexOf('\n\n')
-    }
+  for await (const data of readSseData(response.body)) {
+    if (data) onFrame(data)
   }
 }
 
@@ -1258,6 +1170,7 @@ export function transcribeAudioIncrementally(
   else options.signal?.addEventListener('abort', cancelFromCaller, { once: true })
 
   const done = (async (): Promise<Transcription> => {
+    let uploadFailure: unknown
     try {
       const daemon = await connection()
       const created = await daemonFetch(
@@ -1302,7 +1215,21 @@ export function transcribeAudioIncrementally(
         },
         body,
         duplex: 'half'
-      } as RequestInit & { duplex: 'half' })
+      } as RequestInit & { duplex: 'half' }).then(async (uploaded) => {
+        if (!uploaded.ok) {
+          const payload = (await uploaded.json().catch(() => null)) as {
+            error?: { message?: string }
+          } | null
+          throw new Error(
+            payload?.error?.message ?? `Streaming audio upload failed (${uploaded.status}).`
+          )
+        }
+      }).catch((cause: unknown) => {
+        // Observe upload failures immediately: the event stream can otherwise
+        // wait forever for audio that will never arrive.
+        uploadFailure = cause
+        abort.abort(cause)
+      })
       const response = await responsePromise
       if (!response.ok || !response.body) {
         const payload = (await response.json().catch(() => null)) as {
@@ -1313,59 +1240,38 @@ export function transcribeAudioIncrementally(
         )
       }
 
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
       let fullText = ''
       let result: Transcription | null = null
-      while (true) {
-        const { done: responseDone, value } = await reader.read()
-        if (responseDone) break
-        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
-        const frames = buffer.split('\n\n')
-        buffer = frames.pop() ?? ''
-        for (const frame of frames) {
-          const data = frame
-            .split('\n')
-            .find((line) => line.startsWith('data:'))
-            ?.slice(5)
-            .trim()
-          if (!data) continue
-          const event = JSON.parse(data) as {
-            type?: string
-            text?: string
-            engine?: string
-            duration_ms?: number
-            error?: { message?: string }
+      for await (const data of readSseData(response.body)) {
+        if (!data) continue
+        const event = JSON.parse(data) as {
+          type?: string
+          text?: string
+          engine?: string
+          duration_ms?: number
+          error?: { message?: string }
+        }
+        if (event.error?.message) throw new Error(event.error.message)
+        if (event.type === 'transcription.delta' && event.text) {
+          fullText += event.text
+          options.onPartial?.(fullText.trim())
+        }
+        if (event.type === 'transcription.done') {
+          result = {
+            text: (event.text ?? fullText).trim(),
+            engine: event.engine ?? 'streaming-asr',
+            durationMs: typeof event.duration_ms === 'number' ? event.duration_ms : null
           }
-          if (event.error?.message) throw new Error(event.error.message)
-          if (event.type === 'transcription.delta' && event.text) {
-            fullText += event.text
-            options.onPartial?.(fullText.trim())
-          }
-          if (event.type === 'transcription.done') {
-            result = {
-              text: (event.text ?? fullText).trim(),
-              engine: event.engine ?? 'streaming-asr',
-              durationMs: typeof event.duration_ms === 'number' ? event.duration_ms : null
-            }
-          }
+          break
         }
       }
-      const uploaded = await uploadPromise
-      if (!uploaded.ok) {
-        const payload = (await uploaded.json().catch(() => null)) as {
-          error?: { message?: string }
-        } | null
-        throw new Error(
-          payload?.error?.message ?? `Streaming audio upload failed (${uploaded.status}).`
-        )
-      }
+      await uploadPromise
+      if (uploadFailure) throw uploadFailure
       if (!result) throw new Error('Streaming transcription ended without a result.')
       return result
     } catch (cause) {
       abort.abort()
-      throw cause
+      throw uploadFailure ?? cause
     } finally {
       options.signal?.removeEventListener('abort', cancelFromCaller)
     }
@@ -1577,114 +1483,100 @@ export async function streamCompletion(
     )
   }
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
   const toolRecords: ToolCallRecord[] = []
   const clientToolCalls: ClientToolCall[] = []
   const transcript: TranscriptMessagePayload[] = []
   let responseText = ''
   let reasoningText = ''
   let generationStats: StreamCompletionResult['generationStats']
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const frames = buffer.split('\n\n')
-    buffer = frames.pop() ?? ''
-    for (const frame of frames) {
-      const data = frame
-        .split('\n')
-        .find((line) => line.startsWith('data:'))
-        ?.slice(5)
-        .trim()
-      if (!data || data === '[DONE]') continue
-      const chunk = JSON.parse(data) as {
-        choices?: Array<{
-          delta?: {
-            content?: string
-            reasoning_content?: string
-            tool_calls?: Array<{
-              index?: number
-              id?: string
-              type?: string
-              function?: { name?: string; arguments?: string | Record<string, unknown> | unknown[] }
-            }>
-          }
-          finish_reason?: string | null
-        }>
-        brazier?: {
-          tool_call?: ToolCallRecord
-          transcript_message?: TranscriptMessagePayload
-          fork_hints?: RuntimeForkHint[]
-          load?: { phase: string; message: string }
-          prefill?: PrefillProgress
-          generation?: {
-            prompt_tokens?: number | null
-            completion_tokens?: number
-            decode_duration_ms?: number
-          }
+  for await (const data of readSseData(response.body)) {
+    if (data === '[DONE]') break
+    if (!data) continue
+    const chunk = JSON.parse(data) as {
+      choices?: Array<{
+        delta?: {
+          content?: string
+          reasoning_content?: string
+          tool_calls?: Array<{
+            index?: number
+            id?: string
+            type?: string
+            function?: { name?: string; arguments?: string | Record<string, unknown> | unknown[] }
+          }>
         }
-        error?: { message?: string }
+        finish_reason?: string | null
+      }>
+      brazier?: {
+        tool_call?: ToolCallRecord
+        transcript_message?: TranscriptMessagePayload
+        fork_hints?: RuntimeForkHint[]
+        load?: { phase: string; message: string }
+        prefill?: PrefillProgress
+        generation?: {
+          prompt_tokens?: number | null
+          completion_tokens?: number
+          decode_duration_ms?: number
+        }
       }
-      if (chunk.error?.message) {
-        throw new GenerationFailure(chunk.error.message, chunk.brazier?.fork_hints ?? [])
-      }
-      if (chunk.brazier?.load) options?.onLoad?.(chunk.brazier.load)
-      if (chunk.brazier?.prefill) options?.onPrefill?.(chunk.brazier.prefill)
-      const generation = chunk.brazier?.generation
-      if (
-        typeof generation?.completion_tokens === 'number' &&
+      error?: { message?: string }
+    }
+    if (chunk.error?.message) {
+      throw new GenerationFailure(chunk.error.message, chunk.brazier?.fork_hints ?? [])
+    }
+    if (chunk.brazier?.load) options?.onLoad?.(chunk.brazier.load)
+    if (chunk.brazier?.prefill) options?.onPrefill?.(chunk.brazier.prefill)
+    const generation = chunk.brazier?.generation
+    if (
+      typeof generation?.completion_tokens === 'number' &&
       typeof generation.decode_duration_ms === 'number'
-      ) {
-        generationStats = {
-          prompt_tokens: generation.prompt_tokens,
-          completion_tokens: generation.completion_tokens,
-          decode_duration_ms: generation.decode_duration_ms
+    ) {
+      generationStats = {
+        prompt_tokens: generation.prompt_tokens,
+        completion_tokens: generation.completion_tokens,
+        decode_duration_ms: generation.decode_duration_ms
+      }
+    }
+    if (chunk.brazier?.tool_call) {
+      toolRecords.push(chunk.brazier.tool_call)
+      options?.onToolCall?.(chunk.brazier.tool_call)
+    }
+    if (chunk.brazier?.transcript_message) {
+      transcript.push(chunk.brazier.transcript_message)
+      // An assistant transcript message commits the reasoning accumulated for
+      // that internal tool round. Keep only subsequent reasoning for the
+      // eventual final assistant message instead of saving every earlier
+      // round a second time on the final response.
+      reasoningText = reasoningAfterTranscriptBoundary(
+        reasoningText,
+        chunk.brazier.transcript_message
+      )
+    }
+    const finishReason = chunk.choices?.[0]?.finish_reason
+    const toolCalls = chunk.choices?.[0]?.delta?.tool_calls
+    if (finishReason === 'tool_calls' && toolCalls?.length) {
+      for (const call of toolCalls) {
+        if (call.id && call.function?.name) {
+          const rawArgs = call.function.arguments
+          clientToolCalls.push({
+            id: call.id,
+            name: call.function.name,
+            arguments:
+              typeof rawArgs === 'string'
+                ? rawArgs
+                : JSON.stringify(rawArgs ?? {})
+          })
         }
       }
-      if (chunk.brazier?.tool_call) {
-        toolRecords.push(chunk.brazier.tool_call)
-        options?.onToolCall?.(chunk.brazier.tool_call)
-      }
-      if (chunk.brazier?.transcript_message) {
-        transcript.push(chunk.brazier.transcript_message)
-        // An assistant transcript message commits the reasoning accumulated for
-        // that internal tool round. Keep only subsequent reasoning for the
-        // eventual final assistant message instead of saving every earlier
-        // round a second time on the final response.
-        reasoningText = reasoningAfterTranscriptBoundary(
-          reasoningText,
-          chunk.brazier.transcript_message
-        )
-      }
-      const finishReason = chunk.choices?.[0]?.finish_reason
-      const toolCalls = chunk.choices?.[0]?.delta?.tool_calls
-      if (finishReason === 'tool_calls' && toolCalls?.length) {
-        for (const call of toolCalls) {
-          if (call.id && call.function?.name) {
-            const rawArgs = call.function.arguments
-            clientToolCalls.push({
-              id: call.id,
-              name: call.function.name,
-              arguments:
-                typeof rawArgs === 'string'
-                  ? rawArgs
-                  : JSON.stringify(rawArgs ?? {})
-            })
-          }
-        }
-      }
-      const reasoningToken = chunk.choices?.[0]?.delta?.reasoning_content
-      if (reasoningToken) {
-        reasoningText += reasoningToken
-        options?.onReasoning?.(reasoningToken)
-      }
-      const token = chunk.choices?.[0]?.delta?.content
-      if (token) {
-        responseText += token
-        onToken(token)
-      }
+    }
+    const reasoningToken = chunk.choices?.[0]?.delta?.reasoning_content
+    if (reasoningToken) {
+      reasoningText += reasoningToken
+      options?.onReasoning?.(reasoningToken)
+    }
+    const token = chunk.choices?.[0]?.delta?.content
+    if (token) {
+      responseText += token
+      onToken(token)
     }
   }
   return { responseText, reasoningText, toolRecords, clientToolCalls, transcript, generationStats }
@@ -1748,20 +1640,10 @@ async function readProgressSse(
     throw new Error(`Request failed with status ${response.status}.`)
   }
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let last: ProgressEvent | null = null
-
-  const consumeFrame = (frame: string): ProgressEvent | null => {
-    const data = frame
-      .split('\n')
-      .find((line) => line.startsWith('data:'))
-      ?.slice(5)
-      .trim()
-    if (!data || data === '[DONE]') return null
+  for await (const data of readSseData(response.body)) {
+    if (data === '[DONE]') break
+    if (!data) continue
     const event = JSON.parse(data) as ProgressEvent
-    last = event
     onProgress(event)
     if (event.error) {
       const error = new Error(event.error) as Error & {
@@ -1771,45 +1653,8 @@ async function readProgressSse(
       throw error
     }
     if (isTerminalProgress(event)) return event
-    return null
   }
 
-  const drainFrames = (final = false): ProgressEvent | null => {
-    const parts = buffer.split('\n\n')
-    if (final) {
-      buffer = ''
-      for (const frame of parts) {
-        if (!frame.trim()) continue
-        const terminal = consumeFrame(frame)
-        if (terminal) return terminal
-      }
-    } else {
-      buffer = parts.pop() ?? ''
-      for (const frame of parts) {
-        if (!frame.trim()) continue
-        const terminal = consumeFrame(frame)
-        if (terminal) return terminal
-      }
-    }
-    return null
-  }
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (value) {
-      buffer += decoder.decode(value, { stream: true })
-      const terminal = drainFrames(false)
-      if (terminal) return terminal
-    }
-    if (done) {
-      buffer += decoder.decode()
-      const terminal = drainFrames(true)
-      if (terminal) return terminal
-      break
-    }
-  }
-
-  if (last && isTerminalProgress(last)) return last
   throw new Error('Operation ended without a completion event.')
 }
 
@@ -2915,40 +2760,26 @@ export async function prepareModel(
     )
   }
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const frames = buffer.split('\n\n')
-    buffer = frames.pop() ?? ''
-    for (const frame of frames) {
-      const data = frame
-        .split('\n')
-        .find((line) => line.startsWith('data:'))
-        ?.slice(5)
-        .trim()
-      if (!data || data === '[DONE]') continue
-      const chunk = JSON.parse(data) as {
-        phase?: string
-        message?: string
-        status?: string
-        residency?: ModelResidency
-        error?: { message?: string }
-        brazier?: { fork_hints?: RuntimeForkHint[] }
-      }
-      if (chunk.error?.message) {
-        throw new GenerationFailure(chunk.error.message, chunk.brazier?.fork_hints ?? [])
-      }
-      if (chunk.phase && chunk.message) {
-        options?.onLoad?.({ phase: chunk.phase, message: chunk.message })
-      }
-      if (chunk.status === 'ready') return chunk.residency ?? null
+  for await (const data of readSseData(response.body)) {
+    if (data === '[DONE]') break
+    if (!data) continue
+    const chunk = JSON.parse(data) as {
+      phase?: string
+      message?: string
+      status?: string
+      residency?: ModelResidency
+      error?: { message?: string }
+      brazier?: { fork_hints?: RuntimeForkHint[] }
     }
+    if (chunk.error?.message) {
+      throw new GenerationFailure(chunk.error.message, chunk.brazier?.fork_hints ?? [])
+    }
+    if (chunk.phase && chunk.message) {
+      options?.onLoad?.({ phase: chunk.phase, message: chunk.message })
+    }
+    if (chunk.status === 'ready') return chunk.residency ?? null
   }
-  return null
+  throw new Error('Model preparation ended before the model was ready. Please retry.')
 }
 
 /** Stop the currently resident local chat model, if any. */
@@ -3263,19 +3094,11 @@ export type StoredBlob = {
   original_name?: string | null
 }
 
-const blobUrlCache = new Map<string, string>()
-
-export async function fetchBlobObjectUrl(sha256: string): Promise<string> {
-  const cached = blobUrlCache.get(sha256)
-  if (cached) return cached
+export async function fetchBlob(sha256: string, signal?: AbortSignal): Promise<Blob> {
   const daemon = await connection()
-  const headers = new Headers()
-  const response = await daemonFetch(`${daemon.address}/api/v1/blobs/${sha256}`, { headers })
+  const response = await daemonFetch(`${daemon.address}/api/v1/blobs/${encodeURIComponent(sha256)}`, { signal })
   if (!response.ok) throw new Error(`Could not load attachment (${response.status}).`)
-  const blob = await response.blob()
-  const url = URL.createObjectURL(blob)
-  blobUrlCache.set(sha256, url)
-  return url
+  return response.blob()
 }
 
 /** Extension to suggest for a stored blob, from its MIME type. */

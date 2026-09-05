@@ -16,43 +16,8 @@ import type {
   SandboxDescription,
   ToolExecutionRecord
 } from '../../agent/core/types'
+import { connection, request } from './daemonClient'
 import { daemonFetch } from './daemonAvailability'
-
-type Connection = Awaited<ReturnType<typeof window.brazier.getConnection>>
-let connectionPromise: Promise<Connection> | undefined
-
-export function invalidateAgentConnectionCache(): void {
-  connectionPromise = undefined
-}
-
-if (typeof window !== 'undefined' && window.brazier?.onConnectionProfileChanged) {
-  window.brazier.onConnectionProfileChanged(invalidateAgentConnectionCache)
-}
-
-async function connection(): Promise<Connection> {
-  connectionPromise ??= window.brazier.getConnection()
-  const pending = connectionPromise
-  try {
-    return await pending
-  } catch (error) {
-    if (connectionPromise === pending) connectionPromise = undefined
-    throw error
-  }
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const daemon = await connection()
-  const headers = new Headers(init?.headers)
-  headers.set('content-type', 'application/json')
-  const response = await daemonFetch(`${daemon.address}${path}`, { ...init, headers })
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as {
-      error?: { message?: string }
-    } | null
-    throw new Error(payload?.error?.message ?? `Request failed with status ${response.status}.`)
-  }
-  return response.json() as Promise<T>
-}
 
 export type AgentSandboxCapabilities = {
   backend: string

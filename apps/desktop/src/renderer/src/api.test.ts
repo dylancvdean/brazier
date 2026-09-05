@@ -3,10 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   encodePcm16,
   filenameWithExtension,
+  downloadModel,
   invalidateConnectionCache,
   messagesForCompletion,
   prefillProgressLabel,
+  prepareModel,
   reasoningAfterTranscriptBoundary,
+  streamCompletion,
   transcribeAudioIncrementally
 } from './api'
 import { setDaemonAvailability } from './daemonAvailability'
@@ -121,6 +124,82 @@ describe('transcribeAudioIncrementally', () => {
       engine: 'streaming-asr',
       durationMs: 42
     })
+  })
+
+  it.each(['network', 'http'])('fails promptly when the PCM upload fails (%s)', async (failure) => {
+    vi.stubGlobal('window', {
+      brazier: { getConnection: vi.fn().mockResolvedValue({
+        address: 'http://localhost:9999', profile: { id: 'local' }
+      }) }
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/sessions')) return new Response(JSON.stringify({ id: 'broken' }))
+      if (url.endsWith('/events')) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener('abort', () => controller.error(init.signal?.reason))
+          }
+        }))
+      }
+      if (failure === 'network') throw new TypeError('upload disconnected')
+      return new Response(JSON.stringify({ error: { message: 'upload rejected' } }), { status: 500 })
+    }))
+    setDaemonAvailability('healthy')
+    const transcription = transcribeAudioIncrementally(16000)
+    await expect(transcription.done).rejects.toThrow(
+      failure === 'network' ? 'upload disconnected' : 'upload rejected'
+    )
+  })
+})
+
+describe('stream completion boundaries', () => {
+  afterEach(() => {
+    invalidateConnectionCache()
+    vi.unstubAllGlobals()
+  })
+
+  function respond(data: string, close = true): ReturnType<typeof vi.fn> {
+    vi.stubGlobal('window', { brazier: { getConnection: vi.fn().mockResolvedValue({
+      address: 'http://localhost:9999', profile: { id: 'local' }
+    }) } })
+    const cancel = vi.fn()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(data))
+        if (close) controller.close()
+      },
+      cancel
+    }))))
+    setDaemonAvailability('healthy')
+    return cancel
+  }
+
+  it('returns chat output and closes the reader at DONE even if the server stays open', async () => {
+    const cancel = respond('data: {"choices":[{"delta":{"content":"hello"}}]}\r\n\r\ndata: [DONE]\r\n\r\n', false)
+    const token = vi.fn()
+    const result = await streamCompletion([], 'model', new AbortController().signal, token, { dropReasoningBetweenTurns: false })
+    expect(result.responseText).toBe('hello')
+    expect(token).toHaveBeenCalledExactlyOnceWith('hello')
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it('reports truncated model preparation instead of claiming success', async () => {
+    respond('data: {"phase":"loading","message":"Loading model"}\n\n')
+    await expect(prepareModel('model')).rejects.toThrow('before the model was ready')
+  })
+
+  it('closes model preparation as soon as the model is ready', async () => {
+    const cancel = respond('data: {"status":"ready","residency":null}\r\n\r\n', false)
+    await expect(prepareModel('model')).resolves.toBeNull()
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it('accepts a download completion without a trailing blank line', async () => {
+    respond('data: {"phase":"done","done":true,"result":{"model_id":"test","path":"/models/test.gguf"}}')
+    const progress = vi.fn()
+    await expect(downloadModel('owner/repo', 'test.gguf', progress)).resolves.toMatchObject({ path: '/models/test.gguf' })
+    expect(progress).toHaveBeenCalledOnce()
   })
 })
 

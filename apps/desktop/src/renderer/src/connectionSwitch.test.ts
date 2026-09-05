@@ -124,7 +124,7 @@ describe('renderer connection switch boundary', () => {
     expect(session.ws_protocol).toBe('brazier.voice.secret')
   })
 
-  it('invalidates both the general and agent API connection promises', async () => {
+  it('shares and invalidates one connection across the general and agent APIs', async () => {
     const listeners: Array<(profile: unknown) => void> = []
     let selected = {
       address: 'https://one.example',
@@ -179,13 +179,30 @@ describe('renderer connection switch boundary', () => {
     await api.fetchWelcomePreference()
     await agentApi.fetchAgentCapabilities()
 
-    expect(listeners).toHaveLength(2)
-    expect(getConnection).toHaveBeenCalledTimes(4)
+    expect(listeners).toHaveLength(1)
+    expect(getConnection).toHaveBeenCalledTimes(2)
     expect(requests).toEqual([
       'https://one.example/api/v1/preferences/welcome',
       'https://one.example/api/v1/agent/capabilities',
       'https://two.example/api/v1/preferences/welcome',
       'https://two.example/api/v1/agent/capabilities'
     ])
+  })
+
+  it('does not send a pending mutation to a connection that was replaced', async () => {
+    let resolveConnection!: (value: unknown) => void
+    const getConnection = vi.fn(() => new Promise((resolve) => { resolveConnection = resolve }))
+    vi.stubGlobal('window', { brazier: { getConnection } })
+    const fetch_ = vi.fn()
+    vi.stubGlobal('fetch', fetch_)
+    const api = await import('./api')
+    const pending = api.saveWelcomePreference(true)
+    api.invalidateConnectionCache()
+    resolveConnection({ address: 'https://old.example', profile: { id: 'old' } })
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetch_).not.toHaveBeenCalled()
+    const { daemonAvailability } = await import('./daemonAvailability')
+    expect(daemonAvailability()).toBe('healthy')
   })
 })
