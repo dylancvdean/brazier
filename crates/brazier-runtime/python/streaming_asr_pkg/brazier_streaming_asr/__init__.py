@@ -1,3 +1,3 @@
 """Brazier streaming ASR worker using Transformers."""
 
-__version__ = "0.2.13-beta.76"
+__version__ = "0.3.0-beta.1"
