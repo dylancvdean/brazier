@@ -1579,7 +1579,15 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
                   <input
                     type="checkbox"
                     checked={modes[key]}
-                    disabled={savingModes}
+                    disabled={
+                      savingModes ||
+                      (key === 'computer' && window.brazier.platform === 'win32')
+                    }
+                    title={
+                      key === 'computer' && window.brazier.platform === 'win32'
+                        ? 'Computer Use is unavailable on Windows in this beta.'
+                        : undefined
+                    }
                     onChange={(event) => void toggleMode(key, event.target.checked)}
                   />
                 </label>

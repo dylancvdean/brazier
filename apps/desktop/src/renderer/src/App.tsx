@@ -510,6 +510,8 @@ export function App(): React.JSX.Element {
   const [messages, setMessages] = useState<Message[]>([])
   const [tipId, setTipId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  const draftsRef = useRef({ chat: '', agent: '', computer: '' })
+  const chatTurnRef = useRef(0)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [streamingText, setStreamingText] = useState('')
   const [streamingReasoning, setStreamingReasoning] = useState('')
@@ -595,6 +597,8 @@ export function App(): React.JSX.Element {
   // synthetic conversation id so the message-loading effects treat them like a
   // conversation, but every write is intercepted before it reaches the daemon.
   const [incognito, setIncognito] = useState(false)
+  const incognitoRef = useRef(incognito)
+  incognitoRef.current = incognito
   const INCOGNITO_ID = 'incognito'
   // In-app confirmation before discarding a non-empty incognito session. A
   // native `window.confirm` blocks the renderer main loop and trips Chromium's
@@ -666,6 +670,19 @@ export function App(): React.JSX.Element {
   }, [workspaceModes, appMode])
 
   const abortRef = useRef<AbortController | undefined>(undefined)
+  const abortChatGeneration = useCallback((): void => {
+    chatTurnRef.current += 1
+    abortRef.current?.abort()
+    abortRef.current = undefined
+    setBusy(false)
+    setStreamingText('')
+    setStreamingReasoning('')
+    setStreamingTools([])
+    setStreamingToolOffsets([])
+    setGenerationRate(null)
+    setGenerationTokens(null)
+    setModelLoadStatus(null)
+  }, [])
   const prepareAbortRef = useRef<AbortController | undefined>(undefined)
   const preparingModelRef = useRef('')
   const conversationRefreshRef = useRef(0)
@@ -847,8 +864,15 @@ export function App(): React.JSX.Element {
   const switchAppMode = useCallback(
     (next: AppMode): void => {
       if (next === appMode) return
+      const draftKey = (mode: AppMode): 'chat' | 'agent' | 'computer' =>
+        mode === 'agent' || mode === 'computer' ? mode : 'chat'
+      draftsRef.current[draftKey(appMode)] = draft
+      setDraft(draftsRef.current[draftKey(next)] ?? '')
+      if (next !== 'chat') setAttachments([])
+      if (appMode === 'chat' && busy && next !== 'chat') abortChatGeneration()
       setAppMode(next)
       if ((next === 'chat' || next === 'agent') && selectedModel) {
+        if (busy) abortChatGeneration()
         selectModel(selectedModel, next)
       }
       // Chat stays mounted while other modes are active; re-read the open
@@ -858,7 +882,7 @@ export function App(): React.JSX.Element {
         void refreshMessages(conversationId).catch(() => undefined)
       }
     },
-    [appMode, selectedModel, selectModel, conversationId]
+    [appMode, selectedModel, selectModel, conversationId, draft, busy, abortChatGeneration]
   )
 
   const unloadSelectedModel = useCallback(async (): Promise<void> => {
@@ -1083,6 +1107,10 @@ export function App(): React.JSX.Element {
   const shellComposer = agentMode ? agentComposer : computerMode ? computerComposer : null
   const shellComposerMode = agentMode || computerMode
   const voiceLive = session.snapshot.voiceStatus === 'live'
+  const coordinatorWorking = session.snapshot.activeCorrelationId !== null
+  const streamingOwner = session.snapshot.responses.find(
+    (entry) => entry.correlationId === session.snapshot.activeCorrelationId
+  )?.owner
   const audioSupported = useMemo(() => voiceStreamSupported(), [])
   /** Whichever answer is streaming: the composer's own, or a coordinated turn. */
   const liveText = streamingText || session.snapshot.streamingText
@@ -1389,13 +1417,22 @@ export function App(): React.JSX.Element {
   // Voice writes into a conversation, so there has to be one before the user can
   // start speaking.
   useEffect(() => {
-    if (appMode !== 'voice' || conversationId) return
+    if ((appMode !== 'voice' && appMode !== 'agent') || conversationId) return
     void newConversation().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
   }, [appMode, conversationId])
 
+  // Unmounting VoiceMode must actually stop the microphone. The coordinator
+  // lives on App, so leaving the tab is the teardown, not App unmount.
+  useEffect(() => {
+    if (appMode === 'voice') return
+    if (session.snapshot.voiceStatus === 'off' || session.snapshot.voiceStatus === 'error') return
+    void session.endVoice()
+  }, [appMode, session.endVoice, session.snapshot.voiceStatus])
+
   async function newConversation(): Promise<void> {
+    abortChatGeneration()
     if (incognito) setIncognito(false)
     setIncognitoDiscardOpen(false)
     const conversation = await createConversation()
@@ -1768,7 +1805,7 @@ export function App(): React.JSX.Element {
       metadata?: Record<string, unknown>
     }
   ): Promise<Message> {
-    if (incognito) {
+    if (incognitoRef.current) {
       const message: Message = {
         id: `ephemeral-${crypto.randomUUID()}`,
         conversation_id: INCOGNITO_ID,
@@ -1784,7 +1821,7 @@ export function App(): React.JSX.Element {
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
         created_at: new Date().toISOString()
       }
-      setMessages((current) => [...current, message])
+      setMessages((current) => (incognitoRef.current ? [...current, message] : current))
       return message
     }
     return createMessage(conversationId, input)
@@ -1823,6 +1860,7 @@ export function App(): React.JSX.Element {
       openManage('runtimes')
       return
     }
+    const turn = ++chatTurnRef.current
     setBusy(true)
     setError(null)
     setForkHints([])
@@ -1905,6 +1943,7 @@ export function App(): React.JSX.Element {
           selectedModel,
           controller.signal,
           (token) => {
+            if (turn !== chatTurnRef.current) return
             setModelLoadStatus(null)
             responseText += token
             setStreamingText(responseText)
@@ -2083,9 +2122,11 @@ export function App(): React.JSX.Element {
         }
       }
     } finally {
-      setBusy(false)
-      setModelLoadStatus(null)
-      abortRef.current = undefined
+      if (turn === chatTurnRef.current) {
+        setBusy(false)
+        setModelLoadStatus(null)
+        abortRef.current = undefined
+      }
     }
   }
 
@@ -2099,6 +2140,9 @@ export function App(): React.JSX.Element {
         <WelcomeScreen
           onContinue={() => {
             void markWelcomeCompleted()
+            void fetchWorkspacePreference()
+              .then((result) => setWorkspaceModes(result.modes))
+              .catch(() => undefined)
             setShowWelcome(false)
           }}
           onOpenRuntimes={() => {
@@ -2227,6 +2271,8 @@ export function App(): React.JSX.Element {
                   <button
                     className="conversation-select"
                     onClick={() => {
+                      if (conversation.id === conversationId && !incognito) return
+                      abortChatGeneration()
                       if (incognito) setIncognito(false)
                       setConversationId(conversation.id)
                     }}
@@ -2504,7 +2550,7 @@ export function App(): React.JSX.Element {
           </div>
         )}
 
-        {appMode === 'generate' ? (
+        <div hidden={appMode !== 'generate'}>
           <GenerateMode
             models={generateModels}
             modality={generateModality}
@@ -2524,7 +2570,7 @@ export function App(): React.JSX.Element {
               setActiveGenerateHistoryId(entry.id)
             }}
           />
-        ) : null}
+        </div>
         {appMode === 'voice' ? (
           <VoiceMode
             models={localModels}
@@ -2568,6 +2614,8 @@ export function App(): React.JSX.Element {
             onSidebarChange={setAgentSidebar}
             onSuggestPrompt={setDraft}
             onSessionBound={session.bindAgentSession}
+            onSubmitTurn={session.submitText}
+            onCancelTurn={session.cancelResponse}
             onError={setError}
           />
         ) : null}
@@ -2770,8 +2818,12 @@ export function App(): React.JSX.Element {
                   </div>
                   <div className="message-body">
                     <div className="message-meta">
-                      <strong>{session.snapshot.streamingText ? 'Agent' : 'Brazier'}</strong>
-                      {busy ? <LoaderCircle className="spin" size={14} /> : null}
+                      <strong>
+                        {session.snapshot.streamingText && streamingOwner === 'agent'
+                          ? 'Agent'
+                          : 'Brazier'}
+                      </strong>
+                      {busy || coordinatorWorking ? <LoaderCircle className="spin" size={14} /> : null}
                     </div>
                     <ReasoningDisclosure text={streamingReasoning} defaultOpen />
                     <StreamingTurnSegments
@@ -3002,7 +3054,7 @@ export function App(): React.JSX.Element {
               >
                 <Paperclip size={18} />
               </button>
-              {(shellComposerMode ? shellComposer?.running : busy) ? (
+              {(shellComposerMode ? shellComposer?.running : busy || coordinatorWorking) ? (
                 <button
                   className="send-button stop"
                   type="button"
@@ -3011,10 +3063,13 @@ export function App(): React.JSX.Element {
                       ? 'Stop the run, terminate its processes, and refuse pending approvals'
                       : computerMode
                         ? 'Stop the computer-use loop'
-                        : 'Stop generation'
+                        : coordinatorWorking
+                          ? 'Stop the current response'
+                          : 'Stop generation'
                   }
                   onClick={() => {
                     if (shellComposerMode) void shellComposer?.stop()
+                    else if (coordinatorWorking) void session.cancelResponse()
                     else abortRef.current?.abort()
                   }}
                 >

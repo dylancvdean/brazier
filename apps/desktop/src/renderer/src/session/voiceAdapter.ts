@@ -172,6 +172,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       },
       onDiscarded: (utteranceId) => {
         this.abandonIncremental(utteranceId)
+        this.publish({ type: 'utteranceDiscarded', utteranceId })
       }
     })
     await this.startVad()
@@ -635,6 +636,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     sampleRate: number
     voicedFrames: number
   }): Promise<void> {
+    const generation = this.sessionGeneration
     const closedAt = Date.now()
     this.transcribing += 1
     this.publish({ type: 'transcriptionStarted', utteranceId: utterance.id })
@@ -676,6 +678,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       ) {
         result = await this.startTranscription(utterance.samples, utterance.sampleRate).done
       }
+      if (generation !== this.sessionGeneration) return
       const text = result.text
       const waitedMs = Date.now() - closedAt
       this.publish({
@@ -691,11 +694,11 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       // Whatever leaked past the echo canceller is not a new question, and is
       // the one case where dropping the utterance without a word is correct.
       if (isEchoOfSpokenText(text, this.lastModelText)) {
-        this.publish({ type: 'transcriptionEmpty', utteranceId: utterance.id })
+        this.publish({ type: 'transcriptionEmpty', utteranceId: utterance.id, reason: 'echo' })
         return
       }
       if (!text) {
-        this.publish({ type: 'transcriptionEmpty', utteranceId: utterance.id })
+        this.publish({ type: 'transcriptionEmpty', utteranceId: utterance.id, reason: 'empty' })
         return
       }
       this.publish({ type: 'userTranscriptFinal', utteranceId: utterance.id, text })

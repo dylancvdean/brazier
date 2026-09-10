@@ -125,6 +125,8 @@ export function ComputerMode(props: Props): React.JSX.Element {
   const [liveThought, setLiveThought] = useState('')
   const [maxScreenshotsKept, setMaxScreenshotsKept] = useState(3)
   const abortRef = useRef<AbortController | null>(null)
+  const runningRef = useRef(false)
+  runningRef.current = running
 
   useEffect(() => {
     let current = true
@@ -157,6 +159,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
   const loadSession = useCallback(
     async (id: string): Promise<void> => {
       onError(null)
+      if (runningRef.current && sessionRef.current && sessionRef.current.id !== id) {
+        onError('Stop Computer Use before switching sessions.')
+        return
+      }
       try {
         const list = await refreshSessions()
         const found = list.find((entry) => entry.id === id) ?? null
@@ -442,13 +448,15 @@ export function ComputerMode(props: Props): React.JSX.Element {
     // remains immediate even if the HTTP service is wedged or has crashed.
     await window.brazier.computer.setActive(false)
     const active = sessionRef.current
-    if (active?.target === 'desktop') {
+    if (active) {
       try {
         await stopComputerSession(active.id)
       } catch {
         // Escape remains a local emergency stop even if the daemon vanished.
       }
     }
+    setPendingApproval(null)
+    setPendingUserQuestion(null)
     setRunning(false)
   }, [])
 
@@ -616,6 +624,15 @@ export function ComputerMode(props: Props): React.JSX.Element {
 
   async function resolveApproval(approve: boolean): Promise<void> {
     if (resolvingApproval || !pendingApproval || !session) return
+    if (!running && !approve) {
+      setPendingApproval(null)
+      return
+    }
+    if (!running && approve) {
+      onError('Computer Use was stopped. Start a new turn to continue.')
+      setPendingApproval(null)
+      return
+    }
     setResolvingApproval(true)
     onError(null)
     let safetyActive = false
@@ -670,8 +687,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
   }
 
   const targetUnavailable =
-    (target === 'desktop' && connectionProfile.kind === 'remote')
-      ? `Desktop control must be activated on ${connectionProfile.name}; use Browser for this remote daemon.`
+    daemonPlatform === null
+      ? 'Checking whether Computer Use is available on this daemon…'
+      : (target === 'desktop' && connectionProfile.kind === 'remote')
+        ? `Desktop control must be activated on ${connectionProfile.name}; use Browser for this remote daemon.`
       : daemonPlatform === 'windows'
         ? 'Computer Use is unavailable on this Windows daemon; Agent mode remains sandboxed and supported.'
         : ''
@@ -712,9 +731,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
   useEffect(() => {
     return () => {
       abortRef.current?.abort()
-      // setActive(false) clears the overlay marker and revokes daemon desktop
-      // authority from main, even when this view unmounts mid-session.
+      abortRef.current = null
+      const id = sessionRef.current?.id
       void window.brazier.computer.setActive(false)
+      if (id) void stopComputerSession(id).catch(() => undefined)
     }
   }, [])
 

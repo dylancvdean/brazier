@@ -40,6 +40,13 @@ export class WorkerAgentAdapter implements AgentAdapter {
   private activeCorrelationId: string | null = null
   private activeRunId: string | null = null
   private lastRunId: string | null = null
+  /** Run ids that belong to a cancelled or superseded turn. */
+  private readonly staleRunIds = new Set<string>()
+  /**
+   * After cancel-before-start, events whose run id is not yet known must not
+   * bind to a newer correlation. Cleared when submitTurn starts a new turn.
+   */
+  private ignoreUnboundRuns = false
   private readonly statuses = new Map<string, AgentRunStatusReport>()
   private readonly listeners = new Set<(event: AgentAdapterEvent) => void>()
   /** Attached while anyone is listening; see `subscribe`. */
@@ -104,8 +111,10 @@ export class WorkerAgentAdapter implements AgentAdapter {
       await updateAgentSession(sessionId, { model }).catch(() => undefined)
     }
     assertDaemonMutationAllowed({ method: 'POST' })
+    if (this.activeRunId) this.staleRunIds.add(this.activeRunId)
     this.activeCorrelationId = request.correlationId
     this.activeRunId = null
+    this.ignoreUnboundRuns = false
     this.streamed = ''
     this.statuses.set(request.correlationId, {
       correlationId: request.correlationId,
@@ -148,7 +157,9 @@ export class WorkerAgentAdapter implements AgentAdapter {
       actual.platform !== expectedExecutionLocation.platform ||
       actual.arch !== expectedExecutionLocation.arch
     ) {
-      throw new Error('The approval execution host changed; the decision was not accepted by the client.')
+      // The broker already recorded the decision. Surface the mismatch without
+      // making the coordinator restore a sticky pending card.
+      console.warn('[agent] approval host changed after the decision was accepted')
     }
     this.publish({
       type: 'approvalResolved',
@@ -160,7 +171,13 @@ export class WorkerAgentAdapter implements AgentAdapter {
   async cancelRun(correlationId: string): Promise<void> {
     if (!this.sessionId) return
     if (this.activeCorrelationId && this.activeCorrelationId !== correlationId) return
-    if (this.activeRunId !== null) this.lastRunId = this.activeRunId
+    if (this.activeRunId !== null) {
+      this.lastRunId = this.activeRunId
+      this.staleRunIds.add(this.activeRunId)
+    } else {
+      this.ignoreUnboundRuns = true
+    }
+    this.activeRunId = null
     assertDaemonMutationAllowed({ method: 'POST' })
     await window.brazier.agent.cancel(this.sessionId)
   }
@@ -201,7 +218,19 @@ export class WorkerAgentAdapter implements AgentAdapter {
 
   private onWorkerEvent(event: AgentEvent): void {
     if (this.lastRunId !== null && event.runId === this.lastRunId) return
-    if (this.activeRunId === null) this.activeRunId = event.runId
+    if (this.staleRunIds.has(event.runId)) return
+    if (this.activeRunId !== null && event.runId !== this.activeRunId) {
+      this.staleRunIds.add(event.runId)
+      return
+    }
+    if (this.activeRunId === null) {
+      if (this.ignoreUnboundRuns) {
+        this.staleRunIds.add(event.runId)
+        this.lastRunId = event.runId
+        return
+      }
+      this.activeRunId = event.runId
+    }
     const correlationId = this.activeCorrelationId
     if (!correlationId) return
     switch (event.type) {

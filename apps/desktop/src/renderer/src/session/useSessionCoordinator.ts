@@ -3,8 +3,8 @@
  *
  * The coordinator itself is plain TypeScript and outlives any component render;
  * this hook wires it to the current conversation and re-renders on snapshots.
- * The agent run lives in the worker process, so unmounting the voice UI stops
- * voice, never the task.
+ * App ends the voice session when leaving Voice mode. The agent run lives in
+ * the worker process and is not cancelled by leaving Agent mode.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -245,15 +245,10 @@ export function useSessionCoordinator(
     ),
     bindAgentSession: useCallback(
       async (agentSessionId: string | null) => {
+        // Bind only. attach() would cancel in-flight turns on this conversation.
         await adapters.agent.bindSession(agentSessionId)
-        if (conversationId) {
-          await coordinator.attach(conversationId, {
-            messages: latest.current.messages.map(toConversationMessage),
-            summary: latest.current.summary ?? ''
-          })
-        }
       },
-      [adapters, coordinator, conversationId]
+      [adapters]
     )
   }
 }

@@ -186,7 +186,19 @@ export class InMemoryChatAdapter implements ChatAdapter {
       metadata: patch.metadata ?? base.metadata
     }
     this.messagesById.set(messageId, next)
-    this.hooks.onStatus?.(null)
+    this.hooks.onMessage?.({
+      id: next.id,
+      conversation_id: next.conversationId,
+      parent_id: null,
+      role: next.role,
+      content: next.content,
+      model: null,
+      source: next.source,
+      correlation_id: next.correlationId,
+      status: next.status,
+      metadata: next.metadata ?? null,
+      created_at: next.createdAt
+    })
     return next
   }
 

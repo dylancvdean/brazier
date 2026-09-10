@@ -246,12 +246,17 @@ export function recoverComputerPause(steps: ComputerStep[]): RecoveredComputerPa
       }
       continue
     }
+    if (approval && result.approval_id === approval.approvalId) {
+      approval = null
+      continue
+    }
     // Older brokers did not echo approval_id on the resolved result. A later
-    // record for the same action still proves that this paused action was spent.
+    // terminal record for the same action still proves that this pause was spent.
     if (
       approval &&
-      (result.approval_id === approval.approvalId ||
-        JSON.stringify(step.action) === JSON.stringify(approval.action))
+      !result.approval_id &&
+      result.status !== 'needs_approval' &&
+      JSON.stringify(step.action) === JSON.stringify(approval.action)
     ) {
       approval = null
     }

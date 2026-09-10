@@ -346,8 +346,8 @@ export function VoiceMode(props: Props): React.JSX.Element {
               type="button"
               className="danger"
               disabled={!working}
-              title="Cancel the task. Anything already answered stays in the conversation."
-              onClick={() => void guard(() => session.cancelAgentTask())}
+              title="Cancel the current response. Anything already answered stays in the conversation."
+              onClick={() => void guard(() => session.cancelResponse())}
             >
               <Square size={13} fill="currentColor" /> Cancel task
             </button>

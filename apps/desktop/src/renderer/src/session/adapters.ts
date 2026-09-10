@@ -186,8 +186,12 @@ export type VoiceAdapterEvent =
   /**
    * Transcription returned nothing. Reported rather than dropped: silence is
    * indistinguishable from a pipeline that stopped working.
+   *
+   * `echo` is the assistant hearing itself — not an ASR outage.
    */
-  | { type: 'transcriptionEmpty'; utteranceId: string }
+  | { type: 'transcriptionEmpty'; utteranceId: string; reason?: 'echo' | 'empty' }
+  /** An utterance opened and was then thrown away as noise. */
+  | { type: 'utteranceDiscarded'; utteranceId: string }
   /** Text PersonaPlex generated on its own. Never authoritative. */
   | { type: 'modelText'; text: string }
   | { type: 'sessionError'; error: string; fatal: boolean }

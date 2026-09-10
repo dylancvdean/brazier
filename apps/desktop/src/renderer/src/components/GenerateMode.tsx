@@ -203,6 +203,8 @@ export function GenerateMode(props: Props) {
     setUploading(file.name)
     try {
       onUploaded(await uploadAttachmentBlob(file))
+    } catch (cause) {
+      props.onError(errorText(cause))
     } finally {
       setUploading(null)
     }
@@ -402,6 +404,7 @@ export function GenerateMode(props: Props) {
           role="tab"
           className={modality === 'image' ? 'active' : ''}
           aria-selected={modality === 'image'}
+          disabled={busy}
           onClick={() => props.onModalityChange('image')}
         >
           <Image size={16} /> Image
@@ -411,6 +414,7 @@ export function GenerateMode(props: Props) {
           role="tab"
           className={modality === 'video' ? 'active' : ''}
           aria-selected={modality === 'video'}
+          disabled={busy}
           onClick={() => props.onModalityChange('video')}
         >
           <Video size={16} /> Video

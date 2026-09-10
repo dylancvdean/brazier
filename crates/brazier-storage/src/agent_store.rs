@@ -684,6 +684,7 @@ impl Database {
         note: Option<String>,
         decided_by_client_id: Option<&str>,
     ) -> anyhow::Result<AgentApproval> {
+        self.expire_pending_approvals(None).await?;
         let current = self.approval(id).await?;
         anyhow::ensure!(
             current.status == ApprovalStatus::Pending,
@@ -749,6 +750,26 @@ impl Database {
             "approval {id} is not available to consume"
         );
         Ok(())
+    }
+
+    /// Mark in-flight agent runs failed and expire every pending approval.
+    ///
+    /// A process restart cannot still be executing those runs; leaving
+    /// `last_run_status = running` blocks worktree ops and keeps approvals live.
+    pub async fn interrupt_running_agent_sessions(&self) -> anyhow::Result<u64> {
+        let result = sqlx::query(
+            r#"UPDATE agent_sessions SET last_run_status = 'failed', updated_at = datetime('now')
+               WHERE last_run_status IN ('running', 'awaiting-approval')"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"UPDATE agent_approvals SET status = 'expired', decided_at = datetime('now')
+               WHERE status = 'pending'"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Expire stale pending approvals, and deny everything still pending for a
@@ -1011,6 +1032,39 @@ mod tests {
         // Untouched fields survive a partial update.
         assert_eq!(updated.model, "gguf:test");
         assert_eq!(updated.workspace_path.as_deref(), Some("/ws"));
+    }
+
+    #[tokio::test]
+    async fn interrupt_running_sessions_fails_them_and_expires_approvals() {
+        let (_dir, db) = database().await;
+        let session = db
+            .create_agent_session(session_request(Some("/ws")))
+            .await
+            .expect("create session");
+        db.update_agent_session(
+            &session.id,
+            UpdateAgentSession {
+                last_run_status: Some("running".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("mark running");
+        let approval = db
+            .create_approval(new_approval(&session.id, true))
+            .await
+            .expect("hold");
+        assert_eq!(approval.status, ApprovalStatus::Pending);
+
+        let interrupted = db
+            .interrupt_running_agent_sessions()
+            .await
+            .expect("interrupt");
+        assert_eq!(interrupted, 1);
+        let reloaded = db.agent_session(&session.id).await.expect("reload");
+        assert_eq!(reloaded.last_run_status, "failed");
+        let expired = db.approval(&approval.id).await.expect("approval");
+        assert_eq!(expired.status, ApprovalStatus::Expired);
     }
 
     #[tokio::test]

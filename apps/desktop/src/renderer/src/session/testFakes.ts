@@ -114,6 +114,7 @@ export class FakeAgent implements AgentAdapter {
   async cancelRun(correlationId: string): Promise<void> {
     this.cancelled.push(correlationId)
     this.status.set(correlationId, { correlationId, status: 'cancelled' })
+    this.emit({ type: 'runCancelled', correlationId })
   }
 
   async decideApproval(
@@ -160,12 +161,15 @@ export class FakeVoice implements VoiceAdapter {
   modelAudioEnabled = true
   /** Set to reject the next `startSession`. */
   failStart: string | null = null
+  /** When set, `startSession` waits on this promise before completing. */
+  startHold: Promise<void> | null = null
   private readonly listeners = new Set<(event: VoiceAdapterEvent) => void>()
   private counter = 0
 
   constructor(private readonly clock: () => number = () => 0) {}
 
   async startSession(context: VoiceContext): Promise<VoiceSessionHandle> {
+    if (this.startHold) await this.startHold
     if (this.failStart) {
       const message = this.failStart
       this.failStart = null

@@ -2716,6 +2716,11 @@ async fn create_computer_session(
     headers: HeaderMap,
     Json(body): Json<CreateComputerSession>,
 ) -> ApiResult<Json<Value>> {
+    if cfg!(windows) {
+        return Err(ApiError::bad_request(
+            "Computer Use is unavailable on Windows in this beta; Agent mode remains sandboxed and supported.",
+        ));
+    }
     let target = match body.target.as_deref().unwrap_or("browser") {
         "desktop" => crate::computer_types::ComputerTarget::Desktop,
         _ => crate::computer_types::ComputerTarget::Browser,

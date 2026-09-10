@@ -913,9 +913,10 @@ describe('spoken confirmation', () => {
     const { coordinator, agent } = await holdACall()
     await coordinator.resolveApproval('deny')
     expect(agent.decisions).toEqual([
-      { approvalId: 'apv-1', decision: 'deny', note: undefined }
+      { approvalId: 'apv-1', decision: 'deny', note: 'Refused by the UI' }
     ])
     expect(coordinator.snapshot().pendingApproval).toBeNull()
+    expect(coordinator.snapshot().messages.at(-1)?.content).toContain('Refused by the UI')
   })
 
   it('still shows a held call on a typed request', async () => {
@@ -1019,5 +1020,106 @@ describe('observability', () => {
     ])
     // What the turn waited is the number the latency work is judged on.
     expect(coordinator.metrics().transcriptWaitMs).toEqual([20, 600, 180])
+  })
+})
+
+describe('lifecycle seams', () => {
+  it('does not wipe an in-flight turn when re-attaching the same conversation', async () => {
+    const { coordinator, agent, voice } = await live()
+    speak(voice, 'utt-1', 'Keep going.')
+    await Promise.resolve()
+    const correlationId = agent.submitted[0].correlationId
+    await coordinator.attach('conv-1')
+    expect(coordinator.snapshot().activeCorrelationId).toBe(correlationId)
+    expect(agent.cancelled).toHaveLength(0)
+  })
+
+  it('cancels in-flight work when attaching a different conversation', async () => {
+    const { coordinator, agent, voice } = await live()
+    speak(voice, 'utt-1', 'Work on this thread.')
+    await Promise.resolve()
+    const correlationId = agent.submitted[0].correlationId
+    await coordinator.attach('conv-2')
+    expect(agent.cancelled).toContain(correlationId)
+    expect(coordinator.snapshot().activeCorrelationId).toBeNull()
+    expect(coordinator.snapshot().pendingApproval).toBeNull()
+    expect(coordinator.snapshot().conversationId).toBe('conv-2')
+  })
+
+  it('lets End abort a start that has not received a session id yet', async () => {
+    const { coordinator, voice } = harness({ voiceSessionTarget: 'agent' })
+    await coordinator.attach('conv-1')
+    let releaseStart: () => void = () => undefined
+    voice.startHold = new Promise<void>((resolve) => {
+      releaseStart = resolve
+    })
+    const starting = coordinator.startVoiceSession()
+    await Promise.resolve()
+    expect(coordinator.snapshot().voiceStatus).toBe('starting')
+    await coordinator.endVoiceSession()
+    releaseStart()
+    await starting
+    expect(coordinator.snapshot().voiceStatus).toBe('off')
+    expect(voice.ended).toBeGreaterThan(0)
+  })
+
+  it('ignores a late transcript after the session has ended', async () => {
+    const { coordinator, agent, voice } = await live()
+    await coordinator.endVoiceSession()
+    speak(voice, 'utt-late', 'This should not submit.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(agent.submitted).toHaveLength(0)
+  })
+
+  it('cancels a held task when the user says cancel that', async () => {
+    const { coordinator, agent, voice } = await live()
+    speak(voice, 'utt-1', 'Delete the build folder.')
+    await Promise.resolve()
+    const correlationId = agent.submitted[0].correlationId
+    agent.emit({ type: 'runStarted', correlationId })
+    agent.emit({
+      type: 'approvalRequired',
+      correlationId,
+      approvalId: 'apv-hold',
+      tool: 'shell_run',
+      summary: 'Run rm -rf build',
+      risk: 'destructive',
+      environment: 'host',
+      executionLocation: EXECUTION_LOCATION
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    speak(voice, 'utt-2', 'Cancel that.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(agent.decisions).toHaveLength(0)
+    expect(agent.cancelled).toContain(correlationId)
+    expect(coordinator.snapshot().pendingApproval).toBeNull()
+  })
+
+  it('does not treat echo as an ASR outage', async () => {
+    const { coordinator, voice } = await live()
+    voice.emit({ type: 'transcriptionEmpty', utteranceId: 'utt-echo', reason: 'echo' })
+    expect(coordinator.snapshot().notice).toBeNull()
+    expect(coordinator.snapshot().hearing).toBe('idle')
+  })
+
+  it('returns hearing to idle when an utterance is discarded', async () => {
+    const { coordinator, voice } = await live()
+    voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-noise' })
+    expect(coordinator.snapshot().hearing).toBe('speaking')
+    voice.emit({ type: 'utteranceDiscarded', utteranceId: 'utt-noise' })
+    expect(coordinator.snapshot().hearing).toBe('idle')
+  })
+
+  it('cancels the chat responder from cancelCurrentResponse', async () => {
+    const { coordinator, responder, agent } = harness({ voiceSessionTarget: 'chat' })
+    agent.sessionId = null
+    await coordinator.attach('conv-1')
+    responder.respond = () => new Promise(() => undefined)
+    void coordinator.submitText('A long answer please.')
+    await Promise.resolve()
+    const correlationId = coordinator.snapshot().activeCorrelationId
+    expect(correlationId).toBeTruthy()
+    await coordinator.cancelCurrentResponse()
+    expect(responder.cancelled).toContain(correlationId)
   })
 })

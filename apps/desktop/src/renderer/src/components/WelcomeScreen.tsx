@@ -14,8 +14,10 @@ import brazierLogo from '../assets/brazier-logo.png'
 import {
   fetchRecommendations,
   fetchToolchainStatus,
+  fetchWorkspacePreference,
   hardwareInfo,
   huggingFaceTokenStatus,
+  saveWorkspacePreference,
   setHuggingFaceToken,
   setupToolchain,
   type HardwareInfo,
@@ -111,6 +113,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
   const [stage, setStage] = useState<'features' | 'token' | 'checklist' | 'models'>('features')
   const [wanted, setWanted] = useState<RecommendationCategory[]>(['text'])
   const [wantsComputerUse, setWantsComputerUse] = useState(false)
+  const computerUseUnavailable = hardware?.os === 'windows'
   const [customRuntimes, setCustomRuntimes] = useState(false)
   const [recommendations, setRecommendations] = useState<Recommendations | null>(null)
   const [loadingRecommendations, setLoadingRecommendations] = useState(false)
@@ -124,6 +127,9 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
     void huggingFaceTokenStatus()
       .then((status) => setHfTokenSource(status.source))
       .catch(() => setHfTokenSource('none'))
+    void hardwareInfo()
+      .then(setHardware)
+      .catch(() => setHardware(null))
   }, [])
 
   const needs: ToolchainNeeds = {
@@ -233,12 +239,25 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
               role="checkbox"
               aria-checked={wantsComputerUse}
               className={wantsComputerUse ? 'welcome-feature active' : 'welcome-feature'}
-              onClick={() => setWantsComputerUse((current) => !current)}
+              disabled={computerUseUnavailable}
+              title={
+                computerUseUnavailable
+                  ? 'Computer Use is unavailable on Windows in this beta.'
+                  : undefined
+              }
+              onClick={() => {
+                if (computerUseUnavailable) return
+                setWantsComputerUse((current) => !current)
+              }}
             >
               <span className="welcome-feature-check">{wantsComputerUse ? <Check size={13} /> : null}</span>
               <span>
                 <strong>Computer use (beta)</strong>
-                <small>Let a model use a browser or desktop to complete tasks.</small>
+                <small>
+                  {computerUseUnavailable
+                    ? 'Unavailable on Windows in this beta. Agent mode remains supported.'
+                    : 'Let a model use a browser or desktop to complete tasks.'}
+                </small>
               </span>
             </button>
             <button
@@ -430,7 +449,25 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
             >
               <ArrowLeft size={15} /> Back
             </button>
-            <button type="button" className="primary-button" onClick={props.onContinue}>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                void (async () => {
+                  if (wantsComputerUse && !computerUseUnavailable) {
+                    try {
+                      const preference = await fetchWorkspacePreference()
+                      if (!preference.modes.computer) {
+                        await saveWorkspacePreference({ ...preference.modes, computer: true })
+                      }
+                    } catch {
+                      // The Manage → Customization toggle remains available.
+                    }
+                  }
+                  props.onContinue()
+                })()
+              }}
+            >
               Continue to Brazier
             </button>
           </div>

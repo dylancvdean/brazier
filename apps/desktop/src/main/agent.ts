@@ -266,15 +266,52 @@ export class AgentSupervisor {
   }
 
   private async markSessionsFailed(sessionIds: string[], code: number): Promise<void> {
-    if (sessionIds.length === 0) return
+    const known = new Set(sessionIds)
+    const extra = await this.listRelatedAgentSessions(known)
+    const ids = [...new Set([...sessionIds, ...extra])]
+    if (ids.length === 0) return
     await Promise.all(
-      sessionIds.map((sessionId) =>
-        this.patchSession(sessionId, {
+      ids.map(async (sessionId) => {
+        await this.cancelDaemon(sessionId).catch(() => undefined)
+        await this.patchSession(sessionId, {
           last_run_status: 'failed',
           agent_note: `The agent worker exited (code ${code}).`
         })
-      )
+      })
     )
+  }
+
+  private async listRelatedAgentSessions(parentIds: Set<string>): Promise<string[]> {
+    const connection = this.connection
+    if (!connection || parentIds.size === 0) return []
+    try {
+      const headers = new Headers()
+      if (connection.apiKey) headers.set('authorization', `Bearer ${connection.apiKey}`)
+      const response = await fetch(`${connection.address}/api/v1/agent/sessions`, {
+        headers,
+        signal: AbortSignal.timeout(DAEMON_CANCEL_TIMEOUT_MS)
+      })
+      if (!response.ok) return []
+      const body = (await response.json()) as {
+        data?: Array<{
+          id: string
+          last_run_status?: string
+          runtime_metadata?: { kind?: string; parent_session_id?: string }
+        }>
+      }
+      const related: string[] = []
+      for (const session of body.data ?? []) {
+        const parent = session.runtime_metadata?.parent_session_id
+        const childOfKnown =
+          session.runtime_metadata?.kind === 'subagent' && parent && parentIds.has(parent)
+        const stillRunning =
+          session.last_run_status === 'running' || session.last_run_status === 'awaiting-approval'
+        if (childOfKnown || stillRunning) related.push(session.id)
+      }
+      return related
+    } catch {
+      return []
+    }
   }
 
   /** Kill a worker that did not acknowledge cancellation and reject its run. */

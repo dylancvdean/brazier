@@ -180,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
     // that were mid-flight as paused so they can be resumed rather than
     // appearing to still be running.
     db.interrupt_running_download_jobs().await?;
+    db.interrupt_running_agent_sessions().await?;
     let api_keys = resolve_api_keys(&args, &data_dir)?;
     let local_control_key = (!args.service && args.host.is_loopback())
         .then(|| format!("brazier_local_{}", Uuid::new_v4().simple()));

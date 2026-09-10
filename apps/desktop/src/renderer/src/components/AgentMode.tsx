@@ -56,7 +56,7 @@ import { Markdown } from './Markdown'
 import { ReasoningDisclosure } from './ReasoningDisclosure'
 import { ToolsMenu } from './ToolsMenu'
 import { daemonPathLabel, useConnectionProfile } from '../connectionProfile'
-import { assertDaemonMutationAllowed, daemonAvailability } from '../daemonAvailability'
+import { assertDaemonMutationAllowed } from '../daemonAvailability'
 
 /**
  * What the shared composer needs to drive a run. Agent mode has no input of its
@@ -101,7 +101,10 @@ type Props = {
    * turns in that conversation reach this session instead of opening their own.
    * Null unbinds.
    */
-  onSessionBound?: (agentSessionId: string | null) => void
+  onSessionBound?: (agentSessionId: string | null) => void | Promise<void>
+  /** Route the turn through the shared coordinator so voice and this view cannot double-run. */
+  onSubmitTurn?: (text: string) => Promise<string | null>
+  onCancelTurn?: () => Promise<void>
   onError: (message: string | null) => void
 }
 
@@ -767,6 +770,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   )
   const scrollAnchor = useRef<HTMLDivElement>(null)
   const sessionIdRef = useRef<string | null>(null)
+  const runningRef = useRef(false)
 
   const workspace = session?.workspace_path ?? pendingWorkspace
   const worktree = sessionWorktree(session)
@@ -795,6 +799,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   useEffect(() => {
     sessionIdRef.current = session?.id ?? null
   }, [session?.id])
+  runningRef.current = running
 
   useEffect(() => {
     void fetchAgentCapabilities()
@@ -1091,10 +1096,14 @@ export function AgentMode(props: Props): React.JSX.Element {
   const loadSession = useCallback(
     async (id: string): Promise<void> => {
       try {
+        if (runningRef.current && sessionIdRef.current && sessionIdRef.current !== id) {
+          onError('Stop the agent before switching tasks.')
+          return
+        }
         const detail = await fetchAgentSession(id)
         setSession(detail.session)
         sessionIdRef.current = detail.session.id
-        onSessionBound?.(detail.session.id)
+        await onSessionBound?.(detail.session.id)
         try {
           window.sessionStorage.setItem(lastAgentSessionKey, detail.session.id)
         } catch {
@@ -1122,8 +1131,9 @@ export function AgentMode(props: Props): React.JSX.Element {
         } else {
           setWorkspaceIsGit(false)
         }
-        // Restoring never re-runs anything: the worker rebuilds model context
-        // from the daemon transcript so history is prefilled for the next turn.
+        // Leaving this view must not cancel the worker. Restore running so Stop
+        // is available after a remount; openSession skips rehydrate mid-run.
+        setRunning(detail.session.last_run_status === 'running')
         await window.brazier.agent.openSession(id)
       } catch (cause) {
         onError(errorText(cause))
@@ -1316,7 +1326,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         setPendingWorkspace(null)
         setPendingConfineToWorktree(false)
         setPendingEnabledTools(null)
-        onSessionBound?.(active.id)
+        await onSessionBound?.(active.id)
         // Never silently start in the source checkout after the user selected
         // confinement. The returned session metadata is the daemon's receipt
         // that the worktree was actually created and applied.
@@ -1336,8 +1346,12 @@ export function AgentMode(props: Props): React.JSX.Element {
         ...current,
         { role: 'user', text, timestamp: new Date().toISOString() }
       ])
-      setRunning(true)
-      await window.brazier.agent.run(active.id, { text })
+      if (props.onSubmitTurn) {
+        await props.onSubmitTurn(text)
+      } else {
+        setRunning(true)
+        await window.brazier.agent.run(active.id, { text })
+      }
     } catch (cause) {
       setRunning(false)
       onError(errorText(cause))
@@ -1371,6 +1385,7 @@ export function AgentMode(props: Props): React.JSX.Element {
     if (!session) return
     try {
       assertDaemonMutationAllowed({ method: 'POST' })
+      await props.onCancelTurn?.()
       await window.brazier.agent.cancel(session.id)
       setRunning(false)
       setApprovals([])
@@ -1498,7 +1513,7 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
     // Nothing is bound until the next task exists, so a voice turn falls back
     // to an ordinary chat answer rather than reaching a closed session.
-    onSessionBound?.(null)
+    await onSessionBound?.(null)
     setMessages([])
     setTimeline([])
     setApprovals([])
@@ -1616,17 +1631,6 @@ export function AgentMode(props: Props): React.JSX.Element {
     })
     return () => onSidebarChange?.(null)
   }, [onSidebarChange, sessions, session?.id, loadSession])
-
-  // Leaving Agent mode must not leave a run going in the worker: PR #6 rehydrates
-  // on every explicit open, and clobbering Pi state mid-run can exit the process.
-  useEffect(() => {
-    return () => {
-      const id = sessionIdRef.current
-      if (id && daemonAvailability() === 'healthy') {
-        void window.brazier.agent.cancel(id).catch(() => undefined)
-      }
-    }
-  }, [])
 
   return (
     <div className="agent-mode">

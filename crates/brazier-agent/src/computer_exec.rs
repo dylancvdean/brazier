@@ -564,6 +564,9 @@ impl ComputerBroker {
             let session = sessions
                 .get(&request.session_id)
                 .with_context(|| format!("unknown computer session {}", request.session_id))?;
+            if session.cancel.is_cancelled() {
+                return Ok(self.located_result(Self::refusal("Computer Use was stopped.")));
+            }
             (
                 session.record.target,
                 session.record.permission_mode,
@@ -911,6 +914,7 @@ impl ComputerBroker {
     /// Revoke host-desktop authority immediately. The renderer calls this for
     /// its global Escape hatch in addition to aborting the model request.
     pub async fn stop(&self, session_id: &str) -> Result<()> {
+        let mut denied: Vec<(String, ComputerAction)> = Vec::new();
         let target = {
             let mut sessions = self.sessions.lock().await;
             let session = sessions
@@ -919,6 +923,14 @@ impl ComputerBroker {
             session.record.running = false;
             session.desktop_authorized = false;
             session.cancel.trip();
+            let now = now_stamp();
+            for pending in session.pending.values_mut() {
+                if pending.approved.is_none() {
+                    pending.approved = Some(false);
+                    pending.decided_at = Some(now.clone());
+                    denied.push((pending.id.clone(), pending.action.clone()));
+                }
+            }
             session.record.target
         };
         #[cfg(target_os = "linux")]
@@ -928,6 +940,11 @@ impl ComputerBroker {
         }
         #[cfg(not(target_os = "linux"))]
         let _ = target;
+        for (approval_id, action) in denied {
+            let mut result = Self::refusal("Computer Use was stopped.");
+            result.approval_id = Some(approval_id);
+            self.record(session_id, action, result).await?;
+        }
         self.persist().await
     }
 

@@ -40,6 +40,7 @@ export type QueuedTurn = {
   source: MessageSource
   userMessageId: string
   queuedAt: number
+  supersedes?: string
 }
 
 export type CoordinatorSnapshot = {
@@ -182,8 +183,14 @@ export class SessionCoordinator {
   private pendingRenewal: string | null = null
   /** A renewal in flight, serialized against tick()/requestRenewal(). */
   private renewing: Promise<void> | null = null
+  /** Queue drain in flight, so cancel + runCancelled cannot start two turns. */
+  private draining: Promise<void> | null = null
+  /** Invalidates an in-flight startSession/renew when End is pressed. */
+  private voiceGeneration = 0
   /** The old PersonaPlex stream is silent while an authoritative turn runs. */
   private personaPlexHeldForRouting = false
+  /** Explicit Stop speaking, until the next sustained user utterance. */
+  private voiceOutputStopped = false
 
   private readonly listeners = new Set<(snapshot: CoordinatorSnapshot) => void>()
   private readonly metricsState: SessionMetrics = {
@@ -248,23 +255,62 @@ export class SessionCoordinator {
   /**
    * Bind to a conversation, adopting whatever agent session it already records
    * so text and voice never open one each.
+   *
+   * Re-attaching the same conversation only refreshes the agent binding. A
+   * different conversation cancels in-flight work so late events cannot land
+   * on the new thread, and a live voice session renews against the new summary.
    */
   async attach(
     conversationId: string,
     options: { messages?: ConversationMessage[]; summary?: string } = {}
   ): Promise<void> {
+    const same = this.conversationId === conversationId
+    if (same) {
+      if (options.messages) this.messages = options.messages
+      if (options.summary !== undefined) this.summary = options.summary
+      await this.deps.agent.attachSession(conversationId)
+      this.publish()
+      return
+    }
+    await this.abandonActiveWork()
     this.conversationId = conversationId
     this.messages = options.messages ?? []
     this.summary = options.summary ?? ''
-    this.responses.clear()
-    this.activeCorrelationId = null
+    this.voiceModelText = ''
+    this.hearing = 'idle'
+    await this.deps.agent.attachSession(conversationId)
+    if (this.voiceStatus === 'live' || this.voiceStatus === 'starting') {
+      this.track(this.requestRenewal('conversation changed'), 'Refreshing voice for the new conversation')
+    }
+    this.publish()
+  }
+
+  /** Drop the active turn and queue without starting whatever was waiting. */
+  private async abandonActiveWork(): Promise<void> {
+    const queued = this.queue
     this.queue = []
-    this.task = null
+    for (const turn of queued) {
+      const response = this.responses.get(turn.correlationId)
+      if (response && response.status !== 'delivered') response.status = 'cancelled'
+    }
+    const active = this.activeCorrelationId
+    this.pendingApproval = null
     this.streamingText = ''
     this.partialTranscript = ''
-    this.voiceModelText = ''
-    await this.deps.agent.attachSession(conversationId)
-    this.publish()
+    this.hearing = 'idle'
+    this.releasePersonaPlexRoutingHold()
+    if (active) {
+      const response = this.responses.get(active)
+      if (response && response.status !== 'delivered') {
+        response.status = 'cancelled'
+        response.cancellable = false
+      }
+      if (response?.owner === 'agent') await this.deps.agent.cancelRun(active).catch(() => undefined)
+      else this.deps.responder?.cancel(active)
+      this.activeCorrelationId = null
+    }
+    this.responses.clear()
+    this.task = null
   }
 
   /**
@@ -304,7 +350,12 @@ export class SessionCoordinator {
    * transcript is routed away from it.
    */
   private applyAudioOwnership(): void {
-    this.personaPlexHeldForRouting = false
+    if (!this.muteOnRouteEnabled()) this.personaPlexHeldForRouting = false
+    if (this.personaPlexHeldForRouting) {
+      this.deps.voice.setModelAudioEnabled(false)
+      return
+    }
+    if (this.voiceOutputStopped) return
     this.deps.voice.setModelAudioEnabled(true)
   }
 
@@ -323,7 +374,7 @@ export class SessionCoordinator {
   private releasePersonaPlexRoutingHold(): void {
     if (!this.personaPlexHeldForRouting) return
     this.personaPlexHeldForRouting = false
-    this.deps.voice.setModelAudioEnabled(true)
+    if (!this.voiceOutputStopped) this.deps.voice.setModelAudioEnabled(true)
   }
 
   setPersona(persona: string): void {
@@ -459,7 +510,8 @@ export class SessionCoordinator {
         text: input.text,
         source: input.source,
         userMessageId: userMessage.id,
-        queuedAt: this.now()
+        queuedAt: this.now(),
+        supersedes: input.supersedes
       })
       this.chat.markQueued(userMessage.id)
       await this.patchMessage(userMessage.id, { metadata: { queued: true } })
@@ -524,7 +576,12 @@ export class SessionCoordinator {
           this.publish()
         }
       })
-      if (this.responses.get(input.correlationId)?.status === 'cancelled') return
+      if (
+        this.responses.get(input.correlationId)?.status === 'cancelled' ||
+        this.responses.get(input.correlationId)?.status === 'failed'
+      ) {
+        return
+      }
       await this.deliverFinal(input.correlationId, result.text)
     } catch (cause) {
       this.failResponse(input.correlationId, errorText(cause))
@@ -681,10 +738,15 @@ export class SessionCoordinator {
       }
       case 'runCancelled': {
         const state = this.responses.get(event.correlationId)
-        if (state && state.status !== 'delivered') state.status = 'cancelled'
+        if (state && state.status !== 'delivered') {
+          state.status = 'cancelled'
+          state.cancellable = false
+        }
         if (this.task?.correlationId === event.correlationId) {
           this.task = { ...this.task, status: 'cancelled', updatedAt: this.now() }
         }
+        this.releasePersonaPlexRoutingHold()
+        this.streamingText = ''
         this.finishActive(event.correlationId)
         this.publish()
         return
@@ -698,7 +760,13 @@ export class SessionCoordinator {
   private async deliverFinal(correlationId: string, text: string): Promise<void> {
     const response = this.responses.get(correlationId)
     if (!response) return
-    if (response.status === 'delivered' || response.status === 'cancelled') return
+    if (
+      response.status === 'delivered' ||
+      response.status === 'cancelled' ||
+      response.status === 'failed'
+    ) {
+      return
+    }
 
     const message = await this.chat.appendMessage({
       role: 'assistant',
@@ -707,11 +775,21 @@ export class SessionCoordinator {
       correlationId,
       status: 'final'
     })
+    const latest = this.responses.get(correlationId)
+    if (
+      !latest ||
+      latest.status === 'cancelled' ||
+      latest.status === 'failed' ||
+      latest.status === 'delivered'
+    ) {
+      await this.patchMessage(message.id, { status: 'cancelled' })
+      return
+    }
     this.recordMessage(message)
-    response.authoritativeMessageId = message.id
-    response.status = 'delivered'
-    response.cancellable = false
-    response.finalizedAt = this.now()
+    latest.authoritativeMessageId = message.id
+    latest.status = 'delivered'
+    latest.cancellable = false
+    latest.finalizedAt = this.now()
     this.streamingText = ''
     if (this.task?.correlationId === correlationId) {
       this.task = { ...this.task, status: 'completed', activeTool: undefined, updatedAt: this.now() }
@@ -724,9 +802,15 @@ export class SessionCoordinator {
 
   private failResponse(correlationId: string, error: string): void {
     const response = this.responses.get(correlationId)
-    if (response && (response.status === 'delivered' || response.status === 'cancelled')) {
-      // A cancelled turn has already had its failure recorded by finishActive;
-      // a late rejection from the chat responder must not rewrite it.
+    if (
+      response &&
+      (response.status === 'delivered' ||
+        response.status === 'cancelled' ||
+        response.status === 'failed')
+    ) {
+      // A cancelled or failed turn has already had its outcome recorded;
+      // a late rejection from the chat responder must not rewrite it or
+      // drain the queue a second time.
       return
     }
     if (response) {
@@ -756,10 +840,30 @@ export class SessionCoordinator {
   private finishActive(correlationId: string): void {
     if (this.activeCorrelationId !== correlationId) return
     this.activeCorrelationId = null
+    this.releasePersonaPlexRoutingHold()
     this.track(this.drainQueue(), 'Starting the next turn')
   }
 
   private async drainQueue(): Promise<void> {
+    if (this.draining) {
+      try {
+        await this.draining
+      } catch {
+        // The in-flight drain reports its own failures.
+      }
+      if (!this.activeCorrelationId) await this.drainQueue()
+      return
+    }
+    const run = this.drainQueueBody()
+    this.draining = run
+    try {
+      await run
+    } finally {
+      if (this.draining === run) this.draining = null
+    }
+  }
+
+  private async drainQueueBody(): Promise<void> {
     if (this.activeCorrelationId) return
     const next = this.queue.shift()
     if (!next) {
@@ -768,11 +872,15 @@ export class SessionCoordinator {
     }
     const response = this.responses.get(next.correlationId)
     if (!response || response.status === 'superseded' || response.status === 'cancelled') {
-      await this.drainQueue()
+      await this.drainQueueBody()
       return
     }
     await this.patchMessage(next.userMessageId, { metadata: { queued: false } })
-    await this.startTurn({ correlationId: next.correlationId, text: next.text })
+    await this.startTurn({
+      correlationId: next.correlationId,
+      text: next.text,
+      supersedes: next.supersedes
+    })
   }
 
   // --- Voice events ---------------------------------------------------------
@@ -780,6 +888,7 @@ export class SessionCoordinator {
   private onVoiceEvent(event: VoiceAdapterEvent): void {
     switch (event.type) {
       case 'userSpeechStarted': {
+        this.voiceOutputStopped = false
         this.hearing = 'speaking'
         this.publish()
         this.track(this.onBargeIn(), 'Interrupting speech')
@@ -841,9 +950,19 @@ export class SessionCoordinator {
         // transcribed to nothing is indistinguishable from one never heard.
         this.hearing = 'idle'
         this.releasePersonaPlexRoutingHold()
+        if (event.reason === 'echo') {
+          this.publish()
+          return
+        }
         this.report(
           'That came back with no words even after short-speech recovery. Try it once more or switch ASR engines.'
         )
+        return
+      }
+      case 'utteranceDiscarded': {
+        this.hearing = 'idle'
+        this.releasePersonaPlexRoutingHold()
+        this.publish()
         return
       }
       case 'userTranscriptPartial': {
@@ -876,12 +995,13 @@ export class SessionCoordinator {
         return
       }
       case 'sessionError': {
-        if (!event.fatal && this.hearing === 'transcribing') {
-          this.releasePersonaPlexRoutingHold()
-        }
+        this.hearing = 'idle'
+        if (!event.fatal) this.releasePersonaPlexRoutingHold()
         this.track(
           this.onVoiceSessionError(event.error, event.fatal),
-          'Tearing down the voice session after a fatal error'
+          event.fatal
+            ? 'Tearing down the voice session after a fatal error'
+            : 'Reporting a recoverable voice error'
         )
         return
       }
@@ -904,7 +1024,7 @@ export class SessionCoordinator {
   }
 
   private async onTranscriptFinal(utteranceId: string, text: string): Promise<void> {
-    if (this.voiceStatus === 'error') return
+    if (this.voiceStatus !== 'live') return
     const trimmed = text.trim()
     this.hearing = 'idle'
     this.partialTranscript = ''
@@ -926,23 +1046,6 @@ export class SessionCoordinator {
       this.diagnose('DUPLICATE_IGNORED', utteranceId, 'voice')
       return
     }
-    // A held tool call takes the next thing said. Anything else would submit a
-    // new request to an agent that is stopped mid-action, and would leave the
-    // question that was just asked out loud unanswered.
-    if (this.pendingApproval) {
-      await this.answerApproval(trimmed)
-      this.publish()
-      return
-    }
-
-    // Connected to nothing: PersonaPlex is answering in its own voice and the
-    // conversation is not ours to write to. The transcript is still shown.
-    if (this.config.voiceSessionTarget === 'neither') {
-      this.releasePersonaPlexRoutingHold()
-      this.partialTranscript = ''
-      this.publish()
-      return
-    }
 
     // Noise that cleared the gate is not worth a turn. Without this the
     // assistant abandons what it was saying to report that it understood
@@ -957,6 +1060,23 @@ export class SessionCoordinator {
     const intent = classifyUtterance(trimmed, { taskActive: this.activeCorrelationId !== null })
     if (isControlIntent(intent)) {
       await this.applyControl(intent, trimmed)
+      this.publish()
+      return
+    }
+
+    // A held tool call takes the next thing said, but only after controls:
+    // "cancel that" and "stop talking" must not be swallowed as an unclear yes.
+    if (this.pendingApproval) {
+      await this.answerApproval(trimmed)
+      this.publish()
+      return
+    }
+
+    // Connected to nothing: PersonaPlex is answering in its own voice and the
+    // conversation is not ours to write to. The transcript is still shown.
+    if (this.config.voiceSessionTarget === 'neither') {
+      this.releasePersonaPlexRoutingHold()
+      this.partialTranscript = ''
       this.publish()
       return
     }
@@ -1036,21 +1156,7 @@ export class SessionCoordinator {
     // decideApproval restores the held call on failure, so the transcript must
     // not record an action the broker never received.
     if (this.pendingApproval) return
-    if (this.conversationId) {
-      // Written down: an action allowed by voice should be as visible afterwards
-      // as one allowed by clicking.
-      const note = await this.chat.appendMessage({
-        role: 'system',
-        source: 'system',
-        content:
-          decision === 'approve'
-            ? `Allowed by voice (“${text}”): ${pending.summary}`
-            : `Refused by voice (“${text}”): ${pending.summary}`,
-        correlationId: pending.correlationId,
-        status: 'final'
-      })
-      this.recordMessage(note)
-    }
+    await this.recordApprovalNote(pending, decision, `voice (“${text}”)`)
   }
 
   /**
@@ -1061,8 +1167,36 @@ export class SessionCoordinator {
     const pending = this.pendingApproval
     if (!pending) return
     this.pendingApproval = null
-    await this.decideApproval(pending, decision)
+    await this.decideApproval(
+      pending,
+      decision,
+      decision === 'approve' ? 'Allowed by the UI' : 'Refused by the UI'
+    )
+    if (this.pendingApproval) {
+      this.publish()
+      return
+    }
+    await this.recordApprovalNote(pending, decision, 'the UI')
     this.publish()
+  }
+
+  private async recordApprovalNote(
+    pending: PendingApproval,
+    decision: 'approve' | 'deny',
+    via: string
+  ): Promise<void> {
+    if (!this.conversationId) return
+    const note = await this.chat.appendMessage({
+      role: 'system',
+      source: 'system',
+      content:
+        decision === 'approve'
+          ? `Allowed by ${via}: ${pending.summary}`
+          : `Refused by ${via}: ${pending.summary}`,
+      correlationId: pending.correlationId,
+      status: 'final'
+    })
+    this.recordMessage(note)
   }
 
   private async decideApproval(
@@ -1078,10 +1212,18 @@ export class SessionCoordinator {
         note
       )
     } catch (cause) {
+      const message = errorText(cause)
+      // The broker already committed if this is a double-decide; treat that as
+      // success so the card does not stick while the tool runs.
+      if (/already (decided|approved|denied|consumed)/i.test(message)) {
+        this.pendingApproval = null
+        this.publish()
+        return
+      }
       // The call is still held; say so rather than letting the session look
       // like it went ahead.
       this.pendingApproval = pending
-      this.report(`Could not record that decision: ${errorText(cause)}`)
+      this.report(`Could not record that decision: ${message}`)
     }
     this.publish()
   }
@@ -1096,6 +1238,7 @@ export class SessionCoordinator {
     // the work, because the user said so.
     const target = this.activeCorrelationId
     await this.cancelVoiceOutput()
+    if (this.pendingApproval) this.pendingApproval = null
     if (target) {
       await this.cancelAgentTask(target)
       if (this.conversationId) {
@@ -1157,7 +1300,9 @@ export class SessionCoordinator {
       // tears down the capture graph, VAD, segmenter, and daemon-side session,
       // so it must run before the local handle is dropped — otherwise the mic
       // keeps listening and endVoiceSession's early-return leaves it running.
+      this.voiceGeneration += 1
       this.voiceStatus = 'error'
+      this.hearing = 'idle'
       await this.deps.voice.endSession().catch(() => undefined)
       this.voiceSessionId = null
       this.pendingRenewal = null
@@ -1173,6 +1318,7 @@ export class SessionCoordinator {
 
   /** Silence PersonaPlex. The task and the stored answer are untouched. */
   async cancelVoiceOutput(): Promise<void> {
+    this.voiceOutputStopped = true
     await this.deps.voice.stopSpeaking().catch(() => undefined)
     this.publish()
   }
@@ -1201,10 +1347,17 @@ export class SessionCoordinator {
         await this.patchMessage(response.userMessageId, { metadata: { cancelled: true } })
       }
     }
-    if (response?.owner === 'agent') await this.deps.agent.cancelRun(target).catch(() => undefined)
-    else this.deps.responder?.cancel(target)
     this.streamingText = ''
-    this.finishActive(target)
+    this.releasePersonaPlexRoutingHold()
+    if (response?.owner === 'agent') {
+      // finishActive runs on runCancelled so a late event cannot drain twice
+      // and start two queued turns.
+      await this.deps.agent.cancelRun(target).catch(() => undefined)
+      if (this.activeCorrelationId === target) this.finishActive(target)
+    } else {
+      this.deps.responder?.cancel(target)
+      this.finishActive(target)
+    }
     this.publish()
     return true
   }
@@ -1216,7 +1369,7 @@ export class SessionCoordinator {
   async cancelAgentTask(correlationId?: string): Promise<boolean> {
     const target = correlationId ?? this.activeCorrelationId
     if (!target) return false
-    if (correlationId && this.activeCorrelationId && correlationId !== this.activeCorrelationId) {
+    if (correlationId && correlationId !== this.activeCorrelationId) {
       this.diagnose('RESPONSE_CANCEL_REQUESTED', correlationId, 'coordinator', {
         errorCategory: 'stale_cancellation'
       })
@@ -1233,6 +1386,7 @@ export class SessionCoordinator {
       this.task = { ...this.task, status: 'cancelled', activeTool: undefined, updatedAt: this.now() }
     }
     this.streamingText = ''
+    this.releasePersonaPlexRoutingHold()
     this.finishActive(target)
     this.publish()
     return true
@@ -1242,21 +1396,29 @@ export class SessionCoordinator {
 
   /** Start a voice session for this conversation, seeded with bounded context. */
   async startVoiceSession(): Promise<void> {
-    if (this.voiceSessionId) return
+    if (this.voiceStatus === 'starting' || this.voiceStatus === 'live') return
+    const generation = ++this.voiceGeneration
     this.voiceStatus = 'starting'
     this.personaPlexHeldForRouting = false
+    this.voiceOutputStopped = false
     this.voiceError = null
     this.pendingRenewal = null
-    this.renewing = null
+    this.hearing = 'idle'
     this.publish()
     try {
       const handle = await this.deps.voice.startSession(this.buildContext())
+      if (generation !== this.voiceGeneration) {
+        await this.deps.voice.endSession().catch(() => undefined)
+        return
+      }
       this.voiceSessionId = handle.id
       this.voiceStartedAt = handle.startedAt
       this.voiceStatus = 'live'
       this.applyAudioOwnership()
     } catch (cause) {
+      if (generation !== this.voiceGeneration) return
       this.voiceStatus = 'error'
+      this.voiceSessionId = null
       this.voiceError = errorText(cause)
       this.report(`Voice mode: ${this.voiceError}`)
     }
@@ -1264,11 +1426,18 @@ export class SessionCoordinator {
   }
 
   async endVoiceSession(): Promise<void> {
-    if (!this.voiceSessionId) return
+    this.voiceGeneration += 1
+    this.pendingRenewal = null
+    const hadSession = this.voiceSessionId !== null || this.voiceStatus === 'starting'
+    if (!hadSession && this.voiceStatus === 'off') return
     await this.deps.voice.endSession().catch(() => undefined)
     this.voiceSessionId = null
     this.personaPlexHeldForRouting = false
+    this.voiceOutputStopped = false
+    this.hearing = 'idle'
+    this.partialTranscript = ''
     this.voiceStatus = 'off'
+    this.voiceError = null
     this.publish()
   }
 
@@ -1334,10 +1503,17 @@ export class SessionCoordinator {
    */
   private async renewVoiceSession(reason: string): Promise<void> {
     const previous = this.voiceSessionId
+    const generation = ++this.voiceGeneration
     this.updateSummary()
     try {
+      this.voiceSessionId = null
       await this.deps.voice.endSession()
+      if (generation !== this.voiceGeneration) return
       const handle = await this.deps.voice.startSession(this.buildContext())
+      if (generation !== this.voiceGeneration) {
+        await this.deps.voice.endSession().catch(() => undefined)
+        return
+      }
       this.voiceSessionId = handle.id
       this.voiceStartedAt = handle.startedAt
       this.voiceStatus = 'live'
@@ -1349,7 +1525,8 @@ export class SessionCoordinator {
         voiceSessionId: handle.id
       })
     } catch (cause) {
-      this.onVoiceSessionError(errorText(cause), true)
+      if (generation !== this.voiceGeneration) return
+      await this.onVoiceSessionError(errorText(cause), true)
     }
     this.publish()
   }
