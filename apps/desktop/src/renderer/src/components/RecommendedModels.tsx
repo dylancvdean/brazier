@@ -17,8 +17,7 @@ import {
   Download,
   ExternalLink,
   Hammer,
-  LoaderCircle,
-  Sparkles
+  LoaderCircle
 } from 'lucide-react'
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 
@@ -58,11 +57,11 @@ export const CATEGORY_LABELS: Record<RecommendationCategory, string> = {
 
 const CATEGORY_BLURBS: Record<RecommendationCategory, string> = {
   text: 'Conversation, writing, and questions.',
-  agent: 'Editing files and running commands in a workspace you choose.',
-  image: 'Generating pictures from a description.',
-  video: 'Generating short clips from a description.',
-  voice: 'Speaking to a model and being answered out loud.',
-  computer_use: 'Driving a browser or desktop from screenshots.'
+  agent: 'Edits files and runs commands in a folder you choose.',
+  image: 'Makes images from a prompt.',
+  video: 'Makes short clips from a prompt.',
+  voice: 'Speak and be answered out loud.',
+  computer_use: 'Operates a browser or desktop from screenshots.'
 }
 
 function errorText(cause: unknown): string {
@@ -80,7 +79,7 @@ function progressText(event: ProgressEvent | null): string {
     const percent = Math.round(
       event.percent ?? ((event.bytes ?? 0) / event.total) * 100
     )
-    return `Downloading — ${percent}%`
+    return `Downloading ${percent}%`
   }
   return event.message ?? 'Working…'
 }
@@ -109,10 +108,13 @@ function Card(props: {
           </span>
           <strong>{props.title}</strong>
         </div>
-        <p className="recommendation-blurb">
-          {props.blurb ?? CATEGORY_BLURBS[props.category]}
-        </p>
-        {props.summary ? <p className="recommendation-summary">{props.summary}</p> : null}
+        {props.summary ? (
+          <p className="recommendation-summary">{props.summary}</p>
+        ) : (
+          <p className="recommendation-blurb">
+            {props.blurb ?? CATEGORY_BLURBS[props.category]}
+          </p>
+        )}
         {props.meta ? <p className="recommendation-meta">{props.meta}</p> : null}
         {(props.notes ?? []).map((note, index) => (
           <p
@@ -324,8 +326,8 @@ export function RecommendedModels(props: Props): React.JSX.Element {
             ...(states[key] ?? IDLE),
             busy: true,
             progress: setup.status === 'paused'
-              ? { phase: 'paused', message: 'Paused — resume in Activity' }
-              : { phase: 'setup', message: 'Installing in Activity…' }
+              ? { phase: 'paused', message: 'Paused' }
+              : { phase: 'setup', message: 'Installing…' }
           }
         : states[key] ?? IDLE
     const files = entry.files ?? []
@@ -335,19 +337,13 @@ export function RecommendedModels(props: Props): React.JSX.Element {
     if (entry.gated) {
       notes.push({
         tone: 'warn',
-        text: 'This model is gated on Hugging Face. Accept its terms there, then add an access token below.'
+        text: 'Gated on Hugging Face. Accept its terms there, then add a token below.'
       })
     }
     if (entry.tight) {
       notes.push({
         tone: 'warn',
-        text: 'Nothing this model publishes fits comfortably in this machine’s memory. It will run, but expect it to be slow and to leave little room for a long conversation.'
-      })
-    }
-    if (files.length > 1) {
-      notes.push({
-        tone: 'plain',
-        text: `Published in ${files.length} parts, all of which are downloaded together.`
+        text: 'A tight fit for this machine’s memory. Expect it to be slow, with little room for long conversations.'
       })
     }
     const companions = entry.companion_files ?? []
@@ -355,34 +351,20 @@ export function RecommendedModels(props: Props): React.JSX.Element {
     const includeCompanion = computerUseModel || (includeCompanions[key] ?? true)
     const drafts = entry.draft_files ?? []
     const includeDraft = includeDrafts[key] ?? true
-    if (companions.length > 0) {
-      notes.push({
-        tone: 'plain',
-        text: computerUseModel
-          ? 'Required vision projector: lets the model read the screenshots it drives from. Installed automatically.'
-          : 'Optional vision projector: lets this model understand images you attach. It is not needed for text-only chat.'
-      })
-    }
     if (computerUseModel && entry.context_tokens) {
       notes.push({
         tone: 'plain',
-        text: `Defaults to ${formatContextTokens(entry.context_tokens)} of context so a long screenshot trajectory fits. Tune it per model under model settings.`
+        text: `Uses ${formatContextTokens(entry.context_tokens)} of context by default so long screenshot sessions fit.`
       })
     }
     if (entry.runtime_build) {
       notes.push({
         tone: 'plain',
-        text: `${entry.runtime_build.label} is required for this model and will be built and activated automatically.`
+        text: `Builds ${entry.runtime_build.label} automatically.`
       })
     }
     if (entry.unresolved_companions) {
       notes.push({ tone: 'warn', text: entry.unresolved_companions })
-    }
-    if (drafts.length > 0) {
-      notes.push({
-        tone: 'plain',
-        text: 'Optional speculative draft: speeds up generation when this model supports dspark, dflash, or standard draft decoding.'
-      })
     }
     if (entry.unresolved_drafts) {
       notes.push({ tone: 'warn', text: entry.unresolved_drafts })
@@ -418,11 +400,14 @@ export function RecommendedModels(props: Props): React.JSX.Element {
                     setIncludeCompanions((current) => ({ ...current, [key]: event.target.checked }))
                   }
                 />
-                Add image understanding
+                Image input
               </label>
             ) : null}
             {drafts.length > 0 ? (
-              <label className="recommendation-companion-choice">
+              <label
+                className="recommendation-companion-choice"
+                title="A small draft model that speeds up generation"
+              >
                 <input
                   type="checkbox"
                   checked={includeDraft}
@@ -431,7 +416,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
                     setIncludeDrafts((current) => ({ ...current, [key]: event.target.checked }))
                   }
                 />
-                Add speculative draft
+                Faster decoding
               </label>
             ) : null}
             <InstallButton
@@ -495,13 +480,13 @@ export function RecommendedModels(props: Props): React.JSX.Element {
     if (entry.gated) {
       notes.push({
         tone: 'warn',
-        text: 'This model includes gated Hugging Face files. Accept their terms there, then add an access token below.'
+        text: 'Includes gated Hugging Face files. Accept their terms there, then add a token below.'
       })
     }
     if (split) {
       notes.push({
         tone: 'plain',
-        text: 'This recommendation is two models: one that generates a clip from a description, and one that animates a picture you supply. They are separate downloads, and you can install either or both.'
+        text: 'Two models: one makes clips from text, the other animates a picture you supply. Install either or both.'
       })
     }
 
@@ -576,7 +561,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
         notes={[
           {
             tone: 'plain',
-            text: 'Voice also needs the PersonaPlex runtime, which is built rather than downloaded.'
+            text: 'Also needs the PersonaPlex runtime, which is built from source.'
           }
         ]}
         action={
@@ -610,7 +595,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
             })}
             {props.onOpenRuntimes ? (
               <button type="button" className="chip-button subtle" onClick={props.onOpenRuntimes}>
-                <Hammer size={13} /> Build the runtime
+                <Hammer size={13} /> Build runtime
               </button>
             ) : null}
             {models
@@ -679,26 +664,24 @@ export function RecommendedModels(props: Props): React.JSX.Element {
 
   return (
     <div className="recommendation-list">
-      <p className="recommendation-tier">
-        <Sparkles size={12} />
-        Sized for {recommendations.memory_bytes
-          ? formatBytes(recommendations.memory_bytes)
-          : 'this machine'}
-        {recommendations.memory_source === 'vram' ? ' of video memory' : ' of memory'}
-        {recommendations.tier_gb ? ` · ${recommendations.tier_gb}GB tier` : ''}
-      </p>
+      {recommendations.memory_bytes ? (
+        <p className="recommendation-tier">
+          For {formatBytes(recommendations.memory_bytes)} of{' '}
+          {recommendations.memory_source === 'vram' ? 'video memory' : 'memory'}
+        </p>
+      ) : null}
       {hasGatedRecommendation ? (
         <form className="build-form" onSubmit={(event) => void saveHubToken(event)}>
           <label>
             <span className="label-with-link">
-              Hugging Face token required for the selected gated model
+              Hugging Face token
               <a
                 className="inline-link"
                 href="https://huggingface.co/settings/tokens"
                 target="_blank"
                 rel="noreferrer"
               >
-                Create a token
+                Get a token
               </a>
             </span>
             <input
@@ -708,16 +691,15 @@ export function RecommendedModels(props: Props): React.JSX.Element {
               onChange={(event) => setHfTokenDraft(event.target.value)}
               placeholder={
                 hfTokenSource === 'environment'
-                  ? 'Using HF_TOKEN from the environment'
+                  ? 'Using HF_TOKEN from your environment'
                   : hfTokenSource === 'stored'
-                    ? 'Token saved — paste to replace'
+                    ? 'Saved. Paste a new one to replace it'
                     : 'hf_…'
               }
             />
           </label>
           <p className="model-help">
-            Accept the model terms on Hugging Face first. Your token is stored locally and used
-            only for downloads.
+            Accept the model’s terms on Hugging Face first. Kept on this device.
           </p>
           <div className="build-form-actions">
             <button
@@ -725,14 +707,14 @@ export function RecommendedModels(props: Props): React.JSX.Element {
               type="submit"
               disabled={savingHfToken || !hfTokenDraft.trim()}
             >
-              {savingHfToken ? <LoaderCircle className="spin" size={14} /> : 'Save token'}
+              {savingHfToken ? <LoaderCircle className="spin" size={14} /> : 'Save'}
             </button>
           </div>
         </form>
       ) : null}
       {cards.length === 0 ? (
         <div className="manage-placeholder compact">
-          Nothing is recommended for the categories you chose.
+          No recommendations for what you picked.
         </div>
       ) : (
         cards

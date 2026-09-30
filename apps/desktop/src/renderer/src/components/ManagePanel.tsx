@@ -173,6 +173,7 @@ import {
   type QuantFit
 } from './manage/quant'
 import { ConnectionsSection } from './manage/ConnectionsSection'
+import { readChatTitleMode, writeChatTitleMode, type ChatTitleMode } from '../chatTitleMode'
 
 export {
   appendBuildDiagnostics,
@@ -1361,6 +1362,7 @@ function VoiceSection(props: SectionProps): React.JSX.Element {
 
 function CustomizationSection(props: SectionProps): React.JSX.Element {
   const [modes, setModes] = useState<WorkspaceModesPreference>(DEFAULT_WORKSPACE_MODES)
+  const [chatTitleMode, setChatTitleMode] = useState<ChatTitleMode>(() => readChatTitleMode())
   const [modesLoading, setModesLoading] = useState(true)
   const [savingModes, setSavingModes] = useState(false)
   const [updateSettings, setUpdateSettings] = useState<{
@@ -1557,14 +1559,12 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
     <section>
       <header className="manage-heading">
         <h2>Customization</h2>
-        <p>Choose which workspace modes appear, how updates behave, and review OS permissions.</p>
+        <p>Modes, chats, updates, and permissions.</p>
       </header>
 
       <div className="settings-group">
         <div className="section-label">Workspace modes</div>
-        <p className="model-help">
-          Hide modes you do not use. At least one mode must stay on.
-        </p>
+        <p className="model-help">Hide modes you don’t use. At least one stays on.</p>
         {modesLoading ? (
           <p className="model-help">Loading preferences…</p>
         ) : (
@@ -1598,10 +1598,34 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
       </div>
 
       <div className="settings-group">
+        <div className="section-label">Chats</div>
+        <div className="toggle-list">
+          <label>
+            <div>
+              <strong>Name chats automatically</strong>
+              <span>The model writes a short title after the first reply.</span>
+            </div>
+            <select
+              value={chatTitleMode}
+              onChange={(event) => {
+                const mode = event.target.value as ChatTitleMode
+                setChatTitleMode(mode)
+                writeChatTitleMode(mode)
+              }}
+            >
+              <option value="always">Always</option>
+              <option value="over-20-tokens">When faster than 20 tok/s</option>
+              <option value="never">Never</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div className="settings-group">
         <div className="section-label">App updates</div>
         <p className="model-help">
-          Checks use the signed GitHub release feed. Downloads still ask before installing unless
-          you enable auto-download.
+          Updates come from signed GitHub releases and ask before installing unless auto-download
+          is on.
         </p>
         <div className="toggle-list">
           <label>

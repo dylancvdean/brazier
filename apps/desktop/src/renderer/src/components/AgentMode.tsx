@@ -420,6 +420,10 @@ async function confirmWorktreeCleanup(
  * question the user is right to ask before letting a model run commands, and a
  * native tooltip is too easy to miss to be the only answer.
  */
+function capitalize(text: string): string {
+  return text ? text[0].toUpperCase() + text.slice(1) : text
+}
+
 function SandboxBadge({
   sandbox
 }: {
@@ -1590,8 +1594,6 @@ export function AgentMode(props: Props): React.JSX.Element {
   }
 
   const sandbox = capabilities?.sandbox
-  const executeTools = visibleTools.filter((tool) => tool.executes).length
-
   // Keep the shared composer in step with what the agent can currently do.
   const { onComposerChange, onSidebarChange } = props
   const blockedReason = !props.modelId
@@ -1816,15 +1818,17 @@ export function AgentMode(props: Props): React.JSX.Element {
             {grants.length} standing grant{grants.length === 1 ? '' : 's'}
           </span>
         )}
-        <button
-          className="chip-button subtle"
-          type="button"
-          disabled={!session || running}
-          title="Summarize earlier turns to free up context"
-          onClick={() => void compact()}
-        >
-          Compact
-        </button>
+        {session && messages.length > 0 ? (
+          <button
+            className="chip-button subtle"
+            type="button"
+            disabled={running}
+            title="Summarize earlier turns to free up context"
+            onClick={() => void compact()}
+          >
+            Compact
+          </button>
+        ) : null}
       </header>
 
       {sandbox &&
@@ -1832,8 +1836,8 @@ export function AgentMode(props: Props): React.JSX.Element {
         <div className="agent-warning">
           <AlertTriangle size={15} />
           <span>
-            No sandbox on this host: {sandbox.detail} Commands would run with your full privileges,
-            so each one is held for approval and refused in sandbox-only mode.
+            Commands run unsandboxed with your privileges, so each one asks first.{' '}
+            {capitalize(sandbox.detail.replace(/^no sandbox:\s*/i, ''))}
           </span>
         </div>
       )}
@@ -1846,7 +1850,8 @@ export function AgentMode(props: Props): React.JSX.Element {
             </div>
             <h2>Give the agent a task</h2>
             <p>
-              {`It reads and edits files in the workspace and runs commands there. Everything runs through Brazier's own policy layer: ${executeTools} of ${visibleTools.length} tools can execute programs, and each needs your approval unless you change the mode above.`}
+              It can read, edit, and run commands in{' '}
+              {workspace ? shortPath(workspace) : 'a folder you choose'}.
             </p>
             <div className="agent-suggestions">
               <button type="button" onClick={() => props.onSuggestPrompt?.('Summarize this repository: layout, build commands, and test entry points.')}>

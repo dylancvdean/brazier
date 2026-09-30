@@ -81,7 +81,7 @@ export function GenerateHistorySidebar({ entries, activeId, onSelect }: Props): 
         })}
         {visible.length === 0 ? (
           <p className="empty-sidebar">
-            {entries.length === 0 ? 'Completed images and videos will appear here.' : 'No generations match.'}
+            {entries.length === 0 ? 'Your images and videos will appear here.' : 'No generations match.'}
           </p>
         ) : null}
       </div>

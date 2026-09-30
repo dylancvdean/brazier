@@ -111,7 +111,9 @@ import { CATEGORY_LABELS } from './components/RecommendedModels'
 import { ToolsMenu } from './components/ToolsMenu'
 import { VoiceMode } from './components/VoiceMode'
 import { WelcomeScreen } from './components/WelcomeScreen'
+import brazierLogo from './assets/brazier-logo.png'
 import { hasCompletedWelcome, markWelcomeCompleted } from './welcomePrefs'
+import { readChatTitleMode, type ChatTitleMode } from './chatTitleMode'
 import { voiceStreamSupported } from './audio/voiceStream'
 import { useSessionCoordinator } from './session/useSessionCoordinator'
 import { InMemoryChatAdapter } from './session/chatAdapter'
@@ -151,7 +153,6 @@ import { ConnectionProfileContext, LOCAL_CONNECTION_PROFILE } from './connection
 import { setDaemonAvailability } from './daemonAvailability'
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
-const CHAT_TITLE_MODE_KEY = 'brazier.chatTitleMode.v1'
 const GENERATE_HISTORY_KEY = 'brazier.generateHistory.v1'
 /** How long the completed-dream notice stays before clearing itself. */
 const DREAM_STATUS_DISMISS_MS = 8_000
@@ -165,8 +166,6 @@ const DEFAULT_WORKSPACE_MODES: WorkspaceModesPreference = {
   voice: true,
   computer: false
 }
-
-type ChatTitleMode = 'never' | 'always' | 'over-20-tokens'
 
 function profileStorageKey(base: string, profileId: string): string {
   return `${base}.${encodeURIComponent(profileId)}`
@@ -193,13 +192,22 @@ function writeGenerateHistory(profileId: string, entries: GenerateHistoryEntry[]
   }
 }
 
-function readChatTitleMode(): ChatTitleMode {
-  try {
-    const value = localStorage.getItem(CHAT_TITLE_MODE_KEY)
-    return value === 'never' || value === 'over-20-tokens' || value === 'always' ? value : 'always'
-  } catch {
-    return 'always'
-  }
+/** "14:05" today, "Yesterday", a weekday within the week, otherwise "Sep 3". */
+function shortDate(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  const now = new Date()
+  const startOfDay = (value: Date): number =>
+    new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime()
+  const days = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000)
+  if (days <= 0) return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  if (days === 1) return 'Yesterday'
+  if (days < 7) return date.toLocaleDateString(undefined, { weekday: 'short' })
+  return date.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    ...(date.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {})
+  })
 }
 
 function titleFromCompletion(text: string): string | null {
@@ -216,8 +224,8 @@ function titleFromCompletion(text: string): string | null {
  * ready — generating…"), which is misleading mid-dream, so they are relabeled.
  */
 function dreamStatusForLoad(event: { phase: string; message: string }): string {
-  if (event.phase === 'ready') return 'Dreaming — model ready, consolidating memories…'
-  return `Dreaming — ${event.message}`
+  if (event.phase === 'ready') return 'Dreaming…'
+  return `Dreaming: ${event.message}`
 }
 
 function readEnabledTools(profileId: string): string[] {
@@ -505,8 +513,9 @@ export function App(): React.JSX.Element {
   )
   const [conversationSearch, setConversationSearch] = useState('')
   const [conversationId, setConversationId] = useState<string | null>(null)
-  const [chatTitleMode, setChatTitleMode] = useState<ChatTitleMode>(() => readChatTitleMode())
   const [conversationMenuId, setConversationMenuId] = useState<string | null>(null)
+  const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [tipId, setTipId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -531,7 +540,6 @@ export function App(): React.JSX.Element {
     repository: string
   } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [checkingForUpdates, setCheckingForUpdates] = useState(false)
   const [localModels, setLocalModels] = useState<LocalModel[]>(() =>
     readCachedModels(initialProfileId)
   )
@@ -916,7 +924,7 @@ export function App(): React.JSX.Element {
         selected: voiceModel,
         select: setVoiceModel,
         emptyTitle: 'No voice model',
-        emptySubtitle: 'Download a PersonaPlex model'
+        emptySubtitle: 'None installed'
       }
     }
     if (appMode === 'generate') {
@@ -925,7 +933,7 @@ export function App(): React.JSX.Element {
         selected: generateModel,
         select: setGenerateModel,
         emptyTitle: `No ${generateModality} model`,
-        emptySubtitle: 'Download one from the library'
+        emptySubtitle: 'None installed'
       }
     }
     if (appMode === 'computer') {
@@ -934,15 +942,15 @@ export function App(): React.JSX.Element {
         selected: computerModel,
         select: setComputerModel,
         emptyTitle: 'No computer-use model',
-        emptySubtitle: 'Install a Fara1.5 or similar vision agent model'
+        emptySubtitle: 'None installed'
       }
     }
     return {
       models: chatModels,
       selected: selectedModel,
       select: selectModel,
-      emptyTitle: 'Select a model',
-      emptySubtitle: 'No model loaded yet'
+      emptyTitle: 'Choose a model',
+      emptySubtitle: 'None loaded'
     }
   }, [
     appMode,
@@ -975,7 +983,7 @@ export function App(): React.JSX.Element {
 
   const selectedMeta = useMemo(() => {
     if (modelsLoading && localModels.length === 0) {
-      return { title: 'Loading models…', subtitle: 'Scanning local library' }
+      return { title: 'Loading models…', subtitle: 'Reading your library' }
     }
     if (!modeModel.selected) {
       return { title: modeModel.emptyTitle, subtitle: modeModel.emptySubtitle }
@@ -1213,11 +1221,11 @@ export function App(): React.JSX.Element {
     if (!conversationId && data[0]) setConversationId(data[0].id)
   }
 
-  async function exportCurrentConversation(): Promise<void> {
-    if (!conversationId || incognito) return
+  async function exportConversationFile(id: string): Promise<void> {
+    setConversationMenuId(null)
     setError(null)
     try {
-      const bundle = await exportConversation(conversationId)
+      const bundle = await exportConversation(id)
       const blob = new Blob([JSON.stringify(bundle, null, 2)], {
         type: 'application/json'
       })
@@ -1237,10 +1245,9 @@ export function App(): React.JSX.Element {
     try {
       const bundle = JSON.parse(await file.text()) as ConversationExport
       const conversation = await importConversation(bundle)
-      await refreshConversations('')
       setConversationSearch('')
+      if (incognito) setIncognito(false)
       setConversationId(conversation.id)
-      await refreshMessages(conversation.id)
       await refreshConversations('')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -1506,7 +1513,7 @@ export function App(): React.JSX.Element {
       window.clearTimeout(dreamDismissRef.current)
       dreamDismissRef.current = undefined
     }
-    setDreamStatus('Dreaming — preparing pass…')
+    setDreamStatus('Dreaming…')
     const controller = new AbortController()
     dreamAbortRef.current = controller
     try {
@@ -1532,7 +1539,7 @@ export function App(): React.JSX.Element {
       setDreamStatus(
         changed === 0
           ? 'Dreaming found nothing to change.'
-          : `Dreaming complete: ${result.created} added, ${result.updated} updated, ${result.deleted} removed.`
+          : `Dreaming done: ${result.created} added, ${result.updated} updated, ${result.deleted} removed.`
       )
       // The status is transient: a finished pass should not sit in the notice
       // bar until dismissed, especially one that ran silently in auto mode.
@@ -1661,30 +1668,30 @@ export function App(): React.JSX.Element {
       })
   }
 
-  function changeChatTitleMode(mode: ChatTitleMode): void {
-    setChatTitleMode(mode)
-    try {
-      localStorage.setItem(CHAT_TITLE_MODE_KEY, mode)
-    } catch {
-      // Best-effort persistence.
-    }
+  function startRename(conversation: Conversation): void {
+    setConversationMenuId(null)
+    setRenaming({ id: conversation.id, draft: conversation.title })
   }
 
-  async function renameConversation(conversation: Conversation): Promise<void> {
-    setConversationMenuId(null)
-    const title = window.prompt('Rename conversation', conversation.title)?.trim()
+  async function commitRename(conversation: Conversation, draftTitle: string): Promise<void> {
+    setRenaming(null)
+    const title = draftTitle.trim()
     if (!title || title === conversation.title) return
+    setConversations((current) =>
+      current.map((entry) => (entry.id === conversation.id ? { ...entry, title } : entry))
+    )
     try {
       await updateConversation(conversation.id, { title })
-      await refreshConversations('')
+      await refreshConversations(conversationSearch)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
+      void refreshConversations(conversationSearch).catch(() => undefined)
     }
   }
 
   async function removeConversation(conversation: Conversation): Promise<void> {
     setConversationMenuId(null)
-    if (!window.confirm(`Delete “${conversation.title}”? This cannot be undone.`)) return
+    setConfirmDeleteId(null)
     try {
       await deleteConversation(conversation.id)
       if (conversation.id === conversationId) {
@@ -1735,15 +1742,6 @@ export function App(): React.JSX.Element {
   function openManage(section: ManageSection): void {
     setManageSection(section)
     setManageOpen(true)
-  }
-
-  async function checkForUpdates(): Promise<void> {
-    setCheckingForUpdates(true)
-    try {
-      await window.brazier.checkForUpdates()
-    } finally {
-      setCheckingForUpdates(false)
-    }
   }
 
   function startForkBuild(hint: RuntimeForkHint): void {
@@ -2050,7 +2048,7 @@ export function App(): React.JSX.Element {
           text,
           responseText,
           latestGenerationRate,
-          chatTitleMode
+          readChatTitleMode()
         )
       }
       let finalTipId = assistant.id
@@ -2213,99 +2211,133 @@ export function App(): React.JSX.Element {
             <label className="conversation-search">
               <Search size={14} />
               <input
-                aria-label="Search conversations"
+                aria-label="Search chats"
                 value={conversationSearch}
                 onChange={(event) => setConversationSearch(event.target.value)}
-                placeholder="Search conversations…"
+                placeholder="Search"
               />
             </label>
-            <div className="sidebar-actions">
-              <button
-                className="chip-button subtle"
-                disabled={!conversationId}
-                title="Export this conversation as JSON"
-                onClick={() => void exportCurrentConversation()}
-              >
-                <Download size={13} />
-                Export
-              </button>
-              <button
-                className="chip-button subtle"
-                title="Import a conversation JSON export"
-                onClick={() => importInput.current?.click()}
-              >
-                <Upload size={13} />
-                Import
-              </button>
-              <input
-                ref={importInput}
-                type="file"
-                accept="application/json,.json"
-                hidden
-                onChange={(event) => {
-                  const file = event.target.files?.[0]
-                  if (file) void importConversationFromFile(file)
-                  event.target.value = ''
-                }}
-              />
-            </div>
-            <label className="chat-title-mode">
-              <span>Generated names</span>
-              <select
-                aria-label="Generated chat names"
-                value={chatTitleMode}
-                onChange={(event) => changeChatTitleMode(event.target.value as ChatTitleMode)}
-              >
-                <option value="never">Never</option>
-                <option value="always">Always</option>
-                <option value="over-20-tokens">Over 20 tok/s</option>
-              </select>
-            </label>
+            <input
+              ref={importInput}
+              type="file"
+              accept="application/json,.json"
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                if (file) void importConversationFromFile(file)
+                event.target.value = ''
+              }}
+            />
             <div className="conversation-list">
-              <div className="section-label">Recent</div>
+              <div className="section-label conversation-list-head">
+                Recent
+                <button
+                  type="button"
+                  className="conversation-import"
+                  title="Import a chat from a JSON export"
+                  aria-label="Import chat"
+                  onClick={() => importInput.current?.click()}
+                >
+                  <Upload size={12} />
+                </button>
+              </div>
               {conversations.map((conversation) => (
                 <div
                   className={conversation.id === conversationId ? 'conversation active' : 'conversation'}
                   key={conversation.id}
                 >
-                  <button
-                    className="conversation-select"
-                    onClick={() => {
-                      if (conversation.id === conversationId && !incognito) return
-                      abortChatGeneration()
-                      if (incognito) setIncognito(false)
-                      setConversationId(conversation.id)
-                    }}
-                  >
-                    <span>{conversation.title}</span>
-                    <time>{conversation.updated_at.slice(0, 10)}</time>
-                  </button>
+                  {renaming?.id === conversation.id ? (
+                    <input
+                      className="conversation-rename"
+                      aria-label="Chat name"
+                      autoFocus
+                      value={renaming.draft}
+                      onFocus={(event) => event.currentTarget.select()}
+                      onChange={(event) =>
+                        setRenaming({ id: conversation.id, draft: event.target.value })
+                      }
+                      onBlur={(event) => void commitRename(conversation, event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') event.currentTarget.blur()
+                        if (event.key === 'Escape') setRenaming(null)
+                      }}
+                    />
+                  ) : (
+                    <button
+                      className="conversation-select"
+                      onClick={() => {
+                        if (conversation.id === conversationId && !incognito) return
+                        abortChatGeneration()
+                        if (incognito) setIncognito(false)
+                        setConversationId(conversation.id)
+                      }}
+                      onDoubleClick={() => startRename(conversation)}
+                    >
+                      <span>{conversation.title}</span>
+                      <time dateTime={conversation.updated_at}>
+                        {shortDate(conversation.updated_at)}
+                      </time>
+                    </button>
+                  )}
                   <button
                     className="conversation-menu-button"
                     aria-label={`Actions for ${conversation.title}`}
-                    title="Conversation actions"
-                    onClick={() =>
+                    title="More"
+                    onClick={() => {
+                      setConfirmDeleteId(null)
                       setConversationMenuId((current) =>
                         current === conversation.id ? null : conversation.id
                       )
-                    }
+                    }}
                   >
                     <Ellipsis size={16} />
                   </button>
                   {conversationMenuId === conversation.id ? (
-                    <div className="conversation-menu">
-                      <button onClick={() => void renameConversation(conversation)}>
-                        <Pencil size={13} /> Rename
-                      </button>
-                      <button className="danger" onClick={() => void removeConversation(conversation)}>
-                        <Trash2 size={13} /> Delete
-                      </button>
-                    </div>
+                    <>
+                      <div
+                        className="conversation-menu-backdrop"
+                        onMouseDown={() => {
+                          setConversationMenuId(null)
+                          setConfirmDeleteId(null)
+                        }}
+                      />
+                      <div className="conversation-menu">
+                        {confirmDeleteId === conversation.id ? (
+                          <>
+                            <p>Delete this chat? This can’t be undone.</p>
+                            <button
+                              className="danger"
+                              onClick={() => void removeConversation(conversation)}
+                            >
+                              <Trash2 size={13} /> Delete
+                            </button>
+                            <button onClick={() => setConfirmDeleteId(null)}>Cancel</button>
+                          </>
+                        ) : (
+                          <>
+                            <button onClick={() => startRename(conversation)}>
+                              <Pencil size={13} /> Rename
+                            </button>
+                            <button onClick={() => void exportConversationFile(conversation.id)}>
+                              <Download size={13} /> Export
+                            </button>
+                            <button
+                              className="danger"
+                              onClick={() => setConfirmDeleteId(conversation.id)}
+                            >
+                              <Trash2 size={13} /> Delete
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </>
                   ) : null}
                 </div>
               ))}
               {conversations.length === 0 && (
-                <p className="empty-sidebar">Your conversations stay on this device.</p>
+                <p className="empty-sidebar">
+                  {conversationSearch.trim() ? 'No matching chats.' : 'No chats yet.'}
+                </p>
               )}
             </div>
             <RunHistory
@@ -2315,30 +2347,37 @@ export function App(): React.JSX.Element {
             />
           </>
         )}
-        <div className="privacy-note">
-          <span className={`status-dot ${daemonStatus}`} />
-          {connectionProfile ? `${connectionProfile.name} · ${connectionProfile.hostLabel} · ` : ''}
-          {daemonStatus === 'healthy'
-            ? `Daemon ${daemonVersion}`
-            : daemonStatus === 'offline'
-              ? 'Daemon unavailable'
-              : 'Checking daemon…'}
-        </div>
         <button
           type="button"
-          className="sidebar-update-button"
-          disabled={checkingForUpdates}
-          title="Check for a Brazier app update"
-          onClick={() => void checkForUpdates()}
+          className="privacy-note"
+          title="Connections"
+          onClick={() => openManage('connections')}
         >
-          <RefreshCw className={checkingForUpdates ? 'spin' : ''} size={13} />
-          {checkingForUpdates ? 'Checking for updates…' : 'Check for updates'}
+          <span className={`status-dot ${daemonStatus}`} />
+          <span>
+            {connectionProfile?.kind === 'remote'
+              ? `${connectionProfile.name} · ${connectionProfile.hostLabel}`
+              : 'This computer'}
+            {daemonStatus === 'healthy'
+              ? daemonVersion
+                ? ` · v${daemonVersion}`
+                : ''
+              : daemonStatus === 'offline'
+                ? ' · offline'
+                : ' · connecting…'}
+          </span>
         </button>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
-          <button className="icon-button" onClick={() => setSidebarOpen((open) => !open)}>
+          <button
+            className="icon-button"
+            title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+            aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+            aria-expanded={sidebarOpen}
+            onClick={() => setSidebarOpen((open) => !open)}
+          >
             <Menu size={19} />
           </button>
           <div className="mode-switch" role="tablist" aria-label="Workspace mode">
@@ -2373,11 +2412,9 @@ export function App(): React.JSX.Element {
                 className="model-unload-button"
                 disabled={modelUnloading || busy || Boolean(shellComposer?.running)}
                 title={
-                  busy || shellComposer?.running
-                    ? 'Stop the active response before unloading the model'
-                    : 'Unload model from memory'
+                  busy || shellComposer?.running ? 'Stop the response to unload' : 'Unload model'
                 }
-                aria-label="Unload model from memory"
+                aria-label="Unload model"
                 onClick={() => void unloadSelectedModel()}
               >
                 {modelUnloading ? (
@@ -2390,17 +2427,7 @@ export function App(): React.JSX.Element {
           <button
             className="model-picker"
             disabled={modelUnloading}
-            title={
-              appMode === 'chat'
-                ? 'Choose which installed model to chat with'
-                : appMode === 'agent'
-                  ? 'Choose which installed model drives the agent'
-                  : appMode === 'voice'
-                    ? 'Choose which PersonaPlex model to speak with'
-                    : appMode === 'computer'
-                      ? 'Choose which computer-use model drives the session'
-                      : `Choose which ${generateModality} model to generate with`
-            }
+            title="Choose model"
             onClick={() => setModelMenuOpen(true)}
           >
             <div className="model-icon">
@@ -2426,7 +2453,8 @@ export function App(): React.JSX.Element {
           {(appMode === 'chat' || appMode === 'agent') && (
             <button
               className="icon-button"
-              title="Inference settings (sampling, reasoning)"
+              title="Generation settings"
+              aria-label="Generation settings"
               onClick={() => setInferenceMenuOpen(true)}
             >
               <SlidersHorizontal size={17} />
@@ -2435,12 +2463,9 @@ export function App(): React.JSX.Element {
           {appMode === 'chat' && (
             <button
               className={`icon-button incognito-toggle${incognito ? ' active' : ''}`}
-              title={
-                incognito
-                  ? 'Incognito chat is on: nothing is saved and no memories are used.'
-                  : 'Start an incognito chat: nothing is saved and no memories are used.'
-              }
-              aria-label="Toggle incognito chat"
+              title={incognito ? 'Leave incognito' : 'Incognito chat'}
+              aria-label={incognito ? 'Leave incognito' : 'Incognito chat'}
+              aria-pressed={incognito}
               onClick={toggleIncognito}
             >
               <EyeOff size={17} />
@@ -2448,7 +2473,8 @@ export function App(): React.JSX.Element {
           )}
           <button
             className="icon-button manage-button"
-            title="Manage models, runtimes, and engine configuration"
+            title="Manage"
+            aria-label="Manage"
             onClick={() => openManage('library')}
           >
             <Settings2 size={18} />
@@ -2459,8 +2485,8 @@ export function App(): React.JSX.Element {
           <div className="runtime-notice connection-offline-notice" role="status">
             <CircleAlert size={15} />
             <span>
-              {connectionProfile?.name ?? 'The selected daemon'} is offline. Cached local views stay
-              available, but changes are paused until it reconnects or you switch connections.
+              Can’t reach {connectionProfile?.kind === 'remote' ? connectionProfile.name : 'Brazier’s engine'}.
+              You can browse what’s cached, but changes are paused.
             </span>
             <button type="button" onClick={() => void reconnectDaemon()}>
               Retry
@@ -2490,13 +2516,10 @@ export function App(): React.JSX.Element {
         {incognito && appMode === 'chat' && (
           <div className="runtime-notice incognito-notice">
             <EyeOff size={14} />
-            <span>
-              Incognito chat: this conversation is ephemeral and uses no memory. It will be
-              discarded when you leave.
-            </span>
+            <span>Incognito. Nothing is saved, and memory is off.</span>
             {incognitoDiscardOpen && (
               <>
-                <span className="incognito-discard-label">Discard it now?</span>
+                <span className="incognito-discard-label">Discard this chat?</span>
                 <button
                   type="button"
                   onClick={() => {
@@ -2522,11 +2545,10 @@ export function App(): React.JSX.Element {
           <div className="runtime-notice dream-notice">
             <Brain size={14} />
             <span>
-              Ready to consolidate memories with {selectedMeta.title}. Run a dreaming pass now?
-              It will review recent conversations and merge, prune, and add memories.
+              Dream with {selectedMeta.title}? It merges and prunes memories from recent chats.
             </span>
             <button type="button" onClick={() => void runDream()}>
-              Run
+              Dream
             </button>
             <button
               type="button"
@@ -2641,49 +2663,58 @@ export function App(): React.JSX.Element {
             )}
           {chain.length === 0 && !liveText ? (
             <div className="welcome">
-              <div className="welcome-mark">
-                <Bot size={30} />
-              </div>
-              <h1>What are we exploring?</h1>
+              <img className="welcome-logo" src={brazierLogo} alt="" />
+              <h1>
+                {modelsLoading
+                  ? 'Starting up…'
+                  : chatModels.length === 0
+                    ? 'No chat models yet'
+                    : !selectedModel && modelPrepareState !== 'error'
+                      ? 'Choose a model'
+                      : modelPrepareState === 'loading'
+                        ? `Loading ${selectedMeta.title}…`
+                        : modelPrepareState === 'error'
+                          ? 'The model didn’t load'
+                          : incognito
+                            ? 'Incognito chat'
+                            : 'What are we exploring?'}
+              </h1>
               <p>
                 {modelsLoading
-                  ? 'Starting the local runtime and loading your model library…'
-                  : !selectedModel
-                    ? 'Choose a model to load it locally. Nothing is selected yet.'
-                    : modelPrepareState === 'loading'
-                      ? 'Loading the model and runtime…'
-                      : modelPrepareState === 'error'
-                        ? 'Model load failed. Check the error below or open Manage to adjust the runtime pairing.'
-                        : canChat
-                          ? 'Chat privately with local models. Attach media or start with a question.'
-                          : 'Download a model from Hugging Face to start chatting locally.'}
+                  ? 'Loading your model library.'
+                  : chatModels.length === 0
+                    ? 'Download one to start chatting.'
+                    : !selectedModel && modelPrepareState !== 'error'
+                      ? `You have ${chatModels.length} installed.`
+                      : modelPrepareState === 'loading'
+                        ? 'This can take a moment for large models.'
+                        : modelPrepareState === 'error'
+                          ? 'See the error below, or try another model.'
+                          : incognito
+                            ? 'Nothing here is saved, and memory is off.'
+                            : 'Ask a question, or attach a file.'}
               </p>
-              <div className="starter-grid">
-                {canChat ? (
-                  <button onClick={() => setDraft('Explain how speculative decoding works.')}>
-                    <Brain size={18} />
-                    <span>
-                      <strong>Explore a concept</strong>
-                      Speculative decoding
-                    </span>
-                  </button>
-                ) : (
-                  <button onClick={() => openManage('discover')}>
-                    <Box size={18} />
-                    <span>
-                      <strong>Browse models</strong>
-                      Find models on Hugging Face
-                    </span>
-                  </button>
-                )}
-                <button onClick={() => fileInput.current?.click()}>
-                  <Paperclip size={18} />
-                  <span>
-                    <strong>Analyze media</strong>
-                    Image, audio, or video
-                  </span>
-                </button>
-              </div>
+              {!modelsLoading && !canChat && modelPrepareState !== 'loading' ? (
+                <div className="welcome-actions">
+                  {chatModels.length === 0 ? (
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={() => openManage('recommended')}
+                    >
+                      Browse models
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={() => setModelMenuOpen(true)}
+                    >
+                      Choose a model
+                    </button>
+                  )}
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="messages">
@@ -2793,14 +2824,14 @@ export function App(): React.JSX.Element {
                       <Markdown>{contentText(message)}</Markdown>
                       <button
                         className="fork-button"
-                        title="Edit this message and send an alternate branch"
+                        title="Edit and resend as a new branch"
                         onClick={() => {
                           setDraft(contentText(message))
                           setAttachments([])
                           setTipId(message.parent_id)
                         }}
                       >
-                        <Pencil size={13} /> Edit and branch
+                        <Pencil size={13} /> Edit
                       </button>
                       <BranchNavigator
                         messages={messages}
@@ -2914,14 +2945,14 @@ export function App(): React.JSX.Element {
                   ? (shellComposer?.placeholder ??
                     (agentMode ? 'Loading agent…' : 'Loading computer use…'))
                   : !selectedModel
-                    ? 'Select a model to start chatting…'
+                    ? 'Choose a model to start chatting…'
                     : modelPrepareState === 'loading'
                       ? 'Loading model…'
                       : modelPrepareState === 'error'
-                        ? 'Fix model load to chat…'
+                        ? 'Choose a model to chat…'
                         : tipId
                           ? 'Continue this branch…'
-                          : 'Message a local model…'
+                          : 'Message…'
               }
               rows={shellComposerMode ? 2 : 1}
               value={draft}
@@ -2998,11 +3029,12 @@ export function App(): React.JSX.Element {
                   disabled={!canUseTools}
                   title={
                     !canUseTools
-                      ? 'This model does not advertise tool support'
+                      ? 'This model doesn’t support tools'
                       : toolsEnabled
-                        ? `Tools: ${enabledTools.length} enabled`
-                        : 'Choose tools (bundled + MCP)'
+                        ? `Tools (${enabledTools.length} on)`
+                        : 'Tools'
                   }
+                  aria-label="Tools"
                   onClick={() => {
                     void refreshTools()
                     setToolsMenuOpen((open) => !open)
@@ -3038,18 +3070,8 @@ export function App(): React.JSX.Element {
                 className="attach-button"
                 type="button"
                 hidden={shellComposerMode}
-                title={
-                  canAttach
-                    ? [
-                        canAttachDocuments ? 'documents' : null,
-                        canAttachImage ? 'images' : null,
-                        canAttachAudio ? 'audio' : null,
-                        canAttachVideo ? 'video' : null
-                      ]
-                        .filter(Boolean)
-                        .join(', ')
-                    : 'Attach a document, or configure vision and/or ASR for media'
-                }
+                title="Attach files"
+                aria-label="Attach files"
                 onClick={() => fileInput.current?.click()}
               >
                 <Paperclip size={18} />
@@ -3058,15 +3080,8 @@ export function App(): React.JSX.Element {
                 <button
                   className="send-button stop"
                   type="button"
-                  title={
-                    agentMode
-                      ? 'Stop the run, terminate its processes, and refuse pending approvals'
-                      : computerMode
-                        ? 'Stop the computer-use loop'
-                        : coordinatorWorking
-                          ? 'Stop the current response'
-                          : 'Stop generation'
-                  }
+                  title="Stop"
+                  aria-label="Stop"
                   onClick={() => {
                     if (shellComposerMode) void shellComposer?.stop()
                     else if (coordinatorWorking) void session.cancelResponse()
@@ -3079,9 +3094,8 @@ export function App(): React.JSX.Element {
                 <button
                   className="send-button"
                   type="submit"
-                  title={
-                    agentMode ? 'Start the task' : computerMode ? 'Start computer use' : 'Send'
-                  }
+                  title="Send"
+                  aria-label="Send"
                   disabled={
                     shellComposerMode
                       ? !draft.trim() || !shellComposer || shellComposer.blockedReason !== ''
@@ -3093,12 +3107,8 @@ export function App(): React.JSX.Element {
               )}
             </div>
           </form>
-          <p className="composer-hint" hidden={appMode === 'voice' || appMode === 'generate'}>
-            {agentMode ? (
-              'The agent edits files and runs commands in the workspace above. Each action is judged by its permission mode.'
-            ) : computerMode ? (
-              'Computer Use screenshots the target, asks the model, and runs the returned actions under the permission mode above.'
-            ) : (
+          <p className="composer-hint" hidden={appMode !== 'chat' || !selectedModel}>
+            {
               <>
                 {generationRate != null ? (
                   <span
@@ -3116,7 +3126,6 @@ export function App(): React.JSX.Element {
                     {generationTokens.completion.toLocaleString()} output tokens
                   </span>
                 ) : null}
-                Local models can be inaccurate. Verify important information.
                 <span className="capabilities" aria-label="Model capabilities">
                   <span
                     title={`Acceleration target: ${runtime?.target ?? 'auto'}`}
@@ -3192,12 +3201,8 @@ export function App(): React.JSX.Element {
                     <Wrench size={14} />
                   </span>
                 </span>
-                {toolsEnabled && canUseTools ? ' Tools are enabled (bundled + MCP).' : ''}
-                {selectedCapabilities?.harmony
-                  ? ' This model uses OpenAI Harmony (gpt-oss); reasoning is routed automatically.'
-                  : ''}
               </>
-            )}
+            }
           </p>
         </div>
       </section>
