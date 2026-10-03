@@ -79,8 +79,8 @@ export function AgentSessionSidebar({ controls }: Props): React.JSX.Element {
         {groups.length === 0 && (
           <p className="empty-sidebar">
             {controls.sessions.length === 0
-              ? 'No agent tasks yet. Start one from the composer.'
-              : 'No tasks match that search.'}
+              ? 'No tasks yet.'
+              : 'No matching tasks.'}
           </p>
         )}
         {groups.map((group) => (

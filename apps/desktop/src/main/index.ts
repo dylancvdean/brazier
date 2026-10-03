@@ -30,6 +30,7 @@ import {
 import { runPackageSmoke, type PackageSmokeResult } from './packageSmoke'
 import { parseNvidiaSmiMemoryGib } from './qualificationHost'
 import {
+  isRendererDevelopmentOrigin,
   isSafeExternalUrl,
   isTrustedRendererUrl,
   shouldCancelRendererNetworkRequest
@@ -1124,7 +1125,14 @@ function installRendererConnectionGuard(profiles: ConnectionProfileManager): voi
         delete requestHeaders[name]
       }
     }
-    if (!details.webContentsId) {
+    // Resolving credentials waits for the daemon. The shell document and Vite
+    // traffic never carry them, and must not wait on (or fail with) startup.
+    const developmentOrigin = rendererDevelopmentOrigin()
+    if (
+      !details.webContentsId ||
+      details.resourceType === 'mainFrame' ||
+      (developmentOrigin && isRendererDevelopmentOrigin(details.url, developmentOrigin))
+    ) {
       callback({ requestHeaders })
       return
     }

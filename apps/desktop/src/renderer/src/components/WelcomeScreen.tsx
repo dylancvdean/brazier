@@ -3,10 +3,8 @@ import {
   ArrowRight,
   Check,
   CircleAlert,
-  KeyRound,
   LoaderCircle,
   RefreshCw,
-  Sparkles,
   Wrench
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
@@ -22,6 +20,7 @@ import {
   setupToolchain,
   type HardwareInfo,
   type RecommendationCategory,
+  type RuntimeTarget,
   type Recommendations,
   type ToolchainNeeds,
   type ToolchainStatus,
@@ -40,17 +39,27 @@ type WelcomeScreenProps = {
 const FEATURES: RecommendationCategory[] = ['text', 'agent', 'image', 'video', 'voice']
 
 const FEATURE_BLURBS: Record<RecommendationCategory, string> = {
-  text: 'Ask questions, write, and think out loud with a model running on this machine.',
-  agent: 'Let a model edit files and run commands inside a folder you choose.',
-  image: 'Generate pictures from a description.',
-  video: 'Generate short clips from a description.',
-  voice: 'Talk to a model and be answered out loud, in real time.',
+  text: 'Talk with a model running on this machine.',
+  agent: 'Let a model edit files and run commands in a folder you choose.',
+  image: 'Make images from a prompt.',
+  video: 'Make short clips from a prompt.',
+  voice: 'Speak with a model in real time.',
   computer_use: ''
 }
 
 const FEATURE_LABELS: Record<RecommendationCategory, string> = {
   ...CATEGORY_LABELS,
   voice: 'Voice (alpha)'
+}
+
+const TARGET_LABELS: Record<RuntimeTarget, string> = {
+  auto: 'Auto',
+  cpu: 'CPU',
+  cuda: 'CUDA',
+  rocm: 'ROCm',
+  metal: 'Metal',
+  vulkan: 'Vulkan',
+  sycl: 'SYCL'
 }
 
 function platformLines(
@@ -61,18 +70,18 @@ function platformLines(
   const mlx = toolchain?.platforms.mlx ?? false
   const streaming = toolchain?.platforms.streaming_asr ?? true
   if (mlx) {
-    lines.push('Apple Silicon — llama.cpp, MLX, whisper.cpp, streaming ASR, and video are supported.')
+    lines.push('Apple Silicon: llama.cpp, MLX, whisper.cpp, streaming speech, and video.')
   } else if (hardware?.os === 'macos') {
-    lines.push('macOS Intel — llama.cpp, whisper.cpp, streaming ASR, and video. MLX requires Apple Silicon.')
+    lines.push('Intel Mac: llama.cpp, whisper.cpp, streaming speech, and video. MLX needs Apple Silicon.')
   } else if (hardware?.os === 'linux' || toolchain?.os.family === 'linux') {
-    lines.push('Linux — llama.cpp, whisper.cpp, streaming ASR, and video. MLX is macOS Apple Silicon only.')
+    lines.push('Linux: llama.cpp, whisper.cpp, streaming speech, and video.')
   } else if (hardware?.os === 'windows' || toolchain?.os.family === 'windows') {
-    lines.push('Windows — llama.cpp and whisper.cpp. Streaming ASR and MLX are not available here yet.')
+    lines.push('Windows: llama.cpp and whisper.cpp. Streaming speech and MLX aren’t available yet.')
   } else {
-    lines.push('Local engines: llama.cpp and whisper.cpp everywhere; MLX on Apple Silicon; streaming ASR on macOS/Linux.')
+    lines.push('llama.cpp and whisper.cpp everywhere, MLX on Apple Silicon, streaming speech on macOS and Linux.')
   }
   if (streaming && !mlx && toolchain?.tools.some((tool) => tool.id === 'uv')) {
-    lines.push('Python engines need uv on your PATH before you build them under Runtimes.')
+    lines.push('Python engines need uv on your PATH.')
   }
   return lines
 }
@@ -206,13 +215,10 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         <div className="first-run-card">
           <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
           <p className="first-run-eyebrow">
-            <Sparkles size={13} /> Step 1 of 4
+            Step 1 of 4
           </p>
-          <h1>What do you want to do?</h1>
-          <p className="first-run-lede">
-            Tell Brazier what you want first. We’ll choose the right model and only check for the
-            host tools those choices actually need.
-          </p>
+          <h1>Welcome to Brazier</h1>
+          <p className="first-run-lede">What do you want to use it for? You can change this later.</p>
 
           <div className="welcome-feature-list" role="group" aria-label="Features to set up">
             {FEATURES.map((feature) => {
@@ -241,9 +247,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
               className={wantsComputerUse ? 'welcome-feature active' : 'welcome-feature'}
               disabled={computerUseUnavailable}
               title={
-                computerUseUnavailable
-                  ? 'Computer Use is unavailable on Windows in this beta.'
-                  : undefined
+                computerUseUnavailable ? 'Not available on Windows yet' : undefined
               }
               onClick={() => {
                 if (computerUseUnavailable) return
@@ -255,8 +259,8 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
                 <strong>Computer use (beta)</strong>
                 <small>
                   {computerUseUnavailable
-                    ? 'Unavailable on Windows in this beta. Agent mode remains supported.'
-                    : 'Let a model use a browser or desktop to complete tasks.'}
+                    ? 'Not available on Windows yet.'
+                    : 'Let a model operate a browser or desktop.'}
                 </small>
               </span>
             </button>
@@ -269,8 +273,8 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
             >
               <span className="welcome-feature-check">{customRuntimes ? <Check size={13} /> : null}</span>
               <span>
-                <strong>Build custom runtimes (advanced)</strong>
-                <small>Build engines such as llama.cpp, MLX, whisper.cpp, or vLLM from source.</small>
+                <strong>Custom runtimes (advanced)</strong>
+                <small>Build llama.cpp, MLX, whisper.cpp, or vLLM from source.</small>
               </span>
             </button>
           </div>
@@ -285,10 +289,6 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
               Continue <ArrowRight size={15} />
             </button>
           </div>
-          <p className="first-run-footnote">
-            You can change these choices later. Advanced builds are optional; managed runtimes are
-            the easiest place to start.
-          </p>
         </div>
       </div>
     )
@@ -300,14 +300,12 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         <div className="first-run-card">
           <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
           <p className="first-run-eyebrow">
-            <KeyRound size={13} /> Step 2 of 4
+            Step 2 of 4
           </p>
           <h1>Connect Hugging Face</h1>
           <p className="first-run-lede">
-            A free Hugging Face account unlocks the models that need you to accept a license — the
-            best image models and the voice model — and lets downloads use their servers directly,
-            which is faster. You can skip this and use only open models, and set it up later from
-            Manage.
+            Optional. A free token unlocks license-gated models, including the voice model and the
+            best image models.
           </p>
 
           {error && <div className="runtime-notice">{error}</div>}
@@ -321,14 +319,14 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
           >
             <label>
               <span className="label-with-link">
-                Hugging Face access token
+                Access token
                 <a
                   className="inline-link"
                   href="https://huggingface.co/settings/tokens"
                   target="_blank"
                   rel="noreferrer"
                 >
-                  Create a token (free)
+                  Get a token
                 </a>
               </span>
               <input
@@ -338,42 +336,34 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
                 onChange={(event) => setHfTokenDraft(event.target.value)}
                 placeholder={
                   hfTokenSource === 'environment'
-                    ? 'Using HF_TOKEN from the environment'
+                    ? 'Using HF_TOKEN from your environment'
                     : hfTokenSource === 'stored'
-                      ? 'Token saved — paste to replace'
+                      ? 'Saved. Paste a new one to replace it'
                       : 'hf_…'
                 }
               />
             </label>
-            <p className="model-help">
-              Stored locally under your Brazier data directory. Nothing is sent anywhere except to
-              Hugging Face, and only to fetch models you ask for.
-            </p>
+            <p className="model-help">Kept on this device and sent only to Hugging Face.</p>
             <div className="build-form-actions">
               <button
                 className="secondary-action"
                 type="submit"
                 disabled={savingHfToken || !hfTokenDraft.trim()}
               >
-                {savingHfToken ? <LoaderCircle className="spin" size={14} /> : 'Save token'}
+                {savingHfToken ? <LoaderCircle className="spin" size={14} /> : 'Save'}
               </button>
             </div>
           </form>
 
           {hfTokenSource === 'stored' ? (
             <p className="welcome-token-status ok">
-              <Check size={13} /> Token saved — gated models will be recommended.
+              <Check size={13} /> Token saved
             </p>
           ) : hfTokenSource === 'environment' ? (
             <p className="welcome-token-status ok">
-              <Check size={13} /> Using HF_TOKEN from the environment.
+              <Check size={13} /> Using HF_TOKEN from your environment
             </p>
-          ) : (
-            <p className="welcome-token-status">
-              No token yet — open models only. The voice model and the best image models will be
-              left out.
-            </p>
-          )}
+          ) : null}
 
           <div className="first-run-actions">
             <button
@@ -394,9 +384,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
               {hfTokenSource === 'none' ? 'Skip for now' : 'Continue'} <ArrowRight size={15} />
             </button>
           </div>
-          <p className="first-run-footnote">
-            You can add or remove a token later under Manage → Discover.
-          </p>
+          <p className="first-run-footnote">You can change this later in Manage → Discover.</p>
         </div>
       </div>
     )
@@ -408,20 +396,17 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         <div className="first-run-card wide">
           <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
           <p className="first-run-eyebrow">
-            <Sparkles size={13} /> Step 4 of 4
+            Step 4 of 4
           </p>
           <h1>Recommended for this machine</h1>
-          <p className="first-run-lede">
-            One model per thing you chose, at the largest quantisation this machine can hold
-            comfortably. Downloads continue in the background — you do not have to wait here.
-          </p>
+          <p className="first-run-lede">Downloads run in the background.</p>
 
           {error && <div className="runtime-notice">{error}</div>}
 
           {loadingRecommendations || !recommendations ? (
             <div className="manage-placeholder compact">
               <LoaderCircle className="spin" size={16} />
-              Sizing these against your memory…
+              Finding models that fit…
             </div>
           ) : (
             <RecommendedModels
@@ -436,8 +421,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
           {wanted.includes('voice') && recommendations && !recommendations.voice ? (
             <p className="recommendation-note warn">
               <CircleAlert size={12} />
-              Voice isn&apos;t available without a Hugging Face token — PersonaPlex requires access
-              to be granted. Go back and add one to include it.
+              Voice needs a Hugging Face token. Go back to add one.
             </p>
           ) : null}
 
@@ -468,12 +452,10 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
                 })()
               }}
             >
-              Continue to Brazier
+              Start using Brazier
             </button>
           </div>
-          <p className="first-run-footnote">
-            Reopen this from Manage → Recommended models whenever you want the others.
-          </p>
+          <p className="first-run-footnote">Find more in Manage → Recommended.</p>
         </div>
       </div>
     )
@@ -484,13 +466,10 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
       <div className="first-run-card">
         <img className="welcome-logo" src={brazierLogo} alt="Brazier" />
         <p className="first-run-eyebrow">
-          <Sparkles size={13} /> Step 3 of 4
+          Step 3 of 4
         </p>
-        <h1>Welcome to Brazier</h1>
-        <p className="first-run-lede">
-          A private workbench for local models. This check is based on what you selected, so a
-          managed-runtime setup won’t ask you to install source-build tools you do not need.
-        </p>
+        <h1>Check this machine</h1>
+        <p className="first-run-lede">Only the tools your choices need.</p>
 
         <div className="first-run-platform">
           {platformLines(hardware, toolchain).map((line) => (
@@ -498,16 +477,22 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
           ))}
           {hardware && (
             <p className="first-run-meta">
-              Detected {hardware.os}/{hardware.architecture}
-              {hardware.gpu ? ` · ${hardware.gpu}` : ''}
-              {hardware.recommended_target ? ` · prefer ${hardware.recommended_target}` : ''}
+              {[
+                hardware.architecture,
+                hardware.gpu,
+                hardware.recommended_target && hardware.recommended_target !== 'auto'
+                  ? TARGET_LABELS[hardware.recommended_target]
+                  : null
+              ]
+                .filter(Boolean)
+                .join(' · ')}
             </p>
           )}
         </div>
 
         <div className="first-run-section-head">
           <h2>
-            <Wrench size={15} /> Tools this setup needs
+            <Wrench size={15} /> Tools
           </h2>
           <button
             type="button"
@@ -525,16 +510,16 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         {loading && !toolchain ? (
           <div className="manage-placeholder compact">
             <LoaderCircle className="spin" size={16} />
-            Scanning this machine…
+            Checking…
           </div>
         ) : (
           <>
             <p className="first-run-score">
               {total === 0
-                ? 'No extra host tools are needed for these choices'
-                : `${readyCount}/${total} needed tools available${
-                    missing.length > 0 ? ` · ${missing.length} still needed` : ' · ready to go'
-                  }`}
+                ? 'Nothing extra to install.'
+                : missing.length > 0
+                  ? `${readyCount} of ${total} found`
+                  : `All ${total} found`}
             </p>
             {(toolchain?.tools ?? []).length > 0 ? (
               <ul className="welcome-checklist">
@@ -542,9 +527,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
                   <ToolRow key={tool.id} tool={tool} />
                 ))}
               </ul>
-            ) : (
-              <div className="first-run-platform">Managed runtimes are ready to handle the rest.</div>
-            )}
+            ) : null}
           </>
         )}
 
@@ -566,7 +549,10 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
                 void setupToolchain(needs)
                   .then((result) => {
                     setToolchain(result.status)
-                    setSetupOutput(result.output || 'Homebrew setup finished. Recheck if macOS is still installing Command Line Tools.')
+                    setSetupOutput(
+                      result.output ||
+                        'Homebrew setup finished. If macOS is still installing Command Line Tools, recheck when it’s done.'
+                    )
                   })
                   .catch((cause: unknown) =>
                     setError(cause instanceof Error ? cause.message : String(cause))
@@ -585,10 +571,6 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
             Choose models <ArrowRight size={15} />
           </button>
         </div>
-        <p className="first-run-footnote">
-          You can reopen this screen anytime with{' '}
-          <code>pnpm dev:welcome</code> or <code>BRAZIER_FORCE_WELCOME=1</code>.
-        </p>
       </div>
     </div>
   )

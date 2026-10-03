@@ -55,8 +55,8 @@ export function ComputerSessionSidebar({ controls }: Props): React.JSX.Element {
         {sessions.length === 0 && (
           <p className="empty-sidebar">
             {controls.sessions.length === 0
-              ? 'No computer sessions yet. Describe a task in the composer.'
-              : 'No sessions match that search.'}
+              ? 'No sessions yet.'
+              : 'No matching sessions.'}
           </p>
         )}
         {sessions.map((entry) => (
