@@ -10406,43 +10406,59 @@ mod tests {
         assert_eq!(listed["data"].as_array().unwrap().len(), 1);
         assert_eq!(listed["data"][0]["id"], first_agent_id);
 
-        let (_, first_computer) = request_with_api_key(
-            &app,
-            "POST",
-            "/api/v1/computer/sessions",
-            json!({ "target": "desktop" }),
-            &first.api_key,
-        )
-        .await;
-        let first_computer_id = first_computer["id"].as_str().unwrap();
-        let (_, second_computer) = request_with_api_key(
-            &app,
-            "POST",
-            "/api/v1/computer/sessions",
-            json!({ "target": "desktop" }),
-            &second.api_key,
-        )
-        .await;
-        let second_computer_id = second_computer["id"].as_str().unwrap();
-        let (status, _) = request_with_api_key(
-            &app,
-            "POST",
-            &format!("/api/v1/computer/sessions/{second_computer_id}/stop"),
-            Value::Null,
-            &first.api_key,
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        let (_, listed) = request_with_api_key(
-            &app,
-            "GET",
-            "/api/v1/computer/sessions",
-            Value::Null,
-            &first.api_key,
-        )
-        .await;
-        assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
-        assert_eq!(listed["sessions"][0]["id"], first_computer_id);
+        if cfg!(windows) {
+            // Computer Use is refused before a session exists, so isolation is
+            // the refusal itself: neither paired client receives a session id.
+            for key in [&first.api_key, &second.api_key] {
+                let (status, body) = request_with_api_key(
+                    &app,
+                    "POST",
+                    "/api/v1/computer/sessions",
+                    json!({ "target": "desktop" }),
+                    key,
+                )
+                .await;
+                assert_computer_use_unavailable_on_windows(status, &body);
+            }
+        } else {
+            let (_, first_computer) = request_with_api_key(
+                &app,
+                "POST",
+                "/api/v1/computer/sessions",
+                json!({ "target": "desktop" }),
+                &first.api_key,
+            )
+            .await;
+            let first_computer_id = first_computer["id"].as_str().unwrap();
+            let (_, second_computer) = request_with_api_key(
+                &app,
+                "POST",
+                "/api/v1/computer/sessions",
+                json!({ "target": "desktop" }),
+                &second.api_key,
+            )
+            .await;
+            let second_computer_id = second_computer["id"].as_str().unwrap();
+            let (status, _) = request_with_api_key(
+                &app,
+                "POST",
+                &format!("/api/v1/computer/sessions/{second_computer_id}/stop"),
+                Value::Null,
+                &first.api_key,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            let (_, listed) = request_with_api_key(
+                &app,
+                "GET",
+                "/api/v1/computer/sessions",
+                Value::Null,
+                &first.api_key,
+            )
+            .await;
+            assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
+            assert_eq!(listed["sessions"][0]["id"], first_computer_id);
+        }
 
         let (_, owner_agents) = request_with_api_key(
             &app,
@@ -10483,6 +10499,28 @@ mod tests {
             &issued.api_key,
         )
         .await;
+        if cfg!(windows) {
+            assert_computer_use_unavailable_on_windows(status, &session);
+            let (status, body) = request_with_api_key(
+                &app,
+                "POST",
+                "/api/v1/computer/desktop-authority/revoke-all",
+                Value::Null,
+                &issued.api_key,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            let (status, body) = request_with_api_key(
+                &app,
+                "POST",
+                "/api/v1/computer/desktop-authority/revoke-all",
+                Value::Null,
+                "owner-key",
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+            return;
+        }
         assert_eq!(status, StatusCode::OK, "{session}");
         let session_id = session["id"].as_str().unwrap();
 
@@ -11227,12 +11265,27 @@ done
             json!({ "permission_mode": "allow-all" }),
         )
         .await;
+        if cfg!(windows) {
+            assert_computer_use_unavailable_on_windows(status, &body);
+        } else {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("confirm_elevated_permissions"),
+                "{body}"
+            );
+        }
+    }
+
+    fn assert_computer_use_unavailable_on_windows(status: StatusCode, body: &Value) {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(
             body["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("confirm_elevated_permissions"),
+                .contains("unavailable on Windows"),
             "{body}"
         );
     }
