@@ -234,22 +234,42 @@ pub fn managed_repo_id(model_id: &str) -> Option<String> {
         let key = model_id
             .split_once(':')
             .and_then(|(_, rest)| rest.split_once(':').map(|(_, path)| path))?;
-        let parts: Vec<&str> = key.split('/').collect();
-        if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-            return Some(format!("{}/{}", parts[0], parts[1]));
+        if let Some(repo) = huggingface_cache_repo(key) {
+            return Some(repo);
         }
-        return None;
+        return repo_from_owner_name_path(key);
     }
     if let Ok(repo_id) = mlx_repo_id(model_id) {
         return Some(repo_id.to_owned());
     }
     if let Some(key) = model_id.strip_prefix("gguf:") {
-        let parts: Vec<&str> = key.split('/').collect();
-        if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-            return Some(format!("{}/{}", parts[0], parts[1]));
-        }
+        return repo_from_owner_name_path(key);
     }
     None
+}
+
+/// `models--org--name` folders in a Hugging Face hub cache.
+fn huggingface_cache_repo(key: &str) -> Option<String> {
+    for part in key.split(['/', '\\']) {
+        let Some(rest) = part.strip_prefix("models--") else {
+            continue;
+        };
+        let Some((org, name)) = rest.split_once("--") else {
+            continue;
+        };
+        if org.is_empty() || name.is_empty() {
+            continue;
+        }
+        return Some(format!("{org}/{name}"));
+    }
+    None
+}
+
+fn repo_from_owner_name_path(key: &str) -> Option<String> {
+    let mut parts = key.split('/').filter(|part| !part.is_empty());
+    let org = parts.next()?;
+    let name = parts.next()?;
+    Some(format!("{org}/{name}"))
 }
 
 pub fn mlx_repo_id(model_id: &str) -> anyhow::Result<&str> {
@@ -1498,33 +1518,286 @@ fn collect_gguf(root: &Path, dir: &Path, models: &mut Vec<ModelDescriptor>) -> a
     Ok(())
 }
 
+/// A vision projector sitting beside a GGUF model.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProjectorFile {
+    pub name: String,
+    pub size_bytes: u64,
+}
+
+/// Projectors in one directory, sorted by filename.
+pub fn list_projectors(directory: &Path) -> Vec<ProjectorFile> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut projectors = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+            || !is_projector(&path)
+        {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        projectors.push(ProjectorFile {
+            name: name.to_owned(),
+            size_bytes,
+        });
+    }
+    projectors.sort_by(|left, right| left.name.cmp(&right.name));
+    projectors
+}
+
+/// Projectors beside a local GGUF model. Empty for every other kind of model.
+pub fn projectors_for_model(
+    data_dir: &Path,
+    model_id: &str,
+    extra_library_paths: &[PathBuf],
+) -> Vec<ProjectorFile> {
+    if !model_id.starts_with("gguf:") && !model_id.starts_with("gguf-ext:") {
+        return Vec::new();
+    }
+    let Ok(path) = path_for_model_id(data_dir, model_id, extra_library_paths) else {
+        return Vec::new();
+    };
+    if !path.is_file() {
+        return Vec::new();
+    }
+    path.parent().map(list_projectors).unwrap_or_default()
+}
+
+/// Where an mmproj download should land so llama.cpp finds it beside `model_id`.
+///
+/// The Hub path may include directories; only the file name is written, and only
+/// into the model's own directory inside the managed store or an added library.
+pub fn projector_destination(
+    data_dir: &Path,
+    model_id: &str,
+    filename: &str,
+    extra_library_paths: &[PathBuf],
+) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(
+        model_id.starts_with("gguf:") || model_id.starts_with("gguf-ext:"),
+        "projectors can only be added beside a local GGUF model"
+    );
+    let name = Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("invalid projector filename"))?;
+    anyhow::ensure!(
+        is_projector(Path::new(name)),
+        "only an mmproj GGUF can be placed beside a model"
+    );
+    let model_path = path_for_model_id(data_dir, model_id, extra_library_paths)?;
+    anyhow::ensure!(model_path.is_file(), "model file not found for {model_id}");
+    let directory = model_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("model has no directory"))?;
+    ensure_directory_in_library(data_dir, directory, extra_library_paths)?;
+    Ok(directory.join(name))
+}
+
+/// Copy a local mmproj GGUF next to a model. The original file is left in place.
+pub fn attach_local_projector(
+    data_dir: &Path,
+    model_id: &str,
+    extra_library_paths: &[PathBuf],
+    source: &Path,
+) -> anyhow::Result<PathBuf> {
+    let source = std::fs::canonicalize(source)
+        .map_err(|_| anyhow::anyhow!("projector file not found: {}", source.display()))?;
+    anyhow::ensure!(source.is_file(), "projector source is not a file");
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("projector file needs a name"))?;
+    let destination = projector_destination(data_dir, model_id, name, extra_library_paths)?;
+    if destination.is_file() {
+        let existing = std::fs::canonicalize(&destination)?;
+        if existing == source {
+            return Ok(destination);
+        }
+        anyhow::bail!("a projector named {name} is already beside this model");
+    }
+    let temporary = destination.with_file_name(format!(".{name}.partial"));
+    std::fs::copy(&source, &temporary)
+        .map_err(|error| anyhow::anyhow!("copy projector: {error}"))?;
+    std::fs::rename(&temporary, &destination).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        anyhow::anyhow!("place projector beside model: {error}")
+    })?;
+    Ok(destination)
+}
+
+/// Delete one projector beside a model, or every projector in that folder.
+pub fn delete_projectors(
+    data_dir: &Path,
+    model_id: &str,
+    extra_library_paths: &[PathBuf],
+    filename: Option<&str>,
+) -> anyhow::Result<Vec<PathBuf>> {
+    anyhow::ensure!(
+        model_id.starts_with("gguf:") || model_id.starts_with("gguf-ext:"),
+        "only a local GGUF model has a projector to remove"
+    );
+    let model_path = path_for_model_id(data_dir, model_id, extra_library_paths)?;
+    anyhow::ensure!(model_path.is_file(), "model file not found for {model_id}");
+    let directory = model_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("model has no directory"))?;
+    ensure_directory_in_library(data_dir, directory, extra_library_paths)?;
+    let directory = std::fs::canonicalize(directory)?;
+    let targets = match filename.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => {
+            anyhow::ensure!(
+                !name.contains('/') && !name.contains('\\'),
+                "projector filename must not include a directory"
+            );
+            anyhow::ensure!(
+                is_projector(Path::new(name)),
+                "only an mmproj GGUF can be removed"
+            );
+            let path = directory.join(name);
+            anyhow::ensure!(path.is_file(), "projector not found beside this model");
+            vec![path]
+        }
+        None => list_projectors(&directory)
+            .into_iter()
+            .map(|projector| directory.join(projector.name))
+            .collect(),
+    };
+    anyhow::ensure!(
+        !targets.is_empty(),
+        "no projector is installed beside this model"
+    );
+    for target in &targets {
+        let canonical = std::fs::canonicalize(target)
+            .map_err(|_| anyhow::anyhow!("projector not found: {}", target.display()))?;
+        anyhow::ensure!(
+            canonical.starts_with(&directory),
+            "refusing to delete {} outside the model directory",
+            target.display()
+        );
+        // Unlink the directory entry. A symlink stays a symlink: the check
+        // above already refused one whose target leaves the model folder.
+        std::fs::remove_file(target)
+            .map_err(|error| anyhow::anyhow!("delete {}: {error}", target.display()))?;
+    }
+    Ok(targets)
+}
+
+fn ensure_directory_in_library(
+    data_dir: &Path,
+    directory: &Path,
+    extra_library_paths: &[PathBuf],
+) -> anyhow::Result<()> {
+    let directory = std::fs::canonicalize(directory)
+        .map_err(|error| anyhow::anyhow!("model directory {}: {error}", directory.display()))?;
+    if let Ok(root) = std::fs::canonicalize(gguf_root(data_dir))
+        && directory.starts_with(&root)
+    {
+        return Ok(());
+    }
+    for root in extra_library_paths {
+        if let Ok(root) = std::fs::canonicalize(root)
+            && directory.starts_with(&root)
+        {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("projector destination is outside the model library");
+}
+
+fn external_library_root(
+    extra_library_paths: &[PathBuf],
+    model_id: &str,
+) -> anyhow::Result<PathBuf> {
+    let rest = model_id
+        .split_once(':')
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| anyhow::anyhow!("invalid external model id"))?;
+    let (index_str, _) = rest
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid external model id"))?;
+    let index: usize = index_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid external library index"))?;
+    let root = extra_library_paths
+        .get(index)
+        .ok_or_else(|| anyhow::anyhow!("unknown external library index {index}"))?;
+    std::fs::canonicalize(root)
+        .map_err(|error| anyhow::anyhow!("library root {}: {error}", root.display()))
+}
+
 /// Delete a downloaded model and prune empty parent directories.
+///
+/// External library files (folders the user added) are deleted too, but only
+/// the model itself: the path has to stay inside that library root.
 pub fn delete_model(
     data_dir: &Path,
     model_id: &str,
     extra_library_paths: &[PathBuf],
 ) -> anyhow::Result<PathBuf> {
-    if model_id.starts_with("gguf-ext:") {
-        anyhow::bail!("external library models cannot be deleted from Brazier");
+    if model_id.starts_with("remote:") {
+        anyhow::bail!("remote models are not files on this machine");
     }
-    if model_id.starts_with("mlx-ext:") || model_id.starts_with("mlx-vlm-ext:") {
-        anyhow::bail!("external library models cannot be deleted from Brazier");
-    }
-    if model_id.starts_with("gguf:") {
-        let path = path_for_gguf_id(data_dir, model_id.strip_prefix("gguf:").unwrap())?;
+    if model_id.starts_with("gguf-ext:") || model_id.starts_with("gguf:") {
+        let external = model_id.starts_with("gguf-ext:");
+        let path = path_for_model_id(data_dir, model_id, extra_library_paths)?;
         anyhow::ensure!(path.is_file(), "model file not found for {model_id}");
+        let library_root = if external {
+            Some(external_library_root(extra_library_paths, model_id)?)
+        } else {
+            None
+        };
+        if let Some(root) = &library_root {
+            let canonical = std::fs::canonicalize(&path)?;
+            anyhow::ensure!(
+                canonical.starts_with(root),
+                "external model path escapes its library root"
+            );
+        }
         let siblings = sibling_gguf_shards(&path);
         for sibling in &siblings {
+            if let Some(root) = &library_root {
+                let canonical = std::fs::canonicalize(sibling).unwrap_or_else(|_| sibling.clone());
+                anyhow::ensure!(
+                    canonical.starts_with(root),
+                    "refusing to delete {} outside its library",
+                    sibling.display()
+                );
+            }
             std::fs::remove_file(sibling)
                 .map_err(|error| anyhow::anyhow!("delete {}: {error}", sibling.display()))?;
         }
-        // Drop a companion mmproj only when no other weight GGUFs remain in the
-        // repo directory (other quants may still need the projector).
+        // Drop companion mmproj files only when no other weight GGUFs remain
+        // in the directory (other quants may still need the projector).
         if let Some(directory) = path.parent() {
             remove_orphan_projector(directory)?;
         }
-        prune_empty_parents(path.parent(), &gguf_root(data_dir));
+        let prune_root = library_root.unwrap_or_else(|| gguf_root(data_dir));
+        prune_empty_parents(path.parent(), &prune_root);
         return Ok(path);
+    }
+    if model_id.starts_with("mlx-ext:") || model_id.starts_with("mlx-vlm-ext:") {
+        let path = path_for_model_id(data_dir, model_id, extra_library_paths)?;
+        anyhow::ensure!(path.is_dir(), "model directory not found for {model_id}");
+        let root = external_library_root(extra_library_paths, model_id)?;
+        let canonical = std::fs::canonicalize(&path)?;
+        anyhow::ensure!(
+            canonical.starts_with(&root),
+            "external model path escapes its library root"
+        );
+        std::fs::remove_dir_all(&canonical)
+            .map_err(|error| anyhow::anyhow!("delete {}: {error}", canonical.display()))?;
+        prune_empty_parents(canonical.parent(), &root);
+        return Ok(canonical);
     }
     if model_id.starts_with("mlx:") || model_id.starts_with("mlx-vlm:") {
         let path = path_for_model_id(data_dir, model_id, extra_library_paths)?;
@@ -1577,12 +1850,12 @@ pub fn delete_model(
     anyhow::bail!("unknown local model id: {model_id}");
 }
 
-/// Remove a sibling mmproj when the directory has no remaining weight GGUFs.
+/// Remove sibling mmproj files when the directory has no remaining weight GGUFs.
 fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Ok(());
     };
-    let mut projector: Option<PathBuf> = None;
+    let mut projectors = Vec::new();
     let mut has_weight = false;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -1593,7 +1866,7 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
             continue;
         }
         if is_projector(&path) {
-            projector = Some(path);
+            projectors.push(path);
         } else {
             has_weight = true;
         }
@@ -1601,7 +1874,7 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
     if has_weight {
         return Ok(());
     }
-    if let Some(path) = projector {
+    for path in projectors {
         std::fs::remove_file(&path)
             .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
     }
@@ -2227,6 +2500,12 @@ mod tests {
             managed_repo_id("gguf-ext:0:owner/repo/file.gguf"),
             Some("owner/repo".into())
         );
+        assert_eq!(
+            managed_repo_id(
+                "gguf-ext:0:models--unsloth--Tiny-GGUF/snapshots/abc/model-Q4_K_M.gguf"
+            ),
+            Some("unsloth/Tiny-GGUF".into())
+        );
     }
 
     #[test]
@@ -2325,5 +2604,136 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert!(models[0].id.starts_with("gguf:"));
         assert!(!models[0].read_only);
+    }
+
+    #[test]
+    fn deleting_external_gguf_removes_the_file_and_keeps_the_library_root() {
+        let dir = tempdir().unwrap();
+        let external = dir.path().join("external");
+        let file = external.join("vendor/model-q4.gguf");
+        let projector = external.join("vendor/mmproj-f16.gguf");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"weights").unwrap();
+        std::fs::write(&projector, b"proj").unwrap();
+        let extra = vec![external.clone()];
+        let id = model_id_for_external_path(0, &external, &file).unwrap();
+        delete_model(dir.path(), &id, &extra).unwrap();
+        assert!(!file.exists());
+        assert!(!projector.exists());
+        assert!(external.exists());
+    }
+
+    #[test]
+    fn deleting_one_external_quant_keeps_a_shared_projector() {
+        let dir = tempdir().unwrap();
+        let external = dir.path().join("external");
+        let q4 = external.join("vendor/model-q4.gguf");
+        let q8 = external.join("vendor/model-q8.gguf");
+        let projector = external.join("vendor/mmproj-f16.gguf");
+        std::fs::create_dir_all(q4.parent().unwrap()).unwrap();
+        std::fs::write(&q4, b"q4").unwrap();
+        std::fs::write(&q8, b"q8").unwrap();
+        std::fs::write(&projector, b"proj").unwrap();
+        let extra = vec![external.clone()];
+        let id = model_id_for_external_path(0, &external, &q4).unwrap();
+        delete_model(dir.path(), &id, &extra).unwrap();
+        assert!(!q4.exists());
+        assert!(q8.exists());
+        assert!(projector.exists());
+    }
+
+    #[test]
+    fn deleting_external_gguf_rejects_parent_segments() {
+        let dir = tempdir().unwrap();
+        let external = dir.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let error = delete_model(dir.path(), "gguf-ext:0:../secret.gguf", &[external])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("invalid model key") || error.contains("parent"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn deleting_external_mlx_removes_the_model_directory() {
+        let dir = tempdir().unwrap();
+        let external = dir.path().join("external");
+        let model_dir = external.join("vendor/my-mlx");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
+        std::fs::write(model_dir.join("weights.safetensors"), b"mlx").unwrap();
+        let extra = vec![external.clone()];
+        let id = model_id_for_external_mlx(MlxKind::Lm, 0, &external, &model_dir).unwrap();
+        delete_model(dir.path(), &id, &extra).unwrap();
+        assert!(!model_dir.exists());
+        assert!(external.exists());
+    }
+
+    #[test]
+    fn deleting_a_projector_keeps_the_weights() {
+        let dir = tempdir().unwrap();
+        let model = download_destination(dir.path(), "acme/vision", "model-q4.gguf").unwrap();
+        let projector = download_destination(dir.path(), "acme/vision", "mmproj-f16.gguf").unwrap();
+        let other = download_destination(dir.path(), "acme/vision", "mmproj-q8.gguf").unwrap();
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"weights").unwrap();
+        std::fs::write(&projector, b"proj").unwrap();
+        std::fs::write(&other, b"other").unwrap();
+        let id = "gguf:acme/vision/model-q4.gguf";
+        delete_projectors(dir.path(), id, &[], Some("mmproj-f16.gguf")).unwrap();
+        assert!(model.exists());
+        assert!(!projector.exists());
+        assert!(other.exists());
+        delete_projectors(dir.path(), id, &[], None).unwrap();
+        assert!(model.exists());
+        assert!(!other.exists());
+    }
+
+    #[test]
+    fn projector_destination_rejects_weights_and_stays_beside_an_external_model() {
+        let dir = tempdir().unwrap();
+        let external = dir.path().join("external");
+        let model = external.join("org/repo/model-q4.gguf");
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"weights").unwrap();
+        let extra = vec![external.clone()];
+        let id = model_id_for_external_path(0, &external, &model).unwrap();
+        let destination =
+            projector_destination(dir.path(), &id, "nested/mmproj-f16.gguf", &extra).unwrap();
+        assert_eq!(
+            destination,
+            std::fs::canonicalize(model.parent().unwrap())
+                .unwrap()
+                .join("mmproj-f16.gguf")
+        );
+        let error = projector_destination(dir.path(), &id, "model-q4.gguf", &extra)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("mmproj"), "{error}");
+    }
+
+    #[test]
+    fn attach_local_projector_copies_beside_the_model() {
+        let dir = tempdir().unwrap();
+        let model = download_destination(dir.path(), "acme/vision", "model-q4.gguf").unwrap();
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"weights").unwrap();
+        let source = dir.path().join("incoming-mmproj-f16.gguf");
+        std::fs::write(&source, b"projector").unwrap();
+        let copied =
+            attach_local_projector(dir.path(), "gguf:acme/vision/model-q4.gguf", &[], &source)
+                .unwrap();
+        assert_eq!(
+            copied,
+            model.parent().unwrap().join("incoming-mmproj-f16.gguf")
+        );
+        assert_eq!(std::fs::read(&copied).unwrap(), b"projector");
+        assert!(source.exists());
+        let projectors = projectors_for_model(dir.path(), "gguf:acme/vision/model-q4.gguf", &[]);
+        assert_eq!(projectors.len(), 1);
+        assert_eq!(projectors[0].name, "incoming-mmproj-f16.gguf");
+        assert_eq!(projectors[0].size_bytes, b"projector".len() as u64);
     }
 }

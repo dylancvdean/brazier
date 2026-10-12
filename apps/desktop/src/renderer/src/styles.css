@@ -2447,6 +2447,10 @@ a.inline-link {
   background: #090909;
 }
 
+.library-card {
+  align-items: start;
+}
+
 .runtime-card.active {
   border-color: #984a16;
   background: #2b190d;
@@ -2684,8 +2688,73 @@ a.inline-link {
 
 .library-card-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
+}
+
+.library-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 10px;
+}
+
+.library-toolbar input {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #343434;
+  border-radius: 8px;
+  color: inherit;
+  background: #090909;
+  font: inherit;
+  font-size: 12px;
+}
+
+.library-sort {
+  display: flex;
+  gap: 6px;
+}
+
+.library-usage {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.library-projector {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.library-projector-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.library-projector-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.library-projector-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
 }
 
 .chip-button {

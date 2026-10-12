@@ -323,6 +323,7 @@ mod tests {
             filename: "nested/model-Q4_K_M.gguf".into(),
             revision: "main".into(),
             engine: "whisper.cpp".into(),
+            beside_model_id: None,
         });
         let payload = serde_json::to_string(&work).expect("serialize");
         let restored: QueuedWork = serde_json::from_str(&payload).expect("deserialize");

@@ -38,6 +38,11 @@ pub struct DownloadRequest {
     /// `llama.cpp` (default) or `whisper.cpp`.
     #[serde(default = "default_download_engine")]
     pub engine: String,
+    /// When set, write the file beside this local GGUF instead of the managed
+    /// store. Only an mmproj filename is accepted, and only into that model's
+    /// own directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beside_model_id: Option<String>,
 }
 
 fn default_revision() -> String {
@@ -46,6 +51,45 @@ fn default_revision() -> String {
 
 fn default_download_engine() -> String {
     "llama.cpp".to_owned()
+}
+
+fn gguf_download_destination(
+    data_dir: &Path,
+    request: &DownloadRequest,
+) -> anyhow::Result<PathBuf> {
+    if let Some(model_id) = request.beside_model_id.as_deref() {
+        anyhow::ensure!(
+            request.engine != "whisper.cpp",
+            "projectors are only attached to llama.cpp GGUF models"
+        );
+        let settings = crate::runtime_settings::load(data_dir);
+        let extra: Vec<PathBuf> = settings
+            .extra_model_library_paths
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        return models_store::projector_destination(data_dir, model_id, &request.filename, &extra);
+    }
+    if request.engine == "whisper.cpp" {
+        crate::whisper::download_destination(data_dir, &request.repo_id, &request.filename)
+    } else {
+        download_destination(data_dir, &request.repo_id, &request.filename)
+    }
+}
+
+fn installed_download_model_id(
+    data_dir: &Path,
+    destination: &Path,
+    request: &DownloadRequest,
+) -> anyhow::Result<String> {
+    if let Some(model_id) = request.beside_model_id.as_deref() {
+        return Ok(model_id.to_owned());
+    }
+    if request.engine == "whisper.cpp" {
+        crate::whisper::model_id_for_path(&crate::whisper::whisper_root(data_dir), destination)
+    } else {
+        model_id_for_path(&models_store::gguf_root(data_dir), destination)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,11 +203,7 @@ pub async fn download_gguf_with_progress(
     );
 
     let whisper = request.engine == "whisper.cpp";
-    let destination = if whisper {
-        crate::whisper::download_destination(data_dir, &request.repo_id, &request.filename)?
-    } else {
-        download_destination(data_dir, &request.repo_id, &request.filename)?
-    };
+    let destination = gguf_download_destination(data_dir, &request)?;
     let engine_label = if whisper { "whisper.cpp" } else { "llama.cpp" };
     if destination.is_file() {
         let bytes = tokio::fs::metadata(&destination).await?.len();
@@ -176,14 +216,7 @@ pub async fn download_gguf_with_progress(
             ));
             progress(ProgressEvent::download(bytes, Some(bytes)));
             let sha256 = hash_file(&destination).await?;
-            let model_id = if whisper {
-                crate::whisper::model_id_for_path(
-                    &crate::whisper::whisper_root(data_dir),
-                    &destination,
-                )?
-            } else {
-                model_id_for_path(&crate::models_store::gguf_root(data_dir), &destination)?
-            };
+            let model_id = installed_download_model_id(data_dir, &destination, &request)?;
             let result = DownloadResult {
                 model_id,
                 path: destination.display().to_string(),
@@ -333,11 +366,7 @@ pub async fn download_gguf_with_progress(
         .await
         .context("promote partial download")?;
     let sha256 = hash_file(&destination).await?;
-    let model_id = if whisper {
-        crate::whisper::model_id_for_path(&crate::whisper::whisper_root(data_dir), &destination)?
-    } else {
-        model_id_for_path(&crate::models_store::gguf_root(data_dir), &destination)?
-    };
+    let model_id = installed_download_model_id(data_dir, &destination, &request)?;
     let result = DownloadResult {
         model_id,
         path: destination.display().to_string(),
@@ -1466,6 +1495,7 @@ mod tests {
                 filename: "model.gguf".into(),
                 revision: "main".into(),
                 engine: "llama.cpp".into(),
+                beside_model_id: None,
             },
         )
         .await
@@ -1474,6 +1504,55 @@ mod tests {
         assert_eq!(result.bytes, 15);
         assert_eq!(result.sha256, sha256_hex(b"fixture-weights"));
         assert!(!result.resumed);
+    }
+
+    #[tokio::test]
+    async fn beside_model_places_an_existing_projector_on_that_model() {
+        let dir = tempdir().unwrap();
+        let model = download_destination(dir.path(), "acme/vision", "model-q4.gguf").unwrap();
+        let projector = model.parent().unwrap().join("mmproj-f16.gguf");
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"weights").unwrap();
+        std::fs::write(&projector, b"projector-bytes").unwrap();
+        let result = download_gguf(
+            &reqwest::Client::new(),
+            dir.path(),
+            DownloadRequest {
+                repo_id: "acme/vision".into(),
+                filename: "mmproj-f16.gguf".into(),
+                revision: "main".into(),
+                engine: "llama.cpp".into(),
+                beside_model_id: Some("gguf:acme/vision/model-q4.gguf".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.model_id, "gguf:acme/vision/model-q4.gguf");
+        assert_eq!(result.bytes, b"projector-bytes".len() as u64);
+        assert!(projector.is_file());
+    }
+
+    #[tokio::test]
+    async fn beside_model_rejects_a_weight_file_before_any_download() {
+        let dir = tempdir().unwrap();
+        let model = download_destination(dir.path(), "acme/vision", "model-q4.gguf").unwrap();
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"weights").unwrap();
+        let error = download_gguf(
+            &reqwest::Client::new(),
+            dir.path(),
+            DownloadRequest {
+                repo_id: "acme/vision".into(),
+                filename: "model-q8.gguf".into(),
+                revision: "main".into(),
+                engine: "llama.cpp".into(),
+                beside_model_id: Some("gguf:acme/vision/model-q4.gguf".into()),
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("mmproj"), "{error}");
     }
 
     #[tokio::test]
@@ -1496,6 +1575,7 @@ mod tests {
                 filename: "model.gguf".into(),
                 revision: "main".into(),
                 engine: "llama.cpp".into(),
+                beside_model_id: None,
             },
             noop_progress(),
             Some((db, job.id)),

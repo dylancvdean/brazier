@@ -578,6 +578,14 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         )
         .route("/api/v1/models", axum::routing::delete(delete_local_model))
         .route(
+            "/api/v1/models/projector",
+            axum::routing::delete(delete_model_projector),
+        )
+        .route(
+            "/api/v1/models/projector/attach",
+            post(attach_model_projector),
+        )
+        .route(
             "/api/v1/models/bindings",
             get(model_bindings_list).put(update_model_binding),
         )
@@ -3332,6 +3340,74 @@ async fn delete_local_model(
     let _ = model_bindings::clear_binding(&state.data_dir, &request.model_id).await;
     state.invalidate_models_cache().await;
     Ok(Json(json!({ "deleted": request.model_id })))
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteProjectorRequest {
+    model_id: String,
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+async fn delete_model_projector(
+    State(state): State<AppState>,
+    Json(request): Json<DeleteProjectorRequest>,
+) -> ApiResult<Json<Value>> {
+    let settings = state.runtime.settings().await;
+    let extra_paths: Vec<PathBuf> = settings
+        .extra_model_library_paths
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    state.runtime.release_model(&request.model_id).await;
+    let removed = models_store::delete_projectors(
+        &state.data_dir,
+        &request.model_id,
+        &extra_paths,
+        request.filename.as_deref(),
+    )
+    .map_err(ApiError::bad_request)?;
+    state.invalidate_models_cache().await;
+    Ok(Json(json!({
+        "deleted": removed
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AttachProjectorRequest {
+    model_id: String,
+    source_path: String,
+}
+
+async fn attach_model_projector(
+    State(state): State<AppState>,
+    Json(request): Json<AttachProjectorRequest>,
+) -> ApiResult<Json<Value>> {
+    let source = request.source_path.trim();
+    if source.is_empty() {
+        return Err(ApiError::bad_request("choose a projector file"));
+    }
+    let settings = state.runtime.settings().await;
+    let extra_paths: Vec<PathBuf> = settings
+        .extra_model_library_paths
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    let data_dir = state.data_dir.clone();
+    let model_id = request.model_id.clone();
+    let source = PathBuf::from(source);
+    state.runtime.release_model(&model_id).await;
+    let copied = tokio::task::spawn_blocking(move || {
+        models_store::attach_local_projector(&data_dir, &model_id, &extra_paths, &source)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::bad_request)?;
+    state.invalidate_models_cache().await;
+    Ok(Json(json!({ "path": copied.display().to_string() })))
 }
 
 async fn model_bindings_list(State(state): State<AppState>) -> Json<Value> {
@@ -6124,6 +6200,21 @@ async fn queue_model_download(
     State(state): State<AppState>,
     Json(request): Json<download::DownloadRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
+    if let Some(model_id) = request.beside_model_id.as_deref() {
+        let settings = state.runtime.settings().await;
+        let extra_paths: Vec<PathBuf> = settings
+            .extra_model_library_paths
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        models_store::projector_destination(
+            &state.data_dir,
+            model_id,
+            &request.filename,
+            &extra_paths,
+        )
+        .map_err(ApiError::bad_request)?;
+    }
     let body = enqueue_work(&state, crate::download_queue::QueuedWork::Gguf(request)).await?;
     Ok((StatusCode::ACCEPTED, body))
 }
@@ -6282,9 +6373,17 @@ async fn resume_model_download(
 
 async fn list_models(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let models = state.runtime.models().await.map_err(ApiError::internal)?;
+    let settings = state.runtime.settings().await;
+    let extra_paths: Vec<PathBuf> = settings
+        .extra_model_library_paths
+        .iter()
+        .map(PathBuf::from)
+        .collect();
     let data = models
         .into_iter()
         .map(|model| {
+            let projectors =
+                models_store::projectors_for_model(&state.data_dir, &model.id, &extra_paths);
             json!({
                 "id": model.id,
                 "object": "model",
@@ -6294,6 +6393,8 @@ async fn list_models(State(state): State<AppState>) -> ApiResult<Json<Value>> {
                 "size_bytes": model.size_bytes,
                 "read_only": model.read_only,
                 "library_label": model.library_label,
+                "repo_id": models_store::managed_repo_id(&model.id),
+                "projectors": projectors,
             })
         })
         .collect::<Vec<_>>();

@@ -173,6 +173,16 @@ import {
   type QuantFit
 } from './manage/quant'
 import { ConnectionsSection } from './manage/ConnectionsSection'
+import { LibraryProjectors } from './manage/LibraryProjectors'
+import {
+  isGgufLibraryModel,
+  isRemoteLibraryModel,
+  libraryDiskBytes,
+  libraryModelMatches,
+  modelFolderKey,
+  sortLibraryModels,
+  type LibrarySort
+} from './manage/library'
 import { readChatTitleMode, writeChatTitleMode, type ChatTitleMode } from '../chatTitleMode'
 
 export {
@@ -1869,7 +1879,7 @@ function modelCountSummary(ggufCount: number, mlxCount: number): string {
 }
 
 function isExternalModel(model: LocalModel): boolean {
-  return Boolean(model.read_only) || model.id.includes('-ext:')
+  return !isRemoteLibraryModel(model) && (Boolean(model.read_only) || model.id.includes('-ext:'))
 }
 
 function RecommendedSection(props: SectionProps): React.JSX.Element {
@@ -2196,6 +2206,8 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
   const [addingPath, setAddingPath] = useState<string | null>(null)
   const [daemonPathDraft, setDaemonPathDraft] = useState('')
   const [runtimes, setRuntimes] = useState<RuntimeEntry[] | null>(props.initialRuntimes ?? null)
+  const [sort, setSort] = useState<LibrarySort>('largest')
+  const [filter, setFilter] = useState('')
 
   useEffect(() => {
     void listRuntimes()
@@ -2271,6 +2283,20 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
   }
 
   const visibleSuggestions = suggestions.filter((entry) => entry.exists)
+  const visibleModels = useMemo(() => {
+    const matched = props.models.filter((model) => libraryModelMatches(model, filter))
+    return sortLibraryModels(matched, sort)
+  }, [props.models, filter, sort])
+  const diskBytes = useMemo(() => libraryDiskBytes(props.models), [props.models])
+  const folderCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const model of props.models) {
+      const key = modelFolderKey(model)
+      if (!key) continue
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return counts
+  }, [props.models])
 
   async function removeModel(modelId: string): Promise<void> {
     setDeleting(modelId)
@@ -2291,8 +2317,9 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Model library</h2>
         <p>
-          Models downloaded by Brazier and models found in folders you add (GGUF and MLX from
-          LM Studio, Hugging Face cache, and others). External folders are read-only here.
+          Models downloaded by Brazier and models found in folders you add. Sort by size when
+          you need disk space — deleting a model removes its files, including ones Brazier did
+          not download. Remote servers are left alone.
         </p>
       </header>
 
@@ -2429,8 +2456,49 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
           </span>
         </div>
       )}
+      {props.models.length > 0 && (
+        <div className="library-toolbar">
+          <input
+            value={filter}
+            placeholder="Filter by name, folder, or projector"
+            aria-label="Filter models"
+            onChange={(event) => setFilter(event.target.value)}
+          />
+          <div className="library-sort" role="group" aria-label="Sort models">
+            {(
+              [
+                ['largest', 'Largest'],
+                ['smallest', 'Smallest'],
+                ['name', 'Name']
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                className={sort === id ? 'chip-button selected' : 'chip-button subtle'}
+                aria-pressed={sort === id}
+                onClick={() => setSort(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <span className="library-usage">
+            {filter.trim()
+              ? `${visibleModels.length} of ${props.models.length}`
+              : `${props.models.length} model${props.models.length === 1 ? '' : 's'}`}
+            {` · ${formatBytes(diskBytes)} on disk`}
+          </span>
+        </div>
+      )}
+      {!props.modelsLoading && props.models.length > 0 && visibleModels.length === 0 && (
+        <div className="manage-placeholder">
+          <Search size={18} />
+          No models match “{filter.trim()}”.
+        </div>
+      )}
       <div className="library-list">
-        {props.models.map((model) => {
+        {visibleModels.map((model) => {
           const key = modelLibraryKey(model.id)
           const parts = key.split('/')
           const name = parts.at(-1) ?? key
@@ -2438,6 +2506,8 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
           const caps = model.capabilities
           const isSelected = model.id === props.selectedModel
           const isExternal = isExternalModel(model)
+          const isRemote = isRemoteLibraryModel(model)
+          const folderKey = modelFolderKey(model)
           const engine = modelEngine(model)
           const runtimeNotice = runtimeNoticeForModel(
             model.id,
@@ -2460,7 +2530,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                 <span>
                   {repo}
                   {model.size_bytes != null ? ` · ${formatBytes(model.size_bytes)}` : ''}
-                  {isExternal ? ' · read-only' : ''}
+                  {isExternal ? ' · external folder' : ''}
                 </span>
                 {compatibleRuntimes.length > 0 && props.onSetModelBinding && (
                   <label className="library-runtime-picker">
@@ -2498,6 +2568,20 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                   {caps?.tools && <span>tools</span>}
                   {caps?.reasoning && <span>reasoning</span>}
                 </div>
+                {isGgufLibraryModel(model) && (
+                  <LibraryProjectors
+                    model={model}
+                    sharedWith={folderKey ? (folderCounts.get(folderKey) ?? 1) : 1}
+                    allowLocalFile={connectionProfile.kind !== 'remote'}
+                    onError={props.onError}
+                    onChanged={props.refreshModels}
+                  />
+                )}
+                {confirming === model.id && isExternal && (
+                  <span className="library-projector-row">
+                    This deletes the file from disk. Brazier did not download it.
+                  </span>
+                )}
               </div>
               <div className="library-card-actions">
                 <button
@@ -2536,33 +2620,45 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                     )}
                   </button>
                 )}
-                {!isExternal &&
+                {!isRemote &&
                   (confirming === model.id ? (
-                    <button
-                      className="chip-button danger"
-                      disabled={deleting === model.id}
-                      onClick={() => void removeModel(model.id)}
-                    >
-                      {deleting === model.id ? (
-                        <LoaderCircle className="spin" size={13} />
-                      ) : (
-                        <Trash2 size={13} />
-                      )}
-                      Confirm delete
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="chip-button subtle"
+                        disabled={deleting === model.id}
+                        onClick={() => setConfirming(null)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="chip-button danger"
+                        disabled={deleting === model.id}
+                        onClick={() => void removeModel(model.id)}
+                      >
+                        {deleting === model.id ? (
+                          <LoaderCircle className="spin" size={13} />
+                        ) : (
+                          <Trash2 size={13} />
+                        )}
+                        Confirm delete
+                      </button>
+                    </>
                   ) : (
                     <button
                       className="chip-button subtle"
                       title={
-                        model.id.startsWith('gguf:')
-                          ? 'Delete this model from disk (all shards and an orphaned mmproj)'
-                          : model.id.startsWith('mlx:') ||
-                              model.id.startsWith('mlx-vlm:') ||
-                              model.id.startsWith('streaming-asr:') ||
-                              model.id.startsWith('sdcpp-') ||
-                              model.id.startsWith('personaplex:')
-                            ? 'Delete this model directory from disk'
-                            : 'Delete this model from disk'
+                        isExternal
+                          ? 'Delete this file from disk. Brazier did not download it.'
+                          : model.id.startsWith('gguf:')
+                            ? 'Delete this model from disk (all shards and an orphaned mmproj)'
+                            : model.id.startsWith('mlx:') ||
+                                model.id.startsWith('mlx-vlm:') ||
+                                model.id.startsWith('streaming-asr:') ||
+                                model.id.startsWith('sdcpp-') ||
+                                model.id.startsWith('personaplex:')
+                              ? 'Delete this model directory from disk'
+                              : 'Delete this model from disk'
                       }
                       onClick={() => setConfirming(model.id)}
                     >

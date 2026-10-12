@@ -543,6 +543,11 @@ export async function parseFaraOutput(text: string): Promise<FaraParseResult> {
   })
 }
 
+export type ProjectorFile = {
+  name: string
+  size_bytes: number
+}
+
 export type LocalModel = {
   id: string
   object: string
@@ -551,6 +556,10 @@ export type LocalModel = {
   size_bytes?: number | null
   read_only?: boolean
   library_label?: string | null
+  /** Hugging Face repo this file most likely came from, when it can be inferred. */
+  repo_id?: string | null
+  /** Vision projectors sitting beside a GGUF model. */
+  projectors?: ProjectorFile[]
   capabilities?: {
     input_modalities: string[]
     output_modalities: string[]
@@ -986,11 +995,18 @@ export async function queueModelDownload(
   repoId: string,
   filename: string,
   revision = 'main',
-  engine: 'llama.cpp' | 'whisper.cpp' = 'llama.cpp'
+  engine: 'llama.cpp' | 'whisper.cpp' = 'llama.cpp',
+  besideModelId?: string
 ): Promise<{ job_id: string }> {
   return request('/api/v1/models/download/queue', {
     method: 'POST',
-    body: JSON.stringify({ repo_id: repoId, filename, revision, engine })
+    body: JSON.stringify({
+      repo_id: repoId,
+      filename,
+      revision,
+      engine,
+      ...(besideModelId ? { beside_model_id: besideModelId } : {})
+    })
   })
 }
 
@@ -2695,6 +2711,28 @@ export function deleteModel(modelId: string): Promise<{ deleted: string }> {
   return request('/api/v1/models', {
     method: 'DELETE',
     body: JSON.stringify({ model_id: modelId })
+  })
+}
+
+/** Remove one mmproj beside a GGUF model, or every projector in its folder. */
+export function deleteProjector(
+  modelId: string,
+  filename?: string
+): Promise<{ deleted: string[] }> {
+  return request('/api/v1/models/projector', {
+    method: 'DELETE',
+    body: JSON.stringify({ model_id: modelId, filename: filename ?? null })
+  })
+}
+
+/** Copy a local mmproj GGUF next to a model. The original file stays put. */
+export function attachProjector(
+  modelId: string,
+  sourcePath: string
+): Promise<{ path: string }> {
+  return request('/api/v1/models/projector/attach', {
+    method: 'POST',
+    body: JSON.stringify({ model_id: modelId, source_path: sourcePath })
   })
 }
 
