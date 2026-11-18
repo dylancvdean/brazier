@@ -148,6 +148,7 @@ import {
   modelDisplayName,
   modelEngine,
   modelLibraryKey,
+  resolveLocalModelPath,
   runtimeNoticeForModel,
   runtimesForModel
 } from '../model-utils'
@@ -322,6 +323,8 @@ type ManagePanelProps = {
   settings: RuntimeSettings | null
   onSettingsSaved: (settings: RuntimeSettings) => void
   hardware: HardwareInfo | null
+  /** Local daemon data directory for revealing downloaded weights on disk. */
+  dataDir?: string | null
   /** Open a model's advanced configuration. */
   onConfigureModel?: (modelId: string) => void
   /** How many settings each model already carries. */
@@ -355,6 +358,37 @@ const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Elemen
   { id: 'customization', label: 'Customization', icon: <LayoutDashboard size={15} /> },
   { id: 'support', label: 'Support', icon: <ShieldAlert size={15} /> }
 ]
+
+export type ManageNavGroup = {
+  id: 'models-engine' | 'workspace-modes' | 'integrations-api' | 'app'
+  label: string
+  sections: ManageSection[]
+}
+
+export const MANAGE_NAV_GROUPS: ManageNavGroup[] = [
+  {
+    id: 'models-engine',
+    label: 'Models & Engine',
+    sections: ['library', 'recommended', 'discover', 'runtimes', 'engine']
+  },
+  {
+    id: 'workspace-modes',
+    label: 'Workspace Modes',
+    sections: ['chat', 'agent', 'computer', 'generate', 'voice']
+  },
+  {
+    id: 'integrations-api',
+    label: 'Integrations & API',
+    sections: ['websearch', 'mcp', 'remote', 'server']
+  },
+  {
+    id: 'app',
+    label: 'App',
+    sections: ['connections', 'customization', 'support']
+  }
+]
+
+const SECTION_BY_ID = new Map(SECTIONS.map((entry) => [entry.id, entry]))
 
 type McpRecipe = {
   id: string
@@ -533,19 +567,28 @@ export function ManagePanel(props: ManagePanelProps): React.JSX.Element {
           </button>
         </header>
         <div className="manage-body">
-          <nav className="manage-nav">
-            {SECTIONS.map((entry) => (
-              <button
-                key={entry.id}
-                className={props.section === entry.id ? 'active' : ''}
-                onClick={() => {
-                  setError(null)
-                  props.onSectionChange(entry.id)
-                }}
-              >
-                {entry.icon}
-                {entry.label}
-              </button>
+          <nav className="manage-nav" aria-label="Manage sections">
+            {MANAGE_NAV_GROUPS.map((group) => (
+              <div className="manage-nav-group" key={group.id}>
+                <div className="manage-nav-group-label">{group.label}</div>
+                {group.sections.map((sectionId) => {
+                  const entry = SECTION_BY_ID.get(sectionId)
+                  if (!entry) return null
+                  return (
+                    <button
+                      key={entry.id}
+                      className={props.section === entry.id ? 'active' : ''}
+                      onClick={() => {
+                        setError(null)
+                        props.onSectionChange(entry.id)
+                      }}
+                    >
+                      {entry.icon}
+                      {entry.label}
+                    </button>
+                  )
+                })}
+              </div>
             ))}
           </nav>
           <div className="manage-content">
@@ -1381,10 +1424,6 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
     autoDownload: boolean
   } | null>(null)
   const [checkingUpdates, setCheckingUpdates] = useState(false)
-  const [permissions, setPermissions] = useState<OsPermissionStatus | null>(null)
-  const [requestingComputerPermissions, setRequestingComputerPermissions] = useState(false)
-  const [computerPreference, setComputerPreference] = useState<ComputerUsePreference | null>(null)
-  const [savingComputerPreference, setSavingComputerPreference] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -1415,22 +1454,6 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
         if (!cancelled) {
           setUpdateSettings({ supported: false, checkOnStartup: true, autoDownload: false })
         }
-      })
-
-    void fetchComputerPermissions()
-      .then((status) => {
-        if (!cancelled) setPermissions(status)
-      })
-      .catch(() => {
-        if (!cancelled) setPermissions(null)
-      })
-
-    void fetchComputerUsePreference()
-      .then((preference) => {
-        if (!cancelled) setComputerPreference(preference)
-      })
-      .catch((cause) => {
-        if (!cancelled) props.onError(errorText(cause))
       })
 
     return () => {
@@ -1507,69 +1530,11 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
     }
   }
 
-  async function requestComputerAccess(): Promise<void> {
-    setRequestingComputerPermissions(true)
-    props.onError(null)
-    try {
-      const [nextPermissions] = await Promise.all([
-        requestComputerPermissions(),
-        window.brazier.computer.prepareSafety()
-      ])
-      setPermissions(nextPermissions)
-    } catch (cause) {
-      props.onError(errorText(cause))
-      try {
-        setPermissions(await fetchComputerPermissions())
-      } catch {
-        // Keep the last known status when the portal itself could not reply.
-      }
-    } finally {
-      setRequestingComputerPermissions(false)
-    }
-  }
-
-  async function saveActionSettleDelay(milliseconds: number): Promise<void> {
-    const action_settle_delay_ms = Math.max(0, Math.min(10_000, Math.round(milliseconds)))
-    const previous = computerPreference
-    const next = { action_settle_delay_ms, max_screenshots_kept: computerPreference?.max_screenshots_kept ?? 3 }
-    setComputerPreference(next)
-    setSavingComputerPreference(true)
-    props.onError(null)
-    try {
-      setComputerPreference(await saveComputerUsePreference(next))
-    } catch (cause) {
-      setComputerPreference(previous)
-      props.onError(errorText(cause))
-    } finally {
-      setSavingComputerPreference(false)
-    }
-  }
-
-  async function saveScreenshotsKept(count: number): Promise<void> {
-    const max_screenshots_kept = Math.max(1, Math.min(20, Math.round(count)))
-    const previous = computerPreference
-    const next = {
-      action_settle_delay_ms: computerPreference?.action_settle_delay_ms ?? 750,
-      max_screenshots_kept
-    }
-    setComputerPreference(next)
-    setSavingComputerPreference(true)
-    props.onError(null)
-    try {
-      setComputerPreference(await saveComputerUsePreference(next))
-    } catch (cause) {
-      setComputerPreference(previous)
-      props.onError(errorText(cause))
-    } finally {
-      setSavingComputerPreference(false)
-    }
-  }
-
   return (
     <section>
       <header className="manage-heading">
         <h2>Customization</h2>
-        <p>Modes, chats, updates, and permissions.</p>
+        <p>Workspace modes, chat naming, and app updates.</p>
       </header>
 
       <div className="settings-group">
@@ -1683,118 +1648,20 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
       </div>
 
       <div className="settings-group">
-        <div className="section-label">Computer Use permissions</div>
+        <div className="section-label">Computer Use</div>
         <p className="model-help">
-          Desktop capture, input injection, the always-visible safety overlay, and the global
-          emergency shortcut are all required. Browser target does not need these OS grants.
+          Desktop permissions, action settle delay, screenshot history budget, and model stacks live
+          in Computer Use settings.
         </p>
-        <label className="model-field" style={{ maxWidth: 360, marginBottom: 16 }}>
-          <span>Action settle delay (milliseconds)</span>
-          <input
-            type="number"
-            min={0}
-            max={10_000}
-            step={50}
-            value={computerPreference?.action_settle_delay_ms ?? 750}
-            disabled={!computerPreference || savingComputerPreference}
-            onChange={(event) =>
-              setComputerPreference({
-                action_settle_delay_ms: Number(event.target.value),
-                max_screenshots_kept: computerPreference?.max_screenshots_kept ?? 3
-              })
-            }
-            onBlur={(event) => void saveActionSettleDelay(Number(event.target.value))}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.currentTarget.blur()
-              }
-            }}
-          />
-          <small>
-            Wait after an input action before capturing the next screenshot. Explicit wait actions
-            are not delayed again.
-          </small>
-        </label>
-        <label className="model-field" style={{ maxWidth: 360, marginBottom: 16 }}>
-          <span>Screenshots kept in history</span>
-          <input
-            type="number"
-            min={1}
-            max={20}
-            step={1}
-            value={computerPreference?.max_screenshots_kept ?? 3}
-            disabled={!computerPreference || savingComputerPreference}
-            onChange={(event) =>
-              setComputerPreference({
-                action_settle_delay_ms: computerPreference?.action_settle_delay_ms ?? 750,
-                max_screenshots_kept: Number(event.target.value)
-              })
-            }
-            onBlur={(event) => void saveScreenshotsKept(Number(event.target.value))}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.currentTarget.blur()
-              }
-            }}
-          />
-          <small>
-            How many recent screenshots the model can see on each step. Each costs roughly 1500
-            tokens of context; Fara is trained with 3.
-          </small>
-        </label>
-        {permissions ? (
-          <dl className="customization-permissions">
-            <div>
-              <dt>Platform</dt>
-              <dd>
-                {permissions.platform}
-                {permissions.display_server ? ` · ${permissions.display_server}` : ''}
-              </dd>
-            </div>
-            <div>
-              <dt>Screen capture</dt>
-              <dd>{permissionStateLabel(permissions.screen_capture)}</dd>
-            </div>
-            <div>
-              <dt>Input injection</dt>
-              <dd>{permissionStateLabel(permissions.input_injection)}</dd>
-            </div>
-            {permissions.detail ? (
-              <div>
-                <dt>Detail</dt>
-                <dd>{permissions.detail}</dd>
-              </div>
-            ) : null}
-            {permissions.settings_hint ? (
-              <div>
-                <dt>Hint</dt>
-                <dd>{permissions.settings_hint}</dd>
-              </div>
-            ) : null}
-          </dl>
-        ) : (
-          <p className="model-help">Could not read OS permission status from the daemon.</p>
-        )}
-        {window.brazier.platform === 'linux' ? (
-          <div style={{ marginTop: 14 }}>
-            <div className="section-label">Wayland emergency fallback</div>
-            <InputGuardSetup onError={props.onError} />
-          </div>
-        ) : null}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
+        <div className="runtime-actions" style={{ marginTop: 10 }}>
           <button
             type="button"
-            disabled={requestingComputerPermissions || permissions?.platform === 'windows'}
-            onClick={() => void requestComputerAccess()}
+            className="secondary-action"
+            onClick={() => props.onSectionChange('computer')}
           >
-            {requestingComputerPermissions ? <LoaderCircle className="spin" size={14} /> : null}
-            {requestingComputerPermissions ? 'Waiting for OS approval…' : 'Request desktop access'}
+            <LayoutDashboard size={14} />
+            Open Computer Use settings
           </button>
-          <span className="model-help">
-            On Wayland this requests Screen Share, Remote Desktop, and Ctrl+Shift+Esc. X11 and macOS
-            use Esc. If Wayland cannot activate the shortcut, install the privileged emergency
-            fallback above. Computer Use stays disabled unless one guard is verified.
-          </span>
         </div>
       </div>
     </section>
@@ -1962,7 +1829,94 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
   const [installing, setInstalling] = useState<string | null>(null)
   const [runtimePhase, setRuntimePhase] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [permissions, setPermissions] = useState<OsPermissionStatus | null>(null)
+  const [requestingComputerPermissions, setRequestingComputerPermissions] = useState(false)
+  const [computerPreference, setComputerPreference] = useState<ComputerUsePreference | null>(null)
+  const [savingComputerPreference, setSavingComputerPreference] = useState(false)
   const settledSignature = useRef('')
+
+  useEffect(() => {
+    let cancelled = false
+    void fetchComputerPermissions()
+      .then((status) => {
+        if (!cancelled) setPermissions(status)
+      })
+      .catch(() => {
+        if (!cancelled) setPermissions(null)
+      })
+    void fetchComputerUsePreference()
+      .then((preference) => {
+        if (!cancelled) setComputerPreference(preference)
+      })
+      .catch((cause) => {
+        if (!cancelled) props.onError(errorText(cause))
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function requestComputerAccess(): Promise<void> {
+    setRequestingComputerPermissions(true)
+    props.onError(null)
+    try {
+      const [nextPermissions] = await Promise.all([
+        requestComputerPermissions(),
+        window.brazier.computer.prepareSafety()
+      ])
+      setPermissions(nextPermissions)
+    } catch (cause) {
+      props.onError(errorText(cause))
+      try {
+        setPermissions(await fetchComputerPermissions())
+      } catch {
+        // Keep the last known status when the portal itself could not reply.
+      }
+    } finally {
+      setRequestingComputerPermissions(false)
+    }
+  }
+
+  async function saveActionSettleDelay(milliseconds: number): Promise<void> {
+    const action_settle_delay_ms = Math.max(0, Math.min(10_000, Math.round(milliseconds)))
+    const previous = computerPreference
+    const next = {
+      action_settle_delay_ms,
+      max_screenshots_kept: computerPreference?.max_screenshots_kept ?? 3
+    }
+    setComputerPreference(next)
+    setSavingComputerPreference(true)
+    props.onError(null)
+    try {
+      setComputerPreference(await saveComputerUsePreference(next))
+    } catch (cause) {
+      setComputerPreference(previous)
+      props.onError(errorText(cause))
+    } finally {
+      setSavingComputerPreference(false)
+    }
+  }
+
+  async function saveScreenshotsKept(count: number): Promise<void> {
+    const max_screenshots_kept = Math.max(1, Math.min(20, Math.round(count)))
+    const previous = computerPreference
+    const next = {
+      action_settle_delay_ms: computerPreference?.action_settle_delay_ms ?? 750,
+      max_screenshots_kept
+    }
+    setComputerPreference(next)
+    setSavingComputerPreference(true)
+    props.onError(null)
+    try {
+      setComputerPreference(await saveComputerUsePreference(next))
+    } catch (cause) {
+      setComputerPreference(previous)
+      props.onError(errorText(cause))
+    } finally {
+      setSavingComputerPreference(false)
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -2044,11 +1998,126 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Computer use</h2>
         <p>
-          Install a ready-to-run model stack. Brazier downloads the model and matching vision
-          projector, installs the best managed llama.cpp runtime for this machine, and enables the
-          Computer workspace mode.
+          Configure desktop permissions, timing, screenshot history, or install a ready-to-run
+          computer-use model stack. Any vision-capable chat model can also drive Computer Use.
         </p>
       </header>
+
+      <div className="settings-group">
+        <div className="section-label">Execution &amp; permissions</div>
+        <p className="model-help">
+          Desktop capture, input injection, the always-visible safety overlay, and the global
+          emergency shortcut are required for desktop targets. Browser target does not need these OS
+          grants.
+        </p>
+        <label className="model-field" style={{ maxWidth: 360, marginBottom: 16 }}>
+          <span>Action settle delay (milliseconds)</span>
+          <input
+            type="number"
+            min={0}
+            max={10_000}
+            step={50}
+            value={computerPreference?.action_settle_delay_ms ?? 750}
+            disabled={!computerPreference || savingComputerPreference}
+            onChange={(event) =>
+              setComputerPreference({
+                action_settle_delay_ms: Number(event.target.value),
+                max_screenshots_kept: computerPreference?.max_screenshots_kept ?? 3
+              })
+            }
+            onBlur={(event) => void saveActionSettleDelay(Number(event.target.value))}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.currentTarget.blur()
+              }
+            }}
+          />
+          <small>
+            Wait after an input action before capturing the next screenshot. Explicit wait actions
+            are not delayed again.
+          </small>
+        </label>
+        <label className="model-field" style={{ maxWidth: 360, marginBottom: 16 }}>
+          <span>Screenshots kept in history</span>
+          <input
+            type="number"
+            min={1}
+            max={20}
+            step={1}
+            value={computerPreference?.max_screenshots_kept ?? 3}
+            disabled={!computerPreference || savingComputerPreference}
+            onChange={(event) =>
+              setComputerPreference({
+                action_settle_delay_ms: computerPreference?.action_settle_delay_ms ?? 750,
+                max_screenshots_kept: Number(event.target.value)
+              })
+            }
+            onBlur={(event) => void saveScreenshotsKept(Number(event.target.value))}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.currentTarget.blur()
+              }
+            }}
+          />
+          <small>
+            How many recent screenshots the model can see on each step. Each costs roughly 1500
+            tokens of context; Fara is trained with 3.
+          </small>
+        </label>
+        {permissions ? (
+          <dl className="customization-permissions">
+            <div>
+              <dt>Platform</dt>
+              <dd>
+                {permissions.platform}
+                {permissions.display_server ? ` · ${permissions.display_server}` : ''}
+              </dd>
+            </div>
+            <div>
+              <dt>Screen capture</dt>
+              <dd>{permissionStateLabel(permissions.screen_capture)}</dd>
+            </div>
+            <div>
+              <dt>Input injection</dt>
+              <dd>{permissionStateLabel(permissions.input_injection)}</dd>
+            </div>
+            {permissions.detail ? (
+              <div>
+                <dt>Detail</dt>
+                <dd>{permissions.detail}</dd>
+              </div>
+            ) : null}
+            {permissions.settings_hint ? (
+              <div>
+                <dt>Hint</dt>
+                <dd>{permissions.settings_hint}</dd>
+              </div>
+            ) : null}
+          </dl>
+        ) : (
+          <p className="model-help">Could not read OS permission status from the daemon.</p>
+        )}
+        {window.brazier.platform === 'linux' ? (
+          <div style={{ marginTop: 14 }}>
+            <div className="section-label">Wayland emergency fallback</div>
+            <InputGuardSetup onError={props.onError} />
+          </div>
+        ) : null}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
+          <button
+            type="button"
+            disabled={requestingComputerPermissions || permissions?.platform === 'windows'}
+            onClick={() => void requestComputerAccess()}
+          >
+            {requestingComputerPermissions ? <LoaderCircle className="spin" size={14} /> : null}
+            {requestingComputerPermissions ? 'Waiting for OS approval…' : 'Request desktop access'}
+          </button>
+          <span className="model-help">
+            On Wayland this requests Screen Share, Remote Desktop, and Ctrl+Shift+Esc. X11 and macOS
+            use Esc. Computer Use stays disabled unless a safety guard is verified.
+          </span>
+        </div>
+      </div>
 
       <div className="settings-group">
         <div className="section-label">Fara1.5 models</div>
@@ -2165,30 +2234,13 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
         {notice && <p className="model-help">{notice}</p>}
       </div>
 
-      {window.brazier.platform === 'linux' ? (
-        <div className="settings-group">
-          <div className="section-label">Wayland emergency fallback</div>
-          <InputGuardSetup onError={props.onError} />
-          <button
-            type="button"
-            className="secondary-action"
-            onClick={() => props.onSectionChange('customization')}
-            style={{ marginTop: 10 }}
-          >
-            <Settings2 size={14} />
-            Review all desktop permissions
-          </button>
-        </div>
-      ) : null}
-
       <div className="settings-group">
         <div className="section-label">What Brazier manages</div>
         <p className="model-help">
           Downloads are resumable and remain visible in the global activity tray. The matching
           projector is loaded automatically when the model starts, and the runtime uses the
           hardware target selected under Runtimes. Browser tasks use an installed Chromium-family
-          browser in a fresh dedicated profile; desktop control remains opt-in and reports its OS
-          permission requirements in Computer Use settings.
+          browser in a fresh dedicated profile; desktop control remains opt-in.
         </p>
       </div>
     </section>
@@ -2199,6 +2251,8 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
   const connectionProfile = useConnectionProfile()
   const [confirming, setConfirming] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [copiedModelId, setCopiedModelId] = useState<string | null>(null)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [browseOpen, setBrowseOpen] = useState(false)
   const [suggestions, setSuggestions] = useState<ModelLibraryPathSuggestion[]>([])
   const [configuredPaths, setConfiguredPaths] = useState<string[]>([])
@@ -2208,6 +2262,21 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
   const [runtimes, setRuntimes] = useState<RuntimeEntry[] | null>(props.initialRuntimes ?? null)
   const [sort, setSort] = useState<LibrarySort>('largest')
   const [filter, setFilter] = useState('')
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    }
+  }, [])
+
+  async function copyModelId(modelId: string): Promise<void> {
+    await window.brazier.copyText(modelId)
+    setCopiedModelId(modelId)
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => {
+      setCopiedModelId((current) => (current === modelId ? null : current))
+    }, 1600)
+  }
 
   useEffect(() => {
     void listRuntimes()
@@ -2517,6 +2586,14 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
           )
           const compatibleRuntimes = runtimesForModel(model, runtimes)
           const boundRuntimeId = props.modelBindings?.[model.id] ?? ''
+          const localPath =
+            connectionProfile.kind === 'local' && !isRemote
+              ? resolveLocalModelPath(
+                  model.id,
+                  props.dataDir,
+                  props.settings?.extra_model_library_paths ?? []
+                )
+              : null
           return (
             <article className="library-card" key={model.id}>
               <div className="library-card-info">
@@ -2585,6 +2662,26 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
               </div>
               <div className="library-card-actions">
                 <button
+                  type="button"
+                  className="chip-button subtle"
+                  title={`Copy model ID (${model.id})`}
+                  onClick={() => void copyModelId(model.id)}
+                >
+                  {copiedModelId === model.id ? <Check size={13} /> : <Copy size={13} />}
+                  {copiedModelId === model.id ? 'Copied' : 'Copy ID'}
+                </button>
+                {localPath && (
+                  <button
+                    type="button"
+                    className="chip-button subtle"
+                    title={`Show in folder (${localPath})`}
+                    onClick={() => void window.brazier.revealFile(localPath)}
+                  >
+                    <FolderOpen size={13} />
+                    Show in folder
+                  </button>
+                )}
+                <button
                   className="chip-button subtle"
                   title="Advanced settings for this model"
                   onClick={() => props.onConfigureModel?.(model.id)}
@@ -2646,7 +2743,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                     </>
                   ) : (
                     <button
-                      className="chip-button subtle"
+                      className="chip-button subtle danger-hover"
                       title={
                         isExternal
                           ? 'Delete this file from disk. Brazier did not download it.'
@@ -3817,7 +3914,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
                 </button>
                 {bundle.origin === 'custom' && (
                   <button
-                    className="chip-button subtle"
+                    className="chip-button subtle danger-hover"
                     title="Remove this bundle from the list. Downloaded files stay on disk."
                     onClick={() => void removeBundle(bundle)}
                   >
@@ -4368,7 +4465,8 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   }, [props.hardware?.os, props.hardware?.architecture])
   const [buildJobs, setBuildJobs] = useState(initialBuildJobs)
   const [building, setBuilding] = useState(false)
-  const [activateCompletedBuild, setActivateCompletedBuild] = useState(false)
+  const [activateCompletedBuild, setActivateCompletedBuild] = useState(true)
+  const [showSystemBinaries, setShowSystemBinaries] = useState(false)
   const [activeBuildId, setActiveBuildId] = useState<string | null>(null)
   const [buildProgress, setBuildProgress] = useState<JobProgressState>(() =>
     emptyJobProgress('Preparing source build')
@@ -4462,9 +4560,12 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     return () => window.clearTimeout(timer)
   }, [updateCheckPending, managedStatuses])
 
-  async function refreshRuntimes(notifyParent = false): Promise<void> {
+  async function refreshRuntimes(
+    notifyParent = false,
+    includeSystem = showSystemBinaries
+  ): Promise<void> {
     try {
-      const response = await listRuntimes()
+      const response = await listRuntimes({ includeSystem })
       setRuntimes(response.data)
       if (notifyParent) props.onRuntimesChanged?.()
     } catch (cause) {
@@ -4478,9 +4579,13 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
   }
 
   useEffect(() => {
-    void refreshRuntimes()
     void refreshManagedStatuses()
   }, [])
+
+  useEffect(() => {
+    void refreshRuntimes(false, showSystemBinaries)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showSystemBinaries])
 
   useEffect(() => {
     setBuildJobs(
@@ -4666,7 +4771,6 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       buildCompleted = true
       if (activateCompletedBuild) {
         await activateRuntime(sourceRuntimeId(buildEngine, built.build_id))
-        setActivateCompletedBuild(false)
       }
       setBuildProgress((current) => ({
         ...current,
@@ -5095,21 +5199,32 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       <div className="settings-group">
         <div className="settings-group-head">
           <div className="section-label">Installed runtimes</div>
-          {tabInstalledRuntimes.some((runtime) => runtime.kind === 'source') && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <button
-              className="chip-button subtle"
-              disabled={checkingUpdates}
-              title="Query upstream git refs for source builds"
-              onClick={() => void checkUpdates()}
+              type="button"
+              className={showSystemBinaries ? 'chip-button selected' : 'chip-button subtle'}
+              aria-pressed={showSystemBinaries}
+              title="Include compatible binaries discovered on the daemon system PATH"
+              onClick={() => setShowSystemBinaries((current) => !current)}
             >
-              {checkingUpdates ? (
-                <LoaderCircle className="spin" size={13} />
-              ) : (
-                <RefreshCw size={13} />
-              )}
-              Check for updates
+              Show system PATH binaries
             </button>
-          )}
+            {tabInstalledRuntimes.some((runtime) => runtime.kind === 'source') && (
+              <button
+                className="chip-button subtle"
+                disabled={checkingUpdates}
+                title="Query upstream git refs for source builds"
+                onClick={() => void checkUpdates()}
+              >
+                {checkingUpdates ? (
+                  <LoaderCircle className="spin" size={13} />
+                ) : (
+                  <RefreshCw size={13} />
+                )}
+                Check for updates
+              </button>
+            )}
+          </div>
         </div>
         {runtimes == null && !props.initialRuntimes?.length && (
           <div className="manage-placeholder">
@@ -5120,7 +5235,9 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
         {runtimes != null && tabInstalledRuntimes.length === 0 && (
           <div className="manage-placeholder compact">
             <Cpu size={16} />
-            Downloaded and source-built runtimes appear here.
+            {showSystemBinaries
+              ? 'Downloaded, source-built, and system PATH runtimes appear here.'
+              : 'Downloaded and source-built runtimes appear here.'}
           </div>
         )}
         <div className="runtime-list">
@@ -5141,6 +5258,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 <strong>
                   {runtime.label}
                   {runtime.active && <span className="active-badge">Active</span>}
+                  {runtime.kind === 'system' && <span className="installed-badge">System</span>}
                   {update?.update_available && (
                     <span className="installed-badge update">Update</span>
                   )}
@@ -5223,7 +5341,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                     </button>
                   ) : (
                     <button
-                      className="chip-button subtle"
+                      className="chip-button subtle danger-hover"
                       title="Remove this runtime installation"
                       onClick={() => setConfirming(runtime.id)}
                     >
@@ -5386,6 +5504,17 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
               Builds run locally with git and cmake into an isolated prefix. Non-upstream forks
               execute untrusted native code — only build sources you trust.
             </p>
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={activateCompletedBuild}
+                onChange={(event) => setActivateCompletedBuild(event.target.checked)}
+              />
+              <span>
+                Activate when build finishes
+                <small>Make the built runtime active for its engine once compilation completes.</small>
+              </span>
+            </label>
             <div className="build-form-actions">
               <button
                 className="primary-action"
@@ -5839,22 +5968,49 @@ function WebSearchSection(props: SectionProps): React.JSX.Element {
 }
 
 /** Configure Brazier's own OpenAI-compatible daemon without exposing secrets to React state. */
+export function buildServerCurlSnippet(options: {
+  port: number
+  modelId?: string
+  apiKeyEnabled?: boolean
+  apiKeyPlaceholder?: string
+}): string {
+  const model = options.modelId || 'local-model'
+  const lines = [
+    `curl http://127.0.0.1:${options.port}/v1/chat/completions \\`,
+    `  -H "Content-Type: application/json" \\`
+  ]
+  if (options.apiKeyEnabled) {
+    lines.push(
+      `  -H "Authorization: Bearer ${options.apiKeyPlaceholder || '$BRAZIER_API_KEY'}" \\`
+    )
+  }
+  const body = JSON.stringify({
+    model,
+    messages: [{ role: 'user', content: 'Hello' }]
+  }).replace(/'/g, "'\\''")
+  lines.push(`  -d '${body}'`)
+  return lines.join('\n')
+}
+
 function ServerSection(props: SectionProps): React.JSX.Element {
   const connectionProfile = useConnectionProfile()
   const [settings, setSettings] = useState<Awaited<ReturnType<typeof window.brazier.getServerSettings>> | null>(null)
   const [keyName, setKeyName] = useState('')
   const [revealed, setRevealed] = useState<{ id: string; name: string; value: string } | null>(null)
   const [copied, setCopied] = useState(false)
+  const [copiedCurl, setCopiedCurl] = useState(false)
   const [saving, setSaving] = useState(false)
   const [adding, setAdding] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const curlTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     if (connectionProfile.kind === 'remote') return
     void window.brazier.getServerSettings().then(setSettings).catch((cause) => props.onError(errorText(cause)))
     return () => {
       if (revealTimer.current) clearTimeout(revealTimer.current)
+      if (curlTimer.current) clearTimeout(curlTimer.current)
     }
   }, [connectionProfile.kind])
 
@@ -5985,6 +6141,33 @@ function ServerSection(props: SectionProps): React.JSX.Element {
           <label><span>Port</span><input type="number" min={1} max={65535} disabled={!settings.enabled} value={settings.port} onChange={(event) => setSettings({ ...settings, port: Number(event.target.value) })} /></label>
           <label><span>Base URL</span><input readOnly value={baseUrl} /></label>
         </div>
+        <div className="runtime-actions" style={{ marginTop: 10 }}>
+          <button
+            type="button"
+            className="chip-button subtle"
+            disabled={!settings.enabled}
+            title={
+              settings.enabled
+                ? 'Copy a ready-to-run curl request for this server'
+                : 'Enable the network server to copy an API curl request'
+            }
+            onClick={() => {
+              const snippet = buildServerCurlSnippet({
+                port: settings.port,
+                modelId: props.selectedModel || props.models[0]?.id,
+                apiKeyEnabled: settings.apiKeyEnabled
+              })
+              void window.brazier.copyText(snippet).then(() => {
+                setCopiedCurl(true)
+                if (curlTimer.current) clearTimeout(curlTimer.current)
+                curlTimer.current = setTimeout(() => setCopiedCurl(false), 1600)
+              })
+            }}
+          >
+            {copiedCurl ? <Check size={13} /> : <Copy size={13} />}
+            {copiedCurl ? 'Copied curl' : 'Copy curl'}
+          </button>
+        </div>
       </div>
       <div className="settings-group">
         <div className="section-label">Authentication</div>
@@ -5998,7 +6181,7 @@ function ServerSection(props: SectionProps): React.JSX.Element {
               <div className="server-key-row" key={key.id}>
                 <span className="server-key-name">{key.name || 'Unnamed key'}</span>
                 <span className="server-key-meta">Created {new Date(key.createdAt).toLocaleDateString()}</span>
-                <button className="chip-button subtle" onClick={() => void removeKey(key.id)} title="Revoke this key" disabled={!settings.apiKeyEnabled}>
+                <button className="chip-button subtle danger-hover" onClick={() => void removeKey(key.id)} title="Revoke this key" disabled={!settings.apiKeyEnabled}>
                   <Trash2 size={13} />
                 </button>
               </div>

@@ -3,19 +3,18 @@
  *
  * Agent modes are selected the way model providers are: by id. `simple` exposes
  * the standard broker-sandboxed tool set; `powerful` adds the operator-enabled
- * power-tool surface. Both run the Pi adapter today — powerful grows its own
- * adapter as its tools land.
+ * power-tool surface. Both run on Brazier's first-party native agent harness.
  */
 
 import type { BrokerClient } from './core/brokerClient'
 import type { AgentRuntime, AgentRuntimeDescriptor } from './core/types'
-import { PiAgentRuntime } from './pi/piRuntime'
+import { NativeAgentRuntime } from './native/nativeRuntime'
 
 export type AgentRuntimeFactory = (broker: BrokerClient, id: string) => AgentRuntime
 
 const FACTORIES = new Map<string, AgentRuntimeFactory>([
-  ['simple', (broker, id) => new PiAgentRuntime(broker, id)],
-  ['powerful', (broker, id) => new PiAgentRuntime(broker, id)]
+  ['simple', (broker, id) => new NativeAgentRuntime(broker, id)],
+  ['powerful', (broker, id) => new NativeAgentRuntime(broker, id)]
 ])
 
 export const DEFAULT_RUNTIME_ID = 'simple'
@@ -35,7 +34,7 @@ export function createRuntime(id: string, broker: BrokerClient): AgentRuntime {
   const normalized = normalizeRuntimeId(id)
   const factory = FACTORIES.get(normalized)
   if (!factory) {
-    return new PiAgentRuntime(broker, DEFAULT_RUNTIME_ID)
+    return new NativeAgentRuntime(broker, DEFAULT_RUNTIME_ID)
   }
   return factory(broker, normalized)
 }

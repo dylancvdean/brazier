@@ -1,9 +1,20 @@
-import { Download, Image, LoaderCircle, Music, Paperclip, Square, Video, X } from 'lucide-react'
-import { type FormEvent, useEffect, useRef, useState } from 'react'
+import {
+  Download,
+  Image,
+  LoaderCircle,
+  Lock,
+  LockOpen,
+  Music,
+  Paperclip,
+  Shuffle,
+  Square,
+  Video,
+  X
+} from 'lucide-react'
+import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { MediaFullscreenExit, MediaFullscreenIcon, useFullscreen } from './FullscreenButton'
 import {
   cancelGeneration,
-  fetchModelSettings,
   generateImage,
   generateVideo,
   listSdcppBundles,
@@ -13,6 +24,7 @@ import {
   type GenerateBlobResult,
   type HardwareInfo,
   type LocalModel,
+  type ModelProfile,
   type RuntimeSettings,
   type SdcppBundle,
   type SdcppDefaults,
@@ -23,6 +35,7 @@ import {
   usesIntegratedGpuVulkanDefaults
 } from '../runtime-defaults'
 import type { GenerateHistoryEntry } from './GenerateHistorySidebar'
+import type { ManageSection } from './ManagePanel'
 import { useBlobUrls } from '../useBlobUrls'
 
 type Modality = 'image' | 'video'
@@ -36,10 +49,60 @@ type Props = {
   modelId: string
   settings: RuntimeSettings | null
   hardware: HardwareInfo | null
+  /** Live per-model overrides from App state (replaces stale one-shot fetch). */
+  modelProfiles?: Record<string, ModelProfile>
+  onOpenManage?: (section: ManageSection) => void
   onError: (message: string | null) => void
   history: GenerateHistoryEntry[]
   activeHistoryId: string | null
   onGenerated: (entry: GenerateHistoryEntry) => void
+}
+
+const IMAGE_RESOLUTION_PRESETS: ReadonlyArray<readonly [number, number, string]> = [
+  [512, 512, '512×512'],
+  [768, 768, '768×768'],
+  [1024, 1024, '1024×1024'],
+  [1024, 768, '1024×768 · 4:3'],
+  [768, 1024, '768×1024 · 3:4'],
+  [1280, 720, '1280×720 · 16:9']
+]
+
+const VIDEO_RESOLUTION_PRESETS: ReadonlyArray<readonly [number, number, string]> = [
+  [512, 512, '512×512'],
+  [640, 360, '640×360 · 16:9'],
+  [832, 480, '832×480 · 16:9'],
+  [480, 832, '480×832 · 9:16'],
+  [1280, 720, '1280×720 · 720p']
+]
+
+type ParsedGenerationMeta = {
+  width?: number
+  height?: number
+  steps?: number
+  seed?: number
+}
+
+function parseGenerationMetadata(raw: unknown): ParsedGenerationMeta {
+  if (!raw || typeof raw !== 'object') return {}
+  const record = raw as Record<string, unknown>
+  const num = (key: string): number | undefined => {
+    const value = record[key]
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  }
+  return {
+    width: num('width'),
+    height: num('height'),
+    steps: num('steps'),
+    seed: num('seed')
+  }
+}
+
+function formatGenerationMetadata(meta: ParsedGenerationMeta): string | null {
+  const parts: string[] = []
+  if (meta.width && meta.height) parts.push(`${meta.width}×${meta.height}`)
+  if (meta.steps != null) parts.push(`${meta.steps} steps`)
+  if (meta.seed != null) parts.push(`seed ${meta.seed}`)
+  return parts.length > 0 ? parts.join(' · ') : null
 }
 
 function errorText(cause: unknown): string {
@@ -52,7 +115,8 @@ function GenerateCard({
   failed,
   saving,
   saved,
-  onSave
+  onSave,
+  onUseSeed
 }: {
   result: GenerateBlobResult
   url?: string
@@ -60,9 +124,12 @@ function GenerateCard({
   saving: boolean
   saved: boolean
   onSave: (result: GenerateBlobResult) => void
+  onUseSeed?: (seed: number) => void
 }): React.JSX.Element {
   const { setRef, active, toggle } = useFullscreen<HTMLElement>()
   const isVideo = result.blob.mime_type.startsWith('video/')
+  const meta = parseGenerationMetadata(result.metadata)
+  const metaText = formatGenerationMetadata(meta)
   return (
     <figure className="generate-card">
       {!url ? (
@@ -82,18 +149,34 @@ function GenerateCard({
         </div>
       )}
       <figcaption>
-        <span>
-          {result.blob.mime_type} · {(result.blob.size_bytes / 1024).toFixed(0)} KB
-        </span>
-        <button
-          type="button"
-          className="chip-button subtle"
-          disabled={saving}
-          onClick={() => onSave(result)}
-        >
-          <Download size={12} />
-          {saved ? 'Saved' : 'Save'}
-        </button>
+        <div className="generate-card-meta">
+          <span>
+            {metaText ? `${metaText} · ` : ''}
+            {(result.blob.size_bytes / 1024).toFixed(0)} KB
+          </span>
+        </div>
+        <div className="generate-card-actions">
+          {meta.seed != null && onUseSeed ? (
+            <button
+              type="button"
+              className="chip-button subtle"
+              title="Lock and reuse this seed"
+              onClick={() => onUseSeed(meta.seed!)}
+            >
+              <Lock size={11} />
+              Seed
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="chip-button subtle"
+            disabled={saving}
+            onClick={() => onSave(result)}
+          >
+            <Download size={12} />
+            {saved ? 'Saved' : 'Save'}
+          </button>
+        </div>
       </figcaption>
     </figure>
   )
@@ -104,7 +187,7 @@ function isCancellation(cause: unknown): boolean {
   return errorText(cause).toLowerCase().includes('stopped by the user')
 }
 
-export function GenerateMode(props: Props) {
+export function GenerateMode(props: Props): React.JSX.Element {
   const modality = props.modality
   const [prompt, setPrompt] = useState('')
   const [negative, setNegative] = useState('')
@@ -113,6 +196,7 @@ export function GenerateMode(props: Props) {
   const [steps, setSteps] = useState(20)
   const [frames, setFrames] = useState(16)
   const [seed, setSeed] = useState('')
+  const [seedLocked, setSeedLocked] = useState(false)
   const [cfgScale, setCfgScale] = useState(7)
   const [guidance, setGuidance] = useState('')
   const [fps, setFps] = useState(24)
@@ -123,46 +207,30 @@ export function GenerateMode(props: Props) {
   const [results, setResults] = useState<GenerateBlobResult[]>([])
   const [defaultsByModel, setDefaultsByModel] = useState<Record<string, SdcppDefaults>>({})
   const [bundlesByModel, setBundlesByModel] = useState<Record<string, SdcppBundle>>({})
-  const [configuredByModel, setConfiguredByModel] = useState<Record<string, DiffusionProfile>>({})
   const initImageInput = useRef<HTMLInputElement>(null)
   const endImageInput = useRef<HTMLInputElement>(null)
   const refImageInput = useRef<HTMLInputElement>(null)
   const refVideoInput = useRef<HTMLInputElement>(null)
   const refAudioInput = useRef<HTMLInputElement>(null)
-  /** First-frame image for image-to-video conditioning. */
   const [initImage, setInitImage] = useState<StoredBlob | null>(null)
-  /** Last-frame image for first/last-frame conditioning. */
   const [endImage, setEndImage] = useState<StoredBlob | null>(null)
-  /** Reference images for Ref2VA conditioning. */
   const [refImages, setRefImages] = useState<StoredBlob[]>([])
-  /** Reference videos for Ref2VA, each with an optional paired soundtrack. */
   const [refVideos, setRefVideos] = useState<{ blob: StoredBlob; soundtrack: StoredBlob | null }[]>([])
-  /** Standalone audio references for Ref2VA conditioning. */
   const [refAudios, setRefAudios] = useState<StoredBlob[]>([])
   const [uploading, setUploading] = useState<string | null>(null)
 
   const { urls, failed } = useBlobUrls(results.map((result) => result.blob.sha256))
 
-  // What this model has been configured with, which outranks the curated
-  // defaults below: a size or step count chosen for a model is a decision, and
-  // the panel should open showing it.
-  useEffect(() => {
-    void fetchModelSettings()
-      .then((response) =>
-        setConfiguredByModel(
-          Object.fromEntries(
-            Object.entries(response.models).flatMap(([modelId, profile]) =>
-              profile.kind === 'image' || profile.kind === 'video'
-                ? [[modelId, profile as DiffusionProfile]]
-                : []
-            )
-          )
-        )
+  const configuredByModel = useMemo((): Record<string, DiffusionProfile> => {
+    if (!props.modelProfiles) return {}
+    return Object.fromEntries(
+      Object.entries(props.modelProfiles).flatMap(([modelId, profile]) =>
+        profile.kind === 'image' || profile.kind === 'video'
+          ? [[modelId, profile as DiffusionProfile]]
+          : []
       )
-      .catch(() => {
-        // Non-fatal: the panel keeps the curated defaults.
-      })
-  }, [])
+    )
+  }, [props.modelProfiles])
 
   // Curated models carry the settings they expect — most importantly CFG,
   // which has to be 1.0 for distilled models like Flux schnell.
@@ -186,6 +254,8 @@ export function GenerateMode(props: Props) {
   const useIntegratedDefaults = usesIntegratedGpuVulkanDefaults(props.settings, props.hardware)
   const selectedBundle = bundlesByModel[selected]
   const conditioning = selectedBundle?.conditioning ?? null
+  const resolutionPresets =
+    modality === 'video' ? VIDEO_RESOLUTION_PRESETS : IMAGE_RESOLUTION_PRESETS
 
   // Conditioning inputs belong to the previous model; clear them on change.
   useEffect(() => {
@@ -236,8 +306,6 @@ export function GenerateMode(props: Props) {
 
   function attachRefVideos(files: File[]): void {
     for (const file of files) {
-      // Upload first, then append — an entry must never be rendered before
-      // its blob exists.
       void uploadFile(file, (blob) => {
         setRefVideos((current) =>
           current.length >= 3 ? current : [...current, { blob, soundtrack: null }]
@@ -278,16 +346,16 @@ export function GenerateMode(props: Props) {
     if (!curated && !configured) return
     const apuWidth = modality === 'video' ? INTEGRATED_GPU_VIDEO_DEFAULTS.width : 512
     const apuHeight = modality === 'video' ? INTEGRATED_GPU_VIDEO_DEFAULTS.height : 512
-    const width =
+    const nextWidth =
       configured?.width ??
       (useIntegratedDefaults ? Math.min(curated?.width ?? apuWidth, apuWidth) : curated?.width)
-    const height =
+    const nextHeight =
       configured?.height ??
       (useIntegratedDefaults ? Math.min(curated?.height ?? apuHeight, apuHeight) : curated?.height)
-    const steps = configured?.steps ?? curated?.steps
+    const nextSteps = configured?.steps ?? curated?.steps
     const cfg = configured?.cfg_scale ?? curated?.cfg_scale
-    const guidance = configured?.guidance ?? curated?.guidance
-    const frames =
+    const nextGuidance = configured?.guidance ?? curated?.guidance
+    const nextFrames =
       configured?.video_frames ??
       (useIntegratedDefaults && modality === 'video'
         ? Math.min(
@@ -295,15 +363,32 @@ export function GenerateMode(props: Props) {
             INTEGRATED_GPU_VIDEO_DEFAULTS.frames
           )
         : curated?.video_frames)
-    const fps = configured?.fps ?? curated?.fps
-    if (width) setWidth(width)
-    if (height) setHeight(height)
-    if (steps) setSteps(steps)
+    const nextFps = configured?.fps ?? curated?.fps
+    if (nextWidth) setWidth(nextWidth)
+    if (nextHeight) setHeight(nextHeight)
+    if (nextSteps) setSteps(nextSteps)
     if (cfg != null) setCfgScale(cfg)
-    setGuidance(guidance != null ? String(guidance) : '')
-    if (frames) setFrames(frames)
-    if (fps) setFps(fps)
-  }, [selected, modality, defaultsByModel, configuredByModel, useIntegratedDefaults])
+    setGuidance(nextGuidance != null ? String(nextGuidance) : '')
+    if (nextFrames) setFrames(nextFrames)
+    if (nextFps) setFps(nextFps)
+    if (configured?.seed != null && !seedLocked) {
+      setSeed(String(configured.seed))
+    }
+  }, [selected, modality, defaultsByModel, configuredByModel, useIntegratedDefaults, seedLocked])
+
+  function toggleSeedLock(): void {
+    setSeedLocked((locked) => {
+      const next = !locked
+      if (next && !seed.trim()) {
+        const lastSeed = results.length > 0 ? parseGenerationMetadata(results[0].metadata).seed : undefined
+        const chosen = lastSeed ?? Math.floor(Math.random() * 2_147_483_647)
+        setSeed(String(chosen))
+      } else if (!next) {
+        setSeed('')
+      }
+      return next
+    })
+  }
 
   async function onSubmit(event: FormEvent): Promise<void> {
     event.preventDefault()
@@ -316,6 +401,15 @@ export function GenerateMode(props: Props) {
     if (!prompt.trim() || !modelId) return
     setBusy(true)
     props.onError(null)
+    const effectiveSeed =
+      seedLocked && !seed.trim()
+        ? Math.floor(Math.random() * 2_147_483_647)
+        : seed.trim()
+          ? Number(seed)
+          : undefined
+    if (seedLocked && !seed.trim() && effectiveSeed != null) {
+      setSeed(String(effectiveSeed))
+    }
     try {
       const body = {
         prompt: prompt.trim(),
@@ -324,7 +418,7 @@ export function GenerateMode(props: Props) {
         width,
         height,
         steps,
-        seed: seed.trim() ? Number(seed) : undefined,
+        seed: effectiveSeed,
         cfg_scale: cfgScale,
         guidance: guidance.trim() ? Number(guidance) : undefined,
         video_frames: frames,
@@ -344,19 +438,34 @@ export function GenerateMode(props: Props) {
           : {}),
         ...(refAudios.length > 0 ? { ref_audio_blobs: refAudios.map((blob) => blob.sha256) } : {})
       }
-      const result =
+      const rawResult =
         modality === 'image' ? await generateImage(body) : await generateVideo(body)
-      setResults((current) => [result, ...current])
+      // Ensure width/height/steps/seed remain readable on the card even if the
+      // engine returned minimal metadata.
+      const existingMeta =
+        rawResult.metadata && typeof rawResult.metadata === 'object'
+          ? (rawResult.metadata as Record<string, unknown>)
+          : {}
+      const enriched: GenerateBlobResult = {
+        ...rawResult,
+        metadata: {
+          width: body.width,
+          height: body.height,
+          steps: body.steps,
+          ...(body.seed != null ? { seed: body.seed } : {}),
+          ...existingMeta
+        }
+      }
+      setResults((current) => [enriched, ...current])
       props.onGenerated({
         id: crypto.randomUUID(),
         prompt: body.prompt,
         negativePrompt: body.negative_prompt ?? '',
         modality,
-        result,
+        result: enriched,
         createdAt: new Date().toISOString()
       })
     } catch (cause) {
-      // Stopping it yourself is not an error worth a red banner.
       props.onError(isCancellation(cause) ? null : errorText(cause))
     } finally {
       setBusy(false)
@@ -371,7 +480,6 @@ export function GenerateMode(props: Props) {
         result.blob.mime_type,
         result.blob.original_name
       )
-      // Dismissing the dialog is a decision, not a failure.
       if (path) setSaved((current) => ({ ...current, [result.blob.sha256]: path }))
     } catch (cause) {
       props.onError(errorText(cause))
@@ -388,6 +496,15 @@ export function GenerateMode(props: Props) {
       props.onError(errorText(cause))
     } finally {
       setStopping(false)
+    }
+  }
+
+  function handleShortcutSubmit(
+    event: React.KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>
+  ): void {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault()
+      event.currentTarget.form?.requestSubmit()
     }
   }
 
@@ -422,10 +539,37 @@ export function GenerateMode(props: Props) {
       </div>
 
       {available.length === 0 ? (
-        <p className="mode-empty">
-          No {modality} generation models installed yet. Download one from Manage → Discover
-          (stable-diffusion.cpp) and set a default in the Generate settings menu.
-        </p>
+        <div className="mode-empty-state">
+          <p className="mode-empty">
+            No {modality} generation models installed yet. Install a recommended bundle or download
+            one from stable-diffusion.cpp.
+          </p>
+          {props.onOpenManage ? (
+            <div className="mode-empty-actions">
+              <button
+                type="button"
+                className="primary-action"
+                onClick={() => props.onOpenManage?.('recommended')}
+              >
+                Recommended models
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => props.onOpenManage?.('discover')}
+              >
+                Download models
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => props.onOpenManage?.('runtimes')}
+              >
+                Runtimes
+              </button>
+            </div>
+          ) : null}
+        </div>
       ) : (
         <form className="generate-form" onSubmit={(event) => void onSubmit(event)}>
           <label>
@@ -433,6 +577,7 @@ export function GenerateMode(props: Props) {
             <textarea
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={handleShortcutSubmit}
               rows={4}
               required
               placeholder={
@@ -447,6 +592,7 @@ export function GenerateMode(props: Props) {
             <input
               value={negative}
               onChange={(event) => setNegative(event.target.value)}
+              onKeyDown={handleShortcutSubmit}
               placeholder="Optional"
             />
           </label>
@@ -660,6 +806,26 @@ export function GenerateMode(props: Props) {
             </div>
           )}
 
+          <div className="generate-presets" role="group" aria-label="Resolution presets">
+            {resolutionPresets.map(([presetW, presetH, label]) => {
+              const active = width === presetW && height === presetH
+              return (
+                <button
+                  key={label}
+                  type="button"
+                  className={active ? 'chip-button selected' : 'chip-button subtle'}
+                  aria-pressed={active}
+                  onClick={() => {
+                    setWidth(presetW)
+                    setHeight(presetH)
+                  }}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+
           <div className="generate-params">
             <label>
               Width
@@ -667,6 +833,7 @@ export function GenerateMode(props: Props) {
                 type="number"
                 min={64}
                 max={2048}
+                step={64}
                 value={width}
                 onChange={(event) => {
                   const v = Number(event.target.value)
@@ -680,6 +847,7 @@ export function GenerateMode(props: Props) {
                 type="number"
                 min={64}
                 max={2048}
+                step={64}
                 value={height}
                 onChange={(event) => {
                   const v = Number(event.target.value)
@@ -752,13 +920,41 @@ export function GenerateMode(props: Props) {
                 </label>
               </>
             ) : null}
-            <label>
+            <label className="generate-seed-field">
               Seed
-              <input
-                value={seed}
-                onChange={(event) => setSeed(event.target.value)}
-                placeholder="Random"
-              />
+              <div className="generate-seed-row">
+                <input
+                  value={seed}
+                  onChange={(event) => {
+                    setSeed(event.target.value)
+                    if (!event.target.value.trim()) setSeedLocked(false)
+                  }}
+                  placeholder="Random"
+                />
+                <button
+                  type="button"
+                  className={seedLocked ? 'chip-button selected' : 'chip-button subtle'}
+                  title={seedLocked ? 'Unlock seed (return to random)' : 'Lock seed across runs'}
+                  aria-label={seedLocked ? 'Unlock seed' : 'Lock seed'}
+                  aria-pressed={seedLocked}
+                  onClick={toggleSeedLock}
+                >
+                  {seedLocked ? <Lock size={12} /> : <LockOpen size={12} />}
+                </button>
+                <button
+                  type="button"
+                  className="chip-button subtle"
+                  title="Pick a new random seed"
+                  aria-label="New random seed"
+                  onClick={() => {
+                    const nextSeed = Math.floor(Math.random() * 2_147_483_647)
+                    setSeed(String(nextSeed))
+                    setSeedLocked(true)
+                  }}
+                >
+                  <Shuffle size={12} />
+                </button>
+              </div>
             </label>
           </div>
           <div className="generate-submit">
@@ -771,6 +967,7 @@ export function GenerateMode(props: Props) {
                 `Generate ${modality}`
               )}
             </button>
+            <span className="generate-submit-hint">⌘/Ctrl+Enter</span>
             {busy && (
               <button type="button" onClick={() => void stop()} disabled={stopping}>
                 <Square size={14} fill="currentColor" />
@@ -797,6 +994,10 @@ export function GenerateMode(props: Props) {
               saving={saving === result.blob.sha256}
               saved={Boolean(saved[result.blob.sha256])}
               onSave={(target) => void save(target)}
+              onUseSeed={(chosenSeed) => {
+                setSeed(String(chosenSeed))
+                setSeedLocked(true)
+              }}
             />
           ))}
         </div>

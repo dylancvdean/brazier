@@ -1,7 +1,7 @@
 # Brazier
 
 Brazier is an MIT-licensed desktop client and local API for running open weight AI
-models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and video models with stable-diffusion.cpp (and tool integration for LLMs to call them); bidirectional voice with PersonaPlex, and contains a modular agent harness (Pi).
+models. It features LLMs with llama.cpp, mlx-lm, mlx-vlm, and vLLM backends; image and video models with stable-diffusion.cpp (and tool integration for LLMs to call them); bidirectional voice with PersonaPlex, and a sandboxed built-in agent and computer-use harness.
 
 <p align="center">
   <img src="assets/chat-screenshot.png" alt="Brazier chat workspace" width="49%" />
@@ -30,8 +30,8 @@ models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and
 | API | ✅ OpenAI-compatible Models, Chat Completions, and Responses, plus transcription, generation, and agent endpoints |
 | Tools and MCP | ✅ Built-in utilities, media generation, multi-round tool use, and custom stdio MCP servers |
 | Multimodal input | ✅ Image, audio, and sampled video input with capability-aware fallback |
-| Agent | 🟨 Sandboxed Pi core on macOS, Linux, and Windows with brokered MCP tools |
-| Computer Use | 🟨 Browser-first observe–act mode with Fara1.5 adapters, isolated Chromium/CDP sessions, and durable task recovery on macOS/Linux; desktop OS control probes X11/Wayland/macOS and fails closed; Computer Use is unavailable on Windows in this beta |
+| Agent | 🟨 Sandboxed native agent harness on macOS, Linux, and Windows with brokered MCP tools |
+| Computer Use | 🟨 Browser-first observe–act mode with multi-dialect VLM adapters (OpenAI tools, Fara1.5 XML, UI-TARS, prompted JSON), isolated Chromium/CDP sessions, and durable task recovery on macOS/Linux; desktop OS control probes X11/Wayland/macOS and fails closed; Computer Use is unavailable on Windows in this beta |
 | Media generation | 🟨 Curated image/video models and managed runtimes; backend reliability varies and AMD APU Vulkan support is experimental |
 | Speech recognition | ✅ whisper.cpp, WhisperKit, and Nemotron streaming ASR |
 | Multi-GPU | 🟨 Manual llama.cpp GPU splits are supported; automatic and cross-engine placement are not |
@@ -39,7 +39,7 @@ models. It features LLMs with llama.cpp, mlx-lm, and mlx-vlm backends; image and
 
 ## Development
 
-Prerequisites are Node.js 24+, pnpm 11, and Rust 1.93.
+Prerequisites are Node.js 24+, pnpm 11+, and Rust 1.100.
 
 ```sh
 pnpm install
@@ -84,8 +84,8 @@ guide](docs/releasing.md) for release credentials and signature verification.
 Brazier collects no telemetry. Non-upstream forks,
 remote-code models, network tools, and code execution require explicit trust.
 
-Agent mode runs model-chosen commands on your machine. It runs on the Pi
-runtime (broker + OS sandbox when available) and asks before anything writes,
+Agent mode runs model-chosen commands on your machine. It runs on Brazier's
+built-in harness (broker + OS sandbox when available) and asks before anything writes,
 executes, or leaves the workspace. Two modes pick the tool surface: Simple
 exposes the standard set, and Powerful adds the extra tools you enable under
 Manage → Agent. Windows uses AppContainer and Job Object isolation; macOS uses

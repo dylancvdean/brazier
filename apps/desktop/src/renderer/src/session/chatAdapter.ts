@@ -138,15 +138,18 @@ export class DaemonChatAdapter implements ChatAdapter {
  */
 export class InMemoryChatAdapter implements ChatAdapter {
   private lastMessageId: string | null = null
-  private readonly messagesById = new Map<string, ConversationMessage>()
+  private readonly messagesById = new Map<string, Message>()
 
-  constructor(private readonly hooks: ChatAdapterHooks = {}) {}
+  constructor(
+    private readonly hooks: ChatAdapterHooks = {},
+    private readonly conversationId = 'incognito'
+  ) {}
 
   async appendMessage(message: NewMessage): Promise<ConversationMessage> {
     const parentId = this.hooks.parentId?.() ?? this.lastMessageId
     const stored: Message = {
       id: `ephemeral-${crypto.randomUUID()}`,
-      conversation_id: 'incognito',
+      conversation_id: this.conversationId,
       parent_id: parentId,
       role: message.role,
       content: message.content,
@@ -158,48 +161,35 @@ export class InMemoryChatAdapter implements ChatAdapter {
       created_at: new Date().toISOString()
     }
     this.lastMessageId = stored.id
-    const conversation = toConversationMessage(stored)
+    this.messagesById.set(stored.id, stored)
     this.hooks.onMessage?.(stored)
-    const conversationMessage = toConversationMessage(stored)
-    this.messagesById.set(conversationMessage.id, conversationMessage)
-    return conversationMessage
+    return toConversationMessage(stored)
   }
 
   async updateMessage(messageId: string, patch: MessagePatch): Promise<ConversationMessage> {
-    const match = this.messagesById.get(messageId)
-    const base: ConversationMessage =
-      match ??
-      ({
-        id: messageId,
-        conversationId: 'incognito',
-        role: 'assistant',
-        source: 'assistant_chat',
-        content: '',
-        createdAt: new Date().toISOString(),
-        status: 'final',
-        metadata: undefined
-      } as ConversationMessage)
-    const next: ConversationMessage = {
+    const existing = this.messagesById.get(messageId)
+    const base: Message = existing ?? {
+      id: messageId,
+      conversation_id: this.conversationId,
+      parent_id: this.hooks.parentId?.() ?? this.lastMessageId,
+      role: 'assistant',
+      content: '',
+      model: this.hooks.model?.() ?? null,
+      source: 'assistant_chat',
+      correlation_id: null,
+      status: 'final',
+      metadata: null,
+      created_at: new Date().toISOString()
+    }
+    const updated: Message = {
       ...base,
       content: patch.content ?? base.content,
       status: patch.status ?? base.status,
-      metadata: patch.metadata ?? base.metadata
+      metadata: patch.metadata !== undefined ? patch.metadata : base.metadata
     }
-    this.messagesById.set(messageId, next)
-    this.hooks.onMessage?.({
-      id: next.id,
-      conversation_id: next.conversationId,
-      parent_id: null,
-      role: next.role,
-      content: next.content,
-      model: null,
-      source: next.source,
-      correlation_id: next.correlationId,
-      status: next.status,
-      metadata: next.metadata ?? null,
-      created_at: next.createdAt
-    })
-    return next
+    this.messagesById.set(messageId, updated)
+    this.hooks.onMessage?.(updated)
+    return toConversationMessage(updated)
   }
 
   showStatus(status: string | null): void {

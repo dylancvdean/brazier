@@ -140,6 +140,7 @@ export type ConnectionProfileManagerDependencies = {
     local_control_key?: string | null
   }>
   stopLocal: () => void | Promise<void>
+  ensureLocalDaemon?: () => Promise<DaemonConnection>
   fetch?: typeof fetch
   handshakeTimeoutMs?: number
 }
@@ -689,6 +690,7 @@ export class ConnectionProfileManager {
   private localStarted = false
   private stopped = false
   private shutdownPromise?: Promise<void>
+  private switchGeneration = 0
 
   constructor(
     readonly store: ConnectionProfileStore,
@@ -706,13 +708,47 @@ export class ConnectionProfileManager {
   async connection(): Promise<DaemonConnection> {
     this.assertRunning()
     if (!this.activeConnection) {
-      const pending = this.resolve(this.store.current()).catch((error: unknown) => {
-        if (this.activeConnection === pending) this.activeConnection = undefined
-        throw error
-      })
+      const generation = this.switchGeneration
+      const pending = this.resolve(this.store.current()).then(
+        (ready) => {
+          if (generation !== this.switchGeneration && this.activeConnection !== pending) {
+            return this.connection()
+          }
+          return ready
+        },
+        (error: unknown) => {
+          if (this.activeConnection === pending) this.activeConnection = undefined
+          throw error
+        }
+      )
       this.activeConnection = pending
     }
     return this.activeConnection
+  }
+
+  /**
+   * Re-verify the active profile and respawn the owned Local daemon if its
+   * cached connection exited or is no longer reachable.
+   */
+  async reconnect(): Promise<DaemonConnection> {
+    this.assertRunning()
+    const generation = ++this.switchGeneration
+    this.activeConnection = undefined
+    const pending = this.resolve(this.store.current()).catch((error: unknown) => {
+      if (this.activeConnection === pending) this.activeConnection = undefined
+      throw error
+    })
+    this.activeConnection = pending
+    const ready = await pending
+    if (generation !== this.switchGeneration) {
+      return this.connection()
+    }
+    this.activeConnection = Promise.resolve(ready)
+    return ready
+  }
+
+  async activateProfile(id: string): Promise<DaemonConnection> {
+    return this.select(id)
   }
 
   async test(idOrProfile: string | RemoteConnectionProfileInput): Promise<DaemonConnection> {
@@ -726,11 +762,22 @@ export class ConnectionProfileManager {
 
   async upsert(input: RemoteConnectionProfileInput): Promise<RemoteConnectionProfile> {
     this.assertRunning()
-    const activeId = this.store.current().id
     const candidate = this.normalizeRemoteInput(input)
-    const ready = candidate.id === activeId ? await this.resolve(candidate) : undefined
+    const isEditingActive = candidate.id === this.store.current().id
+    const generation = isEditingActive ? ++this.switchGeneration : this.switchGeneration
+    const ready = isEditingActive ? await this.resolve(candidate) : undefined
+    if (isEditingActive && generation !== this.switchGeneration) {
+      const existing = this.store.get(candidate.id)
+      if (existing?.kind === 'remote') return existing
+    }
     const profile = this.store.upsert(candidate)
-    if (ready) this.activeConnection = Promise.resolve(ready)
+    if (
+      ready &&
+      generation === this.switchGeneration &&
+      this.store.current().id === profile.id
+    ) {
+      this.activeConnection = Promise.resolve(ready)
+    }
     return profile
   }
 
@@ -755,7 +802,9 @@ export class ConnectionProfileManager {
     // Persist before the authenticated handshake: the server returns this key
     // once, so a transient handshake failure must not discard the credential.
     const profile = this.store.upsert({ ...candidate, apiKey: issued.apiKey })
-    if (profile.id === this.store.current().id) this.activeConnection = undefined
+    const isCurrent = profile.id === this.store.current().id
+    const generation = isCurrent ? ++this.switchGeneration : this.switchGeneration
+    if (isCurrent) this.activeConnection = undefined
     const daemon = await fetchDaemonInfo(profile.baseUrl, issued.apiKey, {
       fetch: this.dependencies.fetch,
       timeoutMs: this.dependencies.handshakeTimeoutMs
@@ -766,20 +815,36 @@ export class ConnectionProfileManager {
       profile: summarizeConnectionProfile(profile),
       daemon
     }
-    if (profile.id === this.store.current().id) this.activeConnection = Promise.resolve(ready)
+    if (
+      generation === this.switchGeneration &&
+      profile.id === this.store.current().id
+    ) {
+      this.activeConnection = Promise.resolve(ready)
+    }
     return { profile: ready.profile, daemon, client: issued.client }
   }
 
   async delete(id: string): Promise<boolean> {
     this.assertRunning()
     const wasActive = this.store.current().id === id
+    const generation = wasActive ? ++this.switchGeneration : this.switchGeneration
+    let localReplacement: DaemonConnection | undefined
     if (wasActive) {
       // Prove the Local replacement is usable before changing the durable
       // selection. This is the one deletion path that may start Local.
-      await this.resolve(this.store.get(LOCAL_CONNECTION_PROFILE_ID)!)
+      localReplacement = await this.resolve(this.store.get(LOCAL_CONNECTION_PROFILE_ID)!)
     }
     const deleted = this.store.delete(id)
-    if (deleted && wasActive) this.activeConnection = undefined
+    if (
+      deleted &&
+      wasActive &&
+      generation === this.switchGeneration &&
+      this.store.current().id === LOCAL_CONNECTION_PROFILE_ID
+    ) {
+      this.activeConnection = localReplacement
+        ? Promise.resolve(localReplacement)
+        : undefined
+    }
     return deleted
   }
 
@@ -787,10 +852,13 @@ export class ConnectionProfileManager {
     this.assertRunning()
     const profile = this.store.get(id)
     if (!profile) throw new Error('Connection profile does not exist.')
-    if (profile.id === this.store.current().id) return this.connection()
+    const generation = ++this.switchGeneration
     // Validate before persisting. A typo or incompatible endpoint must not
     // strand the next launch on an unusable profile.
     const ready = await this.resolve(profile)
+    if (generation !== this.switchGeneration) {
+      return this.connection()
+    }
     this.store.select(id)
     this.activeConnection = Promise.resolve(ready)
     return ready
@@ -798,6 +866,20 @@ export class ConnectionProfileManager {
 
   invalidate(): void {
     this.activeConnection = undefined
+  }
+
+  /**
+   * Drop the cached Local daemon handle after the owned `brazierd` process
+   * exits so the next connection attempt spawns a fresh child.
+   */
+  invalidateLocalConnection(): void {
+    this.localStarted = false
+    this.localConnection = undefined
+    this.resolvedLocalAddress = undefined
+    this.resolvedLocalControlKey = undefined
+    if (this.store.current().kind === 'local') {
+      this.activeConnection = undefined
+    }
   }
 
   shutdown(): Promise<void> {
@@ -871,18 +953,45 @@ export class ConnectionProfileManager {
   }
 
   private async resolve(profile: ConnectionProfile): Promise<DaemonConnection> {
-    const raw = profile.kind === 'local' ? await this.resolveLocal() : {
-      address: profile.baseUrl,
-      api_key: profile.apiKey
+    if (profile.kind === 'local') {
+      if (this.dependencies.ensureLocalDaemon) {
+        const ensured = await this.dependencies.ensureLocalDaemon()
+        const normalized = normalizeDaemonBaseUrl(ensured.address)
+        this.resolvedLocalAddress = normalized
+        return { ...ensured, address: normalized }
+      }
+      const hadCachedLocal = Boolean(this.localConnection)
+      const handshakeLocal = async (): Promise<DaemonConnection> => {
+        const raw = await this.resolveLocal()
+        const address = normalizeDaemonBaseUrl(raw.address)
+        const daemon = await fetchDaemonInfo(address, raw.api_key, {
+          fetch: this.dependencies.fetch,
+          timeoutMs: this.dependencies.handshakeTimeoutMs
+        })
+        return {
+          address,
+          api_key: raw.api_key,
+          profile: summarizeConnectionProfile(profile),
+          daemon
+        }
+      }
+      try {
+        return await handshakeLocal()
+      } catch (error) {
+        this.invalidateLocalConnection()
+        if (!hadCachedLocal || this.stopped) throw error
+        return handshakeLocal()
+      }
     }
-    const address = normalizeDaemonBaseUrl(raw.address)
-    const daemon = await fetchDaemonInfo(address, raw.api_key, {
+
+    const address = normalizeDaemonBaseUrl(profile.baseUrl)
+    const daemon = await fetchDaemonInfo(address, profile.apiKey, {
       fetch: this.dependencies.fetch,
       timeoutMs: this.dependencies.handshakeTimeoutMs
     })
     return {
       address,
-      api_key: raw.api_key,
+      api_key: profile.apiKey,
       profile: summarizeConnectionProfile(profile),
       daemon
     }

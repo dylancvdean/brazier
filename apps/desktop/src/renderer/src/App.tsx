@@ -3,7 +3,9 @@ import {
   Bot,
   Box,
   Brain,
+  Check,
   CircleAlert,
+  Copy,
   Cpu,
   ChevronLeft,
   ChevronRight,
@@ -19,6 +21,7 @@ import {
   Paperclip,
   Download,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   Settings2,
@@ -32,7 +35,17 @@ import {
   Wrench,
   X
 } from 'lucide-react'
-import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type ChangeEvent,
+  type ClipboardEvent,
+  type DragEvent,
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
 import {
   createConversation,
   createMessage,
@@ -101,9 +114,10 @@ import {
 import { MessageMedia } from './components/MessageMedia'
 import { Markdown } from './components/Markdown'
 import { ReasoningDisclosure, TurnTrace } from './components/ReasoningDisclosure'
+import { CommandPalette } from './components/CommandPalette'
 import { GenerateMode } from './components/GenerateMode'
 import { InferenceMenu } from './components/InferenceMenu'
-import { ManagePanel, type ManageSection } from './components/ManagePanel'
+import { ManagePanel, buildServerCurlSnippet, type ManageSection } from './components/ManagePanel'
 import { ModelMenu } from './components/ModelMenu'
 import { profileCount } from './components/ModelSettingsFields'
 import { ModelSettingsModal } from './components/ModelSettingsModal'
@@ -116,7 +130,6 @@ import { hasCompletedWelcome, markWelcomeCompleted } from './welcomePrefs'
 import { readChatTitleMode, type ChatTitleMode } from './chatTitleMode'
 import { voiceStreamSupported } from './audio/voiceStream'
 import { useSessionCoordinator } from './session/useSessionCoordinator'
-import { InMemoryChatAdapter } from './session/chatAdapter'
 import {
   buildMemoryContext,
   dream,
@@ -127,6 +140,7 @@ import {
   type DreamInputConversation
 } from './memory'
 import {
+  dataDirFromManagedBinaryPath,
   isChatModel,
   isComputerUseModel,
   isImageGenModel,
@@ -135,11 +149,19 @@ import {
   modelDisplayName,
   modelKindFor,
   runtimeNoticeForModel,
-  visionCapabilityTitle
+  sortComputerUseModels,
+  visionCapabilityTitle,
+  withMergedCapabilities
 } from './model-utils'
 import { branchSiblings, messageChain } from './graph'
 import { buildChatDisplayItems } from './chatDisplay'
-import { composerCompletionsFor, replaceTrailingCommand, trailingCommand } from './composerCompletions'
+import {
+  CHAT_SLASH_SUGGESTIONS,
+  composerCompletionsFor,
+  isExactSlashCommand,
+  replaceTrailingCommand,
+  trailingCommand
+} from './composerCompletions'
 import {
   readCachedConversations,
   readCachedModels,
@@ -245,6 +267,53 @@ function writeEnabledTools(profileId: string, names: string[]): void {
   } catch {
     // Best-effort persistence.
   }
+}
+
+/**
+ * Walk upward from an assistant turn node until reaching the direct child of
+ * the preceding user message, so multi-step tool turns share branch siblings.
+ */
+function assistantTurnRootId(messages: Message[], branchId: string): string {
+  const byId = new Map(messages.map((message) => [message.id, message]))
+  let current = byId.get(branchId)
+  while (current?.parent_id) {
+    const parent = byId.get(current.parent_id)
+    if (!parent || parent.role === 'user') break
+    current = parent
+  }
+  return current?.id ?? branchId
+}
+
+function parentUserMessageForTurn(messages: Message[], branchId: string): Message | null {
+  const byId = new Map(messages.map((message) => [message.id, message]))
+  const root = byId.get(assistantTurnRootId(messages, branchId))
+  if (!root?.parent_id) return null
+  const parent = byId.get(root.parent_id)
+  return parent?.role === 'user' ? parent : null
+}
+
+/**
+ * Resolve the latest descendant leaf for a selected branch node so switching
+ * branches shows the complete conversation subtree rather than stopping early.
+ */
+function latestBranchTipId(messages: Message[], startId: string): string {
+  const childrenByParent = new Map<string, Message[]>()
+  for (const message of messages) {
+    if (!message.parent_id) continue
+    const list = childrenByParent.get(message.parent_id)
+    if (list) list.push(message)
+    else childrenByParent.set(message.parent_id, [message])
+  }
+  let currentId = startId
+  const visited = new Set<string>()
+  while (!visited.has(currentId)) {
+    visited.add(currentId)
+    const children = childrenByParent.get(currentId)
+    const next = children?.at(-1)
+    if (!next) break
+    currentId = next.id
+  }
+  return currentId
 }
 
 function BranchNavigator({
@@ -473,8 +542,11 @@ function RunHistory({
 }): React.JSX.Element | null {
   if (runs.length === 0) return null
   return (
-    <div className="run-history">
-      <div className="section-label">Run history</div>
+    <details className="run-history">
+      <summary className="section-label run-history-summary">
+        <span>Run history</span>
+        <span className="run-history-count">{runs.length}</span>
+      </summary>
       {runs.slice(0, 8).map((run) => {
         const expanded = expandedId === run.id
         const label = run.created_at.replace('T', ' ').slice(0, 16)
@@ -501,7 +573,7 @@ function RunHistory({
           </div>
         )
       })}
-    </div>
+    </details>
   )
 }
 
@@ -569,10 +641,18 @@ export function App(): React.JSX.Element {
   const [daemonVersion, setDaemonVersion] = useState('')
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
   const [runtime, setRuntime] = useState<RuntimeSettings | null>(null)
+  const [daemonDataDir, setDaemonDataDir] = useState<string | null>(null)
   const [savingInference, setSavingInference] = useState(false)
 
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [inferenceMenuOpen, setInferenceMenuOpen] = useState(false)
+  const [composerDragOver, setComposerDragOver] = useState(false)
+  const dragDepthRef = useRef(0)
+  const [suggestionIndex, setSuggestionIndex] = useState(0)
+  const [dismissedSuggestionQuery, setDismissedSuggestionQuery] = useState<string | null>(null)
+  const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null)
+  const copiedTurnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Advanced per-model configuration, held here because three surfaces open it:
   // the model picker, the library, and the inference menu.
   const [modelProfiles, setModelProfiles] = useState<Record<string, ModelProfile>>({})
@@ -620,12 +700,21 @@ export function App(): React.JSX.Element {
   const [agentSidebar, setAgentSidebar] = useState<AgentSidebarControls | null>(null)
   const [computerSidebar, setComputerSidebar] = useState<ComputerSidebarControls | null>(null)
   const profileId = connectionProfile?.id ?? initialProfileId
+  const modelOpIdRef = useRef(0)
+  const userUnloadedRef = useRef(false)
+
+  useEffect(() => {
+    return () => {
+      if (copiedTurnTimerRef.current) clearTimeout(copiedTurnTimerRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     let active = true
     const apply = (profile: ConnectionProfileSummary): void => {
       if (!active) return
       if (profile.id !== profileId) {
+        userUnloadedRef.current = false
         const cachedModels = readCachedModels(profile.id)
         setConversations(readCachedConversations(profile.id))
         setLocalModels(cachedModels)
@@ -710,28 +799,55 @@ export function App(): React.JSX.Element {
 
   const chain = useMemo(() => messageChain(messages, tipId), [messages, tipId])
   const chatDisplayItems = useMemo(() => buildChatDisplayItems(chain), [chain])
-  const canChat = Boolean(selectedModel) && modelPrepareState === 'ready' && !modelUnloading
-  const selectedCapabilities = localModels.find((model) => model.id === selectedModel)?.capabilities
-  const chatModels = useMemo(() => localModels.filter((model) => isChatModel(model)), [localModels])
-  const voiceModels = useMemo(() => localModels.filter((model) => isVoiceModel(model)), [localModels])
+  // `modelPrepareState === 'idle'` with a seeded `selectedModel` represents
+  // `selected_lazy`: the selection is ready to chat immediately, and the daemon
+  // JIT-loads weights on the first message without blocking launch VRAM.
+  const canChat =
+    Boolean(selectedModel) &&
+    (modelPrepareState === 'ready' || modelPrepareState === 'idle') &&
+    !modelUnloading
+  const effectiveLocalModels = useMemo(
+    () => localModels.map((model) => withMergedCapabilities(model, modelProfiles[model.id])),
+    [localModels, modelProfiles]
+  )
+  const selectedCapabilities = effectiveLocalModels.find(
+    (model) => model.id === selectedModel
+  )?.capabilities
+  const chatModels = useMemo(
+    () => effectiveLocalModels.filter((model) => isChatModel(model)),
+    [effectiveLocalModels]
+  )
+  const voiceModels = useMemo(
+    () => effectiveLocalModels.filter((model) => isVoiceModel(model)),
+    [effectiveLocalModels]
+  )
   const computerModels = useMemo(
-    () => localModels.filter((model) => isComputerUseModel(model)),
-    [localModels]
+    () =>
+      sortComputerUseModels(
+        effectiveLocalModels.filter((model) => isComputerUseModel(model))
+      ),
+    [effectiveLocalModels]
   )
   const generateModels = useMemo(
     () =>
-      localModels.filter((model) =>
+      effectiveLocalModels.filter((model) =>
         generateModality === 'image' ? isImageGenModel(model) : isVideoGenModel(model)
       ),
-    [localModels, generateModality]
+    [effectiveLocalModels, generateModality]
   )
   const [pipelineFeatures, setPipelineFeatures] = useState<PipelineFeatures>({
     asr: false,
     video_preprocess: false
   })
   const runtimeWarning = useMemo(
-    () => runtimeNoticeForModel(selectedModel, localModels, prefetchedRuntimes, modelBindings),
-    [selectedModel, localModels, prefetchedRuntimes, modelBindings]
+    () =>
+      runtimeNoticeForModel(
+        selectedModel,
+        effectiveLocalModels,
+        prefetchedRuntimes,
+        modelBindings
+      ),
+    [selectedModel, effectiveLocalModels, prefetchedRuntimes, modelBindings]
   )
   const canAttachImage = Boolean(selectedCapabilities?.input_modalities.includes('image'))
   const selectedNativeAudio = selectedCapabilities?.audio_input === 'native'
@@ -752,10 +868,13 @@ export function App(): React.JSX.Element {
         ? 'Streaming ASR is available via /v1/audio/transcriptions?stream=true; chat attachments still use batch ASR or native audio'
         : 'No audio path yet — build whisper.cpp + download a Whisper model, install streaming ASR, or select a native-audio chat model.'
 
-  const updateEnabledTools = useCallback((next: string[]): void => {
-    setEnabledTools(next)
-    writeEnabledTools(profileId, next)
-  }, [])
+  const updateEnabledTools = useCallback(
+    (next: string[]): void => {
+      setEnabledTools(next)
+      writeEnabledTools(profileId, next)
+    },
+    [profileId]
+  )
 
   /**
    * Re-read what the host can do. Building a runtime or downloading a model
@@ -812,8 +931,11 @@ export function App(): React.JSX.Element {
       setError('ASR models are used for transcription, not chat. Pick a chat model instead.')
       return
     }
+    const opId = ++modelOpIdRef.current
     prepareAbortRef.current?.abort()
     preparingModelRef.current = modelId
+    setModelUnloading(false)
+    if (modelId) userUnloadedRef.current = false
     setSelectedModel(modelId)
     setModelResidency(null)
     setForkHints([])
@@ -832,11 +954,19 @@ export function App(): React.JSX.Element {
       signal: controller.signal,
       mode: mode ?? (appMode === 'agent' ? 'agent' : 'chat'),
       onLoad: (event) => {
-        if (!controller.signal.aborted) setModelLoadStatus(event.message)
+        if (!controller.signal.aborted && opId === modelOpIdRef.current) {
+          setModelLoadStatus(event.message)
+        }
       }
     })
       .then((residency) => {
-        if (controller.signal.aborted || preparingModelRef.current !== modelId) return
+        if (
+          controller.signal.aborted ||
+          opId !== modelOpIdRef.current ||
+          preparingModelRef.current !== modelId
+        ) {
+          return
+        }
         setModelResidency(residency)
         setModelPrepareState('ready')
         setModelLoadStatus(null)
@@ -847,6 +977,7 @@ export function App(): React.JSX.Element {
       .catch((cause: unknown) => {
         if (
           controller.signal.aborted ||
+          opId !== modelOpIdRef.current ||
           preparingModelRef.current !== modelId ||
           (cause as Error).name === 'AbortError'
         ) {
@@ -867,7 +998,7 @@ export function App(): React.JSX.Element {
           setError(cause instanceof Error ? cause.message : String(cause))
         }
       })
-  }, [appMode])
+  }, [appMode, refreshCapabilities])
 
   const switchAppMode = useCallback(
     (next: AppMode): void => {
@@ -895,24 +1026,31 @@ export function App(): React.JSX.Element {
 
   const unloadSelectedModel = useCallback(async (): Promise<void> => {
     if (!selectedModel || modelUnloading) return
+    const opId = ++modelOpIdRef.current
+    userUnloadedRef.current = true
     prepareAbortRef.current?.abort()
+    preparingModelRef.current = ''
     setModelUnloading(true)
     setModelPrepareState('loading')
     setModelLoadStatus('Unloading model…')
     setError(null)
     try {
       await unloadModel()
+      if (opId !== modelOpIdRef.current) return
       setSelectedModel('')
       setModelResidency(null)
       setModelPrepareState('idle')
       setForkHints([])
       void prefetchRuntimes()
     } catch (cause) {
+      if (opId !== modelOpIdRef.current) return
       setModelPrepareState('ready')
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setModelUnloading(false)
-      setModelLoadStatus(null)
+      if (opId === modelOpIdRef.current) {
+        setModelUnloading(false)
+        setModelLoadStatus(null)
+      }
     }
   }, [selectedModel, modelUnloading])
 
@@ -982,7 +1120,7 @@ export function App(): React.JSX.Element {
   )
 
   const selectedMeta = useMemo(() => {
-    if (modelsLoading && localModels.length === 0) {
+    if (modelsLoading && effectiveLocalModels.length === 0) {
       return { title: 'Loading models…', subtitle: 'Reading your library' }
     }
     if (!modeModel.selected) {
@@ -990,9 +1128,9 @@ export function App(): React.JSX.Element {
     }
     return modelDisplayName(
       modeModel.selected,
-      localModels.find((model) => model.id === modeModel.selected)
+      effectiveLocalModels.find((model) => model.id === modeModel.selected)
     )
-  }, [modeModel, localModels, modelsLoading])
+  }, [modeModel, effectiveLocalModels, modelsLoading])
 
   // Engine settings arrive after the first render; adopt the saved persona
   // unless the field has already been typed in.
@@ -1011,35 +1149,47 @@ export function App(): React.JSX.Element {
   const voiceResponder = useMemo(() => {
     const controllers = new Map<string, AbortController>()
     return {
-      async respond({
-        correlationId,
-        text,
-        onPartial
-      }: {
+      async respond(turn: {
         correlationId: string
         text: string
+        userMessageId?: string
         onPartial?: (delta: string) => void
       }): Promise<{ text: string }> {
+        const { correlationId, text, userMessageId, onPartial } = turn
         if (!selectedModel) {
           throw new Error('Select a chat model before asking a question by voice.')
         }
         const controller = new AbortController()
         controllers.set(correlationId, controller)
-        // The coordinator has already stored the user message; React has not
-        // re-rendered yet, so the request carries it explicitly.
-        const asked: Message = {
-          id: `pending-${correlationId}`,
-          conversation_id: conversationId ?? '',
-          parent_id: chainRef.current.at(-1)?.id ?? null,
-          role: 'user',
-          content: text,
-          model: null,
-          created_at: new Date().toISOString()
-        }
+        // Fresh turns run before React re-renders the stored user message into
+        // `chainRef.current`; queued turns run later when `chainRef.current`
+        // already contains the stored user message (`userMessageId` or
+        // `correlation_id`). Deduplicate so queued turns never send the user
+        // prompt twice.
+        const existingIdx = chainRef.current.findIndex(
+          (entry) =>
+            (userMessageId != null && entry.id === userMessageId) ||
+            (entry.role === 'user' && entry.correlation_id === correlationId)
+        )
+        const asked: Message =
+          existingIdx >= 0
+            ? chainRef.current[existingIdx]
+            : {
+                id: userMessageId ?? `pending-${correlationId}`,
+                conversation_id: conversationId ?? '',
+                parent_id: chainRef.current.at(-1)?.id ?? null,
+                role: 'user',
+                content: text,
+                model: null,
+                created_at: new Date().toISOString()
+              }
         try {
-          const requestMessages = await (async (): Promise<Message[]> => {
-            const base = [...chainRef.current, asked]
-            const memoryEnabled = (memoryPreference?.enabled ?? true) && !incognito
+          const memoryEnabled = (memoryPreference?.enabled ?? true) && !incognito
+          let requestMessages = await (async (): Promise<Message[]> => {
+            const base =
+              existingIdx >= 0
+                ? chainRef.current.slice(0, existingIdx + 1)
+                : [...chainRef.current, asked]
             if (!memoryEnabled || !memoryPreference || !text) return base
             const memories = await loadRelevantMemories(text, memoryPreference.recall_count)
             const context = buildMemoryContext(memories, memoryPreference.recall_chars)
@@ -1057,25 +1207,76 @@ export function App(): React.JSX.Element {
               ...base
             ]
           })()
-          const result = await streamCompletion(
-            requestMessages,
-            selectedModel,
-            controller.signal,
-            (token) => onPartial?.(token),
-            {
-              builtinTools: toolsEnabled,
-              builtinToolNames: toolsEnabled ? enabledTools : undefined,
-              extraTools:
-                (memoryPreference?.enabled ?? true) && !incognito
-                  ? memoryToolDefinitions()
-                  : undefined,
-              toolChoice:
-                toolsEnabled || ((memoryPreference?.enabled ?? true) && !incognito)
-                  ? 'auto'
-                  : undefined
+          let responseText = ''
+          const maxClientRounds = 4
+          for (let round = 0; round < maxClientRounds; round += 1) {
+            const result = await streamCompletion(
+              requestMessages,
+              selectedModel,
+              controller.signal,
+              (token) => onPartial?.(token),
+              {
+                builtinTools: toolsEnabled,
+                builtinToolNames: toolsEnabled ? enabledTools : undefined,
+                extraTools: memoryEnabled ? memoryToolDefinitions() : undefined,
+                toolChoice: toolsEnabled || memoryEnabled ? 'auto' : undefined
+              }
+            )
+            setModelPrepareState((current) => (current === 'idle' ? 'ready' : current))
+            responseText = result.responseText
+            for (const entry of result.transcript) {
+              requestMessages = [
+                ...requestMessages,
+                {
+                  id: `voice-step-${crypto.randomUUID()}`,
+                  conversation_id: conversationId ?? INCOGNITO_ID,
+                  parent_id: requestMessages.at(-1)?.id ?? null,
+                  role: entry.role as Role,
+                  content: entry.content ?? '',
+                  tool_calls: entry.tool_calls ?? null,
+                  tool_call_id: entry.tool_call_id ?? null,
+                  model: entry.role === 'assistant' ? selectedModel : null,
+                  created_at: new Date().toISOString()
+                }
+              ]
             }
-          )
-          return { text: result.responseText }
+            if (result.clientToolCalls.length === 0) break
+            let allClientHandled = true
+            for (const call of result.clientToolCalls) {
+              if (isMemoryClientTool(call.name)) {
+                const outcome = incognito
+                  ? {
+                      output: 'Memory is disabled in incognito chats; nothing was saved or read.',
+                      is_error: true
+                    }
+                  : await executeMemoryClientTool(call, {
+                      conversation_id: conversationId ?? undefined,
+                      message_id: asked.id
+                    })
+                requestMessages = [
+                  ...requestMessages,
+                  {
+                    id: `voice-tool-${crypto.randomUUID()}`,
+                    conversation_id: conversationId ?? INCOGNITO_ID,
+                    parent_id: requestMessages.at(-1)?.id ?? null,
+                    role: 'tool',
+                    content: outcome.output,
+                    tool_call_id: call.id,
+                    source: 'tool',
+                    model: null,
+                    created_at: new Date().toISOString()
+                  }
+                ]
+              } else {
+                allClientHandled = false
+              }
+            }
+            if (allClientHandled) continue
+            throw new GenerationFailure(
+              `The model requested client-side tools that Brazier cannot execute: ${result.clientToolCalls.map((call: ClientToolCall) => call.name).join(', ')}`
+            )
+          }
+          return { text: responseText }
         } finally {
           controllers.delete(correlationId)
         }
@@ -1156,6 +1357,7 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     setSelectedModel((current) => {
       if (current && chatModels.some((model) => model.id === current)) return current
+      if (userUnloadedRef.current) return ''
       const preferred = runtime?.default_chat_model
       if (preferred && chatModels.some((model) => model.id === preferred)) return preferred
       return ''
@@ -1267,6 +1469,7 @@ export function App(): React.JSX.Element {
     const status = await engineStatus()
     setRuntime(status.settings)
     setHardware(status.hardware)
+    setDaemonDataDir(dataDirFromManagedBinaryPath(status.managed_binary_path))
   }
 
   async function rehydrateDaemonState(): Promise<void> {
@@ -1709,11 +1912,14 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function applyInferenceSettings(next: RuntimeSettings): Promise<void> {
+  async function applyInferenceSettings(
+    next: RuntimeSettings,
+    options?: { skipReload?: boolean }
+  ): Promise<void> {
     setSavingInference(true)
     setError(null)
     try {
-      const model = localModels.find((entry) => entry.id === selectedModel)
+      const model = effectiveLocalModels.find((entry) => entry.id === selectedModel)
       const caps = model?.capabilities
       let adjusted = { ...next }
       const maxContext = caps?.max_context_length
@@ -1729,7 +1935,7 @@ export function App(): React.JSX.Element {
       }
       const saved = await saveRuntimeSettings(adjusted)
       setRuntime(saved)
-      if (selectedModel && modelPrepareState === 'ready') {
+      if (!options?.skipReload && selectedModel && modelPrepareState === 'ready') {
         selectModel(selectedModel)
       }
     } catch (cause) {
@@ -1753,16 +1959,245 @@ export function App(): React.JSX.Element {
     setManageOpen(true)
   }
 
-  async function selectFiles(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+  const selectModelFromAnySurface = useCallback(
+    (model: LocalModel): void => {
+      if (isImageGenModel(model)) {
+        setGenerateModality('image')
+        setGenerateModel(model.id)
+        if (workspaceModes.generate && appMode !== 'generate') switchAppMode('generate')
+        return
+      }
+      if (isVideoGenModel(model)) {
+        setGenerateModality('video')
+        setGenerateModel(model.id)
+        if (workspaceModes.generate && appMode !== 'generate') switchAppMode('generate')
+        return
+      }
+      if (isVoiceModel(model)) {
+        setVoiceModel(model.id)
+        if (workspaceModes.voice && appMode !== 'voice') switchAppMode('voice')
+        return
+      }
+      if (appMode === 'computer' && isComputerUseModel(model)) {
+        setComputerModel(model.id)
+        return
+      }
+      selectModel(model.id)
+      if (appMode !== 'chat' && appMode !== 'agent' && workspaceModes.chat) {
+        switchAppMode('chat')
+      }
+    },
+    [appMode, selectModel, switchAppMode, workspaceModes]
+  )
+
+  const triggerNewForActiveMode = useCallback((): void => {
+    if (appMode === 'agent') {
+      agentSidebar?.newTask()
+      return
+    }
+    if (appMode === 'computer') {
+      computerSidebar?.newSession()
+      return
+    }
+    if (appMode === 'generate') {
+      setActiveGenerateHistoryId(null)
+      return
+    }
+    void newConversation()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appMode, agentSidebar, computerSidebar, incognito])
+
+  const openActiveModelSettings = useCallback((): void => {
+    if (appMode === 'chat' || appMode === 'agent') {
+      setInferenceMenuOpen((open) => !open)
+      return
+    }
+    if (modeModel.selected) {
+      setConfiguringModel(modeModel.selected)
+      return
+    }
+    setModelMenuOpen(true)
+  }, [appMode, modeModel.selected])
+
+  const copyApiCurl = useCallback(async (): Promise<void> => {
     try {
-      const files = Array.from(event.target.files ?? [])
+      const server = await window.brazier
+        .getServerSettings()
+        .catch(() => ({ port: 11435, apiKeyEnabled: false }))
+      const snippet = buildServerCurlSnippet({
+        port: server.port,
+        modelId: selectedModel || effectiveLocalModels[0]?.id,
+        apiKeyEnabled: server.apiKeyEnabled
+      })
+      await window.brazier.copyText(snippet)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }, [selectedModel, effectiveLocalModels])
+
+  function copyTurnAnswer(turnId: string, answer: string): void {
+    if (!answer) return
+    void window.brazier.copyText(answer).then(() => {
+      setCopiedTurnId(turnId)
+      if (copiedTurnTimerRef.current) clearTimeout(copiedTurnTimerRef.current)
+      copiedTurnTimerRef.current = setTimeout(() => {
+        setCopiedTurnId((current) => (current === turnId ? null : current))
+      }, 1600)
+    })
+  }
+
+  // Global power-user keyboard shortcuts across workspace modes.
+  useEffect(() => {
+    if (showWelcome !== false) return
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented) return
+      const mod = event.metaKey || event.ctrlKey
+      const key = event.key.toLowerCase()
+
+      if (mod && !event.altKey && !event.shiftKey && key === 'k') {
+        event.preventDefault()
+        setCommandPaletteOpen((open) => !open)
+        return
+      }
+      if (mod && !event.altKey && !event.shiftKey && key === 'n') {
+        event.preventDefault()
+        triggerNewForActiveMode()
+        return
+      }
+      if (mod && !event.altKey && !event.shiftKey && key === 'b') {
+        event.preventDefault()
+        setSidebarOpen((open) => !open)
+        return
+      }
+      if (mod && !event.altKey && !event.shiftKey && event.key === ',') {
+        event.preventDefault()
+        setManageOpen((open) => !open)
+        return
+      }
+      if (mod && !event.altKey && event.shiftKey && key === 'm') {
+        event.preventDefault()
+        setModelMenuOpen((open) => !open)
+        return
+      }
+      if (mod && !event.altKey && event.shiftKey && key === 'i') {
+        if (!workspaceModes.chat) return
+        event.preventDefault()
+        if (appMode !== 'chat') switchAppMode('chat')
+        toggleIncognito()
+        return
+      }
+      if (mod && !event.altKey && !event.shiftKey && event.key === '.') {
+        event.preventDefault()
+        if (shellComposerMode && shellComposer?.running) {
+          void shellComposer.stop()
+        } else if (coordinatorWorking) {
+          void session.cancelResponse()
+        } else if (busy) {
+          abortChatGeneration()
+        }
+        return
+      }
+      if (mod && !event.altKey && !event.shiftKey && /^[1-5]$/.test(event.key)) {
+        const ordered: AppMode[] = ['chat', 'agent', 'generate', 'voice', 'computer']
+        const enabled = ordered.filter((mode) => workspaceModes[mode])
+        const target = enabled[Number(event.key) - 1]
+        if (target) {
+          event.preventDefault()
+          switchAppMode(target)
+        }
+        return
+      }
+      if (event.key === 'Escape' && !mod && !event.altKey && !event.shiftKey) {
+        if (commandPaletteOpen) {
+          event.preventDefault()
+          setCommandPaletteOpen(false)
+        } else if (configuringModel) {
+          event.preventDefault()
+          setConfiguringModel(null)
+        } else if (inferenceMenuOpen) {
+          event.preventDefault()
+          setInferenceMenuOpen(false)
+        } else if (modelMenuOpen) {
+          event.preventDefault()
+          setModelMenuOpen(false)
+        } else if (toolsMenuOpen) {
+          event.preventDefault()
+          setToolsMenuOpen(false)
+        } else if (conversationMenuId) {
+          event.preventDefault()
+          setConversationMenuId(null)
+          setConfirmDeleteId(null)
+        } else if (manageOpen) {
+          event.preventDefault()
+          setManageOpen(false)
+        }
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    showWelcome,
+    appMode,
+    workspaceModes,
+    shellComposerMode,
+    shellComposer,
+    coordinatorWorking,
+    busy,
+    commandPaletteOpen,
+    configuringModel,
+    inferenceMenuOpen,
+    modelMenuOpen,
+    toolsMenuOpen,
+    conversationMenuId,
+    manageOpen,
+    incognito,
+    messages.length,
+    triggerNewForActiveMode,
+    switchAppMode,
+    abortChatGeneration
+  ])
+
+  const suggestionSource = shellComposerMode
+    ? shellComposer?.suggestions
+    : appMode === 'chat'
+      ? CHAT_SLASH_SUGGESTIONS
+      : undefined
+  const activeSuggestionQuery = suggestionSource ? trailingCommand(draft) : ''
+  const visibleSuggestions = useMemo(() => {
+    if (!suggestionSource || !activeSuggestionQuery) return []
+    if (dismissedSuggestionQuery === activeSuggestionQuery) return []
+    const matched = composerCompletionsFor(draft, suggestionSource)
+    if (
+      matched.length === 0 ||
+      (matched.length === 1 && matched[0]?.value.toLowerCase() === activeSuggestionQuery)
+    ) {
+      return []
+    }
+    return matched
+  }, [suggestionSource, activeSuggestionQuery, dismissedSuggestionQuery, draft])
+  const clampedSuggestionIndex = Math.min(
+    suggestionIndex,
+    Math.max(0, visibleSuggestions.length - 1)
+  )
+
+  useEffect(() => {
+    setSuggestionIndex(0)
+    if (dismissedSuggestionQuery && dismissedSuggestionQuery !== activeSuggestionQuery) {
+      setDismissedSuggestionQuery(null)
+    }
+  }, [activeSuggestionQuery, dismissedSuggestionQuery])
+
+  async function attachFiles(files: File[]): Promise<void> {
+    if (files.length === 0) return
+    try {
       const accepted = files.filter((file) => {
         if (file.type.startsWith('image/')) return canAttachImage
         if (file.type.startsWith('audio/')) return canAttachAudio
         if (file.type.startsWith('video/')) return canAttachVideo
         return isDocumentFile(file)
       })
-      if (accepted.length === 0 && files.length > 0) {
+      if (accepted.length === 0) {
         const reasons: string[] = []
         if (!canAttachImage) reasons.push('vision model for images')
         if (!canAttachAudio)
@@ -1773,15 +2208,61 @@ export function App(): React.JSX.Element {
           )
         if (!canAttachVideo) reasons.push('ffmpeg + vision model for video')
         setError(`Cannot attach that file yet. Need: ${reasons.join('; ')}.`)
-        event.target.value = ''
         return
       }
       const loaded = await Promise.all(accepted.map(fileToAttachment))
       setAttachments((current) => [...current, ...loaded])
-      event.target.value = ''
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
+  }
+
+  async function selectFiles(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = Array.from(event.target.files ?? [])
+    event.target.value = ''
+    await attachFiles(files)
+  }
+
+  function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
+    if (appMode !== 'chat') return
+    const files = Array.from(event.clipboardData?.items ?? [])
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
+    if (files.length === 0) return
+    if (!event.clipboardData.getData('text/plain')) {
+      event.preventDefault()
+    }
+    void attachFiles(files)
+  }
+
+  function handleWorkspaceDragEnter(event: DragEvent<HTMLElement>): void {
+    if (appMode !== 'chat' || !event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    dragDepthRef.current += 1
+    setComposerDragOver(true)
+  }
+
+  function handleWorkspaceDragOver(event: DragEvent<HTMLElement>): void {
+    if (appMode !== 'chat' || !event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }
+
+  function handleWorkspaceDragLeave(event: DragEvent<HTMLElement>): void {
+    if (appMode !== 'chat' || !event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+    if (dragDepthRef.current === 0) setComposerDragOver(false)
+  }
+
+  function handleWorkspaceDrop(event: DragEvent<HTMLElement>): void {
+    if (appMode !== 'chat' || !event.dataTransfer.types.includes('Files')) return
+    event.preventDefault()
+    dragDepthRef.current = 0
+    setComposerDragOver(false)
+    const files = Array.from(event.dataTransfer.files ?? [])
+    if (files.length > 0) void attachFiles(files)
   }
 
   /**
@@ -1789,7 +2270,7 @@ export function App(): React.JSX.Element {
    * sessions where nothing may reach the daemon.
    */
   async function persistChatMessage(
-    conversationId: string,
+    targetConversationId: string,
     input: {
       parent_id: string | null
       role: Role
@@ -1801,7 +2282,8 @@ export function App(): React.JSX.Element {
       status?: string
       correlation_id?: string
       metadata?: Record<string, unknown>
-    }
+    },
+    expectedTurn?: number
   ): Promise<Message> {
     if (incognitoRef.current) {
       const message: Message = {
@@ -1819,170 +2301,124 @@ export function App(): React.JSX.Element {
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
         created_at: new Date().toISOString()
       }
-      setMessages((current) => (incognitoRef.current ? [...current, message] : current))
+      if (expectedTurn === undefined || expectedTurn === chatTurnRef.current) {
+        setMessages((current) => (incognitoRef.current ? [...current, message] : current))
+      }
       return message
     }
-    return createMessage(conversationId, input)
+    return createMessage(targetConversationId, input)
   }
 
-  async function submit(event: FormEvent): Promise<void> {
-    event.preventDefault()
-    const text = draft.trim()
-    // Agent mode: the same box, pointed at the agent. Its own transcript and
-    // approval cards render above; only the input is shared.
-    if (appMode === 'agent' || appMode === 'computer') {
-      const composer = appMode === 'agent' ? agentComposer : computerComposer
-      if (!text || !composer || composer.running) return
-      setDraft('')
-      setError(null)
-      await composer.send(text)
-      return
-    }
-    if ((!text && attachments.length === 0) || busy) return
-    // With voice live, typing goes through the coordinator so both surfaces
-    // share one conversation and one agent session. Attachments keep the
-    // ordinary path, which knows how to hydrate them.
-    if (voiceLive && text && attachments.length === 0) {
-      setDraft('')
-      setError(null)
-      await session.submitText(text)
-      return
-    }
-    if (!selectedModel) {
-      setError('Select or download a local model first.')
-      setModelMenuOpen(true)
-      return
-    }
-    if (runtimeWarning) {
-      setError(runtimeWarning)
-      openManage('runtimes')
-      return
-    }
-    const turn = ++chatTurnRef.current
-    setBusy(true)
-    setError(null)
-    setForkHints([])
-    setModelLoadStatus('Preparing model…')
-    setStreamingText('')
-    setStreamingReasoning('')
-    setStreamingTools([])
-    setStreamingToolOffsets([])
-    setGenerationRate(null)
-    setGenerationTokens(null)
-    // New activity defers dreaming: the idle timer restarts on completion, and
-    // a pending "ask" prompt is withdrawn rather than nagging mid-conversation.
-    clearDreamTimer()
-    setDreamPromptOpen(false)
-    setIncognitoDiscardOpen(false)
-    const controller = new AbortController()
-    abortRef.current = controller
-    const shouldGenerateTitle =
-      !conversationId ||
-      (chain.length === 0 &&
-        conversations.find((conversation) => conversation.id === conversationId)?.title ===
-          'New conversation')
+  async function executeAssistantTurn(params: {
+    turn: number
+    controller: AbortController
+    activeConversationId: string
+    userMessage: Message
+    baseChain: Message[]
+    promptText: string
+    shouldGenerateTitle: boolean
+  }): Promise<void> {
+    const {
+      turn,
+      controller,
+      activeConversationId,
+      userMessage,
+      baseChain,
+      promptText,
+      shouldGenerateTitle
+    } = params
+    const wasIncognito = incognitoRef.current
+    const memoryEnabled = (memoryPreference?.enabled ?? true) && !wasIncognito
+    let requestMessages = [...baseChain]
     let latestGenerationRate: number | null = null
 
-    try {
-      let activeConversationId = conversationId
-      if (incognito) {
-        activeConversationId = INCOGNITO_ID
-      } else if (!activeConversationId) {
-        const created = await createConversation()
-        activeConversationId = created.id
-        setConversationId(created.id)
-      }
-      const memoryEnabled = (memoryPreference?.enabled ?? true) && !incognito
-      const parts: ContentPart[] = [
-        ...(text ? [{ type: 'text' as const, text }] : []),
-        ...attachments.map(attachmentPart)
-      ]
-      const content = attachments.length === 0 ? text : parts
-      const userMessage = await persistChatMessage(activeConversationId, {
-        parent_id: chain.at(-1)?.id ?? null,
-        role: 'user',
-        content
-      })
-      let requestMessages = [...chain, userMessage]
-      if (!incognito) setMessages((current) => [...current, userMessage])
-      setTipId(userMessage.id)
-      setDraft('')
-      setAttachments([])
-      // Recall relevant memories into this turn before the first request. The
-      // system message is ephemeral — it is never persisted to the chain.
-      if (memoryEnabled && memoryPreference && text) {
-        const memories = await loadRelevantMemories(text, memoryPreference.recall_count)
-        const context = buildMemoryContext(memories, memoryPreference.recall_chars)
-        if (context) {
-          const memorySystemMessage: Message = {
-            id: `memory-${crypto.randomUUID()}`,
-            conversation_id: activeConversationId,
-            parent_id: null,
-            role: 'system',
-            content: context,
-            model: null,
-            created_at: new Date().toISOString()
-          }
-          requestMessages = [memorySystemMessage, ...requestMessages]
+    // Recall relevant memories into this turn before the first request. The
+    // system message is ephemeral — it is never persisted to the chain.
+    if (memoryEnabled && memoryPreference && promptText) {
+      const memories = await loadRelevantMemories(promptText, memoryPreference.recall_count)
+      if (turn !== chatTurnRef.current) return
+      const context = buildMemoryContext(memories, memoryPreference.recall_chars)
+      if (context) {
+        const memorySystemMessage: Message = {
+          id: `memory-${crypto.randomUUID()}`,
+          conversation_id: activeConversationId,
+          parent_id: null,
+          role: 'system',
+          content: context,
+          model: null,
+          created_at: new Date().toISOString()
         }
+        requestMessages = [memorySystemMessage, ...requestMessages]
       }
+    }
 
-      let parentId = userMessage.id
-      let responseText = ''
-      let responseReasoning = ''
-      const toolRecords: ToolCallRecord[] = []
-      const toolOffsets: number[] = []
-      const maxClientRounds = 4
-      for (let round = 0; round < maxClientRounds; round += 1) {
-        setStreamingReasoning('')
-        let roundReasoning = ''
-        const result = await streamCompletion(
-          requestMessages,
-          selectedModel,
-          controller.signal,
-          (token) => {
+    let parentId = userMessage.id
+    let responseText = ''
+    let responseReasoning = ''
+    const toolRecords: ToolCallRecord[] = []
+    const toolOffsets: number[] = []
+    const maxClientRounds = 4
+    for (let round = 0; round < maxClientRounds; round += 1) {
+      if (turn !== chatTurnRef.current) return
+      setStreamingReasoning('')
+      let roundReasoning = ''
+      const result = await streamCompletion(
+        requestMessages,
+        selectedModel,
+        controller.signal,
+        (token) => {
+          if (turn !== chatTurnRef.current) return
+          setModelLoadStatus(null)
+          responseText += token
+          setStreamingText(responseText)
+        },
+        {
+          builtinTools: toolsEnabled,
+          builtinToolNames: toolsEnabled ? enabledTools : undefined,
+          extraTools: memoryEnabled ? memoryToolDefinitions() : undefined,
+          toolChoice: toolsEnabled || memoryEnabled ? 'auto' : undefined,
+          onLoad: (event) => {
+            if (turn === chatTurnRef.current) setModelLoadStatus(event.message)
+          },
+          onPrefill: (event) => {
+            if (turn === chatTurnRef.current) setModelLoadStatus(prefillProgressLabel(event))
+          },
+          onReasoning: (token) => {
             if (turn !== chatTurnRef.current) return
             setModelLoadStatus(null)
-            responseText += token
-            setStreamingText(responseText)
+            roundReasoning += token
+            setStreamingReasoning(roundReasoning)
           },
-          {
-            builtinTools: toolsEnabled,
-            builtinToolNames: toolsEnabled ? enabledTools : undefined,
-            extraTools: memoryEnabled ? memoryToolDefinitions() : undefined,
-            toolChoice: toolsEnabled || memoryEnabled ? 'auto' : undefined,
-            onLoad: (event) => setModelLoadStatus(event.message),
-            onPrefill: (event) => setModelLoadStatus(prefillProgressLabel(event)),
-            onReasoning: (token) => {
-              setModelLoadStatus(null)
-              roundReasoning += token
-              setStreamingReasoning(roundReasoning)
-            },
-            onToolCall: (record) => {
-              toolRecords.push(record)
-              toolOffsets.push(responseText.length)
-              setStreamingTools([...toolRecords])
-              setStreamingToolOffsets([...toolOffsets])
-            }
+          onToolCall: (record) => {
+            if (turn !== chatTurnRef.current) return
+            toolRecords.push(record)
+            toolOffsets.push(responseText.length)
+            setStreamingTools([...toolRecords])
+            setStreamingToolOffsets([...toolOffsets])
           }
-        )
-        responseText = result.responseText
-        responseReasoning = result.reasoningText
-        if (result.generationStats) {
-          latestGenerationRate =
-            (result.generationStats.completion_tokens * 1000) /
-            Math.max(1, result.generationStats.decode_duration_ms)
-          setGenerationRate(latestGenerationRate)
-          setGenerationTokens({
-            prompt: result.generationStats.prompt_tokens ?? null,
-            completion: result.generationStats.completion_tokens
-          })
         }
-        for (const entry of result.transcript) {
-          const role = entry.role as Role
-          const entryReasoning =
-            typeof entry.reasoning_content === 'string' ? entry.reasoning_content.trim() : ''
-          const created = await persistChatMessage(activeConversationId, {
+      )
+      if (turn !== chatTurnRef.current) return
+      setModelPrepareState((current) => (current === 'idle' ? 'ready' : current))
+      responseText = result.responseText
+      responseReasoning = result.reasoningText
+      if (result.generationStats) {
+        latestGenerationRate =
+          (result.generationStats.completion_tokens * 1000) /
+          Math.max(1, result.generationStats.decode_duration_ms)
+        setGenerationRate(latestGenerationRate)
+        setGenerationTokens({
+          prompt: result.generationStats.prompt_tokens ?? null,
+          completion: result.generationStats.completion_tokens
+        })
+      }
+      for (const entry of result.transcript) {
+        const role = entry.role as Role
+        const entryReasoning =
+          typeof entry.reasoning_content === 'string' ? entry.reasoning_content.trim() : ''
+        const created = await persistChatMessage(
+          activeConversationId,
+          {
             parent_id: parentId,
             role,
             content: entry.content ?? '',
@@ -1992,48 +2428,57 @@ export function App(): React.JSX.Element {
             ...(role === 'assistant' && entryReasoning
               ? { metadata: { reasoning_content: entryReasoning } }
               : {})
-          })
-          requestMessages = [...requestMessages, created]
-          parentId = created.id
-        }
-        if (result.clientToolCalls.length === 0) {
-          break
-        }
-        // Memory tools have no server-side handler; the renderer executes them
-        // against the memory API and feeds the result back to the model.
-        let allClientHandled = true
-        for (const call of result.clientToolCalls) {
-          if (isMemoryClientTool(call.name)) {
-            // Defense in depth: incognito never offers these tools, but a
-            // misbehaving model must not read or write memories either.
-            const outcome = incognito
-              ? {
-                  output: 'Memory is disabled in incognito chats; nothing was saved or read.',
-                  is_error: true
-                }
-              : await executeMemoryClientTool(call, {
-                  conversation_id: activeConversationId,
-                  message_id: userMessage.id
-                })
-            const toolMessage = await persistChatMessage(activeConversationId, {
+          },
+          turn
+        )
+        if (turn !== chatTurnRef.current) return
+        requestMessages = [...requestMessages, created]
+        parentId = created.id
+      }
+      if (result.clientToolCalls.length === 0) {
+        break
+      }
+      // Memory tools have no server-side handler; the renderer executes them
+      // against the memory API and feeds the result back to the model.
+      let allClientHandled = true
+      for (const call of result.clientToolCalls) {
+        if (isMemoryClientTool(call.name)) {
+          const outcome = wasIncognito
+            ? {
+                output: 'Memory is disabled in incognito chats; nothing was saved or read.',
+                is_error: true
+              }
+            : await executeMemoryClientTool(call, {
+                conversation_id: activeConversationId,
+                message_id: userMessage.id
+              })
+          if (turn !== chatTurnRef.current) return
+          const toolMessage = await persistChatMessage(
+            activeConversationId,
+            {
               parent_id: parentId,
               role: 'tool',
               content: outcome.output,
               tool_call_id: call.id,
               source: 'tool'
-            })
-            requestMessages = [...requestMessages, toolMessage]
-            parentId = toolMessage.id
-          } else {
-            allClientHandled = false
-          }
+            },
+            turn
+          )
+          if (turn !== chatTurnRef.current) return
+          requestMessages = [...requestMessages, toolMessage]
+          parentId = toolMessage.id
+        } else {
+          allClientHandled = false
         }
-        if (allClientHandled) continue
-        throw new GenerationFailure(
-          `The model requested client-side tools that Brazier cannot execute: ${result.clientToolCalls.map((call) => call.name).join(', ')}`
-        )
       }
-      const assistant = await persistChatMessage(activeConversationId, {
+      if (allClientHandled) continue
+      throw new GenerationFailure(
+        `The model requested client-side tools that Brazier cannot execute: ${result.clientToolCalls.map((call) => call.name).join(', ')}`
+      )
+    }
+    const assistant = await persistChatMessage(
+      activeConversationId,
+      {
         parent_id: parentId,
         role: 'assistant',
         content: responseText,
@@ -2041,28 +2486,33 @@ export function App(): React.JSX.Element {
         ...(responseReasoning.trim()
           ? { metadata: { reasoning_content: responseReasoning } }
           : {})
-      })
-      if (!incognito && shouldGenerateTitle && responseText.trim()) {
-        maybeGenerateConversationTitle(
-          activeConversationId,
-          text,
-          responseText,
-          latestGenerationRate,
-          readChatTitleMode()
-        )
-      }
-      let finalTipId = assistant.id
-      const generatedMedia = [
-        ...new Map(
-          toolRecords
-            .flatMap((record) =>
-              (record.media ?? []).map((media) => ({ ...media, call_id: record.call_id }))
-            )
-            .map((media) => [`${media.sha256}:${media.mime_type}`, media])
-        ).values()
-      ]
-      if (generatedMedia.length > 0) {
-        const generated = await persistChatMessage(activeConversationId, {
+      },
+      turn
+    )
+    if (turn !== chatTurnRef.current) return
+    if (!wasIncognito && shouldGenerateTitle && responseText.trim()) {
+      maybeGenerateConversationTitle(
+        activeConversationId,
+        promptText,
+        responseText,
+        latestGenerationRate,
+        readChatTitleMode()
+      )
+    }
+    let finalTipId = assistant.id
+    const generatedMedia = [
+      ...new Map(
+        toolRecords
+          .flatMap((record) =>
+            (record.media ?? []).map((media) => ({ ...media, call_id: record.call_id }))
+          )
+          .map((media) => [`${media.sha256}:${media.mime_type}`, media])
+      ).values()
+    ]
+    if (generatedMedia.length > 0) {
+      const generated = await persistChatMessage(
+        activeConversationId,
+        {
           parent_id: assistant.id,
           role: 'assistant',
           content: generatedMedia.map((media, index) => ({
@@ -2083,34 +2533,88 @@ export function App(): React.JSX.Element {
           model: selectedModel,
           source: 'assistant_chat',
           metadata: { generated_media_display: true }
+        },
+        turn
+      )
+      if (turn !== chatTurnRef.current) return
+      finalTipId = generated.id
+    }
+    if (runtime && !wasIncognito) {
+      await recordRun(activeConversationId, {
+        parent_message_id: userMessage.id,
+        assistant_message_id: assistant.id,
+        model: selectedModel,
+        settings: runtime,
+        tool_calls: toolRecords,
+        response_text: responseText
+      })
+      if (turn !== chatTurnRef.current) return
+    }
+    setStreamingText('')
+    setStreamingReasoning('')
+    setStreamingTools([])
+    setStreamingToolOffsets([])
+    setModelLoadStatus(null)
+    if (wasIncognito) {
+      setTipId(finalTipId)
+    } else {
+      await refreshMessages(activeConversationId, finalTipId)
+      if (turn !== chatTurnRef.current) return
+      await refreshConversations()
+      if (turn !== chatTurnRef.current) return
+      void listRunSnapshots(activeConversationId)
+        .then((snapshots) => {
+          if (turn === chatTurnRef.current) setRunSnapshots(snapshots)
         })
-        finalTipId = generated.id
-      }
-      if (runtime && !incognito) {
-        await recordRun(activeConversationId, {
-          parent_message_id: userMessage.id,
-          assistant_message_id: assistant.id,
-          model: selectedModel,
-          settings: runtime,
-          tool_calls: toolRecords,
-          response_text: responseText
-        })
-      }
-      setStreamingText('')
-      setStreamingReasoning('')
-      setStreamingTools([])
-      setStreamingToolOffsets([])
-      setModelLoadStatus(null)
-      if (incognito) {
-        setTipId(finalTipId)
-      } else {
-        await refreshMessages(activeConversationId, finalTipId)
-        await refreshConversations()
-        void listRunSnapshots(activeConversationId).then(setRunSnapshots).catch(() => {})
-      }
-      scheduleDream()
+        .catch(() => {})
+    }
+    scheduleDream()
+  }
+
+  async function retryAssistantTurn(userMessage: Message): Promise<void> {
+    if (busy || coordinatorWorking) return
+    if (!selectedModel) {
+      setError('Select or download a local model first.')
+      setModelMenuOpen(true)
+      return
+    }
+    if (runtimeWarning) {
+      setError(runtimeWarning)
+      openManage('runtimes')
+      return
+    }
+    const activeConversationId = incognito ? INCOGNITO_ID : conversationId
+    if (!activeConversationId) return
+    const turn = ++chatTurnRef.current
+    setBusy(true)
+    setError(null)
+    setForkHints([])
+    setModelLoadStatus('Preparing model…')
+    setStreamingText('')
+    setStreamingReasoning('')
+    setStreamingTools([])
+    setStreamingToolOffsets([])
+    setGenerationRate(null)
+    setGenerationTokens(null)
+    setTipId(userMessage.id)
+    clearDreamTimer()
+    setDreamPromptOpen(false)
+    setIncognitoDiscardOpen(false)
+    const controller = new AbortController()
+    abortRef.current = controller
+    const baseChain = messageChain(messages, userMessage.id)
+    try {
+      await executeAssistantTurn({
+        turn,
+        controller,
+        activeConversationId,
+        userMessage,
+        baseChain,
+        promptText: contentText(userMessage),
+        shouldGenerateTitle: false
+      })
     } catch (cause) {
-      if ((cause as Error).name !== 'AbortError') {
+      if (turn === chatTurnRef.current && (cause as Error).name !== 'AbortError') {
         if (cause instanceof GenerationFailure) {
           setError(cause.message)
           setForkHints(cause.forkHints)
@@ -2122,6 +2626,173 @@ export function App(): React.JSX.Element {
     } finally {
       if (turn === chatTurnRef.current) {
         setBusy(false)
+        setStreamingText('')
+        setStreamingReasoning('')
+        setStreamingTools([])
+        setStreamingToolOffsets([])
+        setModelLoadStatus(null)
+        abortRef.current = undefined
+      }
+    }
+  }
+
+  async function submit(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    const text = draft.trim()
+    // Agent mode: the same box, pointed at the agent. Its own transcript and
+    // approval cards render above; only the input is shared.
+    if (appMode === 'agent' || appMode === 'computer') {
+      const composer = appMode === 'agent' ? agentComposer : computerComposer
+      if (!text || !composer || composer.running) return
+      setDraft('')
+      setError(null)
+      await composer.send(text)
+      return
+    }
+    if ((!text && attachments.length === 0) || busy) return
+    if (attachments.length === 0 && text.startsWith('/')) {
+      const cmd = text.toLowerCase()
+      if (cmd === '/new') {
+        setDraft('')
+        await newConversation()
+        return
+      }
+      if (cmd === '/incognito') {
+        setDraft('')
+        toggleIncognito()
+        return
+      }
+      if (cmd === '/model') {
+        setDraft('')
+        setModelMenuOpen(true)
+        return
+      }
+      if (cmd === '/settings') {
+        setDraft('')
+        setInferenceMenuOpen(true)
+        return
+      }
+      if (cmd === '/unload') {
+        setDraft('')
+        await unloadSelectedModel()
+        return
+      }
+      if (cmd === '/export') {
+        setDraft('')
+        if (conversationId && !incognito) {
+          await exportConversationFile(conversationId)
+        } else {
+          setError('Open a saved conversation before exporting.')
+        }
+        return
+      }
+      if (cmd === '/dream') {
+        setDraft('')
+        await runDream()
+        return
+      }
+    }
+    // With voice live, typing goes through the coordinator so both surfaces
+    // share one conversation and one agent session. Attachments keep the
+    // ordinary path, which knows how to hydrate them.
+    if (voiceLive && text && attachments.length === 0) {
+      setDraft('')
+      setError(null)
+      await session.submitText(text)
+      return
+    }
+    if (!selectedModel) {
+      setError('Select or download a local model first.')
+      setModelMenuOpen(true)
+      return
+    }
+    if (runtimeWarning) {
+      setError(runtimeWarning)
+      openManage('runtimes')
+      return
+    }
+    const turn = ++chatTurnRef.current
+    const submittedAttachments = attachments
+    const baseChainSnapshot = chain
+    setBusy(true)
+    setError(null)
+    setForkHints([])
+    setModelLoadStatus('Preparing model…')
+    setStreamingText('')
+    setStreamingReasoning('')
+    setStreamingTools([])
+    setStreamingToolOffsets([])
+    setGenerationRate(null)
+    setGenerationTokens(null)
+    // New activity defers dreaming: the idle timer restarts on completion, and
+    // a pending "ask" prompt is withdrawn rather than nagging mid-conversation.
+    clearDreamTimer()
+    setDreamPromptOpen(false)
+    setIncognitoDiscardOpen(false)
+    const controller = new AbortController()
+    abortRef.current = controller
+    const shouldGenerateTitle =
+      !conversationId ||
+      (baseChainSnapshot.length === 0 &&
+        conversations.find((conversation) => conversation.id === conversationId)?.title ===
+          'New conversation')
+
+    try {
+      let activeConversationId = conversationId
+      if (incognito) {
+        activeConversationId = INCOGNITO_ID
+      } else if (!activeConversationId) {
+        const created = await createConversation()
+        if (turn !== chatTurnRef.current) return
+        activeConversationId = created.id
+        setConversationId(created.id)
+      }
+      const parts: ContentPart[] = [
+        ...(text ? [{ type: 'text' as const, text }] : []),
+        ...submittedAttachments.map(attachmentPart)
+      ]
+      const content = submittedAttachments.length === 0 ? text : parts
+      const userMessage = await persistChatMessage(
+        activeConversationId,
+        {
+          parent_id: baseChainSnapshot.at(-1)?.id ?? null,
+          role: 'user',
+          content
+        },
+        turn
+      )
+      if (turn !== chatTurnRef.current) return
+      if (!incognitoRef.current) setMessages((current) => [...current, userMessage])
+      setTipId(userMessage.id)
+      setDraft('')
+      setAttachments([])
+
+      await executeAssistantTurn({
+        turn,
+        controller,
+        activeConversationId,
+        userMessage,
+        baseChain: [...baseChainSnapshot, userMessage],
+        promptText: text,
+        shouldGenerateTitle
+      })
+    } catch (cause) {
+      if (turn === chatTurnRef.current && (cause as Error).name !== 'AbortError') {
+        if (cause instanceof GenerationFailure) {
+          setError(cause.message)
+          setForkHints(cause.forkHints)
+        } else {
+          setError(cause instanceof Error ? cause.message : String(cause))
+          setForkHints([])
+        }
+      }
+    } finally {
+      if (turn === chatTurnRef.current) {
+        setBusy(false)
+        setStreamingText('')
+        setStreamingReasoning('')
+        setStreamingTools([])
+        setStreamingToolOffsets([])
         setModelLoadStatus(null)
         abortRef.current = undefined
       }
@@ -2369,11 +3040,17 @@ export function App(): React.JSX.Element {
         </button>
       </aside>
 
-      <section className="workspace">
+      <section
+        className="workspace"
+        onDragEnter={handleWorkspaceDragEnter}
+        onDragOver={handleWorkspaceDragOver}
+        onDragLeave={handleWorkspaceDragLeave}
+        onDrop={handleWorkspaceDrop}
+      >
         <header className="topbar">
           <button
             className="icon-button"
-            title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+            title={sidebarOpen ? 'Hide sidebar (⌘B)' : 'Show sidebar (⌘B)'}
             aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
             aria-expanded={sidebarOpen}
             onClick={() => setSidebarOpen((open) => !open)}
@@ -2406,7 +3083,9 @@ export function App(): React.JSX.Element {
           </div>
           {(appMode === 'chat' || appMode === 'agent') &&
             selectedModel &&
-            (modelPrepareState === 'ready' || modelUnloading) && (
+            (modelPrepareState === 'ready' ||
+              modelPrepareState === 'idle' ||
+              modelUnloading) && (
               <button
                 type="button"
                 className="model-unload-button"
@@ -2427,7 +3106,7 @@ export function App(): React.JSX.Element {
           <button
             className="model-picker"
             disabled={modelUnloading}
-            title="Choose model"
+            title="Choose model (⌘⇧M)"
             onClick={() => setModelMenuOpen(true)}
           >
             <div className="model-icon">
@@ -2450,20 +3129,27 @@ export function App(): React.JSX.Element {
               <span>{selectedMeta.subtitle}</span>
             </div>
           </button>
-          {(appMode === 'chat' || appMode === 'agent') && (
-            <button
-              className="icon-button"
-              title="Generation settings"
-              aria-label="Generation settings"
-              onClick={() => setInferenceMenuOpen(true)}
-            >
-              <SlidersHorizontal size={17} />
-            </button>
-          )}
+          <button
+            className="icon-button"
+            disabled={appMode !== 'chat' && appMode !== 'agent' && !modeModel.selected}
+            title={
+              appMode === 'chat' || appMode === 'agent'
+                ? 'Generation settings'
+                : modeModel.selected
+                  ? 'Model settings'
+                  : 'Select a model to configure settings'
+            }
+            aria-label={
+              appMode === 'chat' || appMode === 'agent' ? 'Generation settings' : 'Model settings'
+            }
+            onClick={openActiveModelSettings}
+          >
+            <SlidersHorizontal size={17} />
+          </button>
           {appMode === 'chat' && (
             <button
               className={`icon-button incognito-toggle${incognito ? ' active' : ''}`}
-              title={incognito ? 'Leave incognito' : 'Incognito chat'}
+              title={incognito ? 'Leave incognito (⌘⇧I)' : 'Incognito chat (⌘⇧I)'}
               aria-label={incognito ? 'Leave incognito' : 'Incognito chat'}
               aria-pressed={incognito}
               onClick={toggleIncognito}
@@ -2473,7 +3159,7 @@ export function App(): React.JSX.Element {
           )}
           <button
             className="icon-button manage-button"
-            title="Manage"
+            title="Manage (⌘,)"
             aria-label="Manage"
             onClick={() => openManage('library')}
           >
@@ -2580,6 +3266,8 @@ export function App(): React.JSX.Element {
             modelId={generateModel}
             settings={runtime}
             hardware={hardware}
+            modelProfiles={modelProfiles}
+            onOpenManage={openManage}
             onError={setError}
             history={generateHistory}
             activeHistoryId={activeGenerateHistoryId}
@@ -2595,7 +3283,7 @@ export function App(): React.JSX.Element {
         </div>
         {appMode === 'voice' ? (
           <VoiceMode
-            models={localModels}
+            models={effectiveLocalModels}
             realtimeAvailable={realtimeVoiceAvailable}
             modelId={voiceModel}
             audioSupported={audioSupported}
@@ -2616,6 +3304,7 @@ export function App(): React.JSX.Element {
               void refreshCapabilities()
             }}
             onRuntimeActivated={() => void refreshCapabilities()}
+            onOpenManage={openManage}
             onAgentSessionBound={(agentSessionId) =>
               void session.bindAgentSession(agentSessionId)
             }
@@ -2631,13 +3320,18 @@ export function App(): React.JSX.Element {
         {appMode === 'agent' ? (
           <AgentMode
             modelId={selectedModel}
-            models={localModels}
+            models={effectiveLocalModels}
             onComposerChange={setAgentComposer}
             onSidebarChange={setAgentSidebar}
             onSuggestPrompt={setDraft}
             onSessionBound={session.bindAgentSession}
             onSubmitTurn={session.submitText}
-            onCancelTurn={session.cancelResponse}
+            onCancelTurn={
+              coordinatorWorking && session.snapshot.agentSessionId
+                ? session.cancelResponse
+                : undefined
+            }
+            onOpenModelMenu={() => setModelMenuOpen(true)}
             onError={setError}
           />
         ) : null}
@@ -2647,6 +3341,7 @@ export function App(): React.JSX.Element {
             models={computerModels}
             onComposerChange={setComputerComposer}
             onSidebarChange={setComputerSidebar}
+            onOpenManage={openManage}
             onError={setError}
           />
         ) : null}
@@ -2694,7 +3389,7 @@ export function App(): React.JSX.Element {
                             ? 'Nothing here is saved, and memory is off.'
                             : 'Ask a question, or attach a file.'}
               </p>
-              {!modelsLoading && !canChat && modelPrepareState !== 'loading' ? (
+              {!modelsLoading && !selectedModel && modelPrepareState !== 'loading' ? (
                 <div className="welcome-actions">
                   {chatModels.length === 0 ? (
                     <button
@@ -2726,6 +3421,16 @@ export function App(): React.JSX.Element {
                     item.status === 'failed'
                       ? item.status
                       : null
+                  const turnMessage = messages.find((entry) => entry.id === item.branchId)
+                  const turnModelTitle =
+                    turnMessage?.model && item.source !== 'assistant_agent'
+                      ? modelDisplayName(
+                          turnMessage.model,
+                          effectiveLocalModels.find((entry) => entry.id === turnMessage.model)
+                        ).title
+                      : null
+                  const turnRootId = assistantTurnRootId(messages, item.branchId)
+                  const parentUser = parentUserMessageForTurn(messages, item.branchId)
                   return (
                     <article className="message assistant" key={item.id}>
                       <div className="avatar">
@@ -2734,6 +3439,9 @@ export function App(): React.JSX.Element {
                       <div className="message-body">
                         <div className="message-meta">
                           <strong>{item.source === 'assistant_agent' ? 'Agent' : 'Brazier'}</strong>
+                          {turnModelTitle ? (
+                            <span className="message-model-label">{turnModelTitle}</span>
+                          ) : null}
                           {status ? (
                             <span className={`turn-badge ${status}`}>{status}</span>
                           ) : null}
@@ -2781,11 +3489,42 @@ export function App(): React.JSX.Element {
                           </TurnTrace>
                         )}
                         {item.answer && <Markdown>{item.answer}</Markdown>}
-                        <BranchNavigator
-                          messages={messages}
-                          messageId={item.branchId}
-                          onSelect={setTipId}
-                        />
+                        <div className="message-actions">
+                          {item.answer ? (
+                            <button
+                              type="button"
+                              className="message-action-button"
+                              title="Copy response"
+                              onClick={() => copyTurnAnswer(item.id, item.answer)}
+                            >
+                              {copiedTurnId === item.id ? (
+                                <>
+                                  <Check size={12} /> Copied
+                                </>
+                              ) : (
+                                <>
+                                  <Copy size={12} /> Copy
+                                </>
+                              )}
+                            </button>
+                          ) : null}
+                          {parentUser && item.source !== 'assistant_agent' ? (
+                            <button
+                              type="button"
+                              className="message-action-button"
+                              disabled={busy || coordinatorWorking}
+                              title="Regenerate as a new branch"
+                              onClick={() => void retryAssistantTurn(parentUser)}
+                            >
+                              <RotateCcw size={12} /> Retry
+                            </button>
+                          ) : null}
+                          <BranchNavigator
+                            messages={messages}
+                            messageId={turnRootId}
+                            onSelect={(id) => setTipId(latestBranchTipId(messages, id))}
+                          />
+                        </div>
                       </div>
                     </article>
                   )
@@ -2822,22 +3561,41 @@ export function App(): React.JSX.Element {
                       )}
                       <MessageMedia blobs={contentBlobs(message)} onError={setError} />
                       <Markdown>{contentText(message)}</Markdown>
-                      <button
-                        className="fork-button"
-                        title="Edit and resend as a new branch"
-                        onClick={() => {
-                          setDraft(contentText(message))
-                          setAttachments([])
-                          setTipId(message.parent_id)
-                        }}
-                      >
-                        <Pencil size={13} /> Edit
-                      </button>
-                      <BranchNavigator
-                        messages={messages}
-                        messageId={message.id}
-                        onSelect={setTipId}
-                      />
+                      <div className="message-actions">
+                        <button
+                          type="button"
+                          className="fork-button"
+                          title="Edit and resend as a new branch"
+                          onClick={() => {
+                            const restoredAttachments: Attachment[] = contentBlobs(message).map(
+                              (blob, index) => ({
+                                id: `${blob.sha256}-${index}-${crypto.randomUUID()}`,
+                                name:
+                                  blob.original_name ||
+                                  (blob.mime_type.startsWith('image/')
+                                    ? 'image'
+                                    : blob.mime_type.startsWith('audio/')
+                                      ? 'audio'
+                                      : blob.mime_type.startsWith('video/')
+                                        ? 'video'
+                                        : 'attachment'),
+                                type: blob.mime_type,
+                                sha256: blob.sha256
+                              })
+                            )
+                            setDraft(contentText(message))
+                            setAttachments(restoredAttachments)
+                            setTipId(message.parent_id)
+                          }}
+                        >
+                          <Pencil size={13} /> Edit
+                        </button>
+                        <BranchNavigator
+                          messages={messages}
+                          messageId={message.id}
+                          onSelect={(id) => setTipId(latestBranchTipId(messages, id))}
+                        />
+                      </div>
                     </div>
                   </article>
                 )
@@ -2932,7 +3690,7 @@ export function App(): React.JSX.Element {
               prompt form: in both cases a second input would be a second,
               unlabelled one. */}
           <form
-            className="composer"
+            className={composerDragOver ? 'composer drag-over' : 'composer'}
             hidden={appMode === 'voice' || appMode === 'generate'}
             onSubmit={(event) => void submit(event)}
           >
@@ -2957,31 +3715,62 @@ export function App(): React.JSX.Element {
               rows={shellComposerMode ? 2 : 1}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
+              onPaste={handleComposerPaste}
               onKeyDown={(event) => {
+                if (visibleSuggestions.length > 0) {
+                  if (event.key === 'ArrowDown') {
+                    event.preventDefault()
+                    setSuggestionIndex((index) => (index + 1) % visibleSuggestions.length)
+                    return
+                  }
+                  if (event.key === 'ArrowUp') {
+                    event.preventDefault()
+                    setSuggestionIndex(
+                      (index) => (index - 1 + visibleSuggestions.length) % visibleSuggestions.length
+                    )
+                    return
+                  }
+                  if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
+                    const chosen = visibleSuggestions[clampedSuggestionIndex]
+                    if (chosen) {
+                      event.preventDefault()
+                      setDraft((current) => replaceTrailingCommand(current, chosen.value))
+                      return
+                    }
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    setDismissedSuggestionQuery(activeSuggestionQuery)
+                    return
+                  }
+                }
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault()
                   event.currentTarget.form?.requestSubmit()
                 }
               }}
             />
-            {shellComposerMode && shellComposer?.suggestions && (() => {
-              const query = trailingCommand(draft)
-              const suggestions = composerCompletionsFor(draft, shellComposer.suggestions)
-              if (suggestions.length === 0 || suggestions[0]?.value === query) return null
-              return (
-                <div className="composer-suggestions" role="listbox" aria-label="Prompt suggestions">
-                  {suggestions.map((entry) => (
-                    <button
-                      type="button"
-                      key={entry.value}
-                      onClick={() => setDraft((current) => replaceTrailingCommand(current, entry.value))}
-                    >
-                      <strong>{entry.value}</strong><span>{entry.description}</span>
-                    </button>
-                  ))}
-                </div>
-              )
-            })()}
+            {visibleSuggestions.length > 0 && (
+              <div className="composer-suggestions" role="listbox" aria-label="Prompt suggestions">
+                {visibleSuggestions.map((entry, index) => (
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={index === clampedSuggestionIndex}
+                    className={index === clampedSuggestionIndex ? 'active' : ''}
+                    key={entry.value}
+                    onMouseEnter={() => setSuggestionIndex(index)}
+                    onClick={() =>
+                      setDraft((current) => replaceTrailingCommand(current, entry.value))
+                    }
+                  >
+                    <strong>{entry.value}</strong>
+                    <span>{entry.description}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="composer-actions">
               <input
                 ref={fileInput}
@@ -3080,12 +3869,12 @@ export function App(): React.JSX.Element {
                 <button
                   className="send-button stop"
                   type="button"
-                  title="Stop"
+                  title="Stop (⌘.)"
                   aria-label="Stop"
                   onClick={() => {
                     if (shellComposerMode) void shellComposer?.stop()
                     else if (coordinatorWorking) void session.cancelResponse()
-                    else abortRef.current?.abort()
+                    else abortChatGeneration()
                   }}
                 >
                   <Square size={15} fill="currentColor" />
@@ -3098,8 +3887,18 @@ export function App(): React.JSX.Element {
                   aria-label="Send"
                   disabled={
                     shellComposerMode
-                      ? !draft.trim() || !shellComposer || shellComposer.blockedReason !== ''
-                      : (!draft.trim() && attachments.length === 0) || !canChat
+                      ? !draft.trim() ||
+                        !shellComposer ||
+                        (shellComposer.blockedReason !== '' &&
+                          !(
+                            shellComposer.suggestions &&
+                            isExactSlashCommand(draft, shellComposer.suggestions)
+                          ))
+                      : ((!draft.trim() && attachments.length === 0) || !canChat) &&
+                        !(
+                          attachments.length === 0 &&
+                          isExactSlashCommand(draft, CHAT_SLASH_SUGGESTIONS)
+                        )
                   }
                 >
                   <Send size={17} />
@@ -3162,7 +3961,7 @@ export function App(): React.JSX.Element {
                   </span>
                   <span
                     className={canAttachImage ? '' : 'unavailable'}
-                    title={`Vision — ${visionCapabilityTitle(selectedModel, localModels, canAttachImage)}`}
+                    title={`Vision — ${visionCapabilityTitle(selectedModel, effectiveLocalModels, canAttachImage)}`}
                     aria-label="Vision"
                   >
                     <Image size={14} />
@@ -3224,6 +4023,7 @@ export function App(): React.JSX.Element {
           selectedModel={modeModel.selected}
           loading={modelsLoading}
           videoPipeline={Boolean(pipelineFeatures.video_preprocess)}
+          hardware={hardware}
           onSelect={modeModel.select}
           onConfigure={setConfiguringModel}
           configuredCounts={profileCounts}
@@ -3231,7 +4031,7 @@ export function App(): React.JSX.Element {
             openManage(
               appMode === 'computer'
                 ? 'computer'
-                : modelsLoadFailed || localModels.length === 0
+                : modelsLoadFailed || effectiveLocalModels.length === 0
                   ? 'discover'
                   : 'library'
             )
@@ -3244,11 +4044,13 @@ export function App(): React.JSX.Element {
           settings={runtime}
           hardware={hardware}
           selectedModel={selectedModel}
-          models={localModels}
+          models={effectiveLocalModels}
+          rawModels={localModels}
+          residency={modelResidency}
           saving={savingInference}
           advancedModelId={modeModel.selected}
           profile={modelProfiles[modeModel.selected]}
-          onApply={(next) => void applyInferenceSettings(next)}
+          onApply={(next, options) => applyInferenceSettings(next, options)}
           onProfileSaved={(models) => {
             setModelProfiles(models)
             if (modeModel.selected === selectedModel && modelPrepareState === 'ready') {
@@ -3258,6 +4060,47 @@ export function App(): React.JSX.Element {
           onClose={() => setInferenceMenuOpen(false)}
         />
       )}
+      <CommandPalette
+        open={commandPaletteOpen}
+        appMode={appMode}
+        workspaceModes={workspaceModes}
+        models={effectiveLocalModels}
+        selectedModel={selectedModel}
+        voiceModel={voiceModel}
+        generateModel={generateModel}
+        computerModel={computerModel}
+        conversations={conversations}
+        activeConversationId={incognito ? null : conversationId}
+        incognito={incognito}
+        canUnload={Boolean(selectedModel) && !modelUnloading && !busy}
+        isMac={window.brazier.platform === 'darwin'}
+        onClose={() => setCommandPaletteOpen(false)}
+        onSwitchMode={switchAppMode}
+        onSelectModelForApp={selectModelFromAnySurface}
+        onConfigureModel={setConfiguringModel}
+        onSelectConversation={(id) => {
+          if (appMode !== 'chat') switchAppMode('chat')
+          if (id === conversationId && !incognito) return
+          abortChatGeneration()
+          if (incognito) setIncognito(false)
+          setConversationId(id)
+        }}
+        onNewAction={triggerNewForActiveMode}
+        onToggleIncognito={() => {
+          if (appMode !== 'chat' && workspaceModes.chat) switchAppMode('chat')
+          toggleIncognito()
+        }}
+        onUnloadModel={() => void unloadSelectedModel()}
+        onExportConversation={() => {
+          if (conversationId && !incognito) void exportConversationFile(conversationId)
+        }}
+        onCopyApiCurl={() => void copyApiCurl()}
+        onOpenModelMenu={() => setModelMenuOpen(true)}
+        onOpenInferenceSettings={openActiveModelSettings}
+        onToggleSidebar={() => setSidebarOpen((open) => !open)}
+        onRunDream={() => void runDream()}
+        onOpenManage={openManage}
+      />
       {configuringModel && configuredModelEntry && (
         <ModelSettingsModal
           model={configuredModelEntry}
@@ -3315,6 +4158,9 @@ export function App(): React.JSX.Element {
         </aside>
       )}
       <DownloadTray
+        models={effectiveLocalModels}
+        activeModelIds={[selectedModel, generateModel, voiceModel, computerModel].filter(Boolean)}
+        onUseModel={selectModelFromAnySurface}
         onChanged={() => {
           void refreshLocalModels().catch(() => {})
           // A background install can settle after the welcome screen is left;
@@ -3335,12 +4181,16 @@ export function App(): React.JSX.Element {
           }}
           pendingBuild={pendingBuild}
           onPendingBuildConsumed={() => setPendingBuild(null)}
-          models={localModels}
+          models={effectiveLocalModels}
           modelsLoading={modelsLoading}
           refreshModels={refreshLocalModels}
           initialRuntimes={prefetchedRuntimes}
           selectedModel={selectedModel}
-          onSelectModel={selectModel}
+          onSelectModel={(modelId) => {
+            const found = effectiveLocalModels.find((entry) => entry.id === modelId)
+            if (found) selectModelFromAnySurface(found)
+            else selectModel(modelId)
+          }}
           modelBindings={modelBindings}
           onSetModelBinding={(modelId, runtimeId) => void updateModelBinding(modelId, runtimeId)}
           onRuntimesChanged={() => {
@@ -3350,6 +4200,7 @@ export function App(): React.JSX.Element {
           settings={runtime}
           onSettingsSaved={setRuntime}
           hardware={hardware}
+          dataDir={daemonDataDir}
           onConfigureModel={setConfiguringModel}
           profileCounts={profileCounts}
           onWorkspaceModesChange={setWorkspaceModes}

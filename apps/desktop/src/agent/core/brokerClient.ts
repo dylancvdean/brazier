@@ -127,6 +127,74 @@ export type DaemonMessageRecord = {
   created_at: string
 }
 
+export type PrefillProgress = {
+  total: number
+  cached: number
+  processed: number
+  elapsed_ms: number
+  context_total?: number | null
+}
+
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
+export type ChatCompletionMessage =
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string | ChatContentPart[] }
+  | {
+      role: 'assistant'
+      content: string
+      reasoning_content?: string
+      tool_calls?: Array<{
+        id: string
+        type: 'function'
+        function: { name: string; arguments: string }
+      }>
+    }
+  | { role: 'tool'; tool_call_id: string; content: string }
+
+export type ChatCompletionToolSpec = {
+  type: 'function'
+  function: {
+    name: string
+    description: string
+    parameters: Record<string, unknown>
+  }
+}
+
+export type StreamChatCompletionRequest = {
+  model: string
+  messages: ChatCompletionMessage[]
+  tools?: ChatCompletionToolSpec[]
+  toolChoice?: 'auto' | 'none'
+  maxTokens?: number
+  enableReasoning?: boolean
+  slot?: number
+}
+
+export type StreamedToolCall = {
+  id: string
+  name: string
+  arguments: string
+}
+
+export type StreamChatCompletionCallbacks = {
+  onContentDelta?: (delta: string) => void
+  onReasoningDelta?: (delta: string) => void
+  onPrefill?: (prefill: PrefillProgress) => void
+}
+
+export type StreamChatCompletionResult = {
+  content: string
+  reasoning: string
+  toolCalls: StreamedToolCall[]
+  finishReason: string | null
+  promptTokens?: number
+  completionTokens?: number
+  contextTotal?: number | null
+}
+
 export class BrokerError extends Error {
   readonly status: number
 
@@ -137,26 +205,58 @@ export class BrokerError extends Error {
   }
 }
 
-const REQUEST_TIMEOUT_MS = 30_000
-
-function combineAbortSignals(signals: AbortSignal[]): AbortSignal {
-  if (typeof AbortSignal.any === 'function') return AbortSignal.any(signals)
-  const controller = new AbortController()
-  for (const signal of signals) {
-    if (signal.aborted) {
-      controller.abort(signal.reason)
-      return controller.signal
-    }
+export class ContextOverflowError extends BrokerError {
+  constructor(message: string, status = 400) {
+    super(message, status)
+    this.name = 'ContextOverflowError'
   }
-  for (const signal of signals) {
-    signal.addEventListener(
-      'abort',
-      () => controller.abort(signal.reason),
-      { once: true }
-    )
-  }
-  return controller.signal
 }
+
+/** Detect prompt / KV-cache context overflow errors across local and remote engines. */
+export function isContextOverflowMessage(message: string, code?: string | null): boolean {
+  const normalizedCode = (code ?? '').toLowerCase()
+  if (
+    normalizedCode === 'context_length_exceeded' ||
+    normalizedCode === 'exceed_context_size_error'
+  ) {
+    return true
+  }
+  const lower = message.toLowerCase()
+  if (lower.includes('turn off parallel subagents') || lower.includes('failed to load model')) {
+    return false
+  }
+  return (
+    lower.includes('maximum context length') ||
+    lower.includes('exceeds the available context size') ||
+    lower.includes('n_ctx') ||
+    lower.includes('prompt is too long') ||
+    lower.includes('input is too long') ||
+    lower.includes('too many tokens') ||
+    lower.includes('kv cache') ||
+    lower.includes('context')
+  )
+}
+
+function normalizeCompleteToolCall(raw: Record<string, unknown>, index: number): StreamedToolCall {
+  const fn = raw.function as Record<string, unknown> | undefined
+  const id = typeof raw.id === 'string' && raw.id.length > 0 ? raw.id : `call_${index}`
+  const name =
+    typeof fn?.name === 'string'
+      ? fn.name
+      : typeof raw.name === 'string'
+        ? raw.name
+        : ''
+  const rawArgs = fn?.arguments ?? raw.arguments
+  const args =
+    typeof rawArgs === 'string'
+      ? rawArgs
+      : rawArgs && typeof rawArgs === 'object'
+        ? JSON.stringify(rawArgs)
+        : '{}'
+  return { id, name, arguments: args }
+}
+
+const REQUEST_TIMEOUT_MS = 30_000
 
 export class BrokerClient {
   private readonly connection: BrokerConnection
@@ -477,6 +577,315 @@ export class BrokerClient {
     if (buffer.trim()) consume(buffer)
     if (!result) throw new BrokerError('The tool output stream ended before its result.', 502)
     return result
+  }
+
+  /**
+   * Stream a single-pass OpenAI-compatible chat completion directly from the
+   * daemon without monkey-patching global `fetch` or cloning the response stream.
+   */
+  async streamChatCompletion(
+    request: StreamChatCompletionRequest,
+    callbacks?: StreamChatCompletionCallbacks,
+    signal?: AbortSignal
+  ): Promise<StreamChatCompletionResult> {
+    const slot = request.slot ?? 0
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-brazier-mode': 'agent',
+      'x-brazier-slot': String(slot)
+    }
+    if (this.connection.apiKey) {
+      headers.Authorization = `Bearer ${this.connection.apiKey}`
+    }
+
+    const body: Record<string, unknown> = {
+      model: request.model,
+      messages: request.messages,
+      stream: true
+    }
+    if (request.tools && request.tools.length > 0) {
+      body.tools = request.tools
+      body.tool_choice = request.toolChoice ?? 'auto'
+    }
+    if (request.maxTokens !== undefined) {
+      body.max_tokens = request.maxTokens
+    }
+    if (request.enableReasoning !== undefined) {
+      body.enable_reasoning = request.enableReasoning
+    }
+
+    const response = await fetch(`${this.openAiBaseUrl()}/chat/completions`, {
+      method: 'POST',
+      headers,
+      signal,
+      body: JSON.stringify(body)
+    })
+
+    if (!response.ok) {
+      const rawText = await response.text().catch(() => '')
+      let message = `Request failed with status ${response.status}.`
+      let code: string | undefined
+      try {
+        const parsed = JSON.parse(rawText) as {
+          error?: string | { message?: string; code?: string }
+          message?: string
+        }
+        if (typeof parsed.error === 'string') {
+          message = parsed.error
+        } else if (parsed.error && typeof parsed.error === 'object') {
+          if (typeof parsed.error.message === 'string') message = parsed.error.message
+          if (typeof parsed.error.code === 'string') code = parsed.error.code
+        } else if (typeof parsed.message === 'string') {
+          message = parsed.message
+        }
+      } catch {
+        if (rawText.trim()) message = rawText.trim()
+      }
+      if (
+        (response.status === 400 ||
+          response.status === 413 ||
+          response.status === 422 ||
+          response.status === 500) &&
+        isContextOverflowMessage(message, code)
+      ) {
+        throw new ContextOverflowError(message, response.status)
+      }
+      throw new BrokerError(message, response.status)
+    }
+
+    if (!response.body) {
+      throw new BrokerError('The chat completion stream had no body.', 502)
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let content = ''
+    let pendingNull = ''
+    let reasoning = ''
+    let finishReason: string | null = null
+    let promptTokens: number | undefined
+    let completionTokens: number | undefined
+    let contextTotal: number | null | undefined
+    const toolCallsByIndex = new Map<number, { id: string; name: string; arguments: string }>()
+    let completeToolCalls: StreamedToolCall[] | undefined
+    let doneFlag = false
+
+    const consumeBlock = (block: string): void => {
+      if (doneFlag) return
+      let eventType = 'message'
+      const dataLines: string[] = []
+      for (const line of block.split(/\r?\n/)) {
+        if (!line || line.startsWith(':')) continue
+        if (line.startsWith('event:')) {
+          eventType = line.slice(6).trim()
+        } else if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trimStart())
+        }
+      }
+      if (dataLines.length === 0) return
+      const dataStr = dataLines.join('\n')
+      if (dataStr === '[DONE]') {
+        doneFlag = true
+        return
+      }
+
+      let payload: Record<string, unknown>
+      try {
+        payload = JSON.parse(dataStr) as Record<string, unknown>
+      } catch {
+        if (eventType === 'error') {
+          if (isContextOverflowMessage(dataStr)) {
+            throw new ContextOverflowError(dataStr, 400)
+          }
+          throw new BrokerError(dataStr, 500)
+        }
+        return
+      }
+
+      const brazier = payload.brazier as
+        | {
+            prefill?: PrefillProgress
+            generation?: { prompt_tokens?: number | null; completion_tokens?: number }
+            client_tool_calls?: Array<Record<string, unknown>>
+            fork_hints?: unknown
+          }
+        | undefined
+
+      if (payload.error || eventType === 'error') {
+        const rawErr = payload.error
+        const errMsg =
+          typeof rawErr === 'string'
+            ? rawErr
+            : rawErr && typeof rawErr === 'object' && typeof (rawErr as { message?: unknown }).message === 'string'
+              ? ((rawErr as { message: string }).message)
+              : typeof payload.message === 'string'
+                ? payload.message
+                : 'Model stream failed.'
+        const errCode =
+          rawErr && typeof rawErr === 'object' && typeof (rawErr as { code?: unknown }).code === 'string'
+            ? ((rawErr as { code: string }).code)
+            : undefined
+        if (!brazier?.fork_hints && isContextOverflowMessage(errMsg, errCode)) {
+          throw new ContextOverflowError(errMsg, 400)
+        }
+        throw new BrokerError(errMsg, 500)
+      }
+
+      if (brazier?.prefill) {
+        const prefill = brazier.prefill
+        if (typeof prefill.total === 'number') promptTokens = prefill.total
+        if (prefill.context_total !== undefined) contextTotal = prefill.context_total
+        callbacks?.onPrefill?.(prefill)
+      }
+
+      if (brazier?.generation) {
+        if (typeof brazier.generation.prompt_tokens === 'number') {
+          promptTokens = brazier.generation.prompt_tokens
+        }
+        if (typeof brazier.generation.completion_tokens === 'number') {
+          completionTokens = brazier.generation.completion_tokens
+        }
+      }
+
+      const usage = payload.usage as
+        | { prompt_tokens?: number; completion_tokens?: number }
+        | undefined
+      if (usage) {
+        if (typeof usage.prompt_tokens === 'number' && usage.prompt_tokens > 0) {
+          promptTokens = usage.prompt_tokens
+        }
+        if (typeof usage.completion_tokens === 'number' && usage.completion_tokens > 0) {
+          completionTokens = usage.completion_tokens
+        }
+      }
+
+      if (Array.isArray(brazier?.client_tool_calls)) {
+        pendingNull = ''
+        completeToolCalls = brazier.client_tool_calls.map((entry, idx) =>
+          normalizeCompleteToolCall(entry, idx)
+        )
+      }
+
+      const choices = payload.choices as Array<Record<string, unknown>> | undefined
+      const choice = choices?.[0]
+      if (!choice) return
+
+      if (typeof choice.finish_reason === 'string') {
+        finishReason = choice.finish_reason
+      }
+
+      const delta = choice.delta as Record<string, unknown> | undefined
+      if (!delta) return
+
+      const reasoningDelta =
+        typeof delta.reasoning_content === 'string'
+          ? delta.reasoning_content
+          : typeof delta.reasoning === 'string'
+            ? delta.reasoning
+            : ''
+      if (reasoningDelta.length > 0) {
+        reasoning += reasoningDelta
+        callbacks?.onReasoningDelta?.(reasoningDelta)
+      }
+
+      const hasToolDelta = Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0
+
+      if (typeof delta.content === 'string' && delta.content.length > 0) {
+        if (content.length === 0 && pendingNull.length === 0 && delta.content.trim() === 'null') {
+          // Hold a lone initial "null" artifact; drop if tool-only or standalone,
+          // flush only if real prose follows.
+          if (!hasToolDelta && finishReason !== 'tool_calls') {
+            pendingNull = delta.content
+          }
+        } else {
+          const chunk = pendingNull ? pendingNull + delta.content : delta.content
+          pendingNull = ''
+          content += chunk
+          callbacks?.onContentDelta?.(chunk)
+        }
+      }
+
+      if (hasToolDelta) {
+        pendingNull = ''
+        const rawCalls = delta.tool_calls as Array<Record<string, unknown>>
+        const allUnindexed = rawCalls.every((tc) => typeof tc?.index !== 'number')
+        if (allUnindexed) {
+          completeToolCalls = rawCalls.map((tc, idx) => normalizeCompleteToolCall(tc, idx))
+        } else {
+          for (let i = 0; i < rawCalls.length; i += 1) {
+            const tc = rawCalls[i]
+            if (!tc || typeof tc !== 'object') continue
+            const index = typeof tc.index === 'number' ? tc.index : i
+            const acc = toolCallsByIndex.get(index) ?? { id: '', name: '', arguments: '' }
+            if (typeof tc.id === 'string' && tc.id.length > 0) {
+              acc.id = tc.id
+            }
+            const fn = tc.function as Record<string, unknown> | undefined
+            const rawName =
+              typeof fn?.name === 'string'
+                ? fn.name
+                : typeof tc.name === 'string'
+                  ? tc.name
+                  : ''
+            if (rawName) {
+              if (!acc.name) acc.name = rawName
+              else if (acc.name !== rawName) acc.name += rawName
+            }
+            const rawArgs = fn?.arguments ?? tc.arguments
+            if (typeof rawArgs === 'string') {
+              acc.arguments += rawArgs
+            } else if (rawArgs && typeof rawArgs === 'object') {
+              acc.arguments = JSON.stringify(rawArgs)
+            }
+            toolCallsByIndex.set(index, acc)
+          }
+        }
+      }
+    }
+
+    try {
+      while (!doneFlag) {
+        const { value, done } = await reader.read()
+        buffer += decoder.decode(value, { stream: !done })
+        let boundary = buffer.search(/\r?\n\r?\n/)
+        while (boundary >= 0) {
+          const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)?.[0] ?? '\n\n'
+          consumeBlock(buffer.slice(0, boundary))
+          buffer = buffer.slice(boundary + separator.length)
+          if (doneFlag) break
+          boundary = buffer.search(/\r?\n\r?\n/)
+        }
+        if (done) break
+      }
+      if (!doneFlag && buffer.trim()) {
+        consumeBlock(buffer)
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    const toolCalls: StreamedToolCall[] =
+      completeToolCalls && completeToolCalls.length > 0
+        ? completeToolCalls.filter((tc) => tc.name.length > 0)
+        : [...toolCallsByIndex.entries()]
+            .sort(([a], [b]) => a - b)
+            .map(([index, entry]) => ({
+              id: entry.id || `call_${index}`,
+              name: entry.name,
+              arguments: entry.arguments || '{}'
+            }))
+            .filter((tc) => tc.name.length > 0)
+
+    return {
+      content,
+      reasoning,
+      toolCalls,
+      finishReason,
+      promptTokens,
+      completionTokens,
+      contextTotal
+    }
   }
 
   /**

@@ -14,7 +14,7 @@ the real architecture, and tracks the staged work.
 | Conversation API | `crates/brazierd/src/api.rs` | `/api/v1/conversations`, `…/messages`, `…/runs`, export/import. |
 | Chat UI + send loop | `apps/desktop/src/renderer/src/App.tsx` | `submit()` writes the user message, streams `/v1/chat/completions`, writes assistant + tool messages. |
 | Agent session store | `agent_store.rs`, `agent_types.rs` | Transcript, tool ledger, approvals, grants, artifacts. Authoritative for tools and task state. |
-| Agent runtime | `apps/desktop/src/agent/` | Pi runtime in an Electron `utilityProcess`; reached from the renderer through `window.brazier.agent` (`protocol.ts` commands, `AgentEvent` stream). Survives renderer unmount. |
+| Agent runtime | `apps/desktop/src/agent/` | Native runtime in an Electron `utilityProcess`; reached from the renderer through `window.brazier.agent` (`protocol.ts` commands, `AgentEvent` stream). Survives renderer unmount. |
 | Agent UI | `components/AgentMode.tsx` | Own composer and transcript, separate from chat. |
 | Voice runtime | `crates/brazierd/src/voice.rs` | Spawns `moshi.server` (Linux CUDA) or `personaplex_mlx.local_web` (Apple Silicon) on an ephemeral loopback port. Single active session. |
 | Voice API | `/api/v1/voice/sessions` | Create / read / end. Returns a one-session-ticket `ws_url` on the daemon, which proxies the PersonaPlex socket without exposing the process port. |

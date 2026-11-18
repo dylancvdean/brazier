@@ -86,9 +86,10 @@ export class VoiceStream {
   private playbackNode: AudioWorkletNode | null = null
   private playbackReady: Promise<void> | null = null
   private media: MediaStream | null = null
+  private detachTrackListeners: (() => void) | null = null
   private encoder: AudioEncoder | null = null
   private decoder: AudioDecoder | null = null
-  private muxer = new OggOpusMuxer({ sampleRate: SAMPLE_RATE, channelCount: 1 })
+  private muxer: OggOpusMuxer | null = new OggOpusMuxer({ sampleRate: SAMPLE_RATE, channelCount: 1 })
   private demuxer = new OggOpusDemuxer()
   private timestamp = 0
   private decodeTimestamp = 0
@@ -107,37 +108,68 @@ export class VoiceStream {
 
   /** Open the socket, start capture, and begin streaming both ways. */
   async start(wsUrl: string, wsProtocol?: string): Promise<void> {
+    if (this.stopped) return
     if (!voiceStreamSupported()) {
       throw new Error('This build lacks the WebCodecs Opus support realtime voice needs.')
     }
     this.handlers.onState?.('connecting')
-    // Ask for the browser's echo canceller: the server has none, so without it
-    // the model hears itself through the speakers and talks over the user.
-    this.media = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        channelCount: 1
+    try {
+      // Ask for the browser's echo canceller: the server has none, so without it
+      // the model hears itself through the speakers and talks over the user.
+      const media = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1
+        }
+      })
+      if (this.stopped) {
+        for (const track of media.getAudioTracks()) track.stop()
+        await this.cleanupAfterStop()
+        return
       }
-    })
-    await this.openSocket(wsUrl, wsProtocol)
-    await this.startCapture()
+      this.media = media
+      await this.openSocket(wsUrl, wsProtocol)
+      if (this.stopped) {
+        await this.cleanupAfterStop()
+        return
+      }
+      await this.startCapture()
+      if (this.stopped) {
+        await this.cleanupAfterStop()
+      }
+    } catch (error) {
+      await this.cleanupAfterStop()
+      throw error
+    }
   }
 
   private openSocket(wsUrl: string, wsProtocol?: string): Promise<void> {
+    if (this.stopped) return Promise.resolve()
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(wsUrl, wsProtocol ? [wsProtocol] : undefined)
       socket.binaryType = 'arraybuffer'
       this.socket = socket
       const failed = (message: string) => reject(new Error(message))
       socket.onopen = () => {
+        if (this.stopped) {
+          socket.close()
+          resolve()
+          return
+        }
         // Opus headers must lead the stream before any audio page.
-        socket.send(withTag(TAG_AUDIO, this.muxer.headerPages()))
+        if (this.muxer) {
+          socket.send(withTag(TAG_AUDIO, this.muxer.headerPages()))
+        }
         this.handlers.onState?.('live')
         resolve()
       }
       socket.onerror = () => {
+        if (this.stopped) {
+          resolve()
+          return
+        }
         if (socket.readyState === WebSocket.CONNECTING) failed('Could not reach the voice server.')
         else {
           this.handlers.onError?.('Voice connection error.')
@@ -145,6 +177,10 @@ export class VoiceStream {
         }
       }
       socket.onclose = (event) => {
+        if (this.stopped) {
+          resolve()
+          return
+        }
         if (socket.readyState === WebSocket.CONNECTING) failed('The voice server closed the connection.')
         this.handlers.onState?.('closed')
         if (!this.stopped && !event.wasClean) {
@@ -278,11 +314,16 @@ export class VoiceStream {
   }
 
   private async startPlayback(sampleRate: number): Promise<void> {
+    if (this.stopped) return
     // Match the decoder's output rate so no resampling is needed.
     const context = new AudioContext({ sampleRate })
     this.playbackCtx = context
     await context.audioWorklet.addModule(playbackWorkletUrl)
-    if (this.stopped) return
+    if (this.stopped) {
+      await context.close().catch(() => {})
+      if (this.playbackCtx === context) this.playbackCtx = null
+      return
+    }
     const node = new AudioWorkletNode(context, 'brazier-playback', {
       numberOfInputs: 0,
       outputChannelCount: [1],
@@ -291,13 +332,24 @@ export class VoiceStream {
     node.connect(context.destination)
     this.playbackNode = node
     await context.resume().catch(() => {})
+    if (this.stopped) {
+      node.disconnect()
+      if (this.playbackNode === node) this.playbackNode = null
+      await context.close().catch(() => {})
+      if (this.playbackCtx === context) this.playbackCtx = null
+    }
   }
 
   private async startCapture(): Promise<void> {
+    if (this.stopped || !this.media) return
     const context = new AudioContext({ sampleRate: SAMPLE_RATE })
     this.captureCtx = context
     await context.audioWorklet.addModule(captureWorkletUrl)
-    if (this.stopped) return
+    if (this.stopped || !this.media) {
+      await context.close().catch(() => {})
+      if (this.captureCtx === context) this.captureCtx = null
+      return
+    }
 
     this.encoder = new AudioEncoder({
       output: (chunk) => this.sendEncoded(chunk),
@@ -311,7 +363,7 @@ export class VoiceStream {
       opus: { frameDuration: 20_000 }
     })
 
-    const source = context.createMediaStreamSource(this.media!)
+    const source = context.createMediaStreamSource(this.media)
     const node = new AudioWorkletNode(context, 'brazier-capture', {
       outputChannelCount: [1],
       processorOptions: { frameSize: FRAME_SAMPLES }
@@ -319,18 +371,6 @@ export class VoiceStream {
     node.port.onmessage = (event) => this.encodeFrame(event.data as Float32Array<ArrayBuffer>)
     source.connect(node)
 
-    const track = this.media?.getAudioTracks()[0]
-    if (track) {
-      track.addEventListener('ended', () => {
-        if (this.stopped) return
-        this.handlers.onError?.('The microphone was disconnected.')
-        void this.stop()
-      })
-      track.addEventListener('mute', () => {
-        if (this.stopped) return
-        this.handlers.onError?.('The microphone was muted by the system.')
-      })
-    }
     // The processor writes no output; the silent sink is only there to put the
     // node in the graph that reaches the destination, which is what guarantees
     // it is rendered at all. A capture-only node with nowhere to go depends on
@@ -344,17 +384,27 @@ export class VoiceStream {
     // the permission, or the device is yanked from under the system. Without
     // these listeners `readyState` flips to 'ended', frames stop arriving, and
     // the session sits 'live' while the model talks to an empty room.
-    const captureTrack = this.media?.getAudioTracks()[0]
+    const captureTrack = this.media.getAudioTracks()[0]
     if (captureTrack) {
-      captureTrack.addEventListener('ended', () => {
+      const onEnded = (): void => {
         if (this.stopped) return
-        this.handlers.onFatalError?.('The microphone was disconnected mid-session.')
+        if (this.handlers.onFatalError) {
+          this.handlers.onFatalError('The microphone was disconnected mid-session.')
+        } else {
+          this.handlers.onError?.('The microphone was disconnected.')
+        }
         void this.stop()
-      })
-      captureTrack.addEventListener('mute', () => {
+      }
+      const onMute = (): void => {
         if (this.stopped) return
         this.handlers.onError?.('The microphone was muted by the system.')
-      })
+      }
+      captureTrack.addEventListener('ended', onEnded)
+      captureTrack.addEventListener('mute', onMute)
+      this.detachTrackListeners = () => {
+        captureTrack.removeEventListener('ended', onEnded)
+        captureTrack.removeEventListener('mute', onMute)
+      }
     }
 
     // A suspended context renders nothing: no frames, no meter, and no audio
@@ -362,6 +412,11 @@ export class VoiceStream {
     // while the model talks to itself. Playback already resumed; capture did
     // not, so it never ran.
     await context.resume().catch(() => {})
+    if (this.stopped) {
+      await context.close().catch(() => {})
+      if (this.captureCtx === context) this.captureCtx = null
+      return
+    }
     if (context.state !== 'running') {
       this.handlers.onError?.(
         `The audio input did not start (context is ${context.state}). Check the microphone permission.`
@@ -393,10 +448,11 @@ export class VoiceStream {
 
   private sendEncoded(chunk: EncodedAudioChunk): void {
     const socket = this.socket
-    if (!socket || socket.readyState !== WebSocket.OPEN) return
+    const muxer = this.muxer
+    if (!socket || socket.readyState !== WebSocket.OPEN || !muxer) return
     const packet = new Uint8Array(chunk.byteLength)
     chunk.copyTo(packet)
-    const page = this.muxer.addPacket(packet, FRAME_SAMPLES)
+    const page = muxer.addPacket(packet, FRAME_SAMPLES)
     if (page) socket.send(withTag(TAG_AUDIO, page))
   }
 
@@ -443,9 +499,57 @@ export class VoiceStream {
     if (muted) this.handlers.onInputLevel?.(0)
   }
 
+  private async cleanupAfterStop(): Promise<void> {
+    if (this.opusHeadTimer !== null) {
+      window.clearTimeout(this.opusHeadTimer)
+      this.opusHeadTimer = null
+    }
+    this.pendingAudioPackets = []
+    this.detachTrackListeners?.()
+    this.detachTrackListeners = null
+    const socket = this.socket
+    this.socket = null
+    if (socket && socket.readyState === WebSocket.OPEN && this.muxer) {
+      const muxer = this.muxer
+      this.muxer = null
+      const eosPage = muxer.flush({ last: true })
+      if (eosPage) {
+        try {
+          socket.send(withTag(TAG_AUDIO, eosPage))
+        } catch {
+          // Socket may close concurrently during teardown.
+        }
+      }
+    } else {
+      this.muxer = null
+    }
+    if (socket && socket.readyState <= WebSocket.OPEN) socket.close()
+    const media = this.media
+    this.media = null
+    for (const track of media?.getAudioTracks() ?? []) track.stop()
+    const encoder = this.encoder
+    this.encoder = null
+    if (encoder && encoder.state !== 'closed') encoder.close()
+    const decoder = this.decoder
+    this.decoder = null
+    if (decoder && decoder.state !== 'closed') decoder.close()
+    this.playbackNode?.port.postMessage('flush')
+    this.playbackNode = null
+    this.playbackReady = null
+    const captureCtx = this.captureCtx
+    this.captureCtx = null
+    await captureCtx?.close().catch(() => {})
+    const playbackCtx = this.playbackCtx
+    this.playbackCtx = null
+    await playbackCtx?.close().catch(() => {})
+  }
+
   /** Tear down the socket, capture graph, and codecs. Safe to call twice. */
   async stop(): Promise<void> {
-    if (this.stopped) return
+    if (this.stopped) {
+      await this.cleanupAfterStop()
+      return
+    }
     this.stopped = true
     // Flush the encoder and emit the terminating Ogg page (EOS) while the
     // socket is still OPEN. Closing the encoder without flushing drops the last
@@ -459,7 +563,9 @@ export class VoiceStream {
       } catch {
         // A flush failure should not block teardown; the stream is ending anyway.
       }
-      const finalPage = this.muxer.flush({ last: true })
+      const muxer = this.muxer
+      this.muxer = null
+      const finalPage = muxer?.flush({ last: true })
       if (finalPage && this.socket && this.socket.readyState === WebSocket.OPEN) {
         try {
           this.socket.send(withTag(TAG_AUDIO, finalPage))
@@ -468,30 +574,8 @@ export class VoiceStream {
         }
       }
     }
-    if (this.opusHeadTimer !== null) {
-      window.clearTimeout(this.opusHeadTimer)
-      this.opusHeadTimer = null
-    }
-    this.pendingAudioPackets = []
-    const socket = this.socket
-    this.socket = null
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const eosPage = this.muxer.flush({ last: true })
-      if (eosPage) socket.send(withTag(TAG_AUDIO, eosPage))
-    }
-    if (socket && socket.readyState <= WebSocket.OPEN) socket.close()
-    for (const track of this.media?.getAudioTracks() ?? []) track.stop()
-    this.media = null
     if (encoder && encoder.state !== 'closed') encoder.close()
-    if (this.decoder && this.decoder.state !== 'closed') this.decoder.close()
-    this.decoder = null
-    this.playbackNode?.port.postMessage('flush')
-    this.playbackNode = null
-    this.playbackReady = null
-    await this.captureCtx?.close().catch(() => {})
-    this.captureCtx = null
-    await this.playbackCtx?.close().catch(() => {})
-    this.playbackCtx = null
+    await this.cleanupAfterStop()
     this.handlers.onInputLevel?.(0)
     this.handlers.onOutputLevel?.(0)
     this.handlers.onState?.('closed')

@@ -14,17 +14,70 @@ const STRONG_TOOL_FAMILIES = [
   'gpt-oss',
   'qwen3',
   'qwen2.5-coder',
+  'qwen2.5',
+  'qwq',
   'devstral',
   'glm-4',
   'kimi',
   'deepseek-v3',
   'deepseek-r1',
   'mistral-large',
-  'codestral'
+  'mistral-small',
+  'ministral',
+  'codestral',
+  'gemma-3',
+  'gemma-4',
+  'gemma4',
+  'bonsai',
+  'llama-3.1',
+  'llama-3.3',
+  'llama-4',
+  'minimax',
+  'nemotron',
+  'phi-4',
+  'smollm3',
+  'claude-',
+  'gpt-4',
+  'gpt-5',
+  'o1',
+  'o3',
+  'o4',
+  'gemini-',
+  'grok-'
 ]
 
-/** Families that stream reasoning as a separate channel. */
-const REASONING_FAMILIES = ['gpt-oss', 'deepseek-r1', 'qwen3', 'magistral', 'glm-4']
+/** Families that stream reasoning as a separate channel or thinking block. */
+const REASONING_FAMILIES = [
+  'gpt-oss',
+  'deepseek-r1',
+  'qwen3',
+  'qwq',
+  'magistral',
+  'glm-4',
+  'kimi',
+  'gemma-3',
+  'gemma-4',
+  'gemma4',
+  'bonsai',
+  'llama-3.1',
+  'llama-3.3',
+  'llama-4',
+  'qwen2.5',
+  'mistral-small',
+  'ministral',
+  'minimax',
+  'nemotron',
+  'phi-4',
+  'smollm3',
+  'claude-',
+  'gpt-4',
+  'gpt-5',
+  'o1',
+  'o3',
+  'o4',
+  'gemini-',
+  'grok-'
+]
 
 /**
  * Conservative capability guess from a Brazier model id. Wrong guesses cost a
@@ -45,6 +98,56 @@ export function inferModelCapabilities(modelId: string): AgentModelCapabilities 
     // One call per turn keeps a weak model's mistakes cheap to recover from.
     maxToolsPerTurn: strong ? undefined : 1
   }
+}
+
+/** Common local-model tool-name hallucinations mapped to Brazier canonical tools. */
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  fs_edit: 'fs_patch',
+  edit_file: 'fs_patch',
+  str_replace_editor: 'fs_patch',
+  replace_in_file: 'fs_patch',
+  read_file: 'fs_read',
+  view_file: 'fs_read',
+  write_file: 'fs_write',
+  create_file: 'fs_write',
+  list_dir: 'fs_list',
+  ls: 'fs_list',
+  bash: 'shell_run',
+  sh: 'shell_run',
+  run_command: 'shell_run',
+  execute_command: 'shell_run',
+  grep: 'fs_search',
+  ripgrep: 'fs_search',
+  search_files: 'fs_search',
+  find_files: 'fs_find',
+  glob: 'fs_find'
+}
+
+/**
+ * Resolve a raw model-emitted tool name (including `functions.*` Harmony prefix
+ * and common training-set tool aliases) onto an enabled canonical tool.
+ *
+ * Never rewrites a name that is already directly enabled, and never maps onto a
+ * canonical tool that is disabled in this session.
+ */
+export function resolveToolNameAlias(rawName: string, enabledTools: readonly string[]): string {
+  const trimmed = rawName.trim()
+  if (!trimmed) return trimmed
+  if (enabledTools.includes(trimmed)) return trimmed
+
+  const withoutNamespace = trimmed.startsWith('functions.')
+    ? trimmed.slice('functions.'.length)
+    : trimmed
+  if (withoutNamespace !== trimmed && enabledTools.includes(withoutNamespace)) {
+    return withoutNamespace
+  }
+
+  const canonical = TOOL_NAME_ALIASES[withoutNamespace.toLowerCase()]
+  if (canonical && enabledTools.includes(canonical)) {
+    return canonical
+  }
+
+  return trimmed
 }
 
 /** Parameter names models commonly reach for instead of the real one. */
@@ -95,8 +198,13 @@ export function parseLooseJson(text: string): unknown {
   }
 }
 
+type PropertySchema = {
+  type?: string | string[]
+  enum?: unknown[]
+}
+
 type SchemaShape = {
-  properties: Record<string, { type?: string; enum?: unknown[] }>
+  properties: Record<string, PropertySchema>
   required: string[]
   additionalProperties: boolean
 }
@@ -111,11 +219,17 @@ function schemaShape(schema: Record<string, unknown>): SchemaShape {
   }
 }
 
+function primaryType(declared?: PropertySchema): string | undefined {
+  if (!declared?.type) return undefined
+  if (typeof declared.type === 'string') return declared.type
+  return declared.type.find((entry) => entry !== 'null') ?? declared.type[0]
+}
+
 /**
  * Coerce one value toward its declared type. Providers hand back strings for
  * numbers and booleans often enough that this is worth doing before validation.
  */
-function coerceValue(value: unknown, declared?: { type?: string; enum?: unknown[] }): unknown {
+function coerceValue(value: unknown, declared?: PropertySchema): unknown {
   if (declared?.enum && typeof value === 'string') {
     const match = declared.enum.find(
       (candidate) =>
@@ -123,7 +237,7 @@ function coerceValue(value: unknown, declared?: { type?: string; enum?: unknown[
     )
     if (match !== undefined) return match
   }
-  switch (declared?.type) {
+  switch (primaryType(declared)) {
     case 'boolean': {
       if (typeof value === 'boolean') return value
       if (value === 'true' || value === 'True' || value === 1) return true
@@ -195,7 +309,7 @@ export function repairToolArguments(
     // a bare value has an unambiguous home.
     if (typeof raw === 'string' && shape.required.length === 1) {
       const key = shape.required[0]!
-      if (shape.properties[key]?.type === 'string') {
+      if (primaryType(shape.properties[key]) === 'string') {
         return { [key]: raw }
       }
     }
@@ -230,6 +344,74 @@ export function repairToolArguments(
   }
 
   return repaired
+}
+
+function matchesSchemaType(value: unknown, expected: string): boolean {
+  switch (expected) {
+    case 'string':
+      return typeof value === 'string'
+    case 'number':
+      return typeof value === 'number' && Number.isFinite(value)
+    case 'integer':
+      return typeof value === 'number' && Number.isInteger(value)
+    case 'boolean':
+      return typeof value === 'boolean'
+    case 'array':
+      return Array.isArray(value)
+    case 'object':
+      return typeof value === 'object' && value !== null && !Array.isArray(value)
+    case 'null':
+      return value === null
+    default:
+      return true
+  }
+}
+
+function describeValueType(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  if (typeof value === 'number' && !Number.isFinite(value)) return String(value)
+  return typeof value
+}
+
+/**
+ * Validate repaired tool arguments against the tool's JSON Schema.
+ * Returns a model-readable error string when invalid, or `null` when valid.
+ */
+export function validateToolArguments(
+  args: Record<string, unknown>,
+  tool: Pick<AgentToolDefinition, 'name' | 'inputSchema'>
+): string | null {
+  const shape = schemaShape(tool.inputSchema)
+
+  for (const requiredKey of shape.required) {
+    if (args[requiredKey] === undefined || args[requiredKey] === null) {
+      return `Missing required argument \`${requiredKey}\` for tool \`${tool.name}\`.`
+    }
+  }
+
+  for (const [key, value] of Object.entries(args)) {
+    if (value === undefined) continue
+    const prop = shape.properties[key]
+    if (!prop) continue
+
+    if (prop.type !== undefined) {
+      const allowedTypes = Array.isArray(prop.type) ? prop.type : [prop.type]
+      const ok = allowedTypes.some((expected) => matchesSchemaType(value, expected))
+      if (!ok) {
+        return `Invalid argument \`${key}\` for tool \`${tool.name}\`: expected ${allowedTypes.join(' | ')}, got ${describeValueType(value)}.`
+      }
+    }
+
+    if (Array.isArray(prop.enum) && prop.enum.length > 0) {
+      if (!prop.enum.includes(value)) {
+        const choices = prop.enum.map((entry) => JSON.stringify(entry)).join(', ')
+        return `Invalid argument \`${key}\` for tool \`${tool.name}\`: expected one of [${choices}], got ${JSON.stringify(value)}.`
+      }
+    }
+  }
+
+  return null
 }
 
 /** Human-readable note for the timeline when repair changed something. */

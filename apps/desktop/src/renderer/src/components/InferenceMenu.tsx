@@ -1,12 +1,14 @@
 import { ChevronDown, ChevronRight, LoaderCircle } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  formatBytes,
   listAdapters,
   saveModelProfile,
   type Adapter,
   type HardwareInfo,
   type LocalModel,
   type ModelProfile,
+  type ModelResidency,
   type RuntimeSettings
 } from '../api'
 import { modelEngine, modelKindFor } from '../model-utils'
@@ -21,6 +23,9 @@ type InferenceMenuProps = {
   hardware: HardwareInfo | null
   selectedModel: string
   models: LocalModel[]
+  /** Raw un-overridden model catalog so capability toggles show their true base default. */
+  rawModels?: LocalModel[]
+  residency?: ModelResidency | null
   saving: boolean
   /**
    * Model the advanced section configures. The bar shows a different model per
@@ -31,13 +36,117 @@ type InferenceMenuProps = {
   advancedModelId?: string
   /** That model's stored overrides, when it has any. */
   profile?: ModelProfile
-  onApply: (settings: RuntimeSettings) => void
+  onApply: (settings: RuntimeSettings, options?: { skipReload?: boolean }) => void | Promise<void>
   /** Persist the model's own overrides, which are separate from the defaults. */
   onProfileSaved: (models: Record<string, ModelProfile>) => void
   onClose: () => void
 }
 
 type ReasoningMode = 'off' | 'on' | 'budget'
+
+export type SamplingPreset = {
+  id: 'coding' | 'balanced' | 'creative' | 'greedy'
+  label: string
+  temperature: number
+  top_p: number
+}
+
+export const SAMPLING_PRESETS: readonly SamplingPreset[] = [
+  { id: 'coding', label: 'Coding · 0.15', temperature: 0.15, top_p: 0.9 },
+  { id: 'balanced', label: 'Balanced · 0.7', temperature: 0.7, top_p: 0.95 },
+  { id: 'creative', label: 'Creative · 1.0', temperature: 1.0, top_p: 0.98 },
+  { id: 'greedy', label: 'Greedy · 0.0', temperature: 0.0, top_p: 1.0 }
+]
+
+export function matchingSamplingPreset(
+  temperature: number,
+  topP: number
+): SamplingPreset['id'] | null {
+  const match = SAMPLING_PRESETS.find(
+    (preset) =>
+      Math.abs(preset.temperature - temperature) < 0.005 &&
+      Math.abs(preset.top_p - topP) < 0.005
+  )
+  return match?.id ?? null
+}
+
+export type ResidencySummary = {
+  placement: ModelResidency['placement']
+  headline: string
+  detail: string | null
+  weightsPercent: number | null
+  kvPercent: number | null
+}
+
+export function summarizeResidency(residency: ModelResidency): ResidencySummary {
+  const hasGpuNumbers = residency.gpu_bytes != null || residency.gpu_kv_bytes != null
+  const gpuWeights = residency.gpu_bytes ?? 0
+  const gpuKv = residency.gpu_kv_bytes ?? 0
+  const gpuTotal = gpuWeights + gpuKv
+  const cpuWeights = residency.cpu_bytes ?? 0
+  const cpuKv = residency.cpu_kv_bytes ?? 0
+  const cpuTotal = cpuWeights + cpuKv
+
+  const ctxPart = residency.aggregate_context_tokens
+    ? `${formatTokens(residency.aggregate_context_tokens)} ctx`
+    : null
+  const slotsPart =
+    residency.parallel_slots != null
+      ? `${residency.parallel_slots} slot${residency.parallel_slots === 1 ? '' : 's'}`
+      : null
+
+  if (!hasGpuNumbers && cpuTotal === 0) {
+    const extras = [ctxPart, slotsPart].filter(Boolean).join(' · ')
+    return {
+      placement: residency.placement,
+      headline: residency.description,
+      detail: extras || null,
+      weightsPercent: null,
+      kvPercent: null
+    }
+  }
+
+  const capacity = residency.gpu_capacity_bytes
+  const gpuLabel = capacity
+    ? `GPU ${formatBytes(gpuTotal)} / ${formatBytes(capacity)}`
+    : `GPU ${formatBytes(gpuTotal)}`
+  const cpuLabel = cpuTotal > 0 ? `CPU ${formatBytes(cpuTotal)}` : null
+  const headline = [gpuLabel, cpuLabel, ctxPart, slotsPart].filter(Boolean).join(' · ')
+
+  const breakdownParts: string[] = []
+  if (residency.gpu_bytes != null) breakdownParts.push(`weights ${formatBytes(residency.gpu_bytes)}`)
+  if (residency.gpu_kv_bytes != null) breakdownParts.push(`KV ${formatBytes(residency.gpu_kv_bytes)}`)
+  if (residency.cpu_kv_bytes != null && residency.cpu_kv_bytes > 0) {
+    breakdownParts.push(`CPU KV ${formatBytes(residency.cpu_kv_bytes)}`)
+  }
+
+  let weightsPercent: number | null = null
+  let kvPercent: number | null = null
+  if (capacity && capacity > 0) {
+    weightsPercent = Math.min(100, Math.max(0, (gpuWeights / capacity) * 100))
+    kvPercent = Math.min(100 - weightsPercent, Math.max(0, (gpuKv / capacity) * 100))
+  }
+
+  return {
+    placement: residency.placement,
+    headline,
+    detail: breakdownParts.length > 0 ? breakdownParts.join(' + ') : residency.description,
+    weightsPercent,
+    kvPercent
+  }
+}
+
+export function unifiedSaveLabel(state: {
+  dirty: boolean
+  profileDirty: boolean
+  saving: boolean
+}): string {
+  if (state.saving) return 'Saving…'
+  if (state.dirty && state.profileDirty) return 'Save defaults & model overrides'
+  if (state.profileDirty) return 'Save model overrides'
+  if (state.dirty) return 'Apply'
+  return 'Up to date'
+}
 
 export function contextPresets(maxContext: number | null | undefined): number[] {
   const candidates = [2048, 4096, 8192, 16_384, 32_768, 65_536, 131_072]
@@ -105,15 +214,16 @@ function applyReasoningMode(
 }
 
 /**
- * Per-generation inference defaults (sampling, context, reasoning). These are
- * usage-side settings, deliberately separated from engine launch
- * configuration and runtime management.
+ * Per-generation inference defaults (sampling, context, reasoning) + live
+ * memory residency and unified per-model overrides.
  */
 export function InferenceMenu({
   settings,
   hardware,
   selectedModel,
   models,
+  rawModels,
+  residency,
   saving,
   advancedModelId,
   profile,
@@ -155,6 +265,7 @@ export function InferenceMenu({
 
   const advancedModel = advancedModelId ?? selectedModel
   const advancedEntry = models.find((entry) => entry.id === advancedModel)
+  const rawAdvancedEntry = (rawModels ?? models).find((entry) => entry.id === advancedModel)
   const modelKind = advancedModel ? modelKindFor(advancedModel) : null
   const useIntegratedDefaults = usesIntegratedGpuVulkanDefaults(draft, hardware)
   const storedProfile = useMemo(
@@ -167,8 +278,6 @@ export function InferenceMenu({
     storedProfile != null &&
     JSON.stringify(profileDraft) !== JSON.stringify(storedProfile)
 
-  // A different model has a different profile; whatever was half-edited for the
-  // last one is not an override for this one.
   useEffect(() => {
     setProfileDraft(null)
     setProfileError(null)
@@ -192,23 +301,50 @@ export function InferenceMenu({
     setDraft(applyReasoningMode(draft, mode, reasoningBudget))
   }
 
-  async function saveProfile(): Promise<void> {
-    if (!profileDraft || !advancedModel) return
-    setSavingProfile(true)
+  const anyDirty = dirty || profileDirty
+  const anySaving = saving || savingProfile
+
+  async function saveAll(): Promise<void> {
+    if (!draft || !anyDirty || anySaving) return
     setProfileError(null)
     try {
-      onProfileSaved(await saveModelProfile(advancedModel, profileDraft))
-      setProfileDraft(null)
+      if (dirty) {
+        await onApply(draft, { skipReload: profileDirty })
+      }
+      if (profileDirty && profileDraft && advancedModel) {
+        setSavingProfile(true)
+        try {
+          const savedModels = await saveModelProfile(advancedModel, profileDraft)
+          onProfileSaved(savedModels)
+          setProfileDraft(null)
+        } finally {
+          setSavingProfile(false)
+        }
+      }
     } catch (cause) {
       setProfileError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setSavingProfile(false)
     }
   }
 
+  const residencyInfo = useMemo(
+    () => (residency ? summarizeResidency(residency) : null),
+    [residency]
+  )
+  const activePreset = draft ? matchingSamplingPreset(draft.temperature, draft.top_p) : null
+
   return (
     <div className="menu-backdrop" onMouseDown={onClose}>
-      <div className="popover inference-menu" onMouseDown={(event) => event.stopPropagation()}>
+      <div
+        className="popover inference-menu"
+        onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            event.stopPropagation()
+            onClose()
+          }
+        }}
+      >
         <div className="popover-title">Inference settings</div>
         {!draft ? (
           <div className="popover-empty">
@@ -217,6 +353,37 @@ export function InferenceMenu({
           </div>
         ) : (
           <>
+            {residencyInfo && (
+              <div className="inference-residency" aria-label="Memory residency">
+                <div className="inference-residency-head">
+                  <span className="inference-residency-label">
+                    <i className={`model-residency-dot ${residencyInfo.placement}`} />
+                    Memory residency
+                  </span>
+                  <strong>{residencyInfo.headline}</strong>
+                </div>
+                {residencyInfo.weightsPercent != null && (
+                  <div className="inference-residency-bar" aria-hidden="true">
+                    <div
+                      className="inference-residency-weights"
+                      style={{ width: `${residencyInfo.weightsPercent}%` }}
+                      title="Model weights in GPU memory"
+                    />
+                    {residencyInfo.kvPercent != null && residencyInfo.kvPercent > 0 ? (
+                      <div
+                        className="inference-residency-kv"
+                        style={{ width: `${residencyInfo.kvPercent}%` }}
+                        title="KV cache in GPU memory"
+                      />
+                    ) : null}
+                  </div>
+                )}
+                {residencyInfo.detail ? (
+                  <span className="inference-residency-detail">{residencyInfo.detail}</span>
+                ) : null}
+              </div>
+            )}
+
             <label className="slider-row context-slider">
               <span>
                 <span>Context length</span>
@@ -256,6 +423,29 @@ export function InferenceMenu({
               Snaps to common windows{maxContext ? ` · max ${formatTokens(maxContext)}` : ''}. Larger
               context uses more memory; stay at or below the model&apos;s trained window.
             </p>
+
+            <div className="sampling-presets" role="group" aria-label="Sampling presets">
+              {SAMPLING_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className={
+                    activePreset === preset.id ? 'chip-button selected' : 'chip-button subtle'
+                  }
+                  aria-pressed={activePreset === preset.id}
+                  onClick={() =>
+                    setDraft({
+                      ...draft,
+                      temperature: preset.temperature,
+                      top_p: preset.top_p
+                    })
+                  }
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+
             <label className="slider-row">
               <span>
                 Temperature <em>{draft.temperature.toFixed(2)}</em>
@@ -364,14 +554,6 @@ export function InferenceMenu({
                 </small>
               </span>
             </label>
-            <button
-              className="popover-apply"
-              disabled={!dirty || saving}
-              onClick={() => onApply(draft)}
-            >
-              {saving ? <LoaderCircle className="spin" size={14} /> : null}
-              {dirty ? 'Apply' : 'Up to date'}
-            </button>
 
             {/* Everything above is the default for every model. Everything
                 below belongs to the one selected, and outranks it. */}
@@ -396,7 +578,6 @@ export function InferenceMenu({
                       These apply to <strong>{advancedEntry.id}</strong> alone and override the defaults
                       above. Anything left blank follows them.
                     </p>
-                    {profileError ? <div className="error-banner">{profileError}</div> : null}
                     <ModelSettingsFields
                       modelId={advancedModel}
                       kind={modelKind}
@@ -412,6 +593,14 @@ export function InferenceMenu({
                         kvCacheTypeK: draft.kv_cache_type_k,
                         kvCacheTypeV: draft.kv_cache_type_v,
                         maxTokens: draft.max_tokens,
+                        capabilityVision: Boolean(
+                          rawAdvancedEntry?.capabilities?.input_modalities.includes('image')
+                        ),
+                        capabilityReasoning: Boolean(rawAdvancedEntry?.capabilities?.reasoning),
+                        capabilityTools: Boolean(rawAdvancedEntry?.capabilities?.tools),
+                        capabilityComputerUse: Boolean(
+                          rawAdvancedEntry?.capabilities?.computer_use
+                        ),
                         diffusionWidth:
                           useIntegratedDefaults && modelKind === 'video'
                             ? INTEGRATED_GPU_VIDEO_DEFAULTS.width
@@ -440,20 +629,24 @@ export function InferenceMenu({
                       onAdapterAdded={refreshAdapters}
                       onError={setProfileError}
                     />
-                    <button
-                      className="popover-apply"
-                      disabled={!profileDirty || savingProfile}
-                      onClick={() => void saveProfile()}
-                    >
-                      {savingProfile ? <LoaderCircle className="spin" size={14} /> : null}
-                      {profileDirty ? 'Save model settings' : 'Model settings saved'}
-                    </button>
                   </>
                 ) : null}
               </div>
-            ) : advancedModel && !advancedEntry ? (
-              <p className="inference-help">Waiting for model library…</p>
             ) : null}
+
+            {profileError ? <div className="error-banner">{profileError}</div> : null}
+
+            <div className="inference-footer">
+              <button
+                type="button"
+                className="popover-apply"
+                disabled={!anyDirty || anySaving}
+                onClick={() => void saveAll()}
+              >
+                {anySaving ? <LoaderCircle className="spin" size={14} /> : null}
+                {unifiedSaveLabel({ dirty, profileDirty, saving: anySaving })}
+              </button>
+            </div>
           </>
         )}
       </div>

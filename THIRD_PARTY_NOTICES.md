@@ -11,51 +11,6 @@ User-downloaded model weights are not covered here. Hugging Face repositories
 carry their own licenses, which the application surfaces and requires
 acknowledging before a download. The bundled Silero VAD model is listed below.
 
-## Agent runtime
-
-**Pi** — `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`
-Copyright (c) Mario Zechner
-License: MIT
-Source: https://github.com/badlogic/pi-mono
-
-Pi provides the agent orchestration loop used by Agent mode. It is installed as a
-normal package dependency at a pinned version and is never vendored into this
-repository. It is reached only through the adapter in
-`apps/desktop/src/agent/pi/`.
-
-The packages were published as `@mariozechner/pi-agent-core` and
-`@mariozechner/pi-ai` up to 0.73.x; those names are deprecated upstream in favour
-of the `@earendil-works` scope, which is what Brazier depends on.
-
-```
-MIT License
-
-Copyright (c) Mario Zechner
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-Pi depends on provider SDKs (`openai`, `@anthropic-ai/sdk`,
-`@aws-sdk/client-bedrock-runtime`, `@google/genai`, `@mistralai/mistralai`), all
-Apache-2.0 or MIT. Brazier's Agent mode uses only the OpenAI-compatible path
-against the local daemon; the other providers are never invoked.
-
 ## Application shell
 
 **Electron** — MIT (Electron), with bundled Chromium (BSD-3-Clause and others)
@@ -63,14 +18,12 @@ and Node.js (MIT). Electron's own `LICENSES.chromium.html` must ship with a
 packaged build; `electron-builder` includes it.
 
 **React**, **React DOM** — MIT
+**KaTeX** (`katex`) — MIT
 **lucide-react** — ISC
 **Inter** (`@fontsource-variable/inter`) — SIL Open Font License 1.1
 
-**Silero VAD v5** — MIT model and implementation
+**Silero VAD v5** — MIT model (`silero_vad_v5.onnx`)
 Source: https://github.com/snakers4/silero-vad
-
-**VAD for Javascript** (`@ricky0123/vad-web`) — ISC
-Source: https://github.com/ricky0123/vad
 
 **ONNX Runtime Web** — MIT
 Source: https://github.com/microsoft/onnxruntime
@@ -81,9 +34,17 @@ detection.
 
 ## Daemon
 
-Rust dependencies are MIT, Apache-2.0, or dual licensed under both, including
-`tokio`, `axum`, `sqlx`, `reqwest`, `serde`, and `rquickjs`. `rquickjs` embeds
-QuickJS (MIT).
+Rust dependencies are permissively licensed, primarily MIT, Apache-2.0, or dual
+licensed under both (including `tokio`, `axum`, `sqlx`, `reqwest`, `serde`,
+`sha2`, `uuid`, `tar`, `flate2`, `zip`, and `rquickjs`, which embeds QuickJS
+under MIT), alongside the following permissive notice components:
+
+- **`subtle`** — BSD-3-Clause (Copyright (c) 2016-2024 Isis Agora Lovecruft, Henry de Valence)
+- **`ring`** (via `rustls`) — ISC, MIT, and OpenSSL/SSLeay (BoringSSL / Eric Young / OpenSSL contributors)
+- **`webpki-roots`** (via `hyper-rustls`) — CDLA-Permissive-2.0 (Mozilla root CA bundle)
+- **ICU4X / Unicode data crates** (`icu_*`, `unicode-ident`) — Unicode-3.0
+- **`zlib-rs`** (via `flate2`) — Zlib
+- **`libsqlite3-sys`** (via `sqlx`) — MIT bindings over SQLite (Public Domain)
 
 ## Engines and external tools
 

@@ -68,7 +68,7 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.100.0
           components: rustfmt, clippy
       - uses: ./.github/actions/install-bubblewrap
       - name: Install test toolchains
@@ -103,7 +103,7 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.100.0
       - run: pnpm install --frozen-lockfile
       - name: Require macOS signing credentials
         env:
@@ -178,7 +178,7 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.100.0
       - run: pnpm install --frozen-lockfile
       - name: Build AppImage distribution
         env:
@@ -239,7 +239,7 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.93.0
+          toolchain: 1.100.0
       - run: pnpm install --frozen-lockfile
       - name: Require Windows signing credentials
         shell: pwsh

@@ -1,5 +1,5 @@
 /**
- * Composer completions for shell modes (Agent/Computer).
+ * Composer completions for Chat and shell modes (Agent/Computer).
  *
  * Suggestions are matched against the trailing word of the draft. A leading
  * slash is part of the query so slash-prefixed commands populate and filter
@@ -9,7 +9,36 @@
 
 export type ComposerSuggestion = { value: string; description: string }
 
-const TRAILING_COMMAND = /(?:^|\s)(\/?[a-z]*)$/i
+const TRAILING_COMMAND = /(?:^|\s)(\/?[a-z0-9_-]*)$/i
+
+export const CHAT_SLASH_SUGGESTIONS: ComposerSuggestion[] = [
+  { value: '/new', description: 'Start a new chat' },
+  { value: '/incognito', description: 'Toggle incognito chat' },
+  { value: '/model', description: 'Choose a model' },
+  { value: '/settings', description: 'Open inference settings' },
+  { value: '/unload', description: 'Unload resident model' },
+  { value: '/export', description: 'Export conversation as JSON' },
+  { value: '/dream', description: 'Consolidate memories now' }
+]
+
+export const AGENT_SLASH_SUGGESTIONS: ComposerSuggestion[] = [
+  { value: '/compact', description: 'Summarize earlier turns to free context' },
+  { value: '/new', description: 'Start a new agent task' },
+  { value: '/worktree', description: 'Toggle isolated git worktree' },
+  { value: '/prompt', description: 'Edit workspace system prompt' },
+  { value: '/ask', description: 'Set permissions to Ask first' },
+  { value: '/sandbox', description: 'Set permissions to Sandbox only' },
+  { value: '/skip', description: 'Set permissions to Skip permissions' }
+]
+
+export function isExactSlashCommand(
+  input: string,
+  commands: readonly ComposerSuggestion[]
+): boolean {
+  const normalized = input.trim().toLowerCase()
+  if (!normalized.startsWith('/')) return false
+  return commands.some((entry) => entry.value.toLowerCase() === normalized)
+}
 
 /** The lowercased trailing command word of the draft, including a leading `/`. */
 export function trailingCommand(draft: string): string {

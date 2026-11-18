@@ -27,6 +27,7 @@ import {
   countRecognizedQualificationPhrases
 } from '../session/voiceQualification'
 import { VoiceSessionConfig } from './VoiceSessionConfig'
+import type { ManageSection } from './ManagePanel'
 import { Markdown } from './Markdown'
 
 type Props = {
@@ -54,6 +55,7 @@ type Props = {
   settings: RuntimeSettings | null
   onSettingsSaved: (settings: RuntimeSettings) => void
   onRuntimeActivated?: () => void
+  onOpenManage?: (section: ManageSection) => void
   onAgentSessionBound: (agentSessionId: string) => void
   /** The shared conversation. Voice turns land in it beside typed ones. */
   session: SessionCoordinatorHandle
@@ -575,12 +577,32 @@ export function VoiceMode(props: Props): React.JSX.Element {
             </p>
 
             {!props.realtimeAvailable ? (
-              <p className="mode-empty">
-                Realtime voice needs a PersonaPlex runtime and a downloaded{' '}
-                <code>personaplex:</code> model. On Apple Silicon build PersonaPlex MLX from Manage →
-                Runtimes (accept the nvidia/personaplex-7b-v1 license and set an HF token); on Linux
-                CUDA build PersonaPlex / Moshi.
-              </p>
+              <div className="mode-empty-state">
+                <p className="mode-empty">
+                  Realtime voice needs a PersonaPlex runtime and a downloaded{' '}
+                  <code>personaplex:</code> model. On Apple Silicon build PersonaPlex MLX from Manage →
+                  Runtimes (accept the nvidia/personaplex-7b-v1 license and set an HF token); on Linux
+                  CUDA build PersonaPlex / Moshi.
+                </p>
+                {props.onOpenManage ? (
+                  <div className="mode-empty-actions">
+                    <button
+                      type="button"
+                      className="primary-action"
+                      onClick={() => props.onOpenManage?.('runtimes')}
+                    >
+                      Open Runtimes
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-action"
+                      onClick={() => props.onOpenManage?.('discover')}
+                    >
+                      Download models
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             {props.realtimeAvailable && !props.audioSupported ? (
               <p className="mode-empty">
@@ -589,15 +611,44 @@ export function VoiceMode(props: Props): React.JSX.Element {
               </p>
             ) : null}
             {props.realtimeAvailable && !anyAsr && needsTranscripts ? (
-              <p className="mode-empty">
-                Sending what you say to a model needs transcription, which is separate from
-                PersonaPlex: the voice model reports only what <em>it</em> says. Any ASR interface
-                will do — build WhisperKit under Manage → Runtimes, download a Whisper model from
-                Discover if you already built whisper.cpp, or download the Nemotron ASR Streaming
-                snapshot if you already built streaming ASR. Until then, use{' '}
-                <strong>Neither</strong>, which talks to PersonaPlex directly and needs no
-                transcript.
-              </p>
+              <div className="mode-empty-state">
+                <p className="mode-empty">
+                  Sending what you say to a model needs transcription, which is separate from
+                  PersonaPlex: the voice model reports only what <em>it</em> says. Any ASR interface
+                  will do — build WhisperKit under Manage → Runtimes, download a Whisper model from
+                  Discover if you already built whisper.cpp, or download the Nemotron ASR Streaming
+                  snapshot if you already built streaming ASR. Until then, use{' '}
+                  <strong>Neither</strong>, which talks to PersonaPlex directly and needs no
+                  transcript.
+                </p>
+                <div className="mode-empty-actions">
+                  {props.onOpenManage ? (
+                    <>
+                      <button
+                        type="button"
+                        className="primary-action"
+                        onClick={() => props.onOpenManage?.('runtimes')}
+                      >
+                        Open Runtimes
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-action"
+                        onClick={() => props.onOpenManage?.('discover')}
+                      >
+                        Download ASR model
+                      </button>
+                    </>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    onClick={() => session.setConfig({ ...config, voiceSessionTarget: 'neither' })}
+                  >
+                    Use Neither (direct voice)
+                  </button>
+                </div>
+              </div>
             ) : null}
 
             <label className="voice-field">
@@ -645,6 +696,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
               settings={props.settings}
               onSettingsSaved={props.onSettingsSaved}
               onRuntimeActivated={props.onRuntimeActivated}
+              onOpenManage={props.onOpenManage}
               asrAvailable={props.asrAvailable}
               asrPreference={config.asrPreference}
               onAsrPreferenceChange={(asrPreference) =>

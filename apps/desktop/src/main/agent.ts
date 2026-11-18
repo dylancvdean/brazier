@@ -52,6 +52,11 @@ const ALLOWED_COMMAND_TYPES = new Set<WorkerCommandInput['type']>([
   'close-session'
 ])
 
+type ActiveSessionRun = {
+  runId: string
+  sequence: number
+}
+
 export class AgentSupervisor {
   private worker?: UtilityProcess
   private connection?: WorkerConnection
@@ -60,7 +65,25 @@ export class AgentSupervisor {
   private ready?: Promise<void>
   private crashes = 0
   private readonly sessions = new Set<string>()
+  private readonly activeSessions = new Map<string, ActiveSessionRun>()
+  private readonly eventListeners = new Set<(message: WorkerMessage) => void>()
   private expectedExit?: UtilityProcess
+
+  constructor(
+    private readonly options: {
+      cancelGraceMs?: number
+      forkWorker?: () => UtilityProcess
+      fetch?: typeof fetch
+    } = {}
+  ) {}
+
+  /** Subscribe to worker events (including synthesized terminal `run-failed` events). */
+  onEvent(listener: (message: WorkerMessage) => void): () => void {
+    this.eventListeners.add(listener)
+    return () => {
+      this.eventListeners.delete(listener)
+    }
+  }
 
   /**
    * Where the built worker bundle lives. `scripts/build-agent-worker.mjs` emits
@@ -104,8 +127,40 @@ export class AgentSupervisor {
   }
 
   private broadcast(channel: string, payload: unknown): void {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send(channel, payload)
+    try {
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed()) window.webContents.send(channel, payload)
+      }
+    } catch {
+      // Headless unit tests may run without initialized BrowserWindow state.
+    }
+  }
+
+  private emitWorkerMessage(message: WorkerMessage): void {
+    for (const listener of [...this.eventListeners]) {
+      listener(message)
+    }
+    this.broadcast(AGENT_IPC.event, message)
+  }
+
+  private synthesizeTerminalRunFailures(reason: string): void {
+    if (this.activeSessions.size === 0) return
+    const entries = [...this.activeSessions.entries()]
+    this.activeSessions.clear()
+    const timestamp = new Date().toISOString()
+    for (const [sessionId, active] of entries) {
+      this.emitWorkerMessage({
+        type: 'event',
+        sessionId,
+        event: {
+          type: 'run-failed',
+          sessionId,
+          runId: active.runId,
+          timestamp,
+          sequence: active.sequence + 1,
+          error: reason
+        }
+      })
     }
   }
 
@@ -119,9 +174,24 @@ export class AgentSupervisor {
         else pending.reject(new Error(message.error))
         return
       }
-      case 'event':
+      case 'event': {
+        if (
+          message.event.type === 'run-completed' ||
+          message.event.type === 'run-cancelled' ||
+          message.event.type === 'run-failed'
+        ) {
+          this.activeSessions.delete(message.sessionId)
+        } else {
+          this.activeSessions.set(message.sessionId, {
+            runId: message.event.runId,
+            sequence: message.event.sequence
+          })
+        }
+        this.emitWorkerMessage(message)
+        return
+      }
       case 'session-state': {
-        this.broadcast(AGENT_IPC.event, message)
+        this.emitWorkerMessage(message)
         return
       }
       case 'log': {
@@ -159,26 +229,36 @@ export class AgentSupervisor {
       workerEnv.NODE_ENV =
         process.env.NODE_ENV ?? (app.isPackaged ? 'production' : 'development')
 
-      const worker = utilityProcess.fork(this.workerPath(), [], {
-        serviceName: 'brazier-agent',
-        stdio: 'inherit',
-        env: workerEnv
-      })
+      const worker = this.options.forkWorker
+        ? this.options.forkWorker()
+        : utilityProcess.fork(this.workerPath(), [], {
+            serviceName: 'brazier-agent',
+            stdio: 'inherit',
+            env: workerEnv
+          })
       this.worker = worker
       worker.on('message', (message: WorkerMessage) => this.onMessage(message))
       worker.on('exit', (code) => {
         const expected = this.expectedExit === worker
         if (!expected) this.crashes += 1
+        const exitError = `The agent worker exited (code ${code}).`
         for (const [, pending] of this.pending) {
-          pending.reject(new Error(`The agent worker exited (code ${code}).`))
+          pending.reject(new Error(exitError))
         }
         this.pending.clear()
         const known = [...this.sessions]
-        if (expected) this.sessions.clear()
+        if (expected) {
+          this.sessions.clear()
+          this.activeSessions.clear()
+        }
         this.worker = undefined
         this.ready = undefined
-        if (expected) this.expectedExit = undefined
-        else void this.markSessionsFailed(known, code)
+        if (expected) {
+          this.expectedExit = undefined
+        } else {
+          this.synthesizeTerminalRunFailures(exitError)
+          void this.markSessionsFailed(known, code)
+        }
         console.error(`[agent-worker] exited with code ${code}`)
       })
       await new Promise<void>((resolve, reject) => {
@@ -229,7 +309,8 @@ export class AgentSupervisor {
     if (!connection) throw new Error('The Brazier daemon connection is not available yet.')
     const headers = new Headers({ 'content-type': 'application/json' })
     if (connection.apiKey) headers.set('authorization', `Bearer ${connection.apiKey}`)
-    const response = await fetch(
+    const fetch_ = this.options.fetch ?? fetch
+    const response = await fetch_(
       `${connection.address}/api/v1/agent/sessions/${encodeURIComponent(sessionId)}/cancel`,
       {
         method: 'POST',
@@ -318,12 +399,13 @@ export class AgentSupervisor {
   private killUnresponsiveWorker(): void {
     const worker = this.worker
     if (!worker) return
-    worker.kill()
     const error = new Error('The agent worker was terminated because it did not stop in time.')
-    for (const [, pending] of this.pending) pending.reject(error)
-    this.pending.clear()
     this.worker = undefined
     this.ready = undefined
+    for (const [, pending] of this.pending) pending.reject(error)
+    this.pending.clear()
+    this.synthesizeTerminalRunFailures(error.message)
+    worker.kill()
   }
 
   private async cancel(sessionId: string): Promise<{ cancelled: true }> {
@@ -333,6 +415,7 @@ export class AgentSupervisor {
     if (!this.worker) {
       throw new Error('The agent worker is not running; nothing to cancel.')
     }
+    const graceMs = this.options.cancelGraceMs ?? CANCEL_GRACE_MS
     // Start both cancellation paths immediately. In particular, do not queue
     // daemon cleanup behind a runtime that may be precisely what is wedged.
     const daemonCancellation = this.cancelDaemon(sessionId)
@@ -343,7 +426,7 @@ export class AgentSupervisor {
           new Promise<never>((_, reject) => {
             setTimeout(
               () => reject(new Error('The agent worker did not acknowledge cancellation.')),
-              CANCEL_GRACE_MS
+              graceMs
             )
           })
         ]).catch((error: unknown) => {
@@ -383,7 +466,25 @@ export class AgentSupervisor {
     }
     if (command.type === 'cancel') return this.cancel(command.sessionId)
     await this.ensureWorker()
-    return this.send({ ...command, requestId: this.requestId() } as WorkerCommand)
+    if (command.type === 'run' && !this.activeSessions.has(command.sessionId)) {
+      this.activeSessions.set(command.sessionId, {
+        runId: `run-${command.sessionId}-${this.nextId + 1}`,
+        sequence: 0
+      })
+    }
+    try {
+      const result = await this.send({ ...command, requestId: this.requestId() } as WorkerCommand)
+      if (command.type === 'close-session') {
+        this.sessions.delete(command.sessionId)
+        this.activeSessions.delete(command.sessionId)
+      }
+      return result
+    } catch (error) {
+      if (command.type === 'run') {
+        this.activeSessions.delete(command.sessionId)
+      }
+      throw error
+    }
   }
 
   async shutdown(): Promise<void> {

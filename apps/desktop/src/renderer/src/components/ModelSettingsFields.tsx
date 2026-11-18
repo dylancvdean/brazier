@@ -769,6 +769,10 @@ export type InheritedDefaults = {
   paramsBackend?: string
   streamLayers?: boolean
   offloadToCpu?: boolean
+  capabilityVision?: boolean
+  capabilityReasoning?: boolean
+  capabilityTools?: boolean
+  capabilityComputerUse?: boolean
 }
 
 type SectionProps<T> = {
@@ -1059,6 +1063,41 @@ function TextFields(props: SectionProps<TextProfile>): React.JSX.Element {
           min={1}
           value={profile.reasoning_budget_tokens}
           onChange={(value) => set('reasoning_budget_tokens', value)}
+        />
+      </FieldGroup>
+
+      <FieldGroup
+        title="Capabilities"
+        summary="Override what this model advertises"
+        open={props.engine === 'remote'}
+      >
+        <ToggleField
+          label="Vision"
+          hint="Allow image attachments in Chat and Computer Use even when the server does not advertise multimodal input."
+          inherited={props.inherited.capabilityVision}
+          value={profile.capability_vision}
+          onChange={(value) => set('capability_vision', value)}
+        />
+        <ToggleField
+          label="Reasoning"
+          hint="Expose thinking controls even when the server does not advertise them."
+          inherited={props.inherited.capabilityReasoning}
+          value={profile.capability_reasoning}
+          onChange={(value) => set('capability_reasoning', value)}
+        />
+        <ToggleField
+          label="Tools"
+          hint="Allow built-in and MCP tool calling with this model."
+          inherited={props.inherited.capabilityTools}
+          value={profile.capability_tools}
+          onChange={(value) => set('capability_tools', value)}
+        />
+        <ToggleField
+          label="Computer use"
+          hint="List this model in Computer Use mode."
+          inherited={props.inherited.capabilityComputerUse}
+          value={profile.capability_computer_use}
+          onChange={(value) => set('capability_computer_use', value)}
         />
       </FieldGroup>
 

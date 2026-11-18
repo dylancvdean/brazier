@@ -1,8 +1,15 @@
-import type { LocalModel, ModelKind, RuntimeEntry } from './api'
+import type { LocalModel, ModelKind, ModelProfile, RuntimeEntry } from './api'
 
 export function modelEngine(model: LocalModel | undefined): string {
   if (!model) return ''
   if (model.engine) return model.engine
+  if (model.id.startsWith('sdcpp-image:') || model.id.startsWith('sdcpp-video:')) {
+    return 'stable-diffusion.cpp'
+  }
+  if (model.id.startsWith('personaplex:')) return 'personaplex'
+  if (model.id.startsWith('whisper:')) return 'whisper.cpp'
+  if (model.id.startsWith('streaming-asr:')) return 'streaming-asr'
+  if (model.id.startsWith('remote:')) return 'remote'
   return model.owned_by.replace(/^brazier:/, '')
 }
 
@@ -61,7 +68,9 @@ export function isChatModel(model: LocalModel | undefined): boolean {
     engine !== 'personaplex' &&
     !model?.id.startsWith('sdcpp-image:') &&
     !model?.id.startsWith('sdcpp-video:') &&
-    !model?.id.startsWith('personaplex:')
+    !model?.id.startsWith('personaplex:') &&
+    !model?.id.startsWith('whisper:') &&
+    !model?.id.startsWith('streaming-asr:')
   )
 }
 
@@ -78,24 +87,109 @@ export function isVoiceModel(model: LocalModel | undefined): boolean {
 }
 
 /**
+ * Merge per-model TextProfile capability overrides onto a model's advertised
+ * capabilities. Null/undefined fields inherit whatever the daemon reported.
+ */
+export function mergeModelCapabilities(
+  model: LocalModel | undefined,
+  profile?: ModelProfile
+): LocalModel['capabilities'] {
+  if (!model) return undefined
+  if (!profile || profile.kind !== 'text') return model.capabilities
+  const hasOverride =
+    profile.capability_vision != null ||
+    profile.capability_reasoning != null ||
+    profile.capability_tools != null ||
+    profile.capability_computer_use != null
+  if (!hasOverride) return model.capabilities
+
+  const base = model.capabilities ?? {
+    input_modalities: ['text'],
+    output_modalities: ['text'],
+    streaming: true,
+    tools: false,
+    reasoning: false
+  }
+
+  let inputModalities = [...base.input_modalities]
+  if (profile.capability_vision === true && !inputModalities.includes('image')) {
+    inputModalities.push('image')
+  } else if (profile.capability_vision === false) {
+    inputModalities = inputModalities.filter((modality) => modality !== 'image')
+  }
+
+  const reasoning =
+    profile.capability_reasoning != null ? profile.capability_reasoning : base.reasoning
+  const reasoningModes =
+    profile.capability_reasoning === false
+      ? []
+      : profile.capability_reasoning === true
+        ? base.reasoning_modes && base.reasoning_modes.length > 0
+          ? base.reasoning_modes
+          : ['off', 'on']
+        : base.reasoning_modes
+
+  const tools = profile.capability_tools != null ? profile.capability_tools : base.tools
+  const computerUse =
+    profile.capability_computer_use != null
+      ? profile.capability_computer_use
+      : base.computer_use
+
+  return {
+    ...base,
+    input_modalities: inputModalities,
+    reasoning,
+    ...(reasoningModes !== undefined ? { reasoning_modes: reasoningModes } : {}),
+    tools,
+    ...(computerUse !== undefined ? { computer_use: computerUse } : {})
+  }
+}
+
+export function withMergedCapabilities(model: LocalModel, profile?: ModelProfile): LocalModel {
+  const capabilities = mergeModelCapabilities(model, profile)
+  if (capabilities === model.capabilities) return model
+  return { ...model, capabilities }
+}
+
+/**
  * Chat-class models that can drive Computer Use (screenshot → action).
  *
- * True when the daemon advertises `capabilities.computer_use`, or when the
- * model accepts image input and its id/name looks like Fara / computer-use.
+ * Allows any dedicated `computer_use` model as well as any vision-capable chat
+ * model (Qwen3-VL, Qwen3.5, Gemma 4, Pixtral, vLLM Fara, and remote VLMs).
  */
-export function isComputerUseModel(model: LocalModel | undefined): boolean {
+export function isComputerUseModel(
+  model: LocalModel | undefined,
+  profile?: ModelProfile
+): boolean {
   if (!model || !isChatModel(model)) return false
-  if (model.capabilities?.computer_use) return true
-  const hasImage = Boolean(model.capabilities?.input_modalities?.includes('image'))
-  if (!hasImage) return false
-  const needle = `${model.id} ${model.library_label ?? ''}`.toLowerCase()
-  return (
-    needle.includes('fara') ||
-    needle.includes('computer-use') ||
-    needle.includes('computer_use') ||
-    needle.includes('cua-') ||
-    needle.includes('-cua')
-  )
+  const effective = profile ? withMergedCapabilities(model, profile) : model
+  if (profile?.kind === 'text' && profile.capability_computer_use != null) {
+    return profile.capability_computer_use
+  }
+  if (effective.capabilities?.computer_use === true) return true
+  return Boolean(effective.capabilities?.input_modalities?.includes('image'))
+}
+
+/** Sort dedicated `computer_use` specialists ahead of general vision chat models. */
+export function sortComputerUseModels(
+  models: LocalModel[],
+  profiles?: Record<string, ModelProfile>
+): LocalModel[] {
+  const isSpecialist = (model: LocalModel): boolean => {
+    const profile = profiles?.[model.id]
+    if (profile?.kind === 'text' && profile.capability_computer_use != null) {
+      return profile.capability_computer_use
+    }
+    return model.capabilities?.computer_use === true
+  }
+  return [...models].sort((left, right) => {
+    const leftRank = isSpecialist(left) ? 0 : 1
+    const rightRank = isSpecialist(right) ? 0 : 1
+    if (leftRank !== rightRank) return leftRank - rightRank
+    return modelDisplayName(left.id, left).title.localeCompare(
+      modelDisplayName(right.id, right).title
+    )
+  })
 }
 
 /**
@@ -130,18 +224,42 @@ export function modelLibraryKey(modelId: string): string {
   if (modelId.startsWith('mlx-vlm:') || modelId.startsWith('mlx:')) {
     return modelId.replace(/^mlx(-vlm)?:/, '')
   }
+  if (modelId.startsWith('sdcpp-image:')) {
+    return modelId.slice('sdcpp-image:'.length)
+  }
+  if (modelId.startsWith('sdcpp-video:')) {
+    return modelId.slice('sdcpp-video:'.length)
+  }
+  if (modelId.startsWith('personaplex:')) {
+    return modelId.slice('personaplex:'.length)
+  }
+  if (modelId.startsWith('whisper:')) {
+    return modelId.slice('whisper:'.length)
+  }
+  if (modelId.startsWith('streaming-asr:')) {
+    return modelId.slice('streaming-asr:'.length)
+  }
+  if (modelId.startsWith('remote:')) {
+    const rest = modelId.slice('remote:'.length)
+    const slash = rest.indexOf('/')
+    return slash >= 0 ? rest.slice(slash + 1) : rest
+  }
   return modelId
 }
 
-/** Drop `-00001-of-00003` so split GGUFs read as one model name. */
+/** Drop `-00001-of-00003` or `-1-of-3` so split GGUFs read as one model name. */
 export function stripGgufShardSuffix(filename: string): string {
-  return filename.replace(/-\d{5}-of-\d{5}(?=\.gguf$)/i, '')
+  return filename.replace(/-\d{1,5}-of-\d{1,5}(?=\.gguf$|$)/i, '')
 }
 
 export function modelDisplayName(
   modelId: string,
   model?: LocalModel
 ): { title: string; subtitle: string } {
+  if (!modelId) {
+    return { title: 'Select a model', subtitle: 'Download a model to get started' }
+  }
+
   const engine = modelEngine(model)
   const engineText = engine ? engineLabel(engine) : ''
 
@@ -178,14 +296,134 @@ export function modelDisplayName(
     }
   }
 
-  if (!modelId) {
-    return { title: 'Select a model', subtitle: 'Download a model to get started' }
+  if (modelId.startsWith('sdcpp-image:') || modelId.startsWith('sdcpp-video:')) {
+    const key = modelLibraryKey(modelId)
+    const name = key.split('/').at(-1) || key
+    const modality = modelId.startsWith('sdcpp-video:') ? 'Video' : 'Image'
+    const label = engineText || 'Gen · sd.cpp'
+    return {
+      title: stripGgufShardSuffix(name),
+      subtitle: `${label} · ${modality}`
+    }
+  }
+
+  if (modelId.startsWith('personaplex:')) {
+    const key = modelLibraryKey(modelId)
+    const name = key.split('/').at(-1) || key
+    const label = engineText || 'Voice · PersonaPlex'
+    return {
+      title: name,
+      subtitle: `${label} · Local library`
+    }
+  }
+
+  if (modelId.startsWith('whisper:')) {
+    const key = modelLibraryKey(modelId)
+    const name = key.split('/').at(-1) || key
+    const label = engineText || 'ASR · whisper'
+    return {
+      title: stripGgufShardSuffix(name),
+      subtitle: `${label} · Local library`
+    }
+  }
+
+  if (modelId.startsWith('streaming-asr:')) {
+    const key = modelLibraryKey(modelId)
+    const name = key.split('/').at(-1) || key
+    const label = engineText || 'ASR · streaming'
+    return {
+      title: name,
+      subtitle: `${label} · Local library`
+    }
+  }
+
+  if (modelId.startsWith('remote:')) {
+    const rest = modelId.slice('remote:'.length)
+    const slash = rest.indexOf('/')
+    const connectionName = slash >= 0 ? rest.slice(0, slash) : ''
+    const rawModel = slash >= 0 ? rest.slice(slash + 1) : rest
+    const title = rawModel.split('/').at(-1) || rawModel || rest
+    const hostLabel = model?.library_label?.trim() || connectionName
+    return {
+      title,
+      subtitle: hostLabel ? `Remote · ${hostLabel}` : 'Remote'
+    }
   }
 
   return {
-    title: modelId,
+    title: stripGgufShardSuffix(modelId),
     subtitle: engineText || model?.owned_by.replace(/^brazier:/, '') || 'Local'
   }
+}
+
+/**
+ * Derive the daemon's `data_dir` from `EngineStatus.managed_binary_path`
+ * (`<data_dir>/engines/llama.cpp/bin/llama-server[.exe]`).
+ */
+export function dataDirFromManagedBinaryPath(
+  managedBinaryPath: string | null | undefined
+): string | null {
+  if (!managedBinaryPath) return null
+  const normalized = managedBinaryPath.replace(/\\/g, '/')
+  const marker = '/engines/llama.cpp/'
+  const index = normalized.lastIndexOf(marker)
+  if (index <= 0) return null
+  const useBackslash = managedBinaryPath.includes('\\') && !managedBinaryPath.includes('/')
+  const prefix = normalized.slice(0, index)
+  return useBackslash ? prefix.replace(/\//g, '\\') : prefix
+}
+
+/**
+ * Resolve an installed local model ID to its on-disk file or folder path,
+ * matching `crates/brazier-runtime/src/models_store.rs::path_for_model_id`.
+ */
+export function resolveLocalModelPath(
+  modelId: string,
+  dataDir: string | null | undefined,
+  extraLibraryPaths: string[] = []
+): string | null {
+  if (!modelId || modelId.startsWith('remote:')) return null
+
+  const joinParts = (root: string, relative: string): string => {
+    const sep = root.includes('\\') && !root.includes('/') ? '\\' : '/'
+    const cleanRoot = root.replace(/[\\/]+$/, '')
+    const cleanRel = relative
+      .split('/')
+      .filter((part) => part.length > 0 && part !== '.' && part !== '..')
+      .join(sep)
+    return cleanRel ? `${cleanRoot}${sep}${cleanRel}` : cleanRoot
+  }
+
+  const externalMatch = /^(?:gguf-ext|mlx-ext|mlx-vlm-ext):(\d+):(.+)$/.exec(modelId)
+  if (externalMatch) {
+    const root = extraLibraryPaths[Number(externalMatch[1])]
+    if (!root) return null
+    return joinParts(root, externalMatch[2])
+  }
+
+  if (!dataDir) return null
+  if (modelId.startsWith('gguf:')) {
+    return joinParts(dataDir, `models/gguf/${modelId.slice('gguf:'.length)}`)
+  }
+  if (modelId.startsWith('mlx:') || modelId.startsWith('mlx-vlm:')) {
+    return joinParts(dataDir, `models/mlx/${modelLibraryKey(modelId)}`)
+  }
+  if (modelId.startsWith('sdcpp-image:')) {
+    return joinParts(dataDir, `models/sdcpp/image/${modelId.slice('sdcpp-image:'.length)}`)
+  }
+  if (modelId.startsWith('sdcpp-video:')) {
+    return joinParts(dataDir, `models/sdcpp/video/${modelId.slice('sdcpp-video:'.length)}`)
+  }
+  if (modelId.startsWith('personaplex:')) {
+    return joinParts(dataDir, `models/personaplex/${modelId.slice('personaplex:'.length)}`)
+  }
+  if (modelId.startsWith('whisper:')) {
+    return joinParts(dataDir, `models/whisper/${modelId.slice('whisper:'.length)}`)
+  }
+  if (modelId.startsWith('streaming-asr:')) {
+    return joinParts(dataDir, `models/streaming-asr/${modelId.slice('streaming-asr:'.length)}`)
+  }
+  return null
 }
 
 export function runtimeNoticeForModel(
@@ -249,6 +487,11 @@ export function visionCapabilityTitle(
   const engine = modelEngine(models.find((model) => model.id === modelId))
   if (engine === 'mlx-vlm') return 'Vision model (MLX)'
   if (engine === 'mlx-lm') return 'Text-only MLX model'
+  if (engine === 'remote') {
+    return canAttach
+      ? 'Vision enabled for this remote model'
+      : 'Vision not advertised — toggle Vision in model settings if supported'
+  }
   if (canAttach) return 'Vision-capable (projector installed)'
   return 'Needs a vision/mmproj GGUF pair for image input'
 }

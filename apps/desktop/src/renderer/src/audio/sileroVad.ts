@@ -8,7 +8,7 @@
  * of latency without opening a second microphone graph.
  */
 
-import vadModelUrl from '@ricky0123/vad-web/dist/silero_vad_v5.onnx?url'
+import vadModelUrl from '../assets/silero_vad_v5.onnx?url'
 import * as ort from 'onnxruntime-web/wasm'
 import ortWasmUrl from 'onnxruntime-web/ort-wasm-simd-threaded.wasm?url'
 

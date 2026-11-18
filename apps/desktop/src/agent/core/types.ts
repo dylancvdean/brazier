@@ -2,7 +2,7 @@
  * Application-owned Agent mode types.
  *
  * Nothing here references an agent framework. A runtime adapter (see
- * `../pi/piRuntime.ts`) translates its framework's messages, events, and tools
+ * `../native/nativeRuntime.ts`) translates runtime messages, events, and tools
  * into these shapes, so swapping the runtime touches only the adapter.
  */
 
@@ -313,6 +313,7 @@ export type AgentRunFailedEvent = EventBase & { type: 'run-failed'; error: strin
 export type AgentCompactedEvent = EventBase & {
   type: 'compacted'
   state: AgentCompactionState
+  keptMessages?: AgentMessage[]
 }
 export type AgentSubagentStartedEvent = EventBase & {
   type: 'subagent-started'

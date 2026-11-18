@@ -167,12 +167,15 @@ export function useSessionCoordinator(
     if (!conversationId) return
     if (options.incognito) {
       coordinator.setChatAdapter(
-        new InMemoryChatAdapter({
-          onMessage: (message) => latest.current.onMessage(message),
-          onStatus: (status) => latest.current.onStatus(status),
-          parentId: () => latest.current.parentId(),
-          model: () => latest.current.chatModelId || undefined
-        })
+        new InMemoryChatAdapter(
+          {
+            onMessage: (message) => latest.current.onMessage(message),
+            onStatus: (status) => latest.current.onStatus(status),
+            parentId: () => latest.current.parentId(),
+            model: () => latest.current.chatModelId || undefined
+          },
+          conversationId
+        )
       )
       void coordinator.attach(conversationId, {
         messages: latest.current.messages.map(toConversationMessage)

@@ -124,13 +124,18 @@ export class WorkerAgentAdapter implements AgentAdapter {
     // on it, because the response arrives as events.
     void window.brazier.agent
       .run(sessionId, { text: request.text })
-      .catch((cause: unknown) =>
+      .catch((cause: unknown) => {
+        if (this.activeCorrelationId !== request.correlationId) return
+        this.setStatus(request.correlationId, 'failed')
+        this.activeRunId = null
+        this.activeCorrelationId = null
+        this.streamed = ''
         this.publish({
           type: 'runFailed',
           correlationId: request.correlationId,
           error: cause instanceof Error ? cause.message : String(cause)
         })
-      )
+      })
   }
 
   async decideApproval(

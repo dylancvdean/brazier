@@ -3,7 +3,7 @@
  * exercised directly in tests.
  *
  * The worker holds sessions and forwards their events. Every tool call goes to
- * the daemon, which decides; the worker selects the Pi runtime adapter by
+ * the daemon, which decides; the worker selects the runtime adapter by
  * `session.runtime_id`.
  */
 

@@ -276,7 +276,7 @@ API. Four processes are involved:
 renderer (sandboxed)  →  main  →  agent worker (utilityProcess)
                                       │
                                       ▼
-                                 Pi adapter
+                                native adapter
                               (broker tools)
                                       │
                                       ▼
@@ -284,21 +284,23 @@ renderer (sandboxed)  →  main  →  agent worker (utilityProcess)
                               policy / sandbox / models
 ```
 
-Agent frameworks are pluggable runtimes selected by `runtime_id`. Two modes
-share the Pi adapter today (`default simple`):
+Agent runtimes are selected by `runtime_id`. Two modes share the built-in native
+harness (`default simple`):
 
 - **Simple** (`simple`) — the standard broker-sandboxed tool set: files, shell,
   git, subagents. This is the everyday surface.
 - **Powerful** (`powerful`) — the same base plus the operator-enabled power tools
-  (web search, web fetch, LSP diagnostics, …) toggled under Manage → Agent.
-  Power tools are metadata in the catalog now; executors land in a later build.
+  (workspace search/tree, multi-file reads, code symbols, git history/blame,
+  project checks, web search, web fetch, LSP diagnostics) toggled under
+  Manage → Agent.
 
-- **Pi** (`@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, MIT) — the
-  orchestration loop both modes run: tool-call parsing, streaming, context
-  tracking, cancellation, and completion detection. Reached exclusively through
-  `apps/desktop/src/agent/pi/`. Everything else — tool definitions, permission
-  policy, sandboxing, execution, persistence, and the event stream — is Brazier's
-  under `apps/desktop/src/agent/core/`.
+- **Native harness** (`apps/desktop/src/agent/native/`) — Brazier's zero-SDK
+  orchestration loop: single-pass OpenAI SSE streaming, inline `<think>` and
+  multi-dialect `<tool_call>`/XML/Harmony parsing, loop detection, proactive and
+  overflow-triggered context compaction, wave-scheduled parallel reads with
+  serialized writes, cancellation, and subagent slot coordination. Shared tool
+  definitions, argument repair, execution, and persistence live under
+  `apps/desktop/src/agent/core/`.
 
 The daemon decides each session's tool set at creation from its mode: `simple`
 gets the base catalog, `powerful` adds the power tools the operator enabled. An
@@ -312,8 +314,8 @@ directories. The worker selects an adapter per session from
 The worker holds no host privileges: its only route to the machine is
 `POST /api/v1/agent/exec` on the daemon, and the daemon decides.
 Tool schemas and the agent system prompt are served by the daemon too
-(`/api/v1/agent/tools`, `/api/v1/agent/sessions/{id}/prompt`), so the contract a
-Pi model sees always matches the executor and the policy behind it. Sessions
+(`/api/v1/agent/tools`, `/api/v1/agent/sessions/{id}/prompt`), so the contract an
+agent model sees always matches the executor and the policy behind it. Sessions
 persist transcripts through the daemon for UI continuity and may register
 Brazier-only MCP tools as broker tools.
 
@@ -395,7 +397,8 @@ network, filesystem, process, and secret requirements. Grants are scoped to one
 call, conversation, domain, or user-selected directory.
 
 The web pack uses an SSRF-aware fetcher. Computer Use mode adds a model-agnostic
-observe–act loop: adapters (Fara XML today; generic tool dialects later) emit
+observe–act loop: dialect adapters (OpenAI tool calls, Fara XML, UI-TARS, and
+prompted JSON across normalized and pixel coordinate spaces) emit
 normalized `ComputerAction` values, and a daemon broker executes them against a
 browser target or — when OS permissions allow — a desktop target. Browser
 sessions run in isolated headless Chromium processes controlled through CDP;

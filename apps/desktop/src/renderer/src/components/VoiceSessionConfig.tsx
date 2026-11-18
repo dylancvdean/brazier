@@ -54,6 +54,7 @@ import {
 import type { AgentPermissionMode } from '../../../agent/core/types'
 import { resolveAsrEngine, type AsrPreference, type VoiceSessionTarget } from '../session/config'
 import { modelDisplayName } from '../model-utils'
+import type { ManageSection } from './ManagePanel'
 
 type Props = {
   target: VoiceSessionTarget
@@ -74,6 +75,8 @@ type Props = {
   onAsrPreferenceChange: (preference: AsrPreference) => void
   /** Re-read host capabilities after activating a runtime. */
   onRuntimeActivated?: () => void
+  /** Open Manage directly to Runtimes or Discover when setup is incomplete. */
+  onOpenManage?: (section: ManageSection) => void
   /** Agent session bound to this conversation, when there is one. */
   agentSessionId: string | null
   onAgentSessionBound: (agentSessionId: string) => void
@@ -240,6 +243,8 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
     permissionMode: 'ask'
   })
   const [busy, setBusy] = useState(false)
+  const [remoteWorkspaceOpen, setRemoteWorkspaceOpen] = useState(false)
+  const [remoteWorkspaceDraft, setRemoteWorkspaceDraft] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [profiles, setProfiles] = useState<Record<string, ModelProfile>>({})
   const [adapters, setAdapters] = useState<Adapter[]>([])
@@ -338,19 +343,7 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
     props.onSettingsSaved(saved)
   }
 
-  /**
-   * Point the agent at a folder. With no task bound yet this creates one, so
-   * choosing a folder is the whole setup: `agent` never opens a conversation
-   * that refuses its first sentence for want of a session.
-   */
-  async function chooseWorkspace(): Promise<void> {
-    const selected = connectionProfile.kind === 'remote'
-      ? window.prompt(
-          `Workspace path on ${connectionProfile.name} (${connectionProfile.hostLabel})`,
-          workspace ?? ''
-        )?.trim() ?? null
-      : await window.brazier.selectWorkspace()
-    if (!selected) return
+  async function applyWorkspacePath(selected: string): Promise<void> {
     if (agentSession) {
       const updated = await updateAgentSession(agentSession.id, { workspace_path: selected })
       setAgentSession(updated)
@@ -369,6 +362,22 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
     setAgentSession(created)
     setPending((current) => ({ ...current, workspacePath: selected }))
     props.onAgentSessionBound(created.id)
+  }
+
+  /**
+   * Point the agent at a folder. With no task bound yet this creates one, so
+   * choosing a folder is the whole setup: `agent` never opens a conversation
+   * that refuses its first sentence for want of a session.
+   */
+  async function chooseWorkspace(): Promise<void> {
+    if (connectionProfile.kind === 'remote') {
+      setRemoteWorkspaceDraft(workspace ?? '')
+      setRemoteWorkspaceOpen(true)
+      return
+    }
+    const selected = await window.brazier.selectWorkspace()
+    if (!selected) return
+    await applyWorkspacePath(selected)
   }
 
   async function choosePermissionMode(mode: AgentPermissionMode): Promise<void> {
@@ -430,10 +439,23 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
       <section className="voice-config-group">
         <span className="section-label">PersonaPlex runtime</span>
         {runtimes.length === 0 ? (
-          <p className="voice-notice">
-            None built yet. On Apple Silicon build PersonaPlex MLX under Manage → Runtimes; on Linux
-            CUDA build PersonaPlex / Moshi.
-          </p>
+          <>
+            <p className="voice-notice">
+              None built yet. On Apple Silicon build PersonaPlex MLX under Manage → Runtimes; on Linux
+              CUDA build PersonaPlex / Moshi.
+            </p>
+            {props.onOpenManage ? (
+              <div className="mode-empty-actions compact">
+                <button
+                  type="button"
+                  className="chip-button subtle"
+                  onClick={() => props.onOpenManage?.('runtimes')}
+                >
+                  Open Runtimes
+                </button>
+              </div>
+            ) : null}
+          </>
         ) : (
           <div className="voice-choice-list">
             {runtimes.map((entry) => (
@@ -459,9 +481,22 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
           </div>
         )}
         {voiceModels.length === 0 ? (
-          <p className="voice-notice">
-            No <code>personaplex:</code> model downloaded yet — get one from Manage → Discover.
-          </p>
+          <>
+            <p className="voice-notice">
+              No <code>personaplex:</code> model downloaded yet — get one from Manage → Discover.
+            </p>
+            {props.onOpenManage ? (
+              <div className="mode-empty-actions compact">
+                <button
+                  type="button"
+                  className="chip-button subtle"
+                  onClick={() => props.onOpenManage?.('discover')}
+                >
+                  Download voice model
+                </button>
+              </div>
+            ) : null}
+          </>
         ) : null}
       </section>
 
@@ -539,10 +574,30 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
                 }.`}
           </p>
           {!props.asrAvailable.batch && !props.asrAvailable.streaming ? (
-            <p className="voice-notice">
-              <AlertTriangle size={13} /> Nothing installed to transcribe with. Build WhisperKit
-              under Manage → Runtimes, or download a Whisper or Nemotron ASR model from Discover.
-            </p>
+            <>
+              <p className="voice-notice">
+                <AlertTriangle size={13} /> Nothing installed to transcribe with. Build WhisperKit
+                under Manage → Runtimes, or download a Whisper or Nemotron ASR model from Discover.
+              </p>
+              {props.onOpenManage ? (
+                <div className="mode-empty-actions compact">
+                  <button
+                    type="button"
+                    className="chip-button subtle"
+                    onClick={() => props.onOpenManage?.('runtimes')}
+                  >
+                    Open Runtimes
+                  </button>
+                  <button
+                    type="button"
+                    className="chip-button subtle"
+                    onClick={() => props.onOpenManage?.('discover')}
+                  >
+                    Download ASR model
+                  </button>
+                </div>
+              ) : null}
+            </>
           ) : null}
         </section>
       ) : null}
@@ -630,6 +685,49 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
               <small>{daemonPathLabel(connectionProfile)} — the agent reads, edits, and runs commands here</small>
             </span>
           </button>
+          {remoteWorkspaceOpen && connectionProfile.kind === 'remote' ? (
+            <form
+              className="inline-path-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                const trimmed = remoteWorkspaceDraft.trim()
+                if (!trimmed) return
+                void guard(async () => {
+                  await applyWorkspacePath(trimmed)
+                  setRemoteWorkspaceOpen(false)
+                })
+              }}
+            >
+              <input
+                autoFocus
+                value={remoteWorkspaceDraft}
+                onChange={(event) => setRemoteWorkspaceDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    setRemoteWorkspaceOpen(false)
+                  }
+                }}
+                placeholder={`Workspace path on ${connectionProfile.name} (e.g. /srv/project)`}
+                aria-label={`Workspace path on ${connectionProfile.name}`}
+              />
+              <button
+                type="submit"
+                className="chip-button"
+                disabled={busy || !remoteWorkspaceDraft.trim()}
+              >
+                Set path
+              </button>
+              <button
+                type="button"
+                className="chip-button subtle"
+                onClick={() => setRemoteWorkspaceOpen(false)}
+              >
+                Cancel
+              </button>
+            </form>
+          ) : null}
 
           <div className="voice-field">
             <span>Permissions</span>

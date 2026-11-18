@@ -4,28 +4,37 @@ import {
   Maximize,
   Minimize,
   Monitor,
+  Settings2,
+  ShieldAlert,
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { parseFaraOutput as parseFaraLocal } from '../../../computer/faraAdapter'
+import {
+  buildComputerUseTool,
+  normalizeComputerActionCoordinates,
+  parseComputerCompletion,
+  resolveComputerAdapter
+} from '../../../computer/adapters'
 import { useFullscreen } from './FullscreenButton'
 import {
   appendComputerStep,
   computerExec,
   computerPreview,
   computerScreenshot,
-  streamComputerPreview,
-  stopComputerSession,
-  setComputerSafetyAuthority,
   createComputerSession,
   decideComputerApproval,
   deleteComputerSession,
+  fetchComputerPermissions,
+  fetchComputerSession,
   fetchComputerUsePreference,
   listComputerSessions,
   listComputerSteps,
   parseFaraOutput as parseFaraRemote,
+  setComputerSafetyAuthority,
+  stopComputerSession,
   streamCompletion,
+  streamComputerPreview,
   updateComputerSession,
   type ComputerAction,
   type ComputerActionResult,
@@ -33,20 +42,32 @@ import {
   type ComputerSession,
   type ComputerStep,
   type ComputerTarget,
-  type ExecutionLocation,
-  type LocalModel
+  type LocalModel,
+  type OsPermissionStatus,
+  type StreamCompletionResult
 } from '../api'
 import { modelDisplayName } from '../model-utils'
 import { useConnectionProfile } from '../connectionProfile'
 import type { AgentComposerControls } from './AgentMode'
 import {
   buildComputerHistory,
+  canInteractComputerViewport,
+  canSendComputerPrompt,
   computerActionLabel,
   computerScreenshotDataUrl,
+  computerTurnStateFromPause,
   continuationForResult,
+  IDLE_COMPUTER_TURN_STATE,
+  isComputerTurnBusy,
   observationError,
+  pendingApprovalForState,
+  pendingUserQuestionForState,
   recoverComputerPause,
-  type ComputerContinuation
+  transitionComputerTurnState,
+  type ComputerContinuation,
+  type ComputerTurnEvent,
+  type ComputerTurnState,
+  type PendingComputerApproval
 } from './computerHistory'
 
 /**
@@ -68,9 +89,12 @@ type Props = {
   onComposerChange?: (controls: AgentComposerControls | null) => void
   /** Publish the session list for the app sidebar; null on unmount. */
   onSidebarChange?: (controls: ComputerSidebarControls | null) => void
+  /** Open Manage -> Computer use for guided model or permission setup. */
+  onOpenManage?: (section: 'computer') => void
 }
 
 const MAX_LOOP_STEPS = 20
+const MAX_CONSECUTIVE_REPAIRS = 2
 
 const PERMISSION_LABELS: Record<
   ComputerPermissionMode,
@@ -94,14 +118,32 @@ const PERMISSION_LABELS: Record<
   }
 }
 
+type LoopOutcome =
+  | { kind: 'completed' }
+  | { kind: 'aborted' }
+  | { kind: 'awaiting_approval'; approval: PendingComputerApproval }
+  | { kind: 'awaiting_user'; question: string }
+  | { kind: 'failed'; error: string }
+
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
 
+function hasMissingOsPermissions(status: OsPermissionStatus | null): boolean {
+  if (!status) return false
+  return (
+    status.screen_capture === 'denied' ||
+    status.screen_capture === 'missing' ||
+    status.input_injection === 'denied' ||
+    status.input_injection === 'missing'
+  )
+}
+
 export function ComputerMode(props: Props): React.JSX.Element {
-  const { modelId, models, onError, onComposerChange, onSidebarChange } = props
+  const { modelId, models, onError, onComposerChange, onSidebarChange, onOpenManage } = props
   const connectionProfile = useConnectionProfile()
   const [daemonPlatform, setDaemonPlatform] = useState<string | null>(null)
+  const [osPermissions, setOsPermissions] = useState<OsPermissionStatus | null>(null)
   const modelLabel = useMemo(() => {
     const model = models.find((entry) => entry.id === modelId)
     return modelDisplayName(modelId, model).title
@@ -113,32 +155,65 @@ export function ComputerMode(props: Props): React.JSX.Element {
   const [viewportUrl, setViewportUrl] = useState<string | null>(null)
   const [target, setTarget] = useState<ComputerTarget>('browser')
   const [permissionMode, setPermissionMode] = useState<ComputerPermissionMode>('ask')
-  const [running, setRunning] = useState(false)
-  const [pendingApproval, setPendingApproval] = useState<{
-    approvalId: string
-    action: ComputerAction
-    message?: string | null
-    executionLocation?: ExecutionLocation | null
-  } | null>(null)
-  const [pendingUserQuestion, setPendingUserQuestion] = useState<string | null>(null)
-  const [resolvingApproval, setResolvingApproval] = useState(false)
+  const [turnState, setTurnState] = useState<ComputerTurnState>(IDLE_COMPUTER_TURN_STATE)
   const [liveThought, setLiveThought] = useState('')
   const [maxScreenshotsKept, setMaxScreenshotsKept] = useState(3)
+
   const abortRef = useRef<AbortController | null>(null)
-  const runningRef = useRef(false)
-  runningRef.current = running
+  const turnStateRef = useRef<ComputerTurnState>(IDLE_COMPUTER_TURN_STATE)
+  const sessionRef = useRef<ComputerSession | null>(null)
+  sessionRef.current = session
+
+  const dispatchTurn = useCallback((event: ComputerTurnEvent): ComputerTurnState => {
+    const next = transitionComputerTurnState(turnStateRef.current, event)
+    turnStateRef.current = next
+    setTurnState(next)
+    return next
+  }, [])
+
+  const running = isComputerTurnBusy(turnState)
+  const pendingApproval = pendingApprovalForState(turnState)
+  const pendingUserQuestion = pendingUserQuestionForState(turnState)
+  const resolvingApproval = turnState.kind === 'resolving_approval'
 
   useEffect(() => {
     let current = true
-    void window.brazier.getConnection().then((connection) => {
-      if (current) setDaemonPlatform(connection.daemon.daemon?.platform ?? null)
-    }).catch(() => {
-      if (current) setDaemonPlatform(null)
-    })
-    return () => { current = false }
+    void window.brazier
+      .getConnection()
+      .then((connection) => {
+        if (current) setDaemonPlatform(connection.daemon.daemon?.platform ?? null)
+      })
+      .catch(() => {
+        if (current) setDaemonPlatform(null)
+      })
+    return () => {
+      current = false
+    }
   }, [connectionProfile.id])
-  const sessionRef = useRef<ComputerSession | null>(null)
-  sessionRef.current = session
+
+  useEffect(() => {
+    if (
+      target !== 'desktop' ||
+      connectionProfile.kind === 'remote' ||
+      daemonPlatform === null ||
+      daemonPlatform === 'windows'
+    ) {
+      setOsPermissions(null)
+      return
+    }
+    let current = true
+    void fetchComputerPermissions()
+      .then((status) => {
+        if (current) setOsPermissions(status)
+      })
+      .catch(() => {
+        if (current) setOsPermissions(null)
+      })
+    return () => {
+      current = false
+    }
+  }, [target, connectionProfile.id, connectionProfile.kind, daemonPlatform])
+
   // Fills the window (or screen) with the browser viewport and the step log
   // side by side, so the user can watch the agent drive the page at full size.
   const { setRef: setFullscreenRef, active: fullscreenActive, toggle: toggleFullscreen } =
@@ -156,10 +231,26 @@ export function ComputerMode(props: Props): React.JSX.Element {
     return list
   }, [])
 
+  const refreshActiveSession = useCallback(
+    async (sessionId: string): Promise<ComputerSession | null> => {
+      try {
+        const latest = await fetchComputerSession(sessionId)
+        if (sessionRef.current?.id === sessionId) {
+          sessionRef.current = latest
+          setSession(latest)
+        }
+        return latest
+      } catch {
+        return sessionRef.current?.id === sessionId ? sessionRef.current : null
+      }
+    },
+    []
+  )
+
   const loadSession = useCallback(
     async (id: string): Promise<void> => {
       onError(null)
-      if (runningRef.current && sessionRef.current && sessionRef.current.id !== id) {
+      if (isComputerTurnBusy(turnStateRef.current) && sessionRef.current && sessionRef.current.id !== id) {
         onError('Stop Computer Use before switching sessions.')
         return
       }
@@ -170,8 +261,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
         sessionRef.current = found
         if (!found) {
           setSteps([])
-          setPendingApproval(null)
-          setPendingUserQuestion(null)
+          dispatchTurn({ type: 'reset' })
           return
         }
         setTarget(found.target)
@@ -184,13 +274,14 @@ export function ComputerMode(props: Props): React.JSX.Element {
           .find(Boolean)
         setViewportUrl(lastShot ?? null)
         const recovered = recoverComputerPause(nextSteps)
-        setPendingApproval(recovered.approval)
-        setPendingUserQuestion(recovered.userQuestion)
+        const restoredState = computerTurnStateFromPause(recovered)
+        turnStateRef.current = restoredState
+        setTurnState(restoredState)
       } catch (cause) {
         onError(errorText(cause))
       }
     },
-    [onError, refreshSessions]
+    [dispatchTurn, onError, refreshSessions]
   )
 
   useEffect(() => {
@@ -207,8 +298,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
     setSession(created)
     sessionRef.current = created
     setSteps([])
-    setPendingApproval(null)
-    setPendingUserQuestion(null)
+    dispatchTurn({ type: 'reset' })
     setViewportUrl(null)
     await refreshSessions()
     return created
@@ -221,28 +311,21 @@ export function ComputerMode(props: Props): React.JSX.Element {
     if (!active) return
     try {
       const updated = await updateComputerSession(active.id, mode)
+      sessionRef.current = updated
       setSession(updated)
     } catch (cause) {
       onError(errorText(cause))
-      // Revert the select to what the daemon actually kept.
       setPermissionMode(active.permission_mode)
     }
   }
 
-  /**
-   * Start a blank session without creating one yet. Deselecting the current
-   * session unlocks the target/permission pickers (a session's target is
-   * immutable) so the next task can choose fresh settings; the old session
-   * stays in the sidebar ready to reopen.
-   */
   function startNewSession(): void {
-    if (running) return
+    if (isComputerTurnBusy(turnStateRef.current)) return
     setSession(null)
     sessionRef.current = null
     setSteps([])
     setViewportUrl(null)
-    setPendingApproval(null)
-    setPendingUserQuestion(null)
+    dispatchTurn({ type: 'reset' })
     setLiveThought('')
   }
 
@@ -254,8 +337,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
         sessionRef.current = null
         setSteps([])
         setViewportUrl(null)
-        setPendingApproval(null)
-        setPendingUserQuestion(null)
+        dispatchTurn({ type: 'reset' })
       }
       await refreshSessions()
     } catch (cause) {
@@ -263,52 +345,63 @@ export function ComputerMode(props: Props): React.JSX.Element {
     }
   }
 
+  function applyResultViewport(sessionId: string, result: ComputerActionResult | null | undefined): void {
+    if (!result) return
+    const url = computerScreenshotDataUrl(result)
+    if (url) setViewportUrl(url)
+    if (result.viewport && sessionRef.current?.id === sessionId) {
+      const updated: ComputerSession = {
+        ...sessionRef.current,
+        viewport: result.viewport,
+        ...(result.url ? { url: result.url } : {}),
+        ...(result.title ? { title_page: result.title } : {})
+      }
+      sessionRef.current = updated
+      setSession(updated)
+    }
+  }
+
   async function refreshViewport(sessionId: string): Promise<ComputerActionResult | null> {
     try {
       const shot = await computerScreenshot(sessionId)
-      const url = computerScreenshotDataUrl(shot)
-      if (url) setViewportUrl(url)
+      applyResultViewport(sessionId, shot)
       return shot
     } catch {
       return null
     }
   }
 
-  // Direct user control of a browser-target viewport: clicks and keystrokes
-  // are forwarded to the running Chromium as computer actions, so the browser
-  // responds to the user the same way it responds to the model. The daemon
-  // records these as steps too, keeping the model's next turn honest about
-  // what actually changed on the page.
-  const [interacting, setInteracting] = useState(false)
   const lastScrollRef = useRef(0)
 
   async function interact(action: ComputerAction): Promise<void> {
     const active = sessionRef.current
-    if (!active || active.target !== 'browser' || running || interacting || pendingApproval) return
-    setInteracting(true)
+    if (!active || active.target !== 'browser' || !canInteractComputerViewport(turnStateRef.current)) {
+      return
+    }
+    dispatchTurn({ type: 'start_interaction' })
     try {
-      // The live stream shows the page's reaction almost immediately; the
-      // exec keeps the full settle delay so the screenshot recorded for the
-      // model is the settled state, not a half-loaded one.
       const result = await computerExec({ session_id: active.id, action })
       if (result.needs_approval || result.status === 'needs_approval') {
         if (result.approval_id) {
-          setPendingApproval({
-            approvalId: result.approval_id,
-            action,
-            message: result.message,
-            executionLocation: result.execution_location
+          dispatchTurn({
+            type: 'require_approval',
+            approval: {
+              approvalId: result.approval_id,
+              action,
+              message: result.message,
+              executionLocation: result.execution_location,
+              resumeLoop: false
+            }
           })
         }
         return
       }
-      const shotUrl = computerScreenshotDataUrl(result)
-      if (shotUrl) setViewportUrl(shotUrl)
+      applyResultViewport(active.id, result)
       await syncSteps(active.id)
     } catch (cause) {
       onError(errorText(cause))
     } finally {
-      setInteracting(false)
+      dispatchTurn({ type: 'end_interaction' })
     }
   }
 
@@ -365,7 +458,6 @@ export function ComputerMode(props: Props): React.JSX.Element {
       void interact({ type: 'keypress', keys })
       return
     }
-    // Ctrl/Cmd+letter shortcuts reach the browser page as real hotkeys.
     if (event.key.length === 1 && (event.ctrlKey || event.metaKey) && !event.altKey) {
       event.preventDefault()
       const modifier = event.metaKey ? 'Cmd' : 'Ctrl'
@@ -378,15 +470,13 @@ export function ComputerMode(props: Props): React.JSX.Element {
     }
   }
 
-  const browserInteractive = Boolean(session && session.target === 'browser' && viewportUrl)
+  const browserInteractive = Boolean(
+    session &&
+      session.target === 'browser' &&
+      viewportUrl &&
+      canInteractComputerViewport(turnState)
+  )
 
-  // Live viewport: while a browser session exists the daemon streams CDP
-  // screencast frames over SSE, so the page tracks under the cursor (hover
-  // menus, form typing, streamed content) at ~50ms. The stream stays connected
-  // through user and agent actions — the quick frames are display-only and are
-  // never recorded, so only the settled 750ms screenshots after actions reach
-  // the model. If streaming is unavailable, fall back to polling the
-  // non-recording preview endpoint at the same cadence.
   useEffect(() => {
     const sessionId = session?.id
     if (!sessionId || session.target !== 'browser') return
@@ -415,9 +505,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
             setViewportUrl((current) => (url === current ? current : url))
           }
         })
-        .catch(() => {
-          // Transient; the last frame stays on screen.
-        })
+        .catch(() => {})
     }, 50)
     return () => {
       controller.abort()
@@ -425,28 +513,71 @@ export function ComputerMode(props: Props): React.JSX.Element {
     }
   }, [session?.id, session?.target])
 
-  async function parseModelOutput(text: string): Promise<{
-    thought: string | null
-    actions: ComputerAction[]
-  }> {
-    try {
-      const remote = await parseFaraRemote(text)
-      return {
-        thought: remote.thought ?? null,
-        actions: remote.actions ?? []
+  async function parseCompletionWithAdapter(
+    completion: StreamCompletionResult,
+    activeSession: ComputerSession,
+    activeModelId: string
+  ): Promise<{ thought: string | null; actions: ComputerAction[]; assistantContent: string }> {
+    const model = models.find((entry) => entry.id === activeModelId)
+    const adapter = resolveComputerAdapter(activeModelId, model)
+    if (
+      adapter.dialect === 'fara-xml' &&
+      completion.clientToolCalls.length === 0 &&
+      completion.responseText.includes('<tool_call>')
+    ) {
+      try {
+        const remote = await parseFaraRemote(completion.responseText)
+        if (remote.actions && remote.actions.length > 0) {
+          const normalized = remote.actions.map((action) =>
+            normalizeComputerActionCoordinates(
+              action as Parameters<typeof normalizeComputerActionCoordinates>[0],
+              adapter.coordinateSpace,
+              activeSession.viewport
+            )
+          ) as ComputerAction[]
+          return {
+            thought: completion.reasoningText.trim() || remote.thought || null,
+            actions: normalized,
+            assistantContent: completion.responseText
+          }
+        }
+      } catch {
+        // Fall through to universal local parser.
       }
-    } catch {
-      const local = parseFaraLocal(text)
-      return { thought: local.thought, actions: local.actions as ComputerAction[] }
+    }
+    const local = parseComputerCompletion(
+      {
+        responseText: completion.responseText,
+        reasoningText: completion.reasoningText,
+        clientToolCalls: completion.clientToolCalls
+      },
+      {
+        dialect: adapter.dialect,
+        coordinateSpace: adapter.coordinateSpace,
+        viewport: activeSession.viewport
+      }
+    )
+    return {
+      thought: local.thought,
+      actions: local.actions as ComputerAction[],
+      assistantContent: local.assistantContent
     }
   }
 
   const stop = useCallback(async (): Promise<void> => {
+    const previousState = turnStateRef.current
     abortRef.current?.abort()
     abortRef.current = null
-    // Revoke the native overlay/input guard before waiting on the daemon. This
-    // remains immediate even if the HTTP service is wedged or has crashed.
+    dispatchTurn({ type: 'stop' })
+    setLiveThought('')
     await window.brazier.computer.setActive(false)
+    if (previousState.kind === 'awaiting_approval') {
+      void decideComputerApproval(
+        previousState.approval.approvalId,
+        false,
+        previousState.approval.executionLocation ?? undefined
+      ).catch(() => undefined)
+    }
     const active = sessionRef.current
     if (active) {
       try {
@@ -454,11 +585,9 @@ export function ComputerMode(props: Props): React.JSX.Element {
       } catch {
         // Escape remains a local emergency stop even if the daemon vanished.
       }
+      void syncSteps(active.id).catch(() => undefined)
     }
-    setPendingApproval(null)
-    setPendingUserQuestion(null)
-    setRunning(false)
-  }, [])
+  }, [dispatchTurn])
 
   async function syncSteps(sessionId: string): Promise<ComputerStep[]> {
     const next = await listComputerSteps(sessionId)
@@ -466,118 +595,262 @@ export function ComputerMode(props: Props): React.JSX.Element {
     return next
   }
 
-  async function runModelLoop(active: ComputerSession, controller: AbortController): Promise<void> {
-    // This screenshot is a broker-recorded action, so it survives reload and is
-    // visible to the next model turn through buildComputerHistory().
-    const observation = await refreshViewport(active.id)
-    const observationFailure = observationError(observation)
-    if (observationFailure) throw new Error(observationFailure)
-    await syncSteps(active.id)
+  async function executeActionBatch(
+    active: ComputerSession,
+    actions: ComputerAction[],
+    controller: AbortController,
+    repairBudget: { count: number }
+  ): Promise<{ outcome: LoopOutcome | null }> {
+    for (let index = 0; index < actions.length; index += 1) {
+      if (controller.signal.aborted) return { outcome: { kind: 'aborted' } }
+      const action = actions[index]
+      const result = await computerExec({ session_id: active.id, action })
+      applyResultViewport(active.id, result)
+      if (action.type === 'memorize' && result.status === 'ok') {
+        await refreshActiveSession(active.id)
+      }
+      await syncSteps(active.id)
+
+      if (
+        active.target === 'desktop' &&
+        (action.type === 'visit_url' || action.type === 'web_search')
+      ) {
+        await appendComputerStep(active.id, {
+          role: 'user',
+          content:
+            'That action is unavailable on this desktop. Continue by interacting with the visible desktop GUI using mouse and keyboard only.'
+        })
+        return { outcome: null }
+      }
+
+      if (result.needs_approval || result.status === 'needs_approval') {
+        const approvalId = result.approval_id
+        if (!approvalId) {
+          return {
+            outcome: {
+              kind: 'failed',
+              error: result.message || 'Action needs approval, but no approval id was returned.'
+            }
+          }
+        }
+        return {
+          outcome: {
+            kind: 'awaiting_approval',
+            approval: {
+              approvalId,
+              action,
+              message: result.message,
+              executionLocation: result.execution_location,
+              resumeLoop: true,
+              remainingActions: actions.slice(index + 1)
+            }
+          }
+        }
+      }
+
+      const continuation: ComputerContinuation = continuationForResult(result)
+      if (continuation.kind === 'waiting_for_user') {
+        return { outcome: { kind: 'awaiting_user', question: continuation.question } }
+      }
+      if (continuation.kind === 'finished') {
+        return { outcome: { kind: 'completed' } }
+      }
+      if (continuation.kind === 'blocked') {
+        if (result.status === 'error' && repairBudget.count < MAX_CONSECUTIVE_REPAIRS) {
+          repairBudget.count += 1
+          await appendComputerStep(active.id, {
+            role: 'user',
+            content: `The previous action (${action.type}) failed: ${result.message || 'execution error'}. Inspect the latest screenshot and choose a valid recovery action.`
+          })
+          return { outcome: null }
+        }
+        return {
+          outcome: {
+            kind: 'failed',
+            error: result.message || `Action ${action.type} ${result.status}.`
+          }
+        }
+      }
+
+      repairBudget.count = 0
+    }
+    return { outcome: null }
+  }
+
+  async function runModelLoop(
+    initialSession: ComputerSession,
+    controller: AbortController,
+    options: { skipInitialScreenshot?: boolean; initialActions?: ComputerAction[] } = {}
+  ): Promise<LoopOutcome> {
+    let active = sessionRef.current?.id === initialSession.id ? sessionRef.current : initialSession
+    if (!options.skipInitialScreenshot) {
+      const observation = await refreshViewport(active.id)
+      const observationFailure = observationError(observation)
+      if (observationFailure) {
+        return { kind: 'failed', error: observationFailure }
+      }
+      active = sessionRef.current?.id === active.id ? sessionRef.current : active
+      await syncSteps(active.id)
+    }
+
+    const repairBudget = { count: 0 }
+
+    if (options.initialActions && options.initialActions.length > 0) {
+      const resumed = await executeActionBatch(
+        active,
+        options.initialActions,
+        controller,
+        repairBudget
+      )
+      if (resumed.outcome) return resumed.outcome
+    }
+
     const activeModelId = active.model_id || modelId
+    const activeModel = models.find((entry) => entry.id === activeModelId)
+    const adapter = resolveComputerAdapter(activeModelId, activeModel)
 
     for (let step = 0; step < MAX_LOOP_STEPS && !controller.signal.aborted; step += 1) {
-      const history = buildComputerHistory(active, await syncSteps(active.id), maxScreenshotsKept)
-      let responseText = ''
+      active = (await refreshActiveSession(active.id)) ?? active
+      const currentSteps = await syncSteps(active.id)
+      const history = buildComputerHistory(active, currentSteps, maxScreenshotsKept, {
+        dialect: adapter.dialect,
+        coordinateSpace: adapter.coordinateSpace
+      })
+      let streamedText = ''
       setLiveThought('')
+      const useOpenAiTools = adapter.dialect === 'openai-tools'
       const completion = await streamCompletion(
         history,
         activeModelId,
         controller.signal,
         (token) => {
-          responseText += token
+          streamedText += token
         },
         {
           onReasoning: (token) => setLiveThought((current) => current + token),
-          toolChoice: 'none',
-          // Fara emits its XML action after a think block. With thinking
-          // enabled llama.cpp can classify the entire response as reasoning,
-          // leaving the action parser an empty completion.
-          enableReasoning: false
+          ...(useOpenAiTools
+            ? {
+                extraTools: [
+                  buildComputerUseTool(active.target, adapter.coordinateSpace, active.viewport)
+                ],
+                toolChoice: 'auto' as const
+              }
+            : {})
         }
       )
-      responseText = completion.responseText || responseText
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted) return { kind: 'aborted' }
 
-      const parsed = await parseModelOutput(responseText)
+      const effectiveCompletion: StreamCompletionResult = {
+        ...completion,
+        responseText: completion.responseText || streamedText
+      }
+      const parsed = await parseCompletionWithAdapter(effectiveCompletion, active, activeModelId)
       if (parsed.thought) setLiveThought(parsed.thought)
-      // The model's complete raw reply is narrative context.  Only the broker
-      // writes action/result records, preventing duplicate tool timeline rows.
+
       await appendComputerStep(active.id, {
         role: 'assistant',
-        content: responseText,
+        content:
+          parsed.assistantContent ||
+          effectiveCompletion.responseText ||
+          (parsed.thought ? `<think>${parsed.thought}</think>` : '(no action output)'),
         thought: parsed.thought
       })
 
       if (parsed.actions.length === 0) {
-        onError('The computer-use model returned no executable action. Try again or choose another model.')
-        return
-      }
-      const parseError = parsed.actions.find((action) => action.type === 'error')
-      if (parseError) {
-        onError(computerActionLabel(parseError))
-        return
-      }
-      for (const action of parsed.actions) {
-        if (controller.signal.aborted) return
-        const result = await computerExec({ session_id: active.id, action })
-        const shotUrl = computerScreenshotDataUrl(result)
-        if (shotUrl) setViewportUrl(shotUrl)
-        await syncSteps(active.id)
-
-        // Fara is browser-trained and can occasionally emit a navigation
-        // action even after the desktop-only signature. Preserve that failed
-        // action in history, then give it a fresh turn to use the visible GUI
-        // rather than treating the whole task as irrecoverably blocked.
-        if (active.target === 'desktop' && (action.type === 'visit_url' || action.type === 'web_search')) {
+        if (repairBudget.count < MAX_CONSECUTIVE_REPAIRS) {
+          repairBudget.count += 1
           await appendComputerStep(active.id, {
             role: 'user',
-            content: 'That action is unavailable on this desktop. Continue by interacting with the visible desktop GUI using mouse and keyboard only.'
+            content:
+              adapter.dialect === 'openai-tools'
+                ? 'No executable `computer_use` tool call was returned. Call `computer_use` with one next action (use `terminate` if finished, or `ask_user_question` if you need user input).'
+                : adapter.dialect === 'ui-tars'
+                  ? "No executable `Action:` line was found. Reply with `Thought: ...` and `Action: click(start_box='(x,y)')` (or `finished(content='...')` if complete)."
+                  : 'No executable `<tool_call>` was found. Reply with `<tool_call>{"name":"computer_use","arguments":{"action":"..."}}</tool_call>` (use `terminate` if finished).'
           })
-          break
+          continue
         }
-
-        const continuation: ComputerContinuation = continuationForResult(result)
-        if (result.needs_approval || result.status === 'needs_approval') {
-          const approvalId = result.approval_id
-          if (!approvalId) {
-            onError(result.message || 'Action needs approval, but no approval id was returned.')
-            return
-          }
-          setPendingApproval({
-            approvalId,
-            action,
-            message: result.message,
-            executionLocation: result.execution_location
-          })
-          return
-        }
-        if (continuation.kind === 'waiting_for_user') {
-          setPendingUserQuestion(continuation.question)
-          return
-        }
-        if (continuation.kind === 'finished') return
-        if (continuation.kind === 'blocked') {
-          onError(result.message || `Action ${action.type} ${result.status}.`)
-          return
+        return {
+          kind: 'failed',
+          error:
+            'The computer-use model returned no executable action. Try again or choose another model.'
         }
       }
+
+      const parseError = parsed.actions.find((action) => action.type === 'error')
+      if (parseError) {
+        if (repairBudget.count < MAX_CONSECUTIVE_REPAIRS) {
+          repairBudget.count += 1
+          await appendComputerStep(active.id, {
+            role: 'user',
+            content: `Your tool call could not be parsed (${computerActionLabel(parseError)}). Emit valid JSON arguments for a single computer_use action.`
+          })
+          continue
+        }
+        return { kind: 'failed', error: computerActionLabel(parseError) }
+      }
+
+      const batch = await executeActionBatch(active, parsed.actions, controller, repairBudget)
+      if (batch.outcome) return batch.outcome
     }
+
+    return controller.signal.aborted ? { kind: 'aborted' } : { kind: 'completed' }
+  }
+
+  function applyLoopOutcome(outcome: LoopOutcome): void {
+    switch (outcome.kind) {
+      case 'awaiting_approval':
+        dispatchTurn({ type: 'require_approval', approval: outcome.approval })
+        return
+      case 'awaiting_user':
+        dispatchTurn({ type: 'require_user', question: outcome.question })
+        return
+      case 'aborted':
+        if (turnStateRef.current.kind !== 'stopped') {
+          dispatchTurn({ type: 'stop' })
+        }
+        return
+      case 'failed':
+        onError(outcome.error)
+        dispatchTurn({ type: 'turn_finished' })
+        return
+      case 'completed':
+        dispatchTurn({ type: 'turn_finished' })
+        return
+    }
+  }
+
+  async function executeApprovedAction(
+    activeSession: ComputerSession,
+    approval: PendingComputerApproval
+  ): Promise<ComputerActionResult | null> {
+    const decided = await decideComputerApproval(
+      approval.approvalId,
+      true,
+      approval.executionLocation ?? undefined
+    )
+    if (decided.result) return decided.result
+    return computerExec({
+      session_id: activeSession.id,
+      action: approval.action,
+      approval_id: approval.approvalId
+    })
   }
 
   async function send(text: string): Promise<void> {
     const userText = text.trim()
-    if (!userText || running || pendingApproval) return
+    if (!userText || !canSendComputerPrompt(turnStateRef.current)) return
     if (!modelId && !sessionRef.current?.model_id) {
       onError('Choose a computer-use model in the top bar.')
       return
     }
 
     onError(null)
-    setRunning(true)
-    setPendingUserQuestion(null)
+    dispatchTurn({ type: 'start_turn' })
     setLiveThought('')
     const controller = new AbortController()
     abortRef.current = controller
+    let desktopSafetyActive = false
     try {
       let active = sessionRef.current
       if (!active) {
@@ -591,30 +864,35 @@ export function ComputerMode(props: Props): React.JSX.Element {
         sessionRef.current = active
         await refreshSessions()
       }
+      if (controller.signal.aborted) {
+        applyLoopOutcome({ kind: 'aborted' })
+        return
+      }
       if (active.target === 'desktop') {
-        // Fail closed: no screenshot, model turn, approval, or OS action may
-        // begin until both the native overlay and Esc watcher report READY.
         await window.brazier.computer.setActive(true)
+        desktopSafetyActive = true
         try {
           await setComputerSafetyAuthority(active.id, true)
         } catch (cause) {
           await window.brazier.computer.setActive(false)
+          desktopSafetyActive = false
           throw cause
         }
       }
-      // User prompts (including answers to ask_user and ordinary follow-ups)
-      // are durable and become part of every resumed/reloaded history.
       await appendComputerStep(active.id, { role: 'user', content: userText })
-      await runModelLoop(active, controller)
+      const outcome = await runModelLoop(active, controller)
+      applyLoopOutcome(outcome)
     } catch (cause) {
       if ((cause as Error).name !== 'AbortError') onError(errorText(cause))
     } finally {
       const active = sessionRef.current
-      if (active?.target === 'desktop') {
+      if (desktopSafetyActive && active?.target === 'desktop') {
         void setComputerSafetyAuthority(active.id, false).catch(() => undefined)
       }
       void window.brazier.computer.setActive(false)
-      setRunning(false)
+      // Only transitions `running -> idle`; never clobbers `awaiting_approval`,
+      // `awaiting_user`, or `stopped`.
+      dispatchTurn({ type: 'turn_finally' })
       if (abortRef.current === controller) abortRef.current = null
       setLiveThought('')
       const id = sessionRef.current?.id
@@ -623,88 +901,167 @@ export function ComputerMode(props: Props): React.JSX.Element {
   }
 
   async function resolveApproval(approve: boolean): Promise<void> {
-    if (resolvingApproval || !pendingApproval || !session) return
-    if (!running && !approve) {
-      setPendingApproval(null)
+    const currentState = turnStateRef.current
+    if (currentState.kind === 'stopped') {
+      if (approve) {
+        onError('Computer Use was stopped. Start a new turn to continue.')
+      }
       return
     }
-    if (!running && approve) {
-      onError('Computer Use was stopped. Start a new turn to continue.')
-      setPendingApproval(null)
-      return
-    }
-    setResolvingApproval(true)
+    if (currentState.kind !== 'awaiting_approval' || !session) return
+
+    const approval = currentState.approval
+    dispatchTurn({ type: 'begin_resolve_approval', approve })
     onError(null)
+
+    if (!approve) {
+      try {
+        await decideComputerApproval(
+          approval.approvalId,
+          false,
+          approval.executionLocation ?? undefined
+        )
+        await syncSteps(session.id)
+        dispatchTurn({ type: 'approval_denied' })
+      } catch (cause) {
+        onError(errorText(cause))
+        try {
+          const nextSteps = await syncSteps(session.id)
+          const restored = computerTurnStateFromPause(recoverComputerPause(nextSteps))
+          turnStateRef.current = restored
+          setTurnState(restored)
+        } catch {
+          dispatchTurn({ type: 'approval_denied' })
+        }
+      }
+      return
+    }
+
     let safetyActive = false
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
-      // Approval executes the pending action inside the broker call, so the
-      // safety boundary must be established before sending the decision.
-      if (approve && session.target === 'desktop') {
+      if (session.target === 'desktop') {
         await window.brazier.computer.setActive(true)
+        safetyActive = true
         try {
           await setComputerSafetyAuthority(session.id, true)
         } catch (cause) {
           await window.brazier.computer.setActive(false)
+          safetyActive = false
           throw cause
         }
-        safetyActive = true
       }
-      const { result } = await decideComputerApproval(
-        pendingApproval.approvalId,
-        approve,
-        pendingApproval.executionLocation ?? undefined
-      )
-      setPendingApproval(null)
+
+      const result = await executeApprovedAction(session, approval)
       if (result) {
-        const shotUrl = computerScreenshotDataUrl(result)
-        if (shotUrl) setViewportUrl(shotUrl)
-        await syncSteps(session.id)
-      }
-      if (approve && result && continuationForResult(result).kind === 'model') {
-        setRunning(true)
-        const controller = new AbortController()
-        abortRef.current = controller
-        try {
-          // The broker result is already in persisted history; continue the
-          // same task without inventing a contextless user prompt.
-          await runModelLoop(session, controller)
-        } finally {
-          setRunning(false)
-          if (abortRef.current === controller) abortRef.current = null
-          setLiveThought('')
-          void syncSteps(session.id).catch(() => undefined)
+        applyResultViewport(session.id, result)
+        if (approval.action.type === 'memorize' && result.status === 'ok') {
+          await refreshActiveSession(session.id)
         }
       }
+      const syncedSteps = await syncSteps(session.id)
+      const activeSession = (await refreshActiveSession(session.id)) ?? session
+
+      if (controller.signal.aborted) {
+        applyLoopOutcome({ kind: 'aborted' })
+        return
+      }
+
+      if (!result) {
+        dispatchTurn({ type: 'turn_finished' })
+        return
+      }
+
+      if (approval.resumeLoop === false) {
+        const continuation = continuationForResult(result)
+        if (continuation.kind === 'waiting_for_user') {
+          dispatchTurn({ type: 'require_user', question: continuation.question })
+        } else {
+          dispatchTurn({ type: 'turn_finished' })
+        }
+        return
+      }
+
+      const continuation = continuationForResult(result)
+      if (continuation.kind === 'waiting_for_user') {
+        dispatchTurn({ type: 'require_user', question: continuation.question })
+        return
+      }
+      if (continuation.kind === 'finished') {
+        dispatchTurn({ type: 'turn_finished' })
+        return
+      }
+      if (continuation.kind === 'blocked') {
+        onError(result.message || `Action ${approval.action.type} ${result.status}.`)
+        dispatchTurn({ type: 'turn_finished' })
+        return
+      }
+
+      // Transition resolving_approval -> running and resume the model loop.
+      dispatchTurn({ type: 'approval_approved_continue' })
+      const hasObservation =
+        Boolean(result.screenshot_base64) ||
+        syncedSteps.some((step) => Boolean(computerScreenshotDataUrl(step.result)))
+      const outcome = await runModelLoop(activeSession, controller, {
+        skipInitialScreenshot: hasObservation,
+        initialActions: approval.remainingActions
+      })
+      applyLoopOutcome(outcome)
     } catch (cause) {
-      onError(errorText(cause))
+      if ((cause as Error).name !== 'AbortError') onError(errorText(cause))
+      try {
+        const nextSteps = await syncSteps(session.id)
+        const restored = computerTurnStateFromPause(recoverComputerPause(nextSteps))
+        turnStateRef.current = restored
+        setTurnState(restored)
+      } catch {
+        dispatchTurn({ type: 'turn_finished' })
+      }
     } finally {
       if (safetyActive) {
         void setComputerSafetyAuthority(session.id, false).catch(() => undefined)
         void window.brazier.computer.setActive(false)
       }
-      setResolvingApproval(false)
+      dispatchTurn({ type: 'turn_finally' })
+      if (abortRef.current === controller) abortRef.current = null
+      setLiveThought('')
+      void syncSteps(session.id).catch(() => undefined)
     }
   }
+
+  const desktopPermissionsMissing =
+    target === 'desktop' &&
+    connectionProfile.kind !== 'remote' &&
+    daemonPlatform !== 'windows' &&
+    hasMissingOsPermissions(osPermissions)
 
   const targetUnavailable =
     daemonPlatform === null
       ? 'Checking whether Computer Use is available on this daemon…'
-      : (target === 'desktop' && connectionProfile.kind === 'remote')
+      : target === 'desktop' && connectionProfile.kind === 'remote'
         ? `Desktop control must be activated on ${connectionProfile.name}; use Browser for this remote daemon.`
-      : daemonPlatform === 'windows'
-        ? 'Computer Use is unavailable on this Windows daemon; Agent mode remains sandboxed and supported.'
-        : ''
-  const blockedReason = targetUnavailable ||
-    (!modelId && !session?.model_id ? 'Choose a computer-use model in the top bar…' : '')
-  const composerPlaceholder =
-    blockedReason ||
-    (running
-      ? 'Computer Use is working. Stop it to send something else…'
+        : daemonPlatform === 'windows'
+          ? 'Computer Use is unavailable on this Windows daemon; Agent mode remains sandboxed and supported.'
+          : ''
+  const blockedReason =
+    targetUnavailable ||
+    (!modelId && !session?.model_id
+      ? 'Choose a computer-use model in the top bar…'
       : pendingApproval
         ? 'Approve or deny the pending action before continuing…'
-        : pendingUserQuestion
-          ? `Answer the agent: ${pendingUserQuestion}`
-          : `Ask ${modelLabel} to use the ${target}…`)
+        : '')
+  const composerPlaceholder =
+    targetUnavailable ||
+    (!modelId && !session?.model_id
+      ? 'Choose a computer-use model in the top bar…'
+      : running
+        ? 'Computer Use is working. Stop it to send something else…'
+        : pendingApproval
+          ? 'Approve or deny the pending action before continuing…'
+          : pendingUserQuestion
+            ? `Answer the agent: ${pendingUserQuestion}`
+            : `Ask ${modelLabel} to use the ${target}…`)
   const composerActionsRef = useRef({ send, stop })
   composerActionsRef.current = { send, stop }
 
@@ -738,8 +1095,6 @@ export function ComputerMode(props: Props): React.JSX.Element {
     }
   }, [])
 
-  // Same pattern for the app sidebar: Computer mode replaces conversations
-  // with its session list, so the list and its actions live up there.
   const sidebarActionsRef = useRef({ loadSession, removeSession, createSession, startNewSession })
   sidebarActionsRef.current = { loadSession, removeSession, createSession, startNewSession }
   useEffect(() => {
@@ -854,6 +1209,34 @@ export function ComputerMode(props: Props): React.JSX.Element {
         </div>
 
         <div className="computer-steps">
+          {desktopPermissionsMissing && (
+            <div className="computer-approval">
+              <div>
+                <strong>
+                  <ShieldAlert size={14} style={{ verticalAlign: 'text-bottom', marginRight: 6 }} />
+                  Desktop permissions required
+                </strong>
+                <p>
+                  {osPermissions?.detail ||
+                    osPermissions?.settings_hint ||
+                    'Grant screen capture and input control permissions before driving the desktop.'}
+                </p>
+              </div>
+              {onOpenManage ? (
+                <div className="computer-approval-actions">
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => onOpenManage('computer')}
+                  >
+                    <Settings2 size={14} />
+                    Configure desktop permissions
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          )}
+
           {pendingApproval && (
             <div className="computer-approval">
               <div>
@@ -914,10 +1297,29 @@ export function ComputerMode(props: Props): React.JSX.Element {
 
           {steps.length === 0 && !running ? (
             <div className="computer-steps-empty">
-              <p>
-                Describe a task below. Computer Use will screenshot the {target}, ask the model,
-                and run the returned actions.
-              </p>
+              {models.length === 0 ? (
+                <>
+                  <p>
+                    Install a computer-use or vision model to screenshot the {target} and run
+                    guided GUI actions.
+                  </p>
+                  {onOpenManage ? (
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => onOpenManage('computer')}
+                    >
+                      <Settings2 size={14} />
+                      Set up Computer Use
+                    </button>
+                  ) : null}
+                </>
+              ) : (
+                <p>
+                  Describe a task below. Computer Use will screenshot the {target}, ask the model,
+                  and run the returned actions.
+                </p>
+              )}
             </div>
           ) : (
             steps.map((step) => (

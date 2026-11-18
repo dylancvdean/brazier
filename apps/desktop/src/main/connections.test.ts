@@ -677,4 +677,115 @@ describe('connection profile lifecycle and switching', () => {
     await manager.connection()
     expect(manager.allowsRendererNetworkUrl('http://0.0.0.0:7614/api/v1/health')).toBe(true)
   })
+
+  it('respawns a fresh Local daemon on reconnect() after brazierd crashes', async () => {
+    const store = new ConnectionProfileStore(temporarySettingsPath())
+    let spawnCount = 0
+    const startLocal = vi.fn(async () => {
+      spawnCount += 1
+      return {
+        address: `http://127.0.0.1:${7613 + spawnCount}`,
+        api_key: `local-key-${spawnCount}`,
+        local_control_key: `ctrl-${spawnCount}`
+      }
+    })
+    const manager = new ConnectionProfileManager(store, {
+      startLocal,
+      stopLocal: vi.fn(),
+      fetch: okFetch()
+    })
+
+    const initial = await manager.connection()
+    expect(initial.address).toBe('http://127.0.0.1:7614')
+    expect(startLocal).toHaveBeenCalledTimes(1)
+    expect(manager.allowsRendererNetworkUrl('http://127.0.0.1:7614/health')).toBe(true)
+
+    // Simulate brazierd child exit notification from main/index.ts.
+    manager.invalidateLocalConnection()
+    expect(manager.allowsRendererNetworkUrl('http://127.0.0.1:7614/health')).toBe(false)
+
+    const recovered = await manager.reconnect()
+    expect(recovered.address).toBe('http://127.0.0.1:7615')
+    expect(recovered.api_key).toBe('local-key-2')
+    expect(startLocal).toHaveBeenCalledTimes(2)
+    expect(manager.allowsRendererNetworkUrl('http://127.0.0.1:7615/health')).toBe(true)
+    await expect(
+      manager.rendererLocalControlKeyForUrl('http://127.0.0.1:7615/api/v1/computer/exec')
+    ).resolves.toBe('ctrl-2')
+  })
+
+  it('self-heals on reconnect() even before child exit fires when the cached Local port stops responding', async () => {
+    const store = new ConnectionProfileStore(temporarySettingsPath())
+    let spawnCount = 0
+    const startLocal = vi.fn(async () => {
+      spawnCount += 1
+      return {
+        address: `http://127.0.0.1:${8000 + spawnCount}`,
+        api_key: null
+      }
+    })
+    let port8001Alive = true
+    const fetch_ = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).startsWith('http://127.0.0.1:8001') && !port8001Alive) {
+        throw new Error('ECONNREFUSED')
+      }
+      return new Response(JSON.stringify(daemonInfo()), { status: 200 })
+    }) as typeof fetch
+
+    const manager = new ConnectionProfileManager(store, {
+      startLocal,
+      stopLocal: vi.fn(),
+      fetch: fetch_
+    })
+
+    expect((await manager.connection()).address).toBe('http://127.0.0.1:8001')
+    expect(startLocal).toHaveBeenCalledTimes(1)
+
+    port8001Alive = false
+    const respawned = await manager.reconnect()
+    expect(respawned.address).toBe('http://127.0.0.1:8002')
+    expect(startLocal).toHaveBeenCalledTimes(2)
+  })
+
+  it('never commits a stale profile switch out of order when concurrent switches overlap', async () => {
+    const store = new ConnectionProfileStore(temporarySettingsPath())
+    const slow = store.upsert({ name: 'Slow Remote', baseUrl: 'https://slow.example' })
+    const fast = store.upsert({ name: 'Fast Remote', baseUrl: 'https://fast.example' })
+
+    let releaseSlow!: () => void
+    const slowGate = new Promise<void>((resolve) => {
+      releaseSlow = resolve
+    })
+
+    const fetch_ = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).startsWith('https://slow.example')) {
+        await slowGate
+      }
+      return new Response(JSON.stringify(daemonInfo()), { status: 200 })
+    }) as typeof fetch
+
+    const manager = new ConnectionProfileManager(store, {
+      startLocal: vi.fn(async () => ({ address: 'http://127.0.0.1:7614', api_key: null })),
+      stopLocal: vi.fn(),
+      fetch: fetch_
+    })
+
+    // Start slow switch first, then immediately switch to fast.
+    const firstSwitch = manager.select(slow.id)
+    const secondSwitch = manager.activateProfile(fast.id)
+
+    const secondResult = await secondSwitch
+    expect(secondResult.profile.id).toBe(fast.id)
+    expect(manager.current().id).toBe(fast.id)
+
+    // Now let the earlier slow handshake finish — it must NOT overwrite fast!
+    releaseSlow()
+    const firstResult = await firstSwitch
+    expect(firstResult.profile.id).toBe(fast.id)
+    expect(manager.current().id).toBe(fast.id)
+    expect(store.current().id).toBe(fast.id)
+    expect((await manager.connection()).address).toBe('https://fast.example')
+    expect(manager.allowsRendererNetworkUrl('https://fast.example/health')).toBe(true)
+    expect(manager.allowsRendererNetworkUrl('https://slow.example/health')).toBe(false)
+  })
 })

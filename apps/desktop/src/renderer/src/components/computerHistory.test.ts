@@ -3,13 +3,22 @@ import { describe, expect, it } from 'vitest'
 import type { ComputerActionResult, ComputerSession, ComputerStep } from '../api'
 import {
   buildComputerHistory,
+  canInteractComputerViewport,
+  canSendComputerPrompt,
   computerActionLabel,
   computerSystemPrompt,
+  computerTurnStateFromPause,
   continuationForResult,
+  IDLE_COMPUTER_TURN_STATE,
+  isComputerTurnBusy,
   MAX_COMPUTER_HISTORY_IMAGES,
   MAX_COMPUTER_HISTORY_MESSAGES,
   observationError,
-  recoverComputerPause
+  pendingApprovalForState,
+  pendingUserQuestionForState,
+  recoverComputerPause,
+  transitionComputerTurnState,
+  type PendingComputerApproval
 } from './computerHistory'
 
 const session: Pick<ComputerSession, 'target' | 'permission_mode' | 'viewport'> = {
@@ -228,5 +237,171 @@ describe('computer continuation state', () => {
         step(2, { role: 'user', action: null, result: null, content: 'Use my work account.' })
       ]).userQuestion
     ).toBeNull()
+  })
+
+  it('preserves awaiting_approval across send() finally cleanup and transitions cleanly on Approve and Deny', () => {
+    const approval: PendingComputerApproval = {
+      approvalId: 'approval-42',
+      action: { type: 'visit_url', url: 'https://bank.example' },
+      message: 'Approve navigation',
+      executionLocation: {
+        kind: 'daemon',
+        daemon_instance_id: 'daemon-1',
+        daemon_display_name: 'MacBook',
+        platform: 'macos',
+        arch: 'aarch64'
+      },
+      resumeLoop: true
+    }
+
+    let state = IDLE_COMPUTER_TURN_STATE
+    state = transitionComputerTurnState(state, { type: 'start_turn' })
+    expect(state).toEqual({ kind: 'running' })
+    expect(isComputerTurnBusy(state)).toBe(true)
+    expect(canSendComputerPrompt(state)).toBe(false)
+
+    // Model loop hits approval_required -> transitions to awaiting_approval.
+    state = transitionComputerTurnState(state, { type: 'require_approval', approval })
+    expect(state.kind).toBe('awaiting_approval')
+
+    // CRITICAL: send()'s finally block dispatches `turn_finally` and MUST NOT clobber awaiting_approval!
+    state = transitionComputerTurnState(state, { type: 'turn_finally' })
+    expect(state).toEqual({ kind: 'awaiting_approval', approval })
+    expect(pendingApprovalForState(state)).toEqual(approval)
+    expect(canSendComputerPrompt(state)).toBe(false)
+
+    // Approve branch: awaiting_approval -> resolving_approval -> running -> turn_finished -> idle.
+    const resolvingApprove = transitionComputerTurnState(state, {
+      type: 'begin_resolve_approval',
+      approve: true
+    })
+    expect(resolvingApprove).toEqual({
+      kind: 'resolving_approval',
+      approval,
+      approve: true
+    })
+    expect(isComputerTurnBusy(resolvingApprove)).toBe(true)
+
+    const resumed = transitionComputerTurnState(resolvingApprove, {
+      type: 'approval_approved_continue'
+    })
+    expect(resumed).toEqual({ kind: 'running' })
+    expect(transitionComputerTurnState(resumed, { type: 'turn_finished' })).toEqual({
+      kind: 'idle'
+    })
+
+    // Deny branch: awaiting_approval -> resolving_approval -> approval_denied -> idle.
+    const resolvingDeny = transitionComputerTurnState(state, {
+      type: 'begin_resolve_approval',
+      approve: false
+    })
+    expect(resolvingDeny).toEqual({
+      kind: 'resolving_approval',
+      approval,
+      approve: false
+    })
+    expect(transitionComputerTurnState(resolvingDeny, { type: 'approval_denied' })).toEqual({
+      kind: 'idle'
+    })
+  })
+
+  it('preserves awaiting_user and stopped across finally and viewport interactions', () => {
+    let state = transitionComputerTurnState(IDLE_COMPUTER_TURN_STATE, { type: 'start_turn' })
+    state = transitionComputerTurnState(state, {
+      type: 'require_user',
+      question: 'Which profile should I choose?'
+    })
+    state = transitionComputerTurnState(state, { type: 'turn_finally' })
+    expect(pendingUserQuestionForState(state)).toBe('Which profile should I choose?')
+    expect(canSendComputerPrompt(state)).toBe(true)
+    expect(canInteractComputerViewport(state)).toBe(true)
+
+    // Viewport interaction while awaiting_user restores the question afterward.
+    const interacting = transitionComputerTurnState(state, { type: 'start_interaction' })
+    expect(interacting.kind).toBe('interacting')
+    const afterInteract = transitionComputerTurnState(interacting, { type: 'end_interaction' })
+    expect(pendingUserQuestionForState(afterInteract)).toBe('Which profile should I choose?')
+
+    // Stop transitions to stopped and permits starting a fresh turn later.
+    const stopped = transitionComputerTurnState(state, { type: 'stop' })
+    expect(stopped).toEqual({ kind: 'stopped' })
+    expect(transitionComputerTurnState(stopped, { type: 'turn_finally' })).toEqual({
+      kind: 'stopped'
+    })
+    expect(canSendComputerPrompt(stopped)).toBe(true)
+    expect(
+      computerTurnStateFromPause({
+        approval: {
+          approvalId: 'rec-1',
+          action: { type: 'left_click', x: 100, y: 200 }
+        },
+        userQuestion: null
+      }).kind
+    ).toBe('awaiting_approval')
+  })
+
+  it('injects session.memories and memorize step facts into buildComputerHistory', () => {
+    const history = buildComputerHistory(
+      { ...session, memories: ['Order ID is #99412'] },
+      [
+        step(0, { role: 'user', action: null, result: null, content: 'Check order total.' }),
+        step(1, {
+          action: { type: 'memorize', fact: 'Subtotal is $48.00' },
+          result: { status: 'ok', message: 'Memorized' }
+        })
+      ]
+    )
+    expect(history[0].content).toContain('Memorized facts:')
+    expect(history[0].content).toContain('- Order ID is #99412')
+    expect(history[0].content).toContain('- Subtotal is $48.00')
+  })
+
+  it('notes screen_changed === false and injects a loop-breaker warning after 2+ unchanged repeats', () => {
+    const history = buildComputerHistory(session, [
+      step(0, { role: 'user', action: null, result: null, content: 'Click Checkout' }),
+      step(1, {
+        action: { type: 'left_click', x: 500, y: 300 },
+        result: {
+          status: 'ok',
+          screenshot_base64: 'same-frame',
+          mime_type: 'image/png',
+          url: 'https://shop.example/cart',
+          screen_changed: false
+        } as ComputerActionResult
+      }),
+      step(2, {
+        action: { type: 'left_click', x: 501, y: 299 },
+        result: {
+          status: 'ok',
+          screenshot_base64: 'same-frame',
+          mime_type: 'image/png',
+          url: 'https://shop.example/cart',
+          screen_changed: false
+        } as ComputerActionResult
+      })
+    ])
+
+    const firstObs = history[2].content
+    const secondObs = history[3].content
+    expect(JSON.stringify(firstObs)).toContain(
+      'Note: The screen and URL did not visibly change after this action.'
+    )
+    expect(JSON.stringify(firstObs)).not.toContain('Loop warning:')
+    expect(JSON.stringify(secondObs)).toContain('Loop warning:')
+  })
+
+  it('adapts system prompt instructions for openai-tools, ui-tars, and pixel coordinate spaces', () => {
+    const toolsPrompt = computerSystemPrompt(session, {
+      dialect: 'openai-tools',
+      coordinateSpace: 'pixels'
+    })
+    expect(toolsPrompt).toContain('Invoke the `computer_use` tool')
+    expect(toolsPrompt).toContain('pixel coordinates matching 1920x1080')
+
+    const uiTarsPrompt = computerSystemPrompt(session, {
+      dialect: 'ui-tars',
+      coordinateSpace: 'norm1000'
+    })
+    expect(uiTarsPrompt).toContain("Action: click(start_box='(500,320)')")
   })
 })

@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Download, Hammer, Pause, Play, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Download, Hammer, Pause, Play, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import {
   cancelDownloadJob,
@@ -9,8 +9,10 @@ import {
   listRecommendationSetups,
   pauseDownloadJob,
   resumeDownloadJob,
-  type DownloadJob
+  type DownloadJob,
+  type LocalModel
 } from '../api'
+import { stripGgufShardSuffix } from '../model-utils'
 
 /** Statuses that mean the job still wants to finish. */
 const OPEN_STATUSES = new Set(['pending', 'downloading', 'paused'])
@@ -28,6 +30,63 @@ function jobPercent(job: DownloadJob): number | null {
 
 function isRuntimeBuild(job: DownloadJob): boolean {
   return job.kind === 'runtime-build'
+}
+
+function isProjectorOrDraftFile(filename: string): boolean {
+  const lower = filename.toLowerCase()
+  return lower.includes('mmproj')
+}
+
+/**
+ * Match a settled download job to its installed `LocalModel` so the user can
+ * activate a freshly downloaded model in one click. Returns null for runtime
+ * builds, companion projectors, and ASR-only weights.
+ */
+export function resolveCompletedJobModel(
+  job: DownloadJob,
+  models: readonly LocalModel[]
+): LocalModel | null {
+  if (job.status !== 'completed' || isRuntimeBuild(job)) return null
+  if (isProjectorOrDraftFile(job.filename)) return null
+
+  const selectable = models.filter(
+    (model) => !model.id.startsWith('whisper:') && !model.id.startsWith('streaming-asr:')
+  )
+  if (selectable.length === 0) return null
+
+  const directCandidates = [
+    `gguf:${job.repo_id}/${job.filename}`,
+    `mlx:${job.repo_id}`,
+    `mlx-vlm:${job.repo_id}`,
+    `personaplex:${job.repo_id}`,
+    `sdcpp-image:${job.repo_id}`,
+    `sdcpp-video:${job.repo_id}`
+  ]
+  for (const candidateId of directCandidates) {
+    const exact = selectable.find((model) => model.id === candidateId)
+    if (exact) return exact
+  }
+
+  // Sharded GGUF downloads or sd.cpp bundles whose key derives from repo/filename.
+  const strippedJobFile = stripGgufShardSuffix(job.filename.split('/').at(-1) ?? job.filename)
+    .toLowerCase()
+  const byShardOrRepo = selectable.find((model) => {
+    if (model.id.startsWith('gguf:')) {
+      const key = model.id.slice('gguf:'.length)
+      if (!key.toLowerCase().startsWith(`${job.repo_id.toLowerCase()}/`)) return false
+      const base = stripGgufShardSuffix(key.split('/').at(-1) ?? key).toLowerCase()
+      return base === strippedJobFile
+    }
+    if (model.id.startsWith('sdcpp-image:') || model.id.startsWith('sdcpp-video:')) {
+      return (
+        model.repo_id === job.repo_id ||
+        model.id.toLowerCase().endsWith(`:${job.repo_id.toLowerCase()}`) ||
+        (job.filename !== 'snapshot' && model.id.toLowerCase().endsWith(`:${job.filename.toLowerCase()}`))
+      )
+    }
+    return false
+  })
+  return byShardOrRepo ?? null
 }
 
 /** Bytes per second, smoothed across polls; see {@link useTransferRates}. */
@@ -109,7 +168,17 @@ function useTransferRates(jobs: DownloadJob[]): Record<string, number | null> {
  * Downloads run one at a time in the daemon, so this is where anything queued
  * behind the current transfer is seen and reordered by pausing.
  */
-export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.JSX.Element | null {
+export function DownloadTray({
+  models = [],
+  activeModelIds = [],
+  onUseModel,
+  onChanged
+}: {
+  models?: LocalModel[]
+  activeModelIds?: string[]
+  onUseModel?: (model: LocalModel) => void
+  onChanged?: () => void
+}): React.JSX.Element | null {
   const [jobs, setJobs] = useState<DownloadJob[]>([])
   const [collapsed, setCollapsed] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
@@ -122,10 +191,6 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
     try {
       const [next] = await Promise.all([listDownloadJobs(), listRecommendationSetups()])
       setJobs(next)
-      // A queued download settling is the moment a freshly installed model
-      // becomes usable. The model install itself runs in the background, so
-      // nothing else refreshes the model list — without this, a new model
-      // stays out of the pickers until the app restarts.
       for (const job of next) {
         if (seenOpen.current.has(job.id) && !OPEN_STATUSES.has(job.status)) {
           onChanged?.()
@@ -163,9 +228,6 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
     try {
       await action(job.id)
       if (action === cancelDownloadJob || action === cancelBuildJob) {
-        // A cancellation must take effect in the visible queue immediately.
-        // Besides making the action feel responsive, this avoids a stale poll
-        // briefly leaving a cancelled queued job labelled "Waiting in queue".
         setJobs((current) =>
           current.map((currentJob) =>
             currentJob.id === job.id
@@ -181,8 +243,6 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
       }
       onChanged?.()
     } catch (cause) {
-      // A refused resume leaves the row exactly as it was, so without this the
-      // button looks like it did nothing at all.
       setActionError({
         id: job.id,
         message: cause instanceof Error ? cause.message : String(cause)
@@ -221,6 +281,12 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
             const paused = job.status === 'paused'
             const finished = !OPEN_STATUSES.has(job.status)
             const runtimeBuild = isRuntimeBuild(job)
+            const completedModel =
+              onUseModel && job.status === 'completed'
+                ? resolveCompletedJobModel(job, models)
+                : null
+            const alreadyActive =
+              completedModel != null && activeModelIds.includes(completedModel.id)
             return (
               <div className={`download-tray-item ${job.status}`} key={job.id}>
                 <div className="download-tray-title">
@@ -242,6 +308,25 @@ export function DownloadTray({ onChanged }: { onChanged?: () => void }): React.J
                 <div className="download-tray-row">
                   <span className="download-tray-detail">{jobDetail(job, rates[job.id] ?? null)}</span>
                   <div className="download-tray-actions">
+                    {completedModel && onUseModel && (
+                      <button
+                        type="button"
+                        className="download-tray-use"
+                        disabled={alreadyActive}
+                        title={
+                          alreadyActive ? 'Already selected' : `Use ${jobTitle(job)}`
+                        }
+                        onClick={() => onUseModel(completedModel)}
+                      >
+                        {alreadyActive ? (
+                          <>
+                            <Check size={11} /> In use
+                          </>
+                        ) : (
+                          'Use'
+                        )}
+                      </button>
+                    )}
                     {!runtimeBuild && (running || pending) && (
                       <button
                         type="button"

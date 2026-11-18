@@ -1,7 +1,16 @@
+export type ComputerActionDialect =
+  | 'fara-xml'
+  | 'openai-tools'
+  | 'ui-tars'
+  | 'prompted-json'
+
+export type CoordinateSpace = 'norm1000' | 'pixels' | 'norm1'
+
 export type ComputerUseRecipe = {
   id: string
   label: string
-  actionDialect: 'fara-xml' | 'generic-tools'
+  actionDialect: ComputerActionDialect
+  coordinateSpace: CoordinateSpace
   recommendedEngine: string
   defaultTarget: 'browser' | 'desktop'
   modelMatchers: string[]
@@ -71,7 +80,8 @@ export const COMPUTER_USE_RECIPES: ComputerUseRecipe[] = [
     id: 'fara1.5-4b',
     label: 'Fara1.5 4B',
     actionDialect: 'fara-xml',
-    recommendedEngine: 'vllm',
+    coordinateSpace: 'norm1000',
+    recommendedEngine: 'llama.cpp',
     defaultTarget: 'browser',
     modelMatchers: ['fara1.5-4b', 'fara1.5_4b', 'microsoft/fara1.5-4b']
   },
@@ -79,7 +89,8 @@ export const COMPUTER_USE_RECIPES: ComputerUseRecipe[] = [
     id: 'fara1.5-9b',
     label: 'Fara1.5 9B',
     actionDialect: 'fara-xml',
-    recommendedEngine: 'vllm',
+    coordinateSpace: 'norm1000',
+    recommendedEngine: 'llama.cpp',
     defaultTarget: 'browser',
     modelMatchers: ['fara1.5-9b', 'fara1.5_9b', 'microsoft/fara1.5-9b']
   },
@@ -87,9 +98,85 @@ export const COMPUTER_USE_RECIPES: ComputerUseRecipe[] = [
     id: 'fara1.5-27b',
     label: 'Fara1.5 27B',
     actionDialect: 'fara-xml',
-    recommendedEngine: 'vllm',
+    coordinateSpace: 'norm1000',
+    recommendedEngine: 'llama.cpp',
     defaultTarget: 'browser',
     modelMatchers: ['fara1.5-27b', 'fara1.5_27b', 'microsoft/fara1.5-27b']
+  },
+  {
+    id: 'ui-tars',
+    label: 'UI-TARS',
+    actionDialect: 'ui-tars',
+    coordinateSpace: 'norm1000',
+    recommendedEngine: 'vllm',
+    defaultTarget: 'desktop',
+    modelMatchers: ['ui-tars', 'uitars', 'bytedance/ui-tars']
+  },
+  {
+    id: 'qwen3-vl',
+    label: 'Qwen3-VL / Qwen3.5',
+    actionDialect: 'openai-tools',
+    coordinateSpace: 'norm1000',
+    recommendedEngine: 'llama.cpp',
+    defaultTarget: 'browser',
+    modelMatchers: ['qwen3-vl', 'qwen3_vl', 'qwen3vl', 'qwen3.5', 'qwen3_5']
+  },
+  {
+    id: 'qwen2.5-vl',
+    label: 'Qwen2.5-VL',
+    actionDialect: 'openai-tools',
+    coordinateSpace: 'pixels',
+    recommendedEngine: 'llama.cpp',
+    defaultTarget: 'browser',
+    modelMatchers: ['qwen2.5-vl', 'qwen2_5_vl', 'qwen2.5vl']
+  },
+  {
+    id: 'gemma-4',
+    label: 'Gemma 4 / Gemma 3',
+    actionDialect: 'openai-tools',
+    coordinateSpace: 'norm1000',
+    recommendedEngine: 'llama.cpp',
+    defaultTarget: 'browser',
+    modelMatchers: ['gemma-4', 'gemma4', 'gemma-3', 'gemma3']
+  },
+  {
+    id: 'llama-4',
+    label: 'Llama 4 Vision',
+    actionDialect: 'openai-tools',
+    coordinateSpace: 'pixels',
+    recommendedEngine: 'vllm',
+    defaultTarget: 'browser',
+    modelMatchers: ['llama-4', 'llama4']
+  },
+  {
+    id: 'pixtral',
+    label: 'Pixtral',
+    actionDialect: 'openai-tools',
+    coordinateSpace: 'pixels',
+    recommendedEngine: 'vllm',
+    defaultTarget: 'browser',
+    modelMatchers: ['pixtral']
+  },
+  {
+    id: 'remote-vlm',
+    label: 'Remote Multimodal Tool Model',
+    actionDialect: 'openai-tools',
+    coordinateSpace: 'norm1000',
+    recommendedEngine: 'remote',
+    defaultTarget: 'browser',
+    modelMatchers: [
+      'gpt-4o',
+      'gpt-4.1',
+      'gpt-5',
+      'claude-3',
+      'claude-4',
+      'claude-sonnet',
+      'claude-opus',
+      'gemini-2',
+      'gemini-3',
+      'gemini-pro',
+      'gemini-flash'
+    ]
   }
 ]
 

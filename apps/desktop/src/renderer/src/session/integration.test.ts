@@ -53,7 +53,7 @@ vi.mock('../agentApi', () => ({
 }))
 
 const { WorkerAgentAdapter } = await import('./agentAdapter')
-const { toConversationMessage } = await import('./chatAdapter')
+const { InMemoryChatAdapter, toConversationMessage } = await import('./chatAdapter')
 const { SessionCoordinator } = await import('./coordinator')
 const { DEFAULT_INTEGRATION_CONFIG } = await import('./config')
 const { FakeChat, FakeVoice, sequentialIds } = await import('./testFakes')
@@ -361,5 +361,50 @@ describe('chat adapter normalization', () => {
       })
     )
     expect(message.content).toBe('look at this\nand this')
+  })
+
+  it('preserves parent_id, conversation_id, model, and correlation_id in InMemoryChatAdapter.updateMessage', async () => {
+    const emitted: Message[] = []
+    let tipId: string | null = null
+    const adapter = new InMemoryChatAdapter(
+      {
+        onMessage: (msg) => {
+          emitted.push(msg)
+          tipId = msg.id
+        },
+        parentId: () => tipId,
+        model: () => 'qwen3-8b'
+      },
+      'incognito-thread-1'
+    )
+
+    const userMsg = await adapter.appendMessage({
+      role: 'user',
+      source: 'user_text',
+      content: 'First incognito question',
+      correlationId: 'corr-1',
+      status: 'final'
+    })
+    const assistantPartial = await adapter.appendMessage({
+      role: 'assistant',
+      source: 'assistant_chat',
+      content: 'Working...',
+      correlationId: 'corr-1',
+      status: 'partial'
+    })
+
+    await adapter.updateMessage(assistantPartial.id, {
+      content: 'Final incognito answer',
+      status: 'final'
+    })
+
+    const lastEmitted = emitted.at(-1)!
+    expect(lastEmitted.id).toBe(assistantPartial.id)
+    expect(lastEmitted.parent_id).toBe(userMsg.id)
+    expect(lastEmitted.conversation_id).toBe('incognito-thread-1')
+    expect(lastEmitted.model).toBe('qwen3-8b')
+    expect(lastEmitted.correlation_id).toBe('corr-1')
+    expect(lastEmitted.content).toBe('Final incognito answer')
+    expect(lastEmitted.status).toBe('final')
   })
 })

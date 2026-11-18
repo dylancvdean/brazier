@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import type { HardwareInfo, HubFile } from '../api'
 import {
+  MANAGE_NAV_GROUPS,
   appendBuildDiagnostics,
+  buildServerCurlSnippet,
   groupQuants,
   quantGroupName,
   sortQuantGroups,
   sourceRuntimeId,
-  targetSupportedByBuildEngine
+  targetSupportedByBuildEngine,
+  type ManageSection
 } from './ManagePanel'
 
 function file(path: string, size: number | null = 1000): HubFile {
@@ -163,5 +166,58 @@ describe('sortQuantGroups', () => {
       'small-Q4_K_M.gguf',
       'huge-F16.gguf'
     ])
+  })
+})
+
+describe('MANAGE_NAV_GROUPS', () => {
+  it('groups all 17 Manage sections into 4 logical groups without duplicates', () => {
+    expect(MANAGE_NAV_GROUPS.map((group) => group.label)).toEqual([
+      'Models & Engine',
+      'Workspace Modes',
+      'Integrations & API',
+      'App'
+    ])
+    const flattened = MANAGE_NAV_GROUPS.flatMap((group) => group.sections)
+    const expected: ManageSection[] = [
+      'library',
+      'recommended',
+      'discover',
+      'runtimes',
+      'engine',
+      'chat',
+      'agent',
+      'computer',
+      'generate',
+      'voice',
+      'websearch',
+      'mcp',
+      'remote',
+      'server',
+      'connections',
+      'customization',
+      'support'
+    ]
+    expect(new Set(flattened).size).toBe(flattened.length)
+    expect(flattened).toEqual(expected)
+  })
+})
+
+describe('buildServerCurlSnippet', () => {
+  it('includes Authorization header only when API key auth is enabled', () => {
+    const withoutAuth = buildServerCurlSnippet({
+      port: 11435,
+      modelId: 'gguf:Qwen/Qwen3-8B.gguf',
+      apiKeyEnabled: false
+    })
+    expect(withoutAuth).toContain('http://127.0.0.1:11435/v1/chat/completions')
+    expect(withoutAuth).toContain('"model":"gguf:Qwen/Qwen3-8B.gguf"')
+    expect(withoutAuth).not.toContain('Authorization')
+
+    const withAuth = buildServerCurlSnippet({
+      port: 11435,
+      modelId: 'gguf:Qwen/Qwen3-8B.gguf',
+      apiKeyEnabled: true
+    })
+    expect(withAuth).toContain('Authorization: Bearer $BRAZIER_API_KEY')
   })
 })

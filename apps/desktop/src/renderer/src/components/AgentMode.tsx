@@ -51,6 +51,8 @@ import {
   type AgentWorktreeStatus
 } from '../agentApi'
 import { prefillProgressLabel, type LocalModel, type PrefillProgress } from '../api'
+import { AGENT_SLASH_SUGGESTIONS } from '../composerCompletions'
+import { useDialogOverlay } from '../hooks/useDialogOverlay'
 import { modelDisplayName } from '../model-utils'
 import { Markdown } from './Markdown'
 import { ReasoningDisclosure } from './ReasoningDisclosure'
@@ -105,6 +107,7 @@ type Props = {
   /** Route the turn through the shared coordinator so voice and this view cannot double-run. */
   onSubmitTurn?: (text: string) => Promise<string | null>
   onCancelTurn?: () => Promise<void>
+  onOpenModelMenu?: () => void
   onError: (message: string | null) => void
 }
 
@@ -372,6 +375,13 @@ function describeWorktreeStatus(status: AgentWorktreeStatus): string {
   return lines.join('\n')
 }
 
+type ConfirmPromptOptions = {
+  title: string
+  detail: string
+  confirmLabel: string
+  danger?: boolean
+}
+
 /**
  * Ask before deleting a task or turning confinement off. Returns whether to
  * proceed, and whether the user accepted discarding unapplied work.
@@ -379,7 +389,8 @@ function describeWorktreeStatus(status: AgentWorktreeStatus): string {
 async function confirmWorktreeCleanup(
   sessionId: string,
   action: 'delete' | 'unconfine',
-  title: string
+  title: string,
+  askConfirm: (options: ConfirmPromptOptions) => Promise<boolean>
 ): Promise<{ proceed: boolean; discardUnapplied: boolean }> {
   let status: AgentWorktreeStatus | null = null
   try {
@@ -388,23 +399,31 @@ async function confirmWorktreeCleanup(
     status = null
   }
   if (!status) {
-    // Inspect failed or the worktree metadata disappeared. Still ask — never
-    // silently unconfine — and do not claim discard consent we cannot verify.
-    const fallback =
-      action === 'delete'
-        ? `Delete task “${title}”? This cannot be undone.`
-        : `Stop isolating task “${title}” and remove its worktree? The worktree could not be inspected; uncommitted unapplied changes will not be discarded automatically.`
-    return {
-      proceed: window.confirm(fallback),
-      discardUnapplied: false
-    }
+    const proceed = await askConfirm({
+      title:
+        action === 'delete'
+          ? `Delete task “${title}”?`
+          : `Stop isolating task “${title}”?`,
+      detail:
+        action === 'delete'
+          ? 'This cannot be undone.'
+          : 'The worktree could not be inspected; uncommitted unapplied changes will not be discarded automatically.',
+      confirmLabel: action === 'delete' ? 'Delete task' : 'Remove worktree',
+      danger: true
+    })
+    return { proceed, discardUnapplied: false }
   }
   const verb =
     action === 'delete'
       ? `Delete task “${title}” and remove its worktree?`
-      : `Stop isolating this task and remove its worktree?`
-  const message = `${verb}\n\n${describeWorktreeStatus(status)}`
-  if (!window.confirm(message)) {
+      : 'Stop isolating this task and remove its worktree?'
+  const proceed = await askConfirm({
+    title: verb,
+    detail: describeWorktreeStatus(status),
+    confirmLabel: action === 'delete' ? 'Delete task' : 'Remove worktree',
+    danger: true
+  })
+  if (!proceed) {
     return { proceed: false, discardUnapplied: false }
   }
   return {
@@ -678,56 +697,6 @@ function shortModelLabel(modelId: string): string {
   return leaf.length > 28 ? `${leaf.slice(0, 28)}…` : leaf
 }
 
-function focusableElements(root: HTMLElement): HTMLElement[] {
-  return Array.from(
-    root.querySelectorAll<HTMLElement>(
-      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-    )
-  ).filter((el) => !el.hasAttribute('disabled'))
-}
-
-function useDialogOverlay(
-  open: boolean,
-  onClose: () => void
-): React.RefObject<HTMLDivElement | null> {
-  const overlayRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    if (!open) return
-    const root = overlayRef.current
-    if (!root) return
-    const previouslyFocused = document.activeElement as HTMLElement | null
-    const items = focusableElements(root)
-    items[0]?.focus()
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        event.stopPropagation()
-        onClose()
-        return
-      }
-      if (event.key !== 'Tab') return
-      const current = focusableElements(root)
-      if (current.length === 0) return
-      const first = current[0]
-      const last = current[current.length - 1]
-      const active = document.activeElement
-      if (event.shiftKey && active === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-    root.addEventListener('keydown', onKeyDown)
-    return () => {
-      root.removeEventListener('keydown', onKeyDown)
-      previouslyFocused?.focus?.()
-    }
-  }, [open, onClose])
-  return overlayRef
-}
-
 export function AgentMode(props: Props): React.JSX.Element {
   const connectionProfile = useConnectionProfile()
   const lastAgentSessionKey = `${LAST_AGENT_SESSION_KEY}.${encodeURIComponent(connectionProfile.id)}`
@@ -767,10 +736,34 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [worktreeNotice, setWorktreeNotice] = useState<string | null>(null)
   const [deciding, setDeciding] = useState(false)
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
+  const [remoteWorkspaceOpen, setRemoteWorkspaceOpen] = useState(false)
+  const [remoteWorkspaceDraft, setRemoteWorkspaceDraft] = useState('')
+  const [confirmDialog, setConfirmDialog] = useState<
+    (ConfirmPromptOptions & { resolve: (confirmed: boolean) => void }) | null
+  >(null)
   const [artifact, setArtifact] = useState<{ id: string; text: string } | null>(null)
   const artifactOverlayRef = useDialogOverlay(Boolean(artifact), () => setArtifact(null))
   const promptEditorOverlayRef = useDialogOverlay(promptEditorOpen, () =>
     setPromptEditorOpen(false)
+  )
+  const closeConfirmDialog = useCallback((confirmed: boolean): void => {
+    setConfirmDialog((current) => {
+      current?.resolve(confirmed)
+      return null
+    })
+  }, [])
+  const confirmOverlayRef = useDialogOverlay(Boolean(confirmDialog), () =>
+    closeConfirmDialog(false)
+  )
+  const askConfirm = useCallback(
+    (options: ConfirmPromptOptions): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        setConfirmDialog((previous) => {
+          previous?.resolve(false)
+          return { ...options, resolve }
+        })
+      }),
+    []
   )
   const scrollAnchor = useRef<HTMLDivElement>(null)
   const sessionIdRef = useRef<string | null>(null)
@@ -1072,9 +1065,10 @@ export function AgentMode(props: Props): React.JSX.Element {
         return
       }
       case 'compacted': {
+        const kept = (event as { keptMessages?: AgentMessage[] }).keptMessages
         setMessages((current) => [
           { role: 'system', text: event.state.summary, timestamp: event.state.compactedAt },
-          ...current.slice(-6)
+          ...(Array.isArray(kept) ? kept : current.slice(-6))
         ])
         return
       }
@@ -1171,15 +1165,7 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }, [loadSession])
 
-  async function chooseWorkspace(): Promise<void> {
-    onError(null)
-    const selected = connectionProfile.kind === 'remote'
-      ? window.prompt(
-          `Workspace path on ${connectionProfile.name} (${connectionProfile.hostLabel})`,
-          workspace ?? ''
-        )?.trim() ?? null
-      : await window.brazier.selectWorkspace()
-    if (!selected) return
+  async function applySelectedWorkspace(selected: string): Promise<void> {
     try {
       const validated = await validateAgentWorkspace(selected)
       setWorkspaceIsGit(validated.git_repository)
@@ -1191,9 +1177,26 @@ export function AgentMode(props: Props): React.JSX.Element {
         // task exists, but an existing task never moves behind their back.
         setPendingConfineToWorktree(validated.git_repository)
       }
+      setRemoteWorkspaceOpen(false)
     } catch (cause) {
       onError(errorText(cause))
     }
+  }
+
+  async function chooseWorkspace(): Promise<void> {
+    onError(null)
+    if (connectionProfile.kind === 'remote') {
+      if (session) {
+        onError('A task keeps the workspace it started with. Start a new task to use another folder.')
+        return
+      }
+      setRemoteWorkspaceDraft(workspace ?? '')
+      setRemoteWorkspaceOpen(true)
+      return
+    }
+    const selected = await window.brazier.selectWorkspace()
+    if (!selected) return
+    await applySelectedWorkspace(selected)
   }
 
   async function toggleWorktreeConfinement(): Promise<void> {
@@ -1211,7 +1214,12 @@ export function AgentMode(props: Props): React.JSX.Element {
       return
     }
     if (worktree) {
-      const confirmation = await confirmWorktreeCleanup(session.id, 'unconfine', session.title)
+      const confirmation = await confirmWorktreeCleanup(
+        session.id,
+        'unconfine',
+        session.title,
+        askConfirm
+      )
       if (!confirmation.proceed) return
       try {
         const updated = await updateAgentSession(session.id, {
@@ -1296,6 +1304,45 @@ export function AgentMode(props: Props): React.JSX.Element {
     const text = input.trim()
     if (!text || running) return
     onError(null)
+
+    const lower = text.toLowerCase()
+    if (lower === '/compact') {
+      if (!session) {
+        onError('Start an agent task before compacting.')
+        return
+      }
+      await compact()
+      return
+    }
+    if (lower === '/new') {
+      await startNewTask()
+      return
+    }
+    if (lower === '/worktree') {
+      await toggleWorktreeConfinement()
+      return
+    }
+    if (lower === '/prompt') {
+      if (!workspaceSettingsPath) {
+        onError('Choose a workspace folder first to edit its system prompt.')
+        return
+      }
+      await openPromptEditor()
+      return
+    }
+    if (lower === '/ask') {
+      await changePermissionMode('ask')
+      return
+    }
+    if (lower === '/sandbox') {
+      await changePermissionMode('sandbox-only')
+      return
+    }
+    if (lower === '/skip') {
+      await changePermissionMode('skip-permissions')
+      return
+    }
+
     if (!props.modelId) {
       onError('Choose a model in the top bar before starting an agent task.')
       return
@@ -1346,13 +1393,19 @@ export function AgentMode(props: Props): React.JSX.Element {
         setSession(updated)
         active = updated
       }
-      setMessages((current) => [
-        ...current,
-        { role: 'user', text, timestamp: new Date().toISOString() }
-      ])
+      const submittedAt = new Date().toISOString()
       if (props.onSubmitTurn) {
-        await props.onSubmitTurn(text)
+        const correlationId = await props.onSubmitTurn(text)
+        if (!correlationId) return
+        setMessages((current) => [
+          ...current,
+          { role: 'user', text, timestamp: submittedAt }
+        ])
       } else {
+        setMessages((current) => [
+          ...current,
+          { role: 'user', text, timestamp: submittedAt }
+        ])
         setRunning(true)
         await window.brazier.agent.run(active.id, { text })
       }
@@ -1360,10 +1413,6 @@ export function AgentMode(props: Props): React.JSX.Element {
       setRunning(false)
       onError(errorText(cause))
     } finally {
-      // The daemon owns the record of what happened; re-read it so the timeline
-      // matches the ledger even if an event was missed. Keep live timestamps so
-      // sorting against committed messages (ISO) does not scramble after the
-      // SQLite clock format is swapped in.
       if (sessionIdRef.current) {
         void fetchAgentSession(sessionIdRef.current)
           .then((detail) => {
@@ -1389,8 +1438,11 @@ export function AgentMode(props: Props): React.JSX.Element {
     if (!session) return
     try {
       assertDaemonMutationAllowed({ method: 'POST' })
-      await props.onCancelTurn?.()
-      await window.brazier.agent.cancel(session.id)
+      if (props.onCancelTurn) {
+        await props.onCancelTurn()
+      } else {
+        await window.brazier.agent.cancel(session.id)
+      }
       setRunning(false)
       setApprovals([])
     } catch (cause) {
@@ -1543,9 +1595,14 @@ export function AgentMode(props: Props): React.JSX.Element {
     const title = entry?.title ?? 'this task'
     const hasWorktree = Boolean(entry?.runtime_metadata?.worktree)
     const confirmation = hasWorktree
-      ? await confirmWorktreeCleanup(id, 'delete', title)
+      ? await confirmWorktreeCleanup(id, 'delete', title, askConfirm)
       : {
-          proceed: window.confirm(`Delete task “${title}”? This cannot be undone.`),
+          proceed: await askConfirm({
+            title: `Delete task “${title}”?`,
+            detail: 'This cannot be undone.',
+            confirmLabel: 'Delete task',
+            danger: true
+          }),
           discardUnapplied: false
         }
     if (!confirmation.proceed) return
@@ -1616,7 +1673,8 @@ export function AgentMode(props: Props): React.JSX.Element {
         ? blockedReason
         : running
           ? 'The agent is working. Stop it to send something else…'
-          : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`
+          : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`,
+      suggestions: AGENT_SLASH_SUGGESTIONS
     })
     return () => onComposerChange?.(null)
   }, [onComposerChange, running, blockedReason, modelLabel, workspace])
@@ -1831,6 +1889,47 @@ export function AgentMode(props: Props): React.JSX.Element {
         ) : null}
       </header>
 
+      {remoteWorkspaceOpen && connectionProfile.kind === 'remote' && !session && (
+        <form
+          className="inline-path-form agent-inline-path-form"
+          onSubmit={(event) => {
+            event.preventDefault()
+            const trimmed = remoteWorkspaceDraft.trim()
+            if (!trimmed) return
+            void applySelectedWorkspace(trimmed)
+          }}
+        >
+          <input
+            autoFocus
+            value={remoteWorkspaceDraft}
+            onChange={(event) => setRemoteWorkspaceDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                event.stopPropagation()
+                setRemoteWorkspaceOpen(false)
+              }
+            }}
+            placeholder={`Workspace path on ${connectionProfile.name} (${connectionProfile.hostLabel})`}
+            aria-label={`Workspace path on ${connectionProfile.name}`}
+          />
+          <button
+            type="submit"
+            className="chip-button"
+            disabled={!remoteWorkspaceDraft.trim()}
+          >
+            Set workspace
+          </button>
+          <button
+            type="button"
+            className="chip-button subtle"
+            onClick={() => setRemoteWorkspaceOpen(false)}
+          >
+            Cancel
+          </button>
+        </form>
+      )}
+
       {sandbox &&
       !sandbox.isolated && (
         <div className="agent-warning">
@@ -1853,6 +1952,28 @@ export function AgentMode(props: Props): React.JSX.Element {
               It can read, edit, and run commands in{' '}
               {workspace ? shortPath(workspace) : 'a folder you choose'}.
             </p>
+            {(!props.modelId || !workspace) && (
+              <div className="mode-empty-actions">
+                {!props.modelId && props.onOpenModelMenu ? (
+                  <button
+                    type="button"
+                    className="primary-action"
+                    onClick={() => props.onOpenModelMenu?.()}
+                  >
+                    Choose a model
+                  </button>
+                ) : null}
+                {!workspace ? (
+                  <button
+                    type="button"
+                    className={props.modelId ? 'primary-action' : 'secondary-action'}
+                    onClick={() => void chooseWorkspace()}
+                  >
+                    <FolderOpen size={14} /> Choose workspace folder
+                  </button>
+                ) : null}
+              </div>
+            )}
             <div className="agent-suggestions">
               <button type="button" onClick={() => props.onSuggestPrompt?.('Summarize this repository: layout, build commands, and test entry points.')}>
                 Explore the repository
@@ -2069,6 +2190,50 @@ export function AgentMode(props: Props): React.JSX.Element {
                 </footer>
               </>
             )}
+          </div>
+        </div>
+      )}
+      {confirmDialog && (
+        <div
+          className="agent-artifact-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={confirmDialog.title}
+          ref={confirmOverlayRef}
+          onMouseDown={() => closeConfirmDialog(false)}
+        >
+          <div
+            className="agent-artifact confirm-dialog"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header>
+              <strong>{confirmDialog.title}</strong>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={() => closeConfirmDialog(false)}
+              >
+                <X size={15} />
+              </button>
+            </header>
+            <p className="confirm-dialog-detail">{confirmDialog.detail}</p>
+            <footer>
+              <button
+                type="button"
+                className="chip-button subtle"
+                onClick={() => closeConfirmDialog(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-autofocus
+                className={confirmDialog.danger ? 'chip-button danger' : 'chip-button'}
+                onClick={() => closeConfirmDialog(true)}
+              >
+                {confirmDialog.confirmLabel}
+              </button>
+            </footer>
           </div>
         </div>
       )}

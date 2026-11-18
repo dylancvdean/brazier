@@ -158,7 +158,8 @@ type Connection = {
 
 let computerSafetyOverlay: BrowserWindow | null = null
 let nativeComputerSafety: ChildProcessWithoutNullStreams | null = null
-let computerSafetyStarting: Promise<void> | null = null
+let computerSafetyStarting = false
+let computerSafetyPending: Promise<void> | null = null
 let computerSafetyGeneration = 0
 let computerOverlayWatchdog: NodeJS.Timeout | null = null
 let computerUseActive = false
@@ -395,7 +396,8 @@ function broadcastComputerEscape(reason?: string): void {
   if (reason) report(`[computer-safety] ${reason}`, 'warn')
   computerUseActive = false
   computerSafetyGeneration += 1
-  computerSafetyStarting = null
+  computerSafetyStarting = false
+  computerSafetyPending = null
   stopNativeComputerSafety()
   stopComputerOverlayWatchdog()
   computerSafetyOverlay?.hide()
@@ -511,7 +513,8 @@ async function setComputerUseActive(active: boolean): Promise<void> {
   if (!active) {
     computerUseActive = false
     computerSafetyGeneration += 1
-    computerSafetyStarting = null
+    computerSafetyStarting = false
+    computerSafetyPending = null
     stopNativeComputerSafety()
     stopComputerOverlayWatchdog()
     computerSafetyOverlay?.hide()
@@ -520,11 +523,12 @@ async function setComputerUseActive(active: boolean): Promise<void> {
     return
   }
   if (computerUseActive) return
-  if (computerSafetyStarting) return computerSafetyStarting
+  if (computerSafetyPending) return computerSafetyPending
 
   const generation = ++computerSafetyGeneration
+  computerSafetyStarting = true
   if (process.platform === 'linux') {
-    computerSafetyStarting = (async () => {
+    computerSafetyPending = (async () => {
       const child = await launchNativeComputerSafety(false)
       if (generation !== computerSafetyGeneration) {
         child.kill('SIGTERM')
@@ -535,49 +539,75 @@ async function setComputerUseActive(active: boolean): Promise<void> {
       computerUseActive = true
     })()
     try {
-      await computerSafetyStarting
+      await computerSafetyPending
     } finally {
-      if (generation === computerSafetyGeneration) computerSafetyStarting = null
+      if (generation === computerSafetyGeneration) {
+        computerSafetyStarting = false
+        computerSafetyPending = null
+      }
     }
     return
   }
 
-  const shortcutRegistered = globalShortcut.register('Escape', () => {
-    broadcastComputerEscape('Esc emergency stop pressed.')
-  })
-  if (!shortcutRegistered) {
-    throw new Error('Could not reserve Esc as the Computer Use emergency stop; desktop control was not started.')
-  }
-  if (!computerSafetyOverlay || computerSafetyOverlay.isDestroyed()) {
-    computerSafetyOverlay = new BrowserWindow({
-      width: 286, height: 48, frame: false, transparent: true,
-      resizable: false, movable: false, focusable: false, skipTaskbar: true,
-      alwaysOnTop: true,
-      webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true }
+  computerSafetyPending = (async () => {
+    const shortcutRegistered = globalShortcut.register('Escape', () => {
+      broadcastComputerEscape('Esc emergency stop pressed.')
     })
-    computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
-    computerSafetyOverlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-    computerSafetyOverlay.setIgnoreMouseEvents(true, { forward: true })
-    computerSafetyOverlay.on('ready-to-show', () => {
+    if (!shortcutRegistered) {
+      throw new Error('Could not reserve Esc as the Computer Use emergency stop; desktop control was not started.')
+    }
+    try {
+      if (!computerSafetyOverlay || computerSafetyOverlay.isDestroyed()) {
+        computerSafetyOverlay = new BrowserWindow({
+          width: 286, height: 48, frame: false, transparent: true,
+          resizable: false, movable: false, focusable: false, skipTaskbar: true,
+          alwaysOnTop: true,
+          webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true }
+        })
+        computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
+        computerSafetyOverlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+        computerSafetyOverlay.setIgnoreMouseEvents(true, { forward: true })
+        computerSafetyOverlay.on('ready-to-show', () => {
+          if (generation !== computerSafetyGeneration || !computerUseActive) return
+          positionComputerSafetyOverlay()
+          computerSafetyOverlay?.setAlwaysOnTop(true, 'screen-saver')
+          computerSafetyOverlay?.moveTop()
+        })
+        await computerSafetyOverlay.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html><style>body{margin:0;background:transparent;font:600 14px -apple-system,BlinkMacSystemFont,sans-serif;color:#fff}div{height:48px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:10px;border:1px solid #ff8c69;border-radius:12px;background:#31140eeF;box-shadow:0 8px 30px #0008}b{color:#ffad91}kbd{padding:3px 7px;border:1px solid #ffffff55;border-radius:5px;background:#0008;font:600 12px inherit}</style><div><b>Computer Use active</b><span><kbd>Esc</kbd> to stop</span></div>`))
+      }
+      if (generation !== computerSafetyGeneration) {
+        computerSafetyOverlay?.hide()
+        if (!computerUseActive) globalShortcut.unregister('Escape')
+        return
+      }
       positionComputerSafetyOverlay()
-      computerSafetyOverlay?.setAlwaysOnTop(true, 'screen-saver')
-      computerSafetyOverlay?.moveTop()
-    })
-    await computerSafetyOverlay.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html><style>body{margin:0;background:transparent;font:600 14px -apple-system,BlinkMacSystemFont,sans-serif;color:#fff}div{height:48px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:10px;border:1px solid #ff8c69;border-radius:12px;background:#31140eeF;box-shadow:0 8px 30px #0008}b{color:#ffad91}kbd{padding:3px 7px;border:1px solid #ffffff55;border-radius:5px;background:#0008;font:600 12px inherit}</style><div><b>Computer Use active</b><span><kbd>Esc</kbd> to stop</span></div>`))
+      computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
+      computerSafetyOverlay.showInactive()
+      computerSafetyOverlay.moveTop()
+      stopComputerOverlayWatchdog()
+      computerOverlayWatchdog = setInterval(() => {
+        if (!computerUseActive || !computerSafetyOverlay || computerSafetyOverlay.isDestroyed()) return
+        positionComputerSafetyOverlay()
+        computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
+        computerSafetyOverlay.showInactive()
+        computerSafetyOverlay.moveTop()
+      }, 250)
+      writeSafetyOverlayMarker()
+      computerUseActive = true
+    } catch (error) {
+      computerSafetyOverlay?.hide()
+      if (!computerUseActive) globalShortcut.unregister('Escape')
+      throw error
+    }
+  })()
+  try {
+    await computerSafetyPending
+  } finally {
+    if (generation === computerSafetyGeneration) {
+      computerSafetyStarting = false
+      computerSafetyPending = null
+    }
   }
-  positionComputerSafetyOverlay()
-  computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
-  computerSafetyOverlay.showInactive()
-  computerSafetyOverlay.moveTop()
-  computerOverlayWatchdog = setInterval(() => {
-    if (!computerUseActive || !computerSafetyOverlay || computerSafetyOverlay.isDestroyed()) return
-    positionComputerSafetyOverlay()
-    computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
-    computerSafetyOverlay.showInactive()
-    computerSafetyOverlay.moveTop()
-  }, 250)
-  writeSafetyOverlayMarker()
-  computerUseActive = true
 }
 
 export type ServerKey = {
@@ -864,10 +894,20 @@ function startDaemon(): Promise<Connection> {
     windowsHide: true
   })
   daemon = child
-  child.once('exit', () => {
+  child.once('exit', (code, signal) => {
     if (daemon === child) {
       daemon = undefined
       daemonProcessId = undefined
+      connectionProfiles?.invalidateLocalConnection()
+      if (
+        connectionProfiles &&
+        connectionProfiles.current().kind === 'local' &&
+        desktopLifecycle.canShowWindow
+      ) {
+        const status = signal ? `signal ${signal}` : `status ${code ?? 'unknown'}`
+        report(`[brazierd] local daemon exited unexpectedly (${status})`, 'warn')
+        broadcastConnectionChanged(connectionProfiles.current())
+      }
     }
   })
   child.stdin.end(
@@ -1468,6 +1508,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     }
   }
 
+  let ipcSwitchGeneration = 0
+
   handleTrusted('brazier:connection', async () => {
     const { api_key: _secret, ...connection } = await readyConnection()
     return connection
@@ -1478,8 +1520,9 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     'brazier:connection-profiles:upsert',
     async (_event, input: RemoteConnectionProfileInput) => {
       const activeId = profiles.current().id
+      const generation = input.id === activeId ? ++ipcSwitchGeneration : ipcSwitchGeneration
       const profile = await profiles.upsert(input)
-      if (profile.id === activeId) {
+      if (profile.id === activeId && generation === ipcSwitchGeneration) {
         const ready = await profiles.connection()
         await resetForConnectionSwitch(ready)
       }
@@ -1497,8 +1540,9 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     'brazier:connection-profiles:claim-pairing',
     async (_event, input: PairingClaimInput): Promise<ClaimedConnection> => {
       const activeId = profiles.current().id
+      const generation = input.id === activeId ? ++ipcSwitchGeneration : ipcSwitchGeneration
       const claimed = await profiles.claimAndSave(input)
-      if (claimed.profile.id === activeId) {
+      if (claimed.profile.id === activeId && generation === ipcSwitchGeneration) {
         await resetForConnectionSwitch(await profiles.connection())
       }
       return claimed
@@ -1506,15 +1550,21 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   )
   handleTrusted('brazier:connection-profiles:select', async (_event, id: string) => {
     const previousId = profiles.current().id
+    const generation = ++ipcSwitchGeneration
     const ready = await profiles.select(id)
-    if (ready.profile.id !== previousId) await resetForConnectionSwitch(ready)
-    else agent.setConnection({ address: ready.address, apiKey: ready.api_key })
+    if (generation === ipcSwitchGeneration) {
+      if (ready.profile.id !== previousId) await resetForConnectionSwitch(ready)
+      else agent.setConnection({ address: ready.address, apiKey: ready.api_key })
+    }
     return ready.profile
   })
   handleTrusted('brazier:connection-profiles:delete', async (_event, id: string) => {
     const wasActive = profiles.current().id === id
+    const generation = wasActive ? ++ipcSwitchGeneration : ipcSwitchGeneration
     const deleted = await profiles.delete(id)
-    if (deleted && wasActive) await resetForConnectionSwitch(await profiles.connection())
+    if (deleted && wasActive && generation === ipcSwitchGeneration) {
+      await resetForConnectionSwitch(await profiles.connection())
+    }
     return deleted
   })
   handleTrusted('brazier:computer:set-active', (_event, active: boolean) =>

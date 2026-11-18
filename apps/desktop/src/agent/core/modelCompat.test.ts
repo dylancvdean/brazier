@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest'
 
-import { inferModelCapabilities, parseLooseJson, repairToolArguments } from './modelCompat'
+import {
+  inferModelCapabilities,
+  parseLooseJson,
+  repairToolArguments,
+  resolveToolNameAlias,
+  validateToolArguments
+} from './modelCompat'
 import type { AgentToolDefinition } from './types'
 
-const fsWrite: Pick<AgentToolDefinition, 'inputSchema'> = {
+const fsWrite: Pick<AgentToolDefinition, 'name' | 'inputSchema'> = {
+  name: 'fs_write',
   inputSchema: {
     type: 'object',
     properties: {
@@ -15,7 +22,8 @@ const fsWrite: Pick<AgentToolDefinition, 'inputSchema'> = {
   }
 }
 
-const shellRun: Pick<AgentToolDefinition, 'inputSchema'> = {
+const shellRun: Pick<AgentToolDefinition, 'name' | 'inputSchema'> = {
+  name: 'shell_run',
   inputSchema: {
     type: 'object',
     properties: {
@@ -28,7 +36,8 @@ const shellRun: Pick<AgentToolDefinition, 'inputSchema'> = {
   }
 }
 
-const fsRead: Pick<AgentToolDefinition, 'inputSchema'> = {
+const fsRead: Pick<AgentToolDefinition, 'name' | 'inputSchema'> = {
+  name: 'fs_read',
   inputSchema: {
     type: 'object',
     properties: { path: { type: 'string' } },
@@ -90,15 +99,15 @@ describe('repairToolArguments', () => {
   })
 
   it('coerces primitives that arrived as strings', () => {
-    expect(repairToolArguments({ command: 'ls', timeout_ms: '5000', network: 'true' }, shellRun)).toEqual(
-      { command: 'ls', timeout_ms: 5000, network: true }
-    )
+    expect(
+      repairToolArguments({ command: 'ls', timeout_ms: '5000', network: 'true' }, shellRun)
+    ).toEqual({ command: 'ls', timeout_ms: 5000, network: true })
   })
 
   it('drops unknown keys when the schema forbids extras', () => {
-    expect(
-      repairToolArguments({ command: 'ls', hallucinated: 'nonsense' }, shellRun)
-    ).toEqual({ command: 'ls' })
+    expect(repairToolArguments({ command: 'ls', hallucinated: 'nonsense' }, shellRun)).toEqual({
+      command: 'ls'
+    })
   })
 
   it('keeps unknown keys when the schema allows extras', () => {
@@ -181,7 +190,135 @@ describe('inferModelCapabilities', () => {
     expect(capabilities.harmony).toBe(true)
   })
 
+  it('recognizes expanded local and remote strong families', () => {
+    for (const modelId of [
+      'gguf:google/gemma-4-27b-it.gguf',
+      'mlx:google/gemma4-12b',
+      'gguf:acme/bonsai-8b.gguf',
+      'gguf:meta/llama-3.3-70b.gguf',
+      'gguf:qwen/qwq-32b.gguf',
+      'gguf:mistral/ministral-8b.gguf',
+      'remote:anthropic/claude-sonnet-4',
+      'remote:openai/gpt-5',
+      'remote:openai/o3-mini',
+      'remote:google/gemini-2.5-pro',
+      'remote:xai/grok-3'
+    ]) {
+      const caps = inferModelCapabilities(modelId)
+      expect(caps.parallelToolCalling, modelId).toBe(true)
+      expect(caps.supportsReasoningStream, modelId).toBe(true)
+      expect(caps.maxToolsPerTurn, modelId).toBeUndefined()
+    }
+  })
+
   it('always assumes native tool calling, since the daemon validates anyway', () => {
     expect(inferModelCapabilities('anything').nativeToolCalling).toBe(true)
+  })
+})
+
+describe('resolveToolNameAlias', () => {
+  const enabled = [
+    'fs_patch',
+    'fs_read',
+    'fs_write',
+    'fs_list',
+    'shell_run',
+    'fs_search',
+    'fs_find'
+  ]
+
+  it('maps common hallucinated tool names onto canonical enabled tools', () => {
+    expect(resolveToolNameAlias('edit_file', enabled)).toBe('fs_patch')
+    expect(resolveToolNameAlias('fs_edit', enabled)).toBe('fs_patch')
+    expect(resolveToolNameAlias('str_replace_editor', enabled)).toBe('fs_patch')
+    expect(resolveToolNameAlias('replace_in_file', enabled)).toBe('fs_patch')
+    expect(resolveToolNameAlias('read_file', enabled)).toBe('fs_read')
+    expect(resolveToolNameAlias('view_file', enabled)).toBe('fs_read')
+    expect(resolveToolNameAlias('write_file', enabled)).toBe('fs_write')
+    expect(resolveToolNameAlias('create_file', enabled)).toBe('fs_write')
+    expect(resolveToolNameAlias('list_dir', enabled)).toBe('fs_list')
+    expect(resolveToolNameAlias('ls', enabled)).toBe('fs_list')
+    expect(resolveToolNameAlias('bash', enabled)).toBe('shell_run')
+    expect(resolveToolNameAlias('sh', enabled)).toBe('shell_run')
+    expect(resolveToolNameAlias('run_command', enabled)).toBe('shell_run')
+    expect(resolveToolNameAlias('execute_command', enabled)).toBe('shell_run')
+    expect(resolveToolNameAlias('grep', enabled)).toBe('fs_search')
+    expect(resolveToolNameAlias('ripgrep', enabled)).toBe('fs_search')
+    expect(resolveToolNameAlias('search_files', enabled)).toBe('fs_search')
+    expect(resolveToolNameAlias('find_files', enabled)).toBe('fs_find')
+    expect(resolveToolNameAlias('glob', enabled)).toBe('fs_find')
+  })
+
+  it('strips Harmony functions.* prefix when target is enabled', () => {
+    expect(resolveToolNameAlias('functions.fs_read', enabled)).toBe('fs_read')
+    expect(resolveToolNameAlias('functions.edit_file', enabled)).toBe('fs_patch')
+  })
+
+  it('never rewrites a tool name that is already directly enabled', () => {
+    expect(resolveToolNameAlias('bash', ['bash', 'shell_run'])).toBe('bash')
+    expect(resolveToolNameAlias('fs_read', enabled)).toBe('fs_read')
+  })
+
+  it('leaves rawName untouched when canonical target is not enabled', () => {
+    expect(resolveToolNameAlias('edit_file', ['fs_read'])).toBe('edit_file')
+    expect(resolveToolNameAlias('functions.shell_run', ['fs_read'])).toBe('functions.shell_run')
+  })
+})
+
+describe('validateToolArguments', () => {
+  it('returns null for valid repaired arguments', () => {
+    expect(validateToolArguments({ path: 'a.txt', content: 'ok' }, fsWrite)).toBeNull()
+    expect(
+      validateToolArguments({ command: 'ls', timeout_ms: 1000, network: false }, shellRun)
+    ).toBeNull()
+  })
+
+  it('reports missing required fields clearly', () => {
+    const err = validateToolArguments({ path: 'a.txt' }, fsWrite)
+    expect(err).toContain('Missing required argument `content`')
+    expect(err).toContain('fs_write')
+  })
+
+  it('checks integer, number, boolean, array, and object types', () => {
+    const complexTool: Pick<AgentToolDefinition, 'name' | 'inputSchema'> = {
+      name: 'complex',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          count: { type: 'integer' },
+          ratio: { type: 'number' },
+          flag: { type: 'boolean' },
+          items: { type: 'array' },
+          meta: { type: 'object' }
+        },
+        required: []
+      }
+    }
+    expect(validateToolArguments({ count: 1.5 }, complexTool)).toContain('expected integer')
+    expect(validateToolArguments({ ratio: 'nope' }, complexTool)).toContain('expected number')
+    expect(validateToolArguments({ flag: 'maybe' }, complexTool)).toContain('expected boolean')
+    expect(validateToolArguments({ items: null }, complexTool)).toContain('expected array')
+    expect(validateToolArguments({ meta: ['not-obj'] }, complexTool)).toContain('expected object')
+    expect(
+      validateToolArguments(
+        { count: 3, ratio: 0.5, flag: true, items: [1], meta: { ok: true } },
+        complexTool
+      )
+    ).toBeNull()
+  })
+
+  it('rejects out-of-range enum values', () => {
+    const enumTool: Pick<AgentToolDefinition, 'name' | 'inputSchema'> = {
+      name: 'mode_tool',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          mode: { type: 'string', enum: ['ask', 'sandbox-only'] }
+        },
+        required: ['mode']
+      }
+    }
+    const err = validateToolArguments({ mode: 'yolo' }, enumTool)
+    expect(err).toContain('expected one of ["ask", "sandbox-only"]')
   })
 })

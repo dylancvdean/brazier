@@ -1122,4 +1122,76 @@ describe('lifecycle seams', () => {
     await coordinator.cancelCurrentResponse()
     expect(responder.cancelled).toContain(correlationId)
   })
+
+  it('guards attach() with attachGeneration so a slower earlier attach cannot clobber a newer conversation', async () => {
+    const { coordinator, agent } = harness()
+    let releaseFirstAttach!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirstAttach = resolve
+    })
+    ;(agent as { attachSession: (conversationId: string) => Promise<string | null> }).attachSession =
+      async (conversationId: string) => {
+        if (conversationId === 'conv-stale') {
+          await firstGate
+          return 'agent-stale'
+        }
+        return 'agent-fresh'
+      }
+
+    const first = coordinator.attach('conv-stale', {
+      messages: [
+        {
+          id: 'm-stale',
+          conversationId: 'conv-stale',
+          role: 'user',
+          source: 'user_text',
+          content: 'stale message',
+          createdAt: '2026-08-01T00:00:00Z',
+          status: 'final'
+        }
+      ],
+      summary: 'stale summary'
+    })
+    const second = coordinator.attach('conv-fresh', {
+      messages: [
+        {
+          id: 'm-fresh',
+          conversationId: 'conv-fresh',
+          role: 'user',
+          source: 'user_text',
+          content: 'fresh message',
+          createdAt: '2026-08-01T00:00:01Z',
+          status: 'final'
+        }
+      ],
+      summary: 'fresh summary'
+    })
+
+    await second
+    expect(coordinator.snapshot().conversationId).toBe('conv-fresh')
+    expect(coordinator.snapshot().summary).toBe('fresh summary')
+
+    releaseFirstAttach()
+    await first
+    expect(coordinator.snapshot().conversationId).toBe('conv-fresh')
+    expect(coordinator.snapshot().summary).toBe('fresh summary')
+    expect(coordinator.snapshot().messages.map((m) => m.id)).toEqual(['m-fresh'])
+  })
+
+  it('resets hearing and partialTranscript during renewVoiceSession so hearing never sticks on transcribing', async () => {
+    const { coordinator, voice, clock } = await live({ voiceSessionMaxDurationMs: 1_000 })
+    voice.emit({ type: 'userSpeechStarted', utteranceId: 'utt-mid' })
+    voice.emit({ type: 'userTranscriptPartial', utteranceId: 'utt-mid', text: 'half-finished' })
+    voice.emit({ type: 'transcriptionStarted', utteranceId: 'utt-mid' })
+
+    expect(coordinator.snapshot().hearing).toBe('transcribing')
+    expect(coordinator.snapshot().partialTranscript).toBe('half-finished')
+
+    clock.advance(1_500)
+    await coordinator.tick()
+
+    expect(coordinator.snapshot().voiceStatus).toBe('live')
+    expect(coordinator.snapshot().hearing).toBe('idle')
+    expect(coordinator.snapshot().partialTranscript).toBe('')
+  })
 })

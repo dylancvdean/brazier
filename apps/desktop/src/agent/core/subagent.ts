@@ -2,7 +2,9 @@
  * Helpers for sandboxed `spawn_subagent` children.
  *
  * Depth is capped at 1 (children cannot spawn). Concurrency comes from the
- * parent model's TextProfile (`max_subagents`, default 2).
+ * parent model's TextProfile (`max_subagents`, default 2) and the backend's
+ * slot model (`independent_backend`, `parallel_llama_slots`, or
+ * `serialized_shared_slot`).
  */
 
 export const SPAWN_SUBAGENT_TOOL = 'spawn_subagent'
@@ -17,12 +19,77 @@ export type SubagentProfileDefaults = {
   parallel_subagents?: boolean | null
 }
 
+export type SubagentExecutionMode =
+  | {
+      kind: 'independent_backend'
+      concurrency: number
+      slot: 0
+    }
+  | {
+      kind: 'parallel_llama_slots'
+      parallelSlots: number
+      childSlotCount: number
+      concurrency: number
+    }
+  | {
+      kind: 'serialized_shared_slot'
+      concurrency: 1
+      slot: 0
+    }
+
 /** llama-server `--parallel` slot count implied by a text profile. */
 export function llamaParallelSlots(
   profile: SubagentProfileDefaults | null | undefined
 ): number {
   if (!profile?.parallel_subagents) return 1
   return 1 + resolveMaxSubagents(profile)
+}
+
+/**
+ * Determine how child subagent sessions share or allocate inference slots:
+ * - `independent_backend`: `remote:` / `vllm:` or distinct child model -> up to `maxSubagents` concurrently on slot 0.
+ * - `parallel_llama_slots`: same-model `gguf:`/`gguf-ext:` with `parallelSlots > 1` -> batched over child slots `1..parallelSlots-1`.
+ * - `serialized_shared_slot`: single-slot local model (`gguf:` or `mlx:`) -> sequential one-at-a-time on idle parent slot 0.
+ */
+export function resolveSubagentExecutionMode(options: {
+  parentModelId: string
+  targetModelId: string
+  parallelSlots: number
+  maxSubagents?: number
+}): SubagentExecutionMode {
+  const parent = options.parentModelId.trim()
+  const target = options.targetModelId.trim()
+  const targetLower = target.toLowerCase()
+  const maxSubagents = Math.max(1, Math.trunc(options.maxSubagents ?? DEFAULT_MAX_SUBAGENTS))
+
+  if (
+    targetLower.startsWith('remote:') ||
+    targetLower.startsWith('vllm:') ||
+    target !== parent
+  ) {
+    return {
+      kind: 'independent_backend',
+      concurrency: maxSubagents,
+      slot: 0
+    }
+  }
+
+  const isLlama = targetLower.startsWith('gguf:') || targetLower.startsWith('gguf-ext:')
+  if (isLlama && options.parallelSlots > 1) {
+    const childSlotCount = options.parallelSlots - 1
+    return {
+      kind: 'parallel_llama_slots',
+      parallelSlots: options.parallelSlots,
+      childSlotCount,
+      concurrency: Math.max(1, Math.min(maxSubagents, childSlotCount))
+    }
+  }
+
+  return {
+    kind: 'serialized_shared_slot',
+    concurrency: 1,
+    slot: 0
+  }
 }
 
 export type SubagentRuntimeMetadata = {

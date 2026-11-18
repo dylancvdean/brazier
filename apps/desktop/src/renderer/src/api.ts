@@ -1,6 +1,11 @@
 import type { ContentPart, Conversation, HubModel, Memory, Message, Role } from './types'
 import { daemonFetch } from './daemonAvailability'
-import { connection, rememberConnectionProfile, request } from './daemonClient'
+import {
+  connection,
+  rememberConnectionProfile,
+  rememberedConnectionProfileId,
+  request
+} from './daemonClient'
 import { readSseData } from './sse'
 
 export { invalidateConnectionCache, rememberedConnectionProfileId } from './daemonClient'
@@ -2208,6 +2213,11 @@ export type TextProfile = {
    * per-agent context to every slot.
    */
   parallel_subagents?: boolean | null
+  /** Per-model capability overrides (`null`/unset inherits model defaults). */
+  capability_vision?: boolean | null
+  capability_reasoning?: boolean | null
+  capability_tools?: boolean | null
+  capability_computer_use?: boolean | null
   loras?: LoraBinding[]
   extra_args?: string[]
 }
@@ -2318,8 +2328,66 @@ export type DraftOptions = {
   options: DraftOption[]
 }
 
-export function fetchModelSettings(): Promise<ModelSettingsResponse> {
-  return request('/api/v1/models/settings')
+type CapabilityOverridePatch = Pick<
+  TextProfile,
+  'capability_vision' | 'capability_reasoning' | 'capability_tools' | 'capability_computer_use'
+>
+
+const CAPABILITY_OVERRIDES_KEY = 'brazier.capabilityOverrides.v1'
+
+function capabilityOverridesStorageKey(): string {
+  return `${CAPABILITY_OVERRIDES_KEY}.${encodeURIComponent(rememberedConnectionProfileId())}`
+}
+
+function readLocalCapabilityOverrides(): Record<string, CapabilityOverridePatch> {
+  try {
+    const raw = localStorage.getItem(capabilityOverridesStorageKey())
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as unknown
+    return parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, CapabilityOverridePatch>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeLocalCapabilityOverrides(overrides: Record<string, CapabilityOverridePatch>): void {
+  try {
+    localStorage.setItem(capabilityOverridesStorageKey(), JSON.stringify(overrides))
+  } catch {
+    // Best-effort client fallback when a remote daemon predates capability fields.
+  }
+}
+
+function mergeStoredCapabilityOverrides(
+  models: Record<string, ModelProfile>
+): Record<string, ModelProfile> {
+  const local = readLocalCapabilityOverrides()
+  if (Object.keys(local).length === 0) return models
+  const next: Record<string, ModelProfile> = { ...models }
+  for (const [modelId, patch] of Object.entries(local)) {
+    const existing = next[modelId]
+    if (existing && existing.kind !== 'text') continue
+    const base: ModelProfile = existing ?? { kind: 'text' }
+    next[modelId] = {
+      ...base,
+      capability_vision: base.capability_vision ?? patch.capability_vision ?? undefined,
+      capability_reasoning: base.capability_reasoning ?? patch.capability_reasoning ?? undefined,
+      capability_tools: base.capability_tools ?? patch.capability_tools ?? undefined,
+      capability_computer_use:
+        base.capability_computer_use ?? patch.capability_computer_use ?? undefined
+    }
+  }
+  return next
+}
+
+export async function fetchModelSettings(): Promise<ModelSettingsResponse> {
+  const response = await request<ModelSettingsResponse>('/api/v1/models/settings')
+  return {
+    ...response,
+    models: mergeStoredCapabilityOverrides(response.models)
+  }
 }
 
 /** Draft models a model can attach for speculative decoding. */
@@ -2332,21 +2400,45 @@ export async function saveModelProfile(
   modelId: string,
   profile: ModelProfile
 ): Promise<Record<string, ModelProfile>> {
+  if (profile.kind === 'text') {
+    const current = readLocalCapabilityOverrides()
+    const patch: CapabilityOverridePatch = {
+      ...(profile.capability_vision != null ? { capability_vision: profile.capability_vision } : {}),
+      ...(profile.capability_reasoning != null
+        ? { capability_reasoning: profile.capability_reasoning }
+        : {}),
+      ...(profile.capability_tools != null ? { capability_tools: profile.capability_tools } : {}),
+      ...(profile.capability_computer_use != null
+        ? { capability_computer_use: profile.capability_computer_use }
+        : {})
+    }
+    if (Object.keys(patch).length > 0) {
+      current[modelId] = patch
+    } else {
+      delete current[modelId]
+    }
+    writeLocalCapabilityOverrides(current)
+  }
   const response = await request<{ models: Record<string, ModelProfile> }>(
     '/api/v1/models/settings',
     { method: 'PUT', body: JSON.stringify({ model_id: modelId, profile }) }
   )
-  return response.models
+  return mergeStoredCapabilityOverrides(response.models)
 }
 
 export async function resetModelProfile(
   modelId: string
 ): Promise<Record<string, ModelProfile>> {
+  const current = readLocalCapabilityOverrides()
+  if (modelId in current) {
+    delete current[modelId]
+    writeLocalCapabilityOverrides(current)
+  }
   const response = await request<{ models: Record<string, ModelProfile> }>(
     '/api/v1/models/settings/reset',
     { method: 'POST', body: JSON.stringify({ model_id: modelId }) }
   )
-  return response.models
+  return mergeStoredCapabilityOverrides(response.models)
 }
 
 export type ModelChatTemplateResponse = {

@@ -72,7 +72,7 @@ export function parseFaraOutput(text: string): FaraParseResult {
   return { thought, actions, raw_tool_calls }
 }
 
-function extractThought(text: string): string | null {
+export function extractThought(text: string): string | null {
   for (const [open, close] of [
     ['<think>', '</think>'],
     ['<thought>', '</thought>'],
@@ -87,15 +87,17 @@ function extractThought(text: string): string | null {
     if (thought) return thought
   }
   // Text before the first tool call is treated as thought.
-  const idx = text.indexOf('<tool_call>')
-  if (idx >= 0) {
-    const prefix = text.slice(0, idx).trim()
-    if (prefix) return prefix
+  for (const marker of ['<tool_call>', '<function=']) {
+    const idx = text.indexOf(marker)
+    if (idx >= 0) {
+      const prefix = text.slice(0, idx).replace(/<\/?think>/gi, '').trim()
+      if (prefix) return prefix
+    }
   }
   return null
 }
 
-function extractToolCallBlocks(text: string): string[] {
+export function extractToolCallBlocks(text: string): string[] {
   const blocks: string[] = []
   let rest = text
   while (true) {
@@ -103,14 +105,22 @@ function extractToolCallBlocks(text: string): string[] {
     if (start < 0) break
     const after = start + '<tool_call>'.length
     const end = rest.indexOf('</tool_call>', after)
-    if (end < 0) break
+    if (end < 0) {
+      const tail = rest.slice(after).trim()
+      if (tail.startsWith('{') && tail.endsWith('}')) blocks.push(tail)
+      break
+    }
     blocks.push(rest.slice(after, end).trim())
     rest = rest.slice(end + '</tool_call>'.length)
   }
   return blocks
 }
 
-function parseToolCallJson(block: string): ComputerAction {
+export function parseToolCallJson(block: string): ComputerAction {
+  if (block.includes('<function=')) {
+    const parsedFn = parseXmlFunctionCall(block)
+    if (parsedFn) return actionFromArgs(parsedFn)
+  }
   const value = JSON.parse(block) as Record<string, unknown>
   let args: unknown
   if (value.name === 'computer_use') {
@@ -119,7 +129,15 @@ function parseToolCallJson(block: string): ComputerAction {
     args = value
   } else if (value.function && typeof value.function === 'object') {
     const fn = value.function as Record<string, unknown>
-    args = fn.arguments ?? null
+    args = fn.arguments ?? fn.parameters ?? null
+  } else if (typeof value.name === 'string' && (value.arguments != null || value.parameters != null)) {
+    const inner = value.arguments ?? value.parameters
+    const decoded = typeof inner === 'string' ? (JSON.parse(inner) as Record<string, unknown>) : inner
+    if (decoded && typeof decoded === 'object') {
+      args = { action: value.name, ...(decoded as Record<string, unknown>) }
+    } else {
+      args = { action: value.name }
+    }
   } else {
     args = value
   }
@@ -131,8 +149,51 @@ function parseToolCallJson(block: string): ComputerAction {
   return actionFromArgs((args && typeof args === 'object' ? args : {}) as Record<string, unknown>)
 }
 
+/** Parse `<function=computer_use><parameter=key>value</parameter>...</function>`. */
+export function parseXmlFunctionCall(text: string): Record<string, unknown> | null {
+  const fnMatch = /<function=([a-zA-Z0-9_.-]+)>([\s\S]*?)(?:<\/function>|$)/.exec(text)
+  if (!fnMatch) return null
+  const fnName = fnMatch[1]
+  const body = fnMatch[2]
+  const params: Record<string, unknown> = {}
+  const paramRegex = /<parameter=([a-zA-Z0-9_.-]+)>([\s\S]*?)<\/parameter>/g
+  let match: RegExpExecArray | null
+  while ((match = paramRegex.exec(body)) !== null) {
+    const key = match[1]
+    const rawVal = match[2].trim()
+    params[key] = coerceParameterValue(rawVal)
+  }
+  if (fnName !== 'computer_use' && params.action === undefined && params.type === undefined) {
+    params.action = fnName
+  }
+  return params
+}
+
+function coerceParameterValue(raw: string): unknown {
+  if (
+    (raw.startsWith('[') && raw.endsWith(']')) ||
+    (raw.startsWith('{') && raw.endsWith('}')) ||
+    raw === 'true' ||
+    raw === 'false' ||
+    raw === 'null' ||
+    /^-?\d+(?:\.\d+)?$/.test(raw)
+  ) {
+    try {
+      return JSON.parse(raw)
+    } catch {
+      return raw
+    }
+  }
+  return raw
+}
+
 function asNumber(value: unknown, fallback = 0): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return fallback
 }
 
 function coord(
@@ -140,7 +201,7 @@ function coord(
   keyX: string,
   keyY: string
 ): [number, number] {
-  const arr = args.coordinate
+  const arr = args.coordinate ?? args.point ?? args.position
   if (Array.isArray(arr) && arr.length >= 2) {
     return [asNumber(arr[0]), asNumber(arr[1])]
   }
@@ -150,7 +211,26 @@ function coord(
   ]
 }
 
-function actionFromArgs(args: Record<string, unknown>): ComputerAction {
+export function splitKeyChord(raw: string): string[] {
+  const trimmed = raw.trim()
+  if (!trimmed) return []
+  if (trimmed === '+' || trimmed.length === 1) return [trimmed]
+  if (trimmed.includes('+')) {
+    return trimmed
+      .split('+')
+      .map((part) => part.trim())
+      .filter(Boolean)
+  }
+  if (/\s+/.test(trimmed)) {
+    return trimmed
+      .split(/\s+/)
+      .map((part) => part.trim())
+      .filter(Boolean)
+  }
+  return [trimmed]
+}
+
+export function actionFromArgs(args: Record<string, unknown>): ComputerAction {
   const action =
     (typeof args.action === 'string' && args.action) ||
     (typeof args.type === 'string' && args.type) ||
@@ -160,15 +240,18 @@ function actionFromArgs(args: Record<string, unknown>): ComputerAction {
     case 'screenshot':
       return { type: 'screenshot' }
     case 'left_click':
-    case 'click': {
+    case 'click':
+    case 'left_single': {
       const [x, y] = coord(args, 'x', 'y')
       return { type: 'left_click', x, y }
     }
-    case 'right_click': {
+    case 'right_click':
+    case 'right_single': {
       const [x, y] = coord(args, 'x', 'y')
       return { type: 'right_click', x, y }
     }
-    case 'double_click': {
+    case 'double_click':
+    case 'left_double': {
       const [x, y] = coord(args, 'x', 'y')
       return { type: 'double_click', x, y }
     }
@@ -176,7 +259,9 @@ function actionFromArgs(args: Record<string, unknown>): ComputerAction {
       const [x, y] = coord(args, 'x', 'y')
       return { type: 'triple_click', x, y }
     }
-    case 'mouse_move': {
+    case 'mouse_move':
+    case 'move':
+    case 'hover': {
       const [x, y] = coord(args, 'x', 'y')
       return { type: 'mouse_move', x, y }
     }
@@ -193,7 +278,7 @@ function actionFromArgs(args: Record<string, unknown>): ComputerAction {
       } else {
         ;[start_x, start_y] = coord(args, 'start_x', 'start_y')
       }
-      const endArr = args.coordinate
+      const endArr = args.coordinate ?? args.end_coordinate
       if (Array.isArray(endArr) && endArr.length >= 2) {
         end_x = asNumber(endArr[0])
         end_y = asNumber(endArr[1])
@@ -204,26 +289,58 @@ function actionFromArgs(args: Record<string, unknown>): ComputerAction {
     }
     case 'type':
     case 'type_text':
-      return { type: 'type', text: typeof args.text === 'string' ? args.text : '' }
+      return {
+        type: 'type',
+        text:
+          typeof args.text === 'string'
+            ? args.text
+            : typeof args.content === 'string'
+              ? args.content
+              : ''
+      }
     case 'keypress':
     case 'key':
     case 'hotkey': {
       let keys: string[] = []
       if (Array.isArray(args.keys)) {
-        keys = args.keys.filter((k): k is string => typeof k === 'string')
+        keys = args.keys
+          .filter((k): k is string => typeof k === 'string')
+          .flatMap((k) => (k.length > 1 && k.includes('+') ? splitKeyChord(k) : [k]))
+      } else if (typeof args.keys === 'string') {
+        keys = splitKeyChord(args.keys)
       } else if (typeof args.key === 'string') {
-        keys = [args.key]
+        keys = splitKeyChord(args.key)
       }
       return { type: 'keypress', keys }
     }
     case 'scroll': {
       const [x, y] = coord(args, 'x', 'y')
+      let defaultDeltaX = 0
+      let defaultDeltaY = -400
+      if (typeof args.direction === 'string') {
+        switch (args.direction.toLowerCase()) {
+          case 'down':
+            defaultDeltaY = 400
+            break
+          case 'up':
+            defaultDeltaY = -400
+            break
+          case 'right':
+            defaultDeltaX = 400
+            defaultDeltaY = 0
+            break
+          case 'left':
+            defaultDeltaX = -400
+            defaultDeltaY = 0
+            break
+        }
+      }
       return {
         type: 'scroll',
         x,
         y,
-        delta_x: asNumber(args.delta_x ?? args.scroll_x),
-        delta_y: asNumber(args.delta_y ?? args.scroll_y ?? args.pixels, -400)
+        delta_x: asNumber(args.delta_x ?? args.scroll_x, defaultDeltaX),
+        delta_y: asNumber(args.delta_y ?? args.scroll_y ?? args.pixels, defaultDeltaY)
       }
     }
     case 'wait':
@@ -234,6 +351,7 @@ function actionFromArgs(args: Record<string, unknown>): ComputerAction {
     case 'visit_url':
     case 'goto':
     case 'navigate':
+    case 'open_url':
       return {
         type: 'visit_url',
         url: typeof args.url === 'string' ? args.url : 'about:blank'
@@ -262,6 +380,7 @@ function actionFromArgs(args: Record<string, unknown>): ComputerAction {
       }
     case 'ask_user_question':
     case 'ask_user':
+    case 'call_user':
       return {
         type: 'ask_user',
         question:
@@ -269,11 +388,14 @@ function actionFromArgs(args: Record<string, unknown>): ComputerAction {
             ? args.question
             : typeof args.text === 'string'
               ? args.text
-              : 'Need your input.'
+              : typeof args.content === 'string'
+                ? args.content
+                : 'Need your input.'
       }
     case 'terminate':
     case 'done':
     case 'finish':
+    case 'finished':
       return {
         type: 'terminate',
         response:
@@ -281,7 +403,9 @@ function actionFromArgs(args: Record<string, unknown>): ComputerAction {
             ? args.response
             : typeof args.text === 'string'
               ? args.text
-              : null
+              : typeof args.content === 'string'
+                ? args.content
+                : null
       }
     default:
       throw new Error(`unsupported Fara action: ${action}`)

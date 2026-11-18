@@ -9,7 +9,18 @@ import { pathToFileURL } from 'node:url'
 const root = path.resolve(import.meta.dirname, '..')
 const corpusPath = path.join(root, 'qualification', 'voice', 'synthetic-noise-corpus.json')
 const desktopRequire = createRequire(path.join(root, 'apps', 'desktop', 'package.json'))
-const modelPath = desktopRequire.resolve('@ricky0123/vad-web/dist/silero_vad_v5.onnx')
+const modelPath = path.join(
+  root,
+  'apps',
+  'desktop',
+  'src',
+  'renderer',
+  'src',
+  'assets',
+  'silero_vad_v5.onnx'
+)
+const EXPECTED_MODEL_SHA256 =
+  '2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f'
 
 function percentile(values, fraction) {
   if (values.length === 0) return 0
@@ -61,6 +72,10 @@ async function main() {
   const corpusBytes = await readFile(corpusPath)
   const corpus = JSON.parse(corpusBytes)
   const modelBytes = new Uint8Array(await readFile(modelPath))
+  const modelSha256 = createHash('sha256').update(modelBytes).digest('hex')
+  if (modelSha256 !== EXPECTED_MODEL_SHA256) {
+    throw new Error(`Unexpected Silero VAD v5 SHA-256: ${modelSha256}`)
+  }
   ort.env.wasm.numThreads = 1
   ort.env.wasm.proxy = false
   const session = await ort.InferenceSession.create(modelBytes, {
@@ -128,7 +143,8 @@ async function main() {
     schema_version: 1,
     kind: 'voice-corpus',
     corpus_sha256: createHash('sha256').update(corpusBytes).digest('hex'),
-    model: '@ricky0123/vad-web silero_vad_v5.onnx',
+    model: 'silero_vad_v5.onnx',
+    model_sha256: modelSha256,
     metrics: {
       false_sustained_interruptions_per_noise_minute:
         falseSustained / Math.max(noiseSeconds / 60, Number.EPSILON),

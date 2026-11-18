@@ -187,6 +187,8 @@ export class SessionCoordinator {
   private draining: Promise<void> | null = null
   /** Invalidates an in-flight startSession/renew when End is pressed. */
   private voiceGeneration = 0
+  /** Invalidates stale in-flight conversation attach() calls on rapid thread switches. */
+  private attachGeneration = 0
   /** The old PersonaPlex stream is silent while an authoritative turn runs. */
   private personaPlexHeldForRouting = false
   /** Explicit Stop speaking, until the next sustained user utterance. */
@@ -264,21 +266,26 @@ export class SessionCoordinator {
     conversationId: string,
     options: { messages?: ConversationMessage[]; summary?: string } = {}
   ): Promise<void> {
+    const generation = ++this.attachGeneration
     const same = this.conversationId === conversationId
     if (same) {
       if (options.messages) this.messages = options.messages
       if (options.summary !== undefined) this.summary = options.summary
       await this.deps.agent.attachSession(conversationId)
+      if (generation !== this.attachGeneration) return
       this.publish()
       return
     }
+    this.conversationId = conversationId
     await this.abandonActiveWork()
+    if (generation !== this.attachGeneration) return
     this.conversationId = conversationId
     this.messages = options.messages ?? []
     this.summary = options.summary ?? ''
     this.voiceModelText = ''
     this.hearing = 'idle'
     await this.deps.agent.attachSession(conversationId)
+    if (generation !== this.attachGeneration) return
     if (this.voiceStatus === 'live' || this.voiceStatus === 'starting') {
       this.track(this.requestRenewal('conversation changed'), 'Refreshing voice for the new conversation')
     }
@@ -1507,6 +1514,8 @@ export class SessionCoordinator {
     this.updateSummary()
     try {
       this.voiceSessionId = null
+      this.hearing = 'idle'
+      this.partialTranscript = ''
       await this.deps.voice.endSession()
       if (generation !== this.voiceGeneration) return
       const handle = await this.deps.voice.startSession(this.buildContext())
@@ -1517,6 +1526,8 @@ export class SessionCoordinator {
       this.voiceSessionId = handle.id
       this.voiceStartedAt = handle.startedAt
       this.voiceStatus = 'live'
+      this.hearing = 'idle'
+      this.partialTranscript = ''
       this.applyAudioOwnership()
       this.metricsState.voiceSessionRenewals += 1
       this.emit('VOICE_SESSION_RENEWED', this.activeCorrelationId ?? 'none', 'coordinator', {
