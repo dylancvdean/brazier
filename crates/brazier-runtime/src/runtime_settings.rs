@@ -389,14 +389,11 @@ impl RuntimeSettings {
             // Chat and agent share one model in the app. When the agent model
             // is the same as the chat model this is a no-op; a different agent
             // model must not hijack the chat default.
-            "agent" => {
+            "agent"
                 if self.default_chat_model.is_none()
-                    || self.default_chat_model.as_deref() == Some(model_id)
-                {
-                    set(&mut self.default_chat_model, model_id)
-                } else {
-                    false
-                }
+                    || self.default_chat_model.as_deref() == Some(model_id) =>
+            {
+                set(&mut self.default_chat_model, model_id)
             }
             _ => false,
         }

@@ -1793,10 +1793,7 @@ where
         let mut reader = tokio::io::BufReader::new(reader);
         let mut chunk = [0_u8; 8192];
         let mut pending = Vec::new();
-        loop {
-            let Ok(read) = reader.read(&mut chunk).await else {
-                break;
-            };
+        while let Ok(read) = reader.read(&mut chunk).await {
             if read == 0 {
                 break;
             }

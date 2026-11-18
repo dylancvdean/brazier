@@ -18,3 +18,5 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+  # Only emits version-scheme advice; no build artifacts are required.
+  protobufjs: false
