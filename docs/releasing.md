@@ -43,7 +43,8 @@ tag:
 - `MACOS_CERTIFICATE_PASSWORD`;
 - `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` for notarization.
 - `WINDOWS_CERTIFICATE_P12` and `WINDOWS_CERTIFICATE_PASSWORD` for the Windows
-  Authenticode signature.
+  Authenticode signature. When both are unset, the workflow skips experimental
+  Windows packaging. Configuring either enables the job and requires both.
 
 GitHub's OIDC token signs each executable distribution, the macOS ZIP, the SPDX
 SBOM, and `SHA512SUMS` with Sigstore; no Linux private signing key is stored in

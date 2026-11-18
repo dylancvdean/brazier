@@ -123,6 +123,9 @@ import {
   listMemories,
   saveMemoryPreference,
   updateMemory,
+  type ConnectionProfile,
+  listConnectionProfiles,
+  selectConnectionProfile,
   type DreamingMode,
   type MemoryPreference
 } from '../api'
@@ -2249,6 +2252,23 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
 
 function LibrarySection(props: SectionProps): React.JSX.Element {
   const connectionProfile = useConnectionProfile()
+  const [hosts, setHosts] = useState<ConnectionProfile[]>([])
+  const [switchingHost, setSwitchingHost] = useState(false)
+  useEffect(() => {
+    void listConnectionProfiles().then(setHosts).catch((cause) => props.onError(errorText(cause)))
+  }, [props.onError])
+
+  async function switchHost(id: string): Promise<void> {
+    setSwitchingHost(true)
+    props.onError(null)
+    try {
+      await selectConnectionProfile(id)
+    } catch (cause) {
+      props.onError(errorText(cause))
+      setSwitchingHost(false)
+    }
+  }
+
   const [confirming, setConfirming] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [copiedModelId, setCopiedModelId] = useState<string | null>(null)
@@ -2322,6 +2342,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
         ...props.settings,
         extra_model_library_paths: nextPaths
       })
+      setDaemonPathDraft((draft) => draft.trim() === path ? '' : draft)
       props.onSettingsSaved(saved)
       setConfiguredPaths(saved.extra_model_library_paths ?? [])
       setSuggestions((current) =>
@@ -2381,14 +2402,232 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
     }
   }
 
+  const modelGroups = new Map<string | null, LocalModel[]>([[null, []]])
+  for (const model of visibleModels) {
+    const server = isRemoteLibraryModel(model)
+      ? model.id.match(/^remote:([^/]+)\//)?.[1] ?? 'remote server'
+      : null
+    const group = modelGroups.get(server)
+    if (group) group.push(model)
+    else modelGroups.set(server, [model])
+  }
+  if (!modelGroups.get(null)?.length) modelGroups.delete(null)
+
+  function renderModel(model: LocalModel): React.JSX.Element {
+    const key = modelLibraryKey(model.id)
+    const parts = key.split('/')
+    const name = parts.at(-1) ?? key
+    const repo = parts.slice(0, -1).join('/')
+    const caps = model.capabilities
+    const isSelected = model.id === props.selectedModel
+    const isExternal = isExternalModel(model)
+    const isRemote = isRemoteLibraryModel(model)
+    const folderKey = modelFolderKey(model)
+    const engine = modelEngine(model)
+    const runtimeNotice = runtimeNoticeForModel(
+      model.id,
+      props.models,
+      runtimes,
+      props.modelBindings
+    )
+    const compatibleRuntimes = runtimesForModel(model, runtimes)
+    const boundRuntimeId = props.modelBindings?.[model.id] ?? ''
+    const localPath =
+      connectionProfile.kind === 'local' && !isRemote
+        ? resolveLocalModelPath(
+            model.id,
+            props.dataDir,
+            props.settings?.extra_model_library_paths ?? []
+          )
+        : null
+    return (
+      <article className="library-card" key={model.id}>
+        <div className="library-card-info">
+          <strong>
+            {name}
+            <span className={engineBadgeClass(engine)}>{engineLabel(engine)}</span>
+            {isExternal && model.library_label && (
+              <span className="installed-badge">{model.library_label}</span>
+            )}
+          </strong>
+          <span>
+            {repo}
+            {model.size_bytes != null ? ` · ${formatBytes(model.size_bytes)}` : ''}
+            {isExternal ? ' · external folder' : ''}
+          </span>
+          {compatibleRuntimes.length > 0 && props.onSetModelBinding && (
+            <label className="library-runtime-picker">
+              <span>Runtime</span>
+              <select
+                value={boundRuntimeId}
+                onChange={(event) => {
+                  const value = event.target.value
+                  props.onSetModelBinding?.(model.id, value || null)
+                }}
+              >
+                <option value="">Default (active global runtime)</option>
+                {compatibleRuntimes.map((runtime) => (
+                  <option key={runtime.id} value={runtime.id}>
+                    {runtime.label}
+                    {runtime.active ? ' · active' : ''}
+                    {runtime.repository ? ` · fork` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {runtimeNotice && (
+            <span className="library-runtime-note">{runtimeNotice}</span>
+          )}
+          <div className="library-caps">
+            {engine === 'whisper.cpp' && <span>batch ASR</span>}
+            {engine === 'streaming-asr' && <span>streaming ASR</span>}
+            {caps?.audio_input === 'native' && <span>native audio</span>}
+            {caps?.input_modalities.includes('image') && <span>vision</span>}
+            {caps?.input_modalities.includes('audio') &&
+              engine !== 'whisper.cpp' &&
+              engine !== 'streaming-asr' &&
+              caps?.audio_input !== 'native' && <span>audio</span>}
+            {caps?.tools && <span>tools</span>}
+            {caps?.reasoning && <span>reasoning</span>}
+          </div>
+          {isGgufLibraryModel(model) && (
+            <LibraryProjectors
+              model={model}
+              sharedWith={folderKey ? (folderCounts.get(folderKey) ?? 1) : 1}
+              allowLocalFile={connectionProfile.kind !== 'remote'}
+              onError={props.onError}
+              onChanged={props.refreshModels}
+            />
+          )}
+          {confirming === model.id && isExternal && (
+            <span className="library-projector-row">
+              This deletes the file from disk. Brazier did not download it.
+            </span>
+          )}
+        </div>
+        <div className="library-card-actions">
+          <button
+            type="button"
+            className="chip-button subtle"
+            title={`Copy model ID (${model.id})`}
+            onClick={() => void copyModelId(model.id)}
+          >
+            {copiedModelId === model.id ? <Check size={13} /> : <Copy size={13} />}
+            {copiedModelId === model.id ? 'Copied' : 'Copy ID'}
+          </button>
+          {localPath && (
+            <button
+              type="button"
+              className="chip-button subtle"
+              title={`Show in folder (${localPath})`}
+              onClick={() => void window.brazier.revealFile(localPath)}
+            >
+              <FolderOpen size={13} />
+              Show in folder
+            </button>
+          )}
+          <button
+            className="chip-button subtle"
+            title="Advanced settings for this model"
+            onClick={() => props.onConfigureModel?.(model.id)}
+          >
+            <SlidersHorizontal size={13} />
+            {(props.profileCounts?.[model.id] ?? 0) > 0 ? 'Configured' : 'Configure'}
+          </button>
+          {engine === 'whisper.cpp' || engine === 'streaming-asr' ? (
+            <button
+              className="chip-button selected"
+              disabled
+              type="button"
+              title={
+                engine === 'streaming-asr'
+                  ? 'Used for streaming transcription via /v1/audio/transcriptions'
+                  : 'Used automatically for audio/video transcription when active'
+              }
+            >
+              <Check size={13} /> ASR model
+            </button>
+          ) : (
+            <button
+              className={isSelected ? 'chip-button selected' : 'chip-button'}
+              disabled={isSelected}
+              onClick={() => props.onSelectModel(model.id)}
+            >
+              {isSelected ? (
+                <>
+                  <Check size={13} /> In use
+                </>
+              ) : (
+                'Use'
+              )}
+            </button>
+          )}
+          {!isRemote &&
+            (confirming === model.id ? (
+              <>
+                <button
+                  type="button"
+                  className="chip-button subtle"
+                  disabled={deleting === model.id}
+                  onClick={() => setConfirming(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="chip-button danger"
+                  disabled={deleting === model.id}
+                  onClick={() => void removeModel(model.id)}
+                >
+                  {deleting === model.id ? (
+                    <LoaderCircle className="spin" size={13} />
+                  ) : (
+                    <Trash2 size={13} />
+                  )}
+                  Confirm delete
+                </button>
+              </>
+            ) : (
+              <button
+                className="chip-button subtle danger-hover"
+                title={
+                  isExternal
+                    ? 'Delete this file from disk. Brazier did not download it.'
+                    : model.id.startsWith('gguf:')
+                      ? 'Delete this model from disk (all shards and an orphaned mmproj)'
+                      : model.id.startsWith('mlx:') ||
+                          model.id.startsWith('mlx-vlm:') ||
+                          model.id.startsWith('streaming-asr:') ||
+                          model.id.startsWith('sdcpp-') ||
+                          model.id.startsWith('personaplex:')
+                        ? 'Delete this model directory from disk'
+                        : 'Delete this model from disk'
+                }
+                onClick={() => setConfirming(model.id)}
+              >
+                <Trash2 size={13} />
+              </button>
+            ))}
+        </div>
+      </article>
+    )
+  }
+
   return (
     <section>
       <header className="manage-heading">
         <h2>Model library</h2>
+        {hosts.length > 1 && (
+          <label>
+            Active connection{' '}
+            <select value={connectionProfile.id} disabled={switchingHost} onChange={(event) => void switchHost(event.target.value)}>
+              {hosts.map((host) => <option key={host.id} value={host.id}>{host.kind === 'local' ? 'This computer' : host.name}</option>)}
+            </select>
+          </label>
+        )}
         <p>
-          Models downloaded by Brazier and models found in folders you add. Sort by size when
-          you need disk space — deleting a model removes its files, including ones Brazier did
-          not download. Remote servers are left alone.
+          Deleting a model removes its files from {connectionProfile.kind === 'local' ? 'this computer' : connectionProfile.hostLabel},
+          including files in folders you added.
         </p>
       </header>
 
@@ -2396,7 +2635,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
         <div className="section-label">Other model folders · {daemonPathLabel(connectionProfile)}</div>
         <p className="model-help">
           Add directories that already contain GGUF or MLX weights. Brazier scans them alongside
-          your local downloads.
+          downloads on {connectionProfile.hostLabel}.
         </p>
         {configuredPaths.length > 0 && (
           <div className="library-path-list">
@@ -2412,19 +2651,11 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
             <Search size={15} />
             Browse common folders…
           </button>
-          <button
-            className="secondary-action"
-            disabled={connectionProfile.kind === 'remote'}
-            title={
-              connectionProfile.kind === 'remote'
-                ? `The native picker can only browse this computer, not ${connectionProfile.name}.`
-                : 'Choose a folder on this computer'
-            }
-            onClick={() => void chooseCustomFolder()}
-          >
-            <FolderOpen size={15} />
-            Choose folder…
-          </button>
+          {connectionProfile.kind === 'local' && (
+            <button className="secondary-action" onClick={() => void chooseCustomFolder()}>
+              <FolderOpen size={15} /> Choose folder…
+            </button>
+          )}
         </div>
         {connectionProfile.kind === 'remote' ? (
           <form
@@ -2433,7 +2664,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
               event.preventDefault()
               const path = daemonPathDraft.trim()
               if (!path) return
-              void addLibraryPath(path).then(() => setDaemonPathDraft(''))
+              void addLibraryPath(path)
             }}
           >
             <label className="setting-row">
@@ -2445,7 +2676,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
                 onChange={(event) => setDaemonPathDraft(event.target.value)}
               />
             </label>
-            <button className="secondary-action" type="submit" disabled={!daemonPathDraft.trim()}>
+            <button className="secondary-action" type="submit" disabled={!props.settings || addingPath != null || !daemonPathDraft.trim()}>
               Add daemon path
             </button>
           </form>
@@ -2461,7 +2692,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
             {!loadingSuggestions && visibleSuggestions.length === 0 && (
               <div className="manage-placeholder">
                 <Box size={16} />
-                No common model folders were found. Use Choose folder to pick one manually.
+                No common model folders were found. {connectionProfile.kind === 'remote' ? 'Enter a folder path above.' : 'Choose a folder manually.'}
               </div>
             )}
             <div className="runtime-offer-list">
@@ -2567,205 +2798,12 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
         </div>
       )}
       <div className="library-list">
-        {visibleModels.map((model) => {
-          const key = modelLibraryKey(model.id)
-          const parts = key.split('/')
-          const name = parts.at(-1) ?? key
-          const repo = parts.slice(0, -1).join('/')
-          const caps = model.capabilities
-          const isSelected = model.id === props.selectedModel
-          const isExternal = isExternalModel(model)
-          const isRemote = isRemoteLibraryModel(model)
-          const folderKey = modelFolderKey(model)
-          const engine = modelEngine(model)
-          const runtimeNotice = runtimeNoticeForModel(
-            model.id,
-            props.models,
-            runtimes,
-            props.modelBindings
-          )
-          const compatibleRuntimes = runtimesForModel(model, runtimes)
-          const boundRuntimeId = props.modelBindings?.[model.id] ?? ''
-          const localPath =
-            connectionProfile.kind === 'local' && !isRemote
-              ? resolveLocalModelPath(
-                  model.id,
-                  props.dataDir,
-                  props.settings?.extra_model_library_paths ?? []
-                )
-              : null
-          return (
-            <article className="library-card" key={model.id}>
-              <div className="library-card-info">
-                <strong>
-                  {name}
-                  <span className={engineBadgeClass(engine)}>{engineLabel(engine)}</span>
-                  {isExternal && model.library_label && (
-                    <span className="installed-badge">{model.library_label}</span>
-                  )}
-                </strong>
-                <span>
-                  {repo}
-                  {model.size_bytes != null ? ` · ${formatBytes(model.size_bytes)}` : ''}
-                  {isExternal ? ' · external folder' : ''}
-                </span>
-                {compatibleRuntimes.length > 0 && props.onSetModelBinding && (
-                  <label className="library-runtime-picker">
-                    <span>Runtime</span>
-                    <select
-                      value={boundRuntimeId}
-                      onChange={(event) => {
-                        const value = event.target.value
-                        props.onSetModelBinding?.(model.id, value || null)
-                      }}
-                    >
-                      <option value="">Default (active global runtime)</option>
-                      {compatibleRuntimes.map((runtime) => (
-                        <option key={runtime.id} value={runtime.id}>
-                          {runtime.label}
-                          {runtime.active ? ' · active' : ''}
-                          {runtime.repository ? ` · fork` : ''}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                {runtimeNotice && (
-                  <span className="library-runtime-note">{runtimeNotice}</span>
-                )}
-                <div className="library-caps">
-                  {engine === 'whisper.cpp' && <span>batch ASR</span>}
-                  {engine === 'streaming-asr' && <span>streaming ASR</span>}
-                  {caps?.audio_input === 'native' && <span>native audio</span>}
-                  {caps?.input_modalities.includes('image') && <span>vision</span>}
-                  {caps?.input_modalities.includes('audio') &&
-                    engine !== 'whisper.cpp' &&
-                    engine !== 'streaming-asr' &&
-                    caps?.audio_input !== 'native' && <span>audio</span>}
-                  {caps?.tools && <span>tools</span>}
-                  {caps?.reasoning && <span>reasoning</span>}
-                </div>
-                {isGgufLibraryModel(model) && (
-                  <LibraryProjectors
-                    model={model}
-                    sharedWith={folderKey ? (folderCounts.get(folderKey) ?? 1) : 1}
-                    allowLocalFile={connectionProfile.kind !== 'remote'}
-                    onError={props.onError}
-                    onChanged={props.refreshModels}
-                  />
-                )}
-                {confirming === model.id && isExternal && (
-                  <span className="library-projector-row">
-                    This deletes the file from disk. Brazier did not download it.
-                  </span>
-                )}
-              </div>
-              <div className="library-card-actions">
-                <button
-                  type="button"
-                  className="chip-button subtle"
-                  title={`Copy model ID (${model.id})`}
-                  onClick={() => void copyModelId(model.id)}
-                >
-                  {copiedModelId === model.id ? <Check size={13} /> : <Copy size={13} />}
-                  {copiedModelId === model.id ? 'Copied' : 'Copy ID'}
-                </button>
-                {localPath && (
-                  <button
-                    type="button"
-                    className="chip-button subtle"
-                    title={`Show in folder (${localPath})`}
-                    onClick={() => void window.brazier.revealFile(localPath)}
-                  >
-                    <FolderOpen size={13} />
-                    Show in folder
-                  </button>
-                )}
-                <button
-                  className="chip-button subtle"
-                  title="Advanced settings for this model"
-                  onClick={() => props.onConfigureModel?.(model.id)}
-                >
-                  <SlidersHorizontal size={13} />
-                  {(props.profileCounts?.[model.id] ?? 0) > 0 ? 'Configured' : 'Configure'}
-                </button>
-                {engine === 'whisper.cpp' || engine === 'streaming-asr' ? (
-                  <button
-                    className="chip-button selected"
-                    disabled
-                    type="button"
-                    title={
-                      engine === 'streaming-asr'
-                        ? 'Used for streaming transcription via /v1/audio/transcriptions'
-                        : 'Used automatically for audio/video transcription when active'
-                    }
-                  >
-                    <Check size={13} /> ASR model
-                  </button>
-                ) : (
-                  <button
-                    className={isSelected ? 'chip-button selected' : 'chip-button'}
-                    disabled={isSelected}
-                    onClick={() => props.onSelectModel(model.id)}
-                  >
-                    {isSelected ? (
-                      <>
-                        <Check size={13} /> In use
-                      </>
-                    ) : (
-                      'Use'
-                    )}
-                  </button>
-                )}
-                {!isRemote &&
-                  (confirming === model.id ? (
-                    <>
-                      <button
-                        type="button"
-                        className="chip-button subtle"
-                        disabled={deleting === model.id}
-                        onClick={() => setConfirming(null)}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        className="chip-button danger"
-                        disabled={deleting === model.id}
-                        onClick={() => void removeModel(model.id)}
-                      >
-                        {deleting === model.id ? (
-                          <LoaderCircle className="spin" size={13} />
-                        ) : (
-                          <Trash2 size={13} />
-                        )}
-                        Confirm delete
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      className="chip-button subtle danger-hover"
-                      title={
-                        isExternal
-                          ? 'Delete this file from disk. Brazier did not download it.'
-                          : model.id.startsWith('gguf:')
-                            ? 'Delete this model from disk (all shards and an orphaned mmproj)'
-                            : model.id.startsWith('mlx:') ||
-                                model.id.startsWith('mlx-vlm:') ||
-                                model.id.startsWith('streaming-asr:') ||
-                                model.id.startsWith('sdcpp-') ||
-                                model.id.startsWith('personaplex:')
-                              ? 'Delete this model directory from disk'
-                              : 'Delete this model from disk'
-                      }
-                      onClick={() => setConfirming(model.id)}
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  ))}
-              </div>
-            </article>
-          )
-        })}
+        {Array.from(modelGroups, ([server, models]) => (
+          <section className="library-list" key={server ?? ''}>
+            <h3>{server === null ? connectionProfile.hostLabel : `Served by ${models[0]?.library_label || server}`}</h3>
+            {models.map(renderModel)}
+          </section>
+        ))}
       </div>
     </section>
   )

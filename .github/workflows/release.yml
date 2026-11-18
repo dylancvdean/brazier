@@ -26,6 +26,7 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       commit: ${{ steps.release.outputs.commit }}
+      build_windows: ${{ steps.release.outputs.build_windows }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,6 +38,7 @@ jobs:
       - id: release
         env:
           REQUESTED_TAG: ${{ inputs.tag }}
+          BUILD_WINDOWS: ${{ secrets.WINDOWS_CERTIFICATE_P12 != '' || secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
         run: |
           tag="${REQUESTED_TAG:-${GITHUB_REF_NAME}}"
           case "$tag" in v*) ;; *) echo "Release tags must start with v" >&2; exit 1;; esac
@@ -48,6 +50,7 @@ jobs:
             echo "Tag/version mismatch: tag=$tag, root=$expected_root, desktop=$expected_desktop" >&2
             exit 1
           fi
+          echo "build_windows=$BUILD_WINDOWS" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -222,6 +225,7 @@ jobs:
 
   windows:
     needs: [validate, verify]
+    if: needs.validate.outputs.build_windows == 'true'
     runs-on: windows-latest
     # Windows packaging is experimental. Preserve a failed job for diagnosis,
     # but allow the signed macOS/Linux release to proceed.

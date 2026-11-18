@@ -1,5 +1,5 @@
 import { Check, Copy, KeyRound, LoaderCircle, RefreshCw, Trash2 } from 'lucide-react'
-import { type FormEvent, useCallback, useEffect, useState } from 'react'
+import { type ClipboardEvent, type FormEvent, useCallback, useEffect, useState } from 'react'
 import {
   cancelDaemonPairing,
   claimConnectionProfile,
@@ -238,10 +238,24 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
 
   async function copyPairing(): Promise<void> {
     if (!createdPairing) return
-    await window.brazier.copyText(
-      `Pairing id: ${createdPairing.pairing.id}\nPairing code: ${createdPairing.code}`
+    const address = current?.kind === 'remote' ? `Daemon URL: ${current.baseUrl}\n` : ''
+    try {
+      await window.brazier.copyText(
+        `${address}Pairing id: ${createdPairing.pairing.id}\nPairing code: ${createdPairing.code}`
+      )
+      setPairingCopied(true)
+    } catch (cause) {
+      setTrustError(errorText(cause))
+    }
+  }
+
+  function pastePairing(event: ClipboardEvent<HTMLInputElement>): void {
+    const match = /^(?:Daemon URL: ([^\s]+)\r?\n)?Pairing id: (\S+)\r?\nPairing code: (\S+)$/i.exec(
+      event.clipboardData.getData('text/plain').trim()
     )
-    setPairingCopied(true)
+    if (!match) return
+    event.preventDefault()
+    setDraft({ ...draft, baseUrl: match[1] ?? draft.baseUrl, pairingId: match[2], pairingCode: match[3] })
   }
 
   async function cancelPairing(id: string): Promise<void> {
@@ -380,13 +394,18 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
         </div>
       )}
 
-      <form className="settings-group" onSubmit={(event) => void save(event)}>
+      <form className="settings-group" onSubmit={(event) => {
+        if (draft.pairingId || draft.pairingCode) {
+          event.preventDefault()
+          void claimPairing()
+        } else void save(event)
+      }}>
         <div className="section-label">{draft.id ? 'Edit remote connection' : 'Add remote connection'}</div>
         <div className="settings-grid">
           <label>
-            <span>Name</span>
+            <span>Name (optional)</span>
             <input
-              required
+              maxLength={80}
               value={draft.name}
               placeholder="Lab GPU"
               onChange={(event) => setDraft({ ...draft, name: event.target.value })}
@@ -396,6 +415,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
             <span>Daemon URL</span>
             <input
               required
+              onPaste={pastePairing}
               value={draft.baseUrl}
               placeholder="https://labbox.example:7614"
               onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })}
@@ -436,8 +456,10 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
           <label>
             <span>Pairing id</span>
             <input
+              onPaste={pastePairing}
+              required={Boolean(draft.pairingCode)}
               value={draft.pairingId}
-              placeholder="Paste the one-time pairing id"
+              placeholder="Paste pairing details or ID"
               autoComplete="off"
               onChange={(event) => setDraft({ ...draft, pairingId: event.target.value })}
             />
@@ -446,6 +468,8 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
             <span>Pairing code</span>
             <input
               type="password"
+              onPaste={pastePairing}
+              required={Boolean(draft.pairingId)}
               value={draft.pairingCode}
               placeholder="Paste the one-time pairing code"
               autoComplete="off"
@@ -461,30 +485,15 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
           <button
             type="button"
             className="secondary-action"
-            disabled={!draft.name.trim() || !draft.baseUrl.trim() || working != null}
+            disabled={!draft.baseUrl.trim() || working != null}
             onClick={() => void test(draft)}
           >
             {working === 'test:draft' ? <LoaderCircle className="spin" size={14} /> : null}
             Test
           </button>
           <button className="primary-action" type="submit" disabled={working != null}>
-            {working === 'save' ? <LoaderCircle className="spin" size={14} /> : null}
-            {draft.id ? 'Save changes' : 'Add connection'}
-          </button>
-          <button
-            type="button"
-            className="primary-action"
-            disabled={
-              !draft.name.trim() ||
-              !draft.baseUrl.trim() ||
-              !draft.pairingId.trim() ||
-              !draft.pairingCode.trim() ||
-              working != null
-            }
-            onClick={() => void claimPairing()}
-          >
-            {working === 'claim:draft' ? <LoaderCircle className="spin" size={14} /> : null}
-            Pair and add
+            {working === 'save' || working === 'claim:draft' ? <LoaderCircle className="spin" size={14} /> : null}
+            {draft.pairingId || draft.pairingCode ? 'Pair and save' : draft.id ? 'Save changes' : 'Add connection'}
           </button>
           {draft.id ? (
             <button type="button" className="chip-button subtle" onClick={() => setDraft(EMPTY_REMOTE_PROFILE)}>

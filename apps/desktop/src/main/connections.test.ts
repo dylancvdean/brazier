@@ -430,6 +430,11 @@ describe('connection profile lifecycle and switching', () => {
     expect(view).toMatchObject({ kind: 'remote', hasApiKey: true })
     expect(view).not.toHaveProperty('apiKey')
 
+    const moved = { id: remote.id, name: 'Lab', baseUrl: 'https://new.example' }
+    await expect(manager.test(moved)).rejects.toThrow('new daemon address')
+    await expect(manager.upsert(moved)).rejects.toThrow('new daemon address')
+    expect(calls).toHaveLength(0)
+
     await manager.test({ id: remote.id, name: 'Lab', baseUrl: 'https://lab.example' })
     expect(calls.at(-1)?.authorization).toBe('Bearer renderer-must-not-see-this')
 
@@ -450,11 +455,11 @@ describe('connection profile lifecycle and switching', () => {
     })
 
     const ready = await manager.test({
-      name: 'Candidate',
+      name: '',
       baseUrl: 'https://candidate.example/',
       apiKey: 'candidate-key'
     })
-    expect(ready.profile).toMatchObject({ name: 'Candidate', kind: 'remote' })
+    expect(ready.profile).toMatchObject({ name: 'candidate.example', kind: 'remote' })
     expect(calls[0]).toEqual({
       url: 'https://candidate.example/api/v1/daemon/info',
       authorization: 'Bearer candidate-key'

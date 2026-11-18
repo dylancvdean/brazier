@@ -263,7 +263,9 @@ function normalizeRemoteProfile(
     : normalizeDaemonBaseUrl(input.baseUrl)
   return {
     id,
-    name: cleanName(input.name),
+    name: cleanName(typeof input.name === 'string' && !input.name.trim()
+      ? new URL(baseUrl).host.slice(0, 80)
+      : input.name),
     kind: 'remote',
     baseUrl,
     apiKey
@@ -1000,6 +1002,10 @@ export class ConnectionProfileManager {
   /** An omitted credential preserves an existing secret; explicit null clears it. */
   private normalizeRemoteInput(input: RemoteConnectionProfileInput): RemoteConnectionProfile {
     const existing = input.id ? this.store.get(input.id) : undefined
+    if (existing?.kind === 'remote' && existing.apiKey && input.apiKey === undefined &&
+        normalizeDaemonBaseUrl(input.baseUrl) !== existing.baseUrl) {
+      throw new Error('Enter a key for the new daemon address, remove the saved key, or pair again.')
+    }
     return normalizeRemoteProfile(
       input.apiKey === undefined && existing?.kind === 'remote'
         ? { ...input, apiKey: existing.apiKey }

@@ -54,6 +54,12 @@ The daemon stores only SHA-256 digests of high-entropy client credentials. A
 credential is returned once when pairing is claimed. Revocation is effective
 on the next request and does not require a daemon restart.
 
+## Connect a desktop
+
+1. On a desktop connected to the host with management access, open **Manage → Connections**, choose the client scopes, create a pairing, and copy its details.
+2. On the receiving desktop, open **Manage → Connections** and paste the details into the pairing ID field. If the host created the pairing from its Local profile, enter its reachable daemon URL. A remote profile includes its configured URL in the copied details.
+3. Choose **Pair and save**, then **Use**. The model library groups files on the active host separately from models served by each configured inference server. Changing the active connection in the library switches the entire desktop.
+
 ## Pairing API
 
 An authenticated management client starts a short-lived pairing request:
