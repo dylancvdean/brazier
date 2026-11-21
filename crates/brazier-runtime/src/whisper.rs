@@ -1,5 +1,6 @@
 //! whisper.cpp discovery, managed installation, activation, and transcription.
 
+use crate::runtime_settings::ReleaseChannel;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -177,17 +178,29 @@ pub struct ReleaseAsset {
 pub fn cached_release_tag(
     client: &reqwest::Client,
     force: bool,
+    channel: ReleaseChannel,
 ) -> crate::github_releases::CachedRelease {
-    crate::github_releases::cached_or_refresh(client, GITHUB_API, USER_AGENT, force)
+    crate::github_releases::cached_or_refresh(
+        client,
+        &channel.release_url(GITHUB_API),
+        USER_AGENT,
+        force,
+    )
 }
 
 pub async fn resolve_managed_release(
     client: &reqwest::Client,
     target: RuntimeTarget,
+    channel: ReleaseChannel,
 ) -> anyhow::Result<(String, ReleaseAsset)> {
     let platform = platform_asset_tag()
         .context("managed whisper.cpp CLI binaries are not available for this platform (macOS uses source builds)")?;
-    let release = crate::github_releases::latest_release(client, GITHUB_API, USER_AGENT).await?;
+    let release = crate::github_releases::latest_release(
+        client,
+        &channel.release_url(GITHUB_API),
+        USER_AGENT,
+    )
+    .await?;
     let names: Vec<String> = release.asset_names().map(str::to_owned).collect();
     let selected =
         select_release_asset_for_target(names.iter().map(String::as_str), platform, target)
@@ -209,13 +222,14 @@ pub async fn install_managed_binary_with_progress(
     client: &reqwest::Client,
     data_dir: &Path,
     target: RuntimeTarget,
+    channel: ReleaseChannel,
     mut progress: ProgressCallback,
 ) -> anyhow::Result<PathBuf> {
     progress(ProgressEvent::phase(
         "resolve",
         "Looking up the latest whisper.cpp release",
     ));
-    let (tag, asset) = resolve_managed_release(client, target).await?;
+    let (tag, asset) = resolve_managed_release(client, target, channel).await?;
     tracing::info!(%tag, asset = %asset.name, "downloading managed whisper.cpp binary");
     progress(ProgressEvent::phase(
         "download",
@@ -393,6 +407,7 @@ pub async fn ensure_binary_with_progress(
     client: &reqwest::Client,
     data_dir: &Path,
     target: RuntimeTarget,
+    channel: ReleaseChannel,
     force: bool,
     mut progress: ProgressCallback,
 ) -> anyhow::Result<PathBuf> {
@@ -414,7 +429,8 @@ pub async fn ensure_binary_with_progress(
             managed_prebuilts_supported(),
             "managed whisper.cpp binaries are not available on this platform; build from source instead"
         );
-        return install_managed_binary_with_progress(client, data_dir, target, progress).await;
+        return install_managed_binary_with_progress(client, data_dir, target, channel, progress)
+            .await;
     }
     let managed = managed_binary_path_for_target(data_dir, target);
     progress(ProgressEvent::phase(
@@ -446,7 +462,7 @@ pub async fn ensure_binary_with_progress(
         managed_prebuilts_supported(),
         "no whisper-cli found and managed binaries are not available on this platform; build whisper.cpp from source"
     );
-    install_managed_binary_with_progress(client, data_dir, target, progress).await
+    install_managed_binary_with_progress(client, data_dir, target, channel, progress).await
 }
 
 pub fn whisper_root(data_dir: &Path) -> PathBuf {

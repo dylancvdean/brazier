@@ -50,6 +50,8 @@ pub struct ReleaseAsset {
 pub struct Release {
     pub tag_name: String,
     #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
     pub assets: Vec<ReleaseAsset>,
     /// Build tag named by `nightly-tag.txt`, when the GitHub `/latest` release
     /// is a pointer rather than the binaries. Status views compare this to the
@@ -224,8 +226,31 @@ async fn fetch_small_text(
     Ok(text.trim().to_owned())
 }
 
+/// Numbered build releases are separate from the stable `/latest` pointer.
+/// Compare build numbers rather than lexical tags or release-list ordering.
+fn newest_build(releases: Vec<Release>) -> anyhow::Result<Release> {
+    releases
+        .into_iter()
+        .filter(|release| !release.draft && !release.assets.is_empty())
+        .filter_map(|release| {
+            let tag = parse_build_pointer_tag(&release.tag_name)?;
+            let build = tag[1..].parse::<u64>().ok()?;
+            Some((build, release))
+        })
+        .max_by_key(|(build, _)| *build)
+        .map(|(_, release)| release)
+        .context("no published numbered runtime builds with assets were found")
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ReleaseResponse {
+    Single(Release),
+    Builds(Vec<Release>),
+}
+
 async fn fetch(client: &reqwest::Client, url: &str, user_agent: &str) -> anyhow::Result<Release> {
-    let mut release: Release = client
+    let response: ReleaseResponse = client
         .get(url)
         .header("user-agent", user_agent)
         .send()
@@ -236,6 +261,10 @@ async fn fetch(client: &reqwest::Client, url: &str, user_agent: &str) -> anyhow:
         .json()
         .await
         .context("decode GitHub release")?;
+    let mut release = match response {
+        ReleaseResponse::Single(release) => release,
+        ReleaseResponse::Builds(releases) => newest_build(releases)?,
+    };
     let pointer_url = release
         .asset(BUILD_POINTER_ASSET)
         .map(|asset| asset.browser_download_url.clone());
@@ -331,6 +360,90 @@ pub fn cached_or_refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build(tag: &str) -> Release {
+        Release {
+            tag_name: tag.into(),
+            assets: vec![ReleaseAsset {
+                name: "runtime.tar.gz".into(),
+                browser_download_url: "https://example.invalid/runtime.tar.gz".into(),
+            }],
+            ..Release::default()
+        }
+    }
+
+    #[test]
+    fn nightly_ignores_stable_drafts_and_unpublished_assets() {
+        let releases = vec![
+            build("v1.0.0"),
+            build("b999"),
+            build("b12406"),
+            Release {
+                draft: true,
+                ..build("b12408")
+            },
+            Release {
+                assets: Vec::new(),
+                ..build("b12407")
+            },
+            build("b12359"),
+        ];
+        assert_eq!(newest_build(releases).unwrap().tag_name, "b12406");
+        assert!(newest_build(vec![build("v1.0.0")]).is_err());
+    }
+
+    #[tokio::test]
+    async fn channels_fetch_and_cache_separate_releases() {
+        use crate::runtime_settings::ReleaseChannel;
+        use axum::{Json, Router, routing::get};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let stable_url = format!("{base_url}/releases/latest");
+        let stable = Release {
+            tag_name: "v1.0.0".into(),
+            assets: vec![ReleaseAsset {
+                name: BUILD_POINTER_ASSET.into(),
+                browser_download_url: format!("{base_url}/nightly-tag.txt"),
+            }],
+            ..Release::default()
+        };
+        let app = Router::new()
+            .route(
+                "/releases/latest",
+                get(move || {
+                    let stable = stable.clone();
+                    async move { Json(stable) }
+                }),
+            )
+            .route("/nightly-tag.txt", get(|| async { "b12359\n" }))
+            .route(
+                "/releases",
+                get(|| async { Json(vec![build("b999"), build("b12406")]) }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let nightly_url = ReleaseChannel::Nightly.release_url(&stable_url);
+        let stable = latest_release(&client, &stable_url, "test").await.unwrap();
+        let nightly = latest_release(&client, &nightly_url, "test").await.unwrap();
+        assert_eq!(stable.effective_tag(), "b12359");
+        assert_eq!(nightly.tag_name, "b12406");
+        for (url, expected) in [(&stable_url, "b12359"), (&nightly_url, "b12406")] {
+            let cached = cached_or_refresh(&client, url, "test", false);
+            assert!(!cached.refreshing);
+            assert_eq!(cached.release.unwrap().effective_tag(), expected);
+        }
+        server.abort();
+        let _ = server.await;
+        // Offline install resolution must also stay within the chosen channel.
+        assert_eq!(
+            latest_release(&client, &nightly_url, "test")
+                .await
+                .unwrap()
+                .tag_name,
+            "b12406"
+        );
+    }
 
     #[test]
     fn entries_expire_after_the_cache_window() {

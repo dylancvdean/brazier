@@ -590,7 +590,11 @@ export type RuntimeTarget =
   | 'vulkan'
   | 'sycl'
 
+export type RuntimeReleaseChannel = 'stable' | 'nightly'
+
 export type RuntimeSettings = {
+  llama_release_channel?: RuntimeReleaseChannel
+  whisper_release_channel?: RuntimeReleaseChannel
   target: RuntimeTarget
   context_size: number
   batch_size: number

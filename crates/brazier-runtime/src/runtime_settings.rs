@@ -28,6 +28,24 @@ impl RuntimeTarget {
     }
 }
 
+/// Upstream release stream for managed runtimes with stable and numbered builds.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseChannel {
+    #[default]
+    Stable,
+    Nightly,
+}
+
+impl ReleaseChannel {
+    pub fn release_url(self, stable_url: &str) -> String {
+        match self {
+            Self::Stable => stable_url.to_owned(),
+            Self::Nightly => format!("{}?per_page=100", stable_url.trim_end_matches("/latest")),
+        }
+    }
+}
+
 /// How to manage memory when image/video generation runs while a chat model is
 /// resident. Generation engines load their own weights; on shared-memory
 /// machines both models can exceed RAM at once.
@@ -47,6 +65,8 @@ pub enum GenerationMemoryPolicy {
 #[serde(default)]
 pub struct RuntimeSettings {
     pub target: RuntimeTarget,
+    pub llama_release_channel: ReleaseChannel,
+    pub whisper_release_channel: ReleaseChannel,
     pub context_size: u32,
     pub batch_size: u32,
     pub threads: Option<u16>,
@@ -232,6 +252,8 @@ impl Default for RuntimeSettings {
     fn default() -> Self {
         Self {
             target: RuntimeTarget::Auto,
+            llama_release_channel: ReleaseChannel::Stable,
+            whisper_release_channel: ReleaseChannel::Stable,
             context_size: 4096,
             batch_size: 512,
             threads: None,
@@ -447,6 +469,21 @@ pub async fn save(data_dir: &Path, settings: &RuntimeSettings) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_channels_default_to_stable_and_round_trip() {
+        let old: RuntimeSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.llama_release_channel, ReleaseChannel::Stable);
+        assert_eq!(old.whisper_release_channel, ReleaseChannel::Stable);
+        let settings = RuntimeSettings {
+            llama_release_channel: ReleaseChannel::Nightly,
+            ..old
+        };
+        let restored: RuntimeSettings =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        assert_eq!(restored.llama_release_channel, ReleaseChannel::Nightly);
+        assert_eq!(restored.whisper_release_channel, ReleaseChannel::Stable);
+    }
 
     #[test]
     fn accepts_model_reported_context_windows_above_one_million_tokens() {

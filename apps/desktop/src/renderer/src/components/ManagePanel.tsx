@@ -4718,6 +4718,24 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     }
   }
 
+  async function selectReleaseChannel(channel: 'stable' | 'nightly'): Promise<void> {
+    if (!props.settings) return
+    const field = runtimeTab === 'language' ? 'llama_release_channel' : 'whisper_release_channel'
+    setSavingTarget(true)
+    props.onError(null)
+    try {
+      const saved = await saveRuntimeSettings({ ...props.settings, [field]: channel })
+      props.onSettingsSaved(saved)
+      setManagedStatuses(null)
+      setWhisperStatuses(null)
+      await refreshManagedStatuses(true)
+    } catch (cause) {
+      props.onError(errorText(cause))
+    } finally {
+      setSavingTarget(false)
+    }
+  }
+
   async function installManaged(
     target: RuntimeTarget,
     force = false,
@@ -4945,8 +4963,28 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       </div>
 
       <div className="settings-group">
-        <div className="settings-group-head">
+        <div className="settings-group-head runtime-release-controls">
           <div className="section-label">Available for your hardware</div>
+          {(runtimeTab === 'language' || runtimeTab === 'speech') && (
+            <label className="runtime-release-channel">
+              Release channel{' '}
+              <select
+                aria-label="Runtime release channel"
+                value={
+                  (runtimeTab === 'language'
+                    ? props.settings?.llama_release_channel
+                    : props.settings?.whisper_release_channel) ?? 'stable'
+                }
+                disabled={!props.settings || savingTarget || installingTarget != null}
+                onChange={(event) =>
+                  void selectReleaseChannel(event.target.value as 'stable' | 'nightly')
+                }
+              >
+                <option value="stable">Stable</option>
+                <option value="nightly">Nightly (latest build)</option>
+              </select>
+            </label>
+          )}
           <button
             className="chip-button subtle"
             disabled={updateCheckPending}
@@ -5004,7 +5042,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 </div>
                 <button
                   className="chip-button"
-                  disabled={!target.available || installing || (installed && !updateAvailable)}
+                  disabled={savingTarget || !target.available || installing || (installed && !updateAvailable)}
                   title={
                     !target.available
                       ? target.detail
@@ -5073,7 +5111,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                   </div>
                   <button
                     className="chip-button"
-                    disabled={installing || (installed && !updateAvailable)}
+                    disabled={savingTarget || installing || (installed && !updateAvailable)}
                     title={
                       updateAvailable
                         ? `Update to ${latestVersion ?? 'latest'}`

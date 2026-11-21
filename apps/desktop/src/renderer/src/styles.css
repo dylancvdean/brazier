@@ -2807,6 +2807,26 @@ a.inline-link {
   padding-bottom: 0;
 }
 
+.runtime-release-controls {
+  flex-wrap: wrap;
+}
+
+.runtime-release-channel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.runtime-release-channel select {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #e3e3e3;
+  background: #0a0a0a;
+}
+
 .runtime-update-note {
   display: block;
   margin-top: 4px;

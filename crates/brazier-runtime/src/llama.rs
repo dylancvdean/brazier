@@ -1,5 +1,6 @@
 //! llama.cpp binary discovery, managed installation, and server lifecycle.
 
+use crate::runtime_settings::ReleaseChannel;
 use std::{
     io::{Read, Seek, SeekFrom},
     net::SocketAddr,
@@ -1226,16 +1227,29 @@ pub struct ReleaseAsset {
 pub fn cached_release_tag(
     client: &reqwest::Client,
     force: bool,
+    channel: ReleaseChannel,
 ) -> crate::github_releases::CachedRelease {
-    crate::github_releases::cached_or_refresh(client, GITHUB_API, USER_AGENT, force)
+    crate::github_releases::cached_or_refresh(
+        client,
+        &channel.release_url(GITHUB_API),
+        USER_AGENT,
+        force,
+    )
 }
 
 /// Resolve the preferred managed binary download for this platform.
 pub async fn resolve_managed_release(
     client: &reqwest::Client,
     target: RuntimeTarget,
+    channel: ReleaseChannel,
 ) -> anyhow::Result<(String, ReleaseAsset)> {
-    resolve_managed_release_from(client, target, GITHUB_API, GITHUB_RELEASE_BY_TAG_API).await
+    resolve_managed_release_from(
+        client,
+        target,
+        &channel.release_url(GITHUB_API),
+        GITHUB_RELEASE_BY_TAG_API,
+    )
+    .await
 }
 
 async fn resolve_managed_release_from(
@@ -1343,21 +1357,28 @@ pub async fn install_managed_binary(
     client: &reqwest::Client,
     data_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
-    install_managed_binary_with_progress(client, data_dir, RuntimeTarget::Cpu, Box::new(|_| {}))
-        .await
+    install_managed_binary_with_progress(
+        client,
+        data_dir,
+        RuntimeTarget::Cpu,
+        ReleaseChannel::Stable,
+        Box::new(|_| {}),
+    )
+    .await
 }
 
 pub async fn install_managed_binary_with_progress(
     client: &reqwest::Client,
     data_dir: &Path,
     target: RuntimeTarget,
+    channel: ReleaseChannel,
     mut progress: ProgressCallback,
 ) -> anyhow::Result<PathBuf> {
     progress(ProgressEvent::phase(
         "resolve",
         "Looking up the latest llama.cpp release",
     ));
-    let (tag, asset) = resolve_managed_release(client, target).await?;
+    let (tag, asset) = resolve_managed_release(client, target, channel).await?;
     tracing::info!(%tag, asset = %asset.name, "downloading managed llama.cpp binary");
     progress(ProgressEvent::phase(
         "download",
@@ -1544,6 +1565,7 @@ pub async fn ensure_binary(client: &reqwest::Client, data_dir: &Path) -> anyhow:
         client,
         data_dir,
         RuntimeTarget::Auto,
+        ReleaseChannel::Stable,
         false,
         Box::new(|_| {}),
     )
@@ -1554,6 +1576,7 @@ pub async fn ensure_binary_with_progress(
     client: &reqwest::Client,
     data_dir: &Path,
     target: RuntimeTarget,
+    channel: ReleaseChannel,
     force: bool,
     mut progress: ProgressCallback,
 ) -> anyhow::Result<PathBuf> {
@@ -1565,7 +1588,8 @@ pub async fn ensure_binary_with_progress(
         target
     };
     if force {
-        return install_managed_binary_with_progress(client, data_dir, target, progress).await;
+        return install_managed_binary_with_progress(client, data_dir, target, channel, progress)
+            .await;
     }
     let managed = managed_binary_path_for_target(data_dir, target);
     progress(ProgressEvent::phase(
@@ -1656,7 +1680,9 @@ pub async fn ensure_binary_with_progress(
                 }
             })
         };
-        match install_managed_binary_with_progress(client, data_dir, candidate, callback).await {
+        match install_managed_binary_with_progress(client, data_dir, candidate, channel, callback)
+            .await
+        {
             Ok(path) => return Ok(path),
             Err(error) => last_error = Some(error),
         }

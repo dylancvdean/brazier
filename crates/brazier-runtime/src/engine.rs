@@ -1718,10 +1718,12 @@ impl Runtime {
                 return Ok(path.clone());
             }
         }
+        let channel = self.settings.lock().await.whisper_release_channel;
         let path = whisper::ensure_binary_with_progress(
             &self.http,
             &self.data_dir,
             target,
+            channel,
             force,
             progress,
         )
@@ -1801,9 +1803,16 @@ impl Runtime {
                 return Ok(path.clone());
             }
         }
-        let path =
-            llama::ensure_binary_with_progress(&self.http, &self.data_dir, target, force, progress)
-                .await?;
+        let channel = self.settings.lock().await.llama_release_channel;
+        let path = llama::ensure_binary_with_progress(
+            &self.http,
+            &self.data_dir,
+            target,
+            channel,
+            force,
+            progress,
+        )
+        .await?;
         // Check the build that just landed rather than the machine's GPU list:
         // an uncovered pairing hangs the GPU instead of erroring.
         if target == RuntimeTarget::Rocm {

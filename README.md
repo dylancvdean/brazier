@@ -37,6 +37,12 @@ models. It features LLMs with llama.cpp, mlx-lm, mlx-vlm, and vLLM backends; ima
 | Multi-GPU | 🟨 Manual llama.cpp GPU splits are supported; automatic and cross-engine placement are not |
 | Voice | 🟨 PersonaPlex bidirectional voice and shared chat/agent conversations work; hardware VAD/latency qualification is an optional regression signal |
 
+In Manage → Runtimes, llama.cpp and whisper.cpp offer a **Release channel**
+selector. **Stable** follows upstream's stable release; **Nightly** selects the
+newest published numbered build, including prereleases. Each engine remembers
+its own channel. After switching channels, use **Update** to replace an installed
+managed runtime. stable-diffusion.cpp follows its upstream rolling release stream.
+
 ## Development
 
 Prerequisites are Node.js 24+, pnpm 11+, and Rust 1.100.

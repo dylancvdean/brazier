@@ -4779,7 +4779,11 @@ async fn managed_llama_status(
 
     // Local install state answers immediately; the upstream tag is filled in
     // from cache, with `latest_pending` telling the UI a check is still running.
-    let cached = llama::cached_release_tag(&state.http, query.force);
+    let cached = llama::cached_release_tag(
+        &state.http,
+        query.force,
+        state.runtime.settings().await.llama_release_channel,
+    );
     let (latest_tag, latest_pending, pointer_unresolved) = managed_release_status(cached);
 
     let target_specs = [
@@ -4883,7 +4887,11 @@ async fn managed_whisper_status(
 
     let supported = whisper::managed_prebuilts_supported();
     let cached = if supported {
-        whisper::cached_release_tag(&state.http, query.force)
+        whisper::cached_release_tag(
+            &state.http,
+            query.force,
+            state.runtime.settings().await.whisper_release_channel,
+        )
     } else {
         crate::github_releases::CachedRelease {
             release: None,
