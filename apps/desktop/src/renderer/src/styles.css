@@ -6870,6 +6870,17 @@ label.span-2 {
   margin: 0;
 }
 
+.voice-options label.voice-field {
+  display: grid;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.voice-options label.voice-field small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* PersonaPlex's own words. Collapsed and captioned, because they are untrusted
    model output rather than part of the conversation. */
 .voice-model-text {

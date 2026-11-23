@@ -131,7 +131,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
    * actually missing was ASR.
    */
   const blockedReason = !props.realtimeAvailable
-    ? 'Voice model not installed'
+    ? 'Voice isn’t set up yet'
     : !props.audioSupported
       ? 'Audio capture unavailable'
       : needsTranscripts && !anyAsr
@@ -582,33 +582,6 @@ export function VoiceMode(props: Props): React.JSX.Element {
               Full-duplex speech with PersonaPlex. Use headphones so it doesn’t hear itself.
             </p>
 
-            {!props.realtimeAvailable ? (
-              <div className="mode-empty-state">
-                <p className="mode-empty">
-                  Voice needs a PersonaPlex runtime and model: PersonaPlex MLX on Apple Silicon (needs a
-                  Hugging Face token and the nvidia/personaplex-7b-v1 license), or PersonaPlex / Moshi
-                  on Linux with CUDA.
-                </p>
-                {props.onOpenManage ? (
-                  <div className="mode-empty-actions">
-                    <button
-                      type="button"
-                      className="primary-action"
-                      onClick={() => props.onOpenManage?.('runtimes')}
-                    >
-                      Open Runtimes
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-action"
-                      onClick={() => props.onOpenManage?.('discover')}
-                    >
-                      Download models
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
             {props.realtimeAvailable && !props.audioSupported ? (
               <p className="mode-empty">
                 This build can’t encode voice audio (WebCodecs Opus is missing).

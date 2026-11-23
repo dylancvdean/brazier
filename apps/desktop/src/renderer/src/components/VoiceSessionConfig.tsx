@@ -440,8 +440,8 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
         {runtimes.length === 0 ? (
           <>
             <p className="voice-notice">
-              None built yet. On Apple Silicon build PersonaPlex MLX under Manage → Runtimes; on Linux
-              CUDA build PersonaPlex / Moshi.
+              None built yet. Use PersonaPlex MLX on Apple Silicon (needs a Hugging Face token and the
+              nvidia/personaplex-7b-v1 license), or PersonaPlex / Moshi on Linux with CUDA.
             </p>
             {props.onOpenManage ? (
               <div className="mode-empty-actions compact">
@@ -482,7 +482,7 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
         {voiceModels.length === 0 ? (
           <>
             <p className="voice-notice">
-              No <code>personaplex:</code> model downloaded yet — get one from Manage → Download models.
+              No voice model downloaded yet.
             </p>
             {props.onOpenManage ? (
               <div className="mode-empty-actions compact">
