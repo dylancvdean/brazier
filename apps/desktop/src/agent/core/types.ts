@@ -17,6 +17,12 @@ export type AgentPermissionMode = 'ask' | 'sandbox-only' | 'skip-permissions'
 export type AgentPermissionSettings = {
   auto_approve_sandboxed_actions: boolean
   auto_approve_host_actions: boolean
+  /**
+   * "Approve for me": before asking, the session's own model checks each
+   * sandboxed, non-destructive approval against the user's instructions and
+   * approves it when it is in scope. Anything else still reaches the user.
+   */
+  approve_for_me?: boolean
 }
 
 /** Durable snapshot of the daemon host that executes a sensitive action. */
@@ -255,6 +261,23 @@ export type AgentApprovalRequiredEvent = EventBase & {
   toolCallId: string
   approval: AgentApproval
 }
+/** "Approve for me" checking an approval request against the user's instructions. */
+export type AgentApprovalReviewedEvent = EventBase & {
+  type: 'approval-reviewed'
+  toolCallId: string
+  approvalId: string
+  /** `escalated` means the request goes to the user as a normal approval. */
+  phase: 'started' | 'approved' | 'escalated'
+  reason?: string
+}
+/** An approval left the pending state, whoever or whatever decided it. */
+export type AgentApprovalResolvedEvent = EventBase & {
+  type: 'approval-resolved'
+  toolCallId: string
+  approvalId: string
+  status: ApprovalStatus
+  decidedBy: 'user' | 'model-review' | 'system'
+}
 export type AgentElevationRequestedEvent = EventBase & {
   type: 'elevation-requested'
   toolCallId: string
@@ -352,6 +375,8 @@ export type AgentEvent =
   | AgentTextDeltaEvent
   | AgentToolCallProposedEvent
   | AgentApprovalRequiredEvent
+  | AgentApprovalReviewedEvent
+  | AgentApprovalResolvedEvent
   | AgentElevationRequestedEvent
   | AgentToolStartedEvent
   | AgentToolOutputEvent
@@ -374,6 +399,8 @@ export type AgentRunSummary = {
   failures: string[]
   hostActions: string[]
   approvalsRequested: number
+  /** Approvals "Approve for me" granted without asking. */
+  approvalsAutoApproved?: number
   text: string
 }
 
@@ -443,6 +470,8 @@ export type PreloadedInferenceSettings = {
 export interface AgentSession {
   readonly id: string
   run(input: AgentUserInput): AsyncIterable<AgentEvent>
+  /** True from `run()` until that run has reported an outcome. */
+  isBusy(): boolean
   cancel(): Promise<void>
   compact(): Promise<AgentCompactionState>
   setModel(model: AgentModelReference): Promise<void>

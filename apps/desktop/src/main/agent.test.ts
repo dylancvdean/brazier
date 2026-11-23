@@ -64,6 +64,25 @@ class FakeUtilityProcess extends EventEmitter {
   }
 }
 
+function runEvent(
+  sessionId: string,
+  type: string,
+  runId: string,
+  sequence: number
+): WorkerMessage {
+  return {
+    type: 'event',
+    sessionId,
+    event: {
+      type,
+      sessionId,
+      runId,
+      timestamp: new Date().toISOString(),
+      sequence
+    }
+  } as WorkerMessage
+}
+
 describe('AgentSupervisor unresponsive worker handling', () => {
   it('synthesizes terminal run-failed events for active sessions when killing an unresponsive worker', async () => {
     const fakeWorker = new FakeUtilityProcess()
@@ -160,5 +179,45 @@ describe('AgentSupervisor unresponsive worker handling', () => {
         })
       ])
     )
+  })
+
+  it('does not resurrect a finished run when a late event arrives', async () => {
+    const fakeWorker = new FakeUtilityProcess()
+    fakeWorker.ignoreCancel = true
+    const supervisor = new AgentSupervisor({
+      cancelGraceMs: 15,
+      forkWorker: () => {
+        queueMicrotask(() => fakeWorker.emit('spawn'))
+        return fakeWorker as unknown as UtilityProcess
+      },
+      fetch: vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch
+    })
+    supervisor.setConnection({ address: 'http://127.0.0.1:7614', apiKey: null })
+    const events: WorkerMessage[] = []
+    supervisor.onEvent((message) => events.push(message))
+
+    await supervisor.invoke({ type: 'open-session', sessionId: 'session-a' })
+    const run = supervisor.invoke({
+      type: 'run',
+      sessionId: 'session-a',
+      input: { text: 'done already' }
+    })
+    await vi.waitFor(() => {
+      expect(fakeWorker.sent.filter((cmd) => cmd.type === 'run')).toHaveLength(1)
+    })
+
+    fakeWorker.emit('message', runEvent('session-a', 'run-started', 'worker-run-a', 1))
+    fakeWorker.emit('message', runEvent('session-a', 'run-completed', 'worker-run-a', 2))
+    fakeWorker.emit('message', runEvent('session-a', 'tool-completed', 'worker-run-a', 3))
+
+    await expect(supervisor.invoke({ type: 'cancel', sessionId: 'session-a' })).resolves.toEqual({
+      cancelled: true
+    })
+    await expect(run).rejects.toThrow('did not stop in time')
+
+    const failed = events.filter(
+      (message) => message.type === 'event' && message.event.type === 'run-failed'
+    )
+    expect(failed).toHaveLength(0)
   })
 })

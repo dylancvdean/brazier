@@ -7,6 +7,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -21,6 +22,10 @@ use crate::{toolchain_hints::resolve_command, tools::ToolInvocation};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const TOOL_PREFIX: &str = "mcp/";
+/// Handshake bound. A server that never answers initialize must not pin the tool.
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound for `tools/list` and `tools/call`. Longer work belongs in the tool itself.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Substrings that mark an environment variable as credential-bearing.
 const SECRET_ENV_PATTERNS: &[&str] = &[
@@ -211,10 +216,52 @@ struct JsonRpcClient {
     stdin: tokio::process::ChildStdin,
     reader: BufReader<tokio::process::ChildStdout>,
     next_id: u64,
+    initialize_timeout: Duration,
+    request_timeout: Duration,
+}
+
+/// A stdout line from an MCP server. Logs and blank lines are not messages.
+fn decode_stdout_line(line: &str) -> Option<Value> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    serde_json::from_str(trimmed).ok()
+}
+
+enum Inbound {
+    /// The response to the request we just sent.
+    Response,
+    /// A request the server started. `id` is answered with method-not-found.
+    ServerRequest(Value),
+    /// A notification, or a response for some other id.
+    Ignore,
+}
+
+fn classify_inbound(message: &Value, expected_id: u64) -> Inbound {
+    if message.get("method").is_some() {
+        return match message.get("id") {
+            Some(id) if !id.is_null() => Inbound::ServerRequest(id.clone()),
+            _ => Inbound::Ignore,
+        };
+    }
+    if message.get("id") == Some(&json!(expected_id)) {
+        Inbound::Response
+    } else {
+        Inbound::Ignore
+    }
 }
 
 impl JsonRpcClient {
     async fn connect(config: &McpServerConfig) -> anyhow::Result<Self> {
+        Self::connect_timeouts(config, INITIALIZE_TIMEOUT, REQUEST_TIMEOUT).await
+    }
+
+    async fn connect_timeouts(
+        config: &McpServerConfig,
+        initialize_timeout: Duration,
+        request_timeout: Duration,
+    ) -> anyhow::Result<Self> {
         // GUI-launched Electron apps do not inherit the user's shell PATH.
         // Resolve named commands through the runtime's user-scoped locations
         // so Homebrew-installed MCP launchers such as `uvx` work on macOS.
@@ -243,11 +290,23 @@ impl JsonRpcClient {
             .stdout
             .take()
             .context("MCP server process has no stdout")?;
+        Self::from_child(child, stdin, stdout, initialize_timeout, request_timeout).await
+    }
+
+    async fn from_child(
+        child: tokio::process::Child,
+        stdin: tokio::process::ChildStdin,
+        stdout: tokio::process::ChildStdout,
+        initialize_timeout: Duration,
+        request_timeout: Duration,
+    ) -> anyhow::Result<Self> {
         let mut client = Self {
             _child: child,
             stdin,
             reader: BufReader::new(stdout),
             next_id: 1,
+            initialize_timeout,
+            request_timeout,
         };
         client.initialize().await?;
         Ok(client)
@@ -262,13 +321,32 @@ impl JsonRpcClient {
     }
 
     async fn read_message(&mut self) -> anyhow::Result<Value> {
-        let mut line = String::new();
-        self.reader.read_line(&mut line).await?;
-        anyhow::ensure!(!line.trim().is_empty(), "MCP server closed stdout");
-        serde_json::from_str(&line).context("decode JSON-RPC message")
+        loop {
+            let mut line = String::new();
+            let read = self.reader.read_line(&mut line).await?;
+            if read == 0 {
+                anyhow::bail!("MCP server closed stdout");
+            }
+            // Servers sometimes log on stdout. A non-JSON line is not a frame.
+            if let Some(message) = decode_stdout_line(&line) {
+                return Ok(message);
+            }
+        }
     }
 
     async fn request(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
+        let timeout = if method == "initialize" {
+            self.initialize_timeout
+        } else {
+            self.request_timeout
+        };
+        match tokio::time::timeout(timeout, self.exchange(method, params)).await {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!("MCP `{method}` timed out after {}ms", timeout.as_millis()),
+        }
+    }
+
+    async fn exchange(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
         self.write_line(&json!({
@@ -280,11 +358,25 @@ impl JsonRpcClient {
         .await?;
         loop {
             let message = self.read_message().await?;
-            if message.get("id") == Some(&json!(id)) {
-                if let Some(error) = message.get("error") {
-                    anyhow::bail!("MCP error: {error}");
+            match classify_inbound(&message, id) {
+                Inbound::ServerRequest(request_id) => {
+                    // Leaving this unanswered makes servers that wait for a
+                    // reply stall the whole session. We do not implement their
+                    // methods, so the honest answer is that we have none.
+                    self.write_line(&json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": { "code": -32601, "message": "Method not found" }
+                    }))
+                    .await?;
                 }
-                return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+                Inbound::Ignore => {}
+                Inbound::Response => {
+                    if let Some(error) = message.get("error") {
+                        anyhow::bail!("MCP error: {error}");
+                    }
+                    return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+                }
             }
         }
     }
@@ -714,5 +806,116 @@ mod tests {
             "{}",
             unknown.output
         );
+    }
+
+    #[test]
+    fn stdout_logs_are_not_messages_and_server_requests_are_rejected() {
+        assert!(decode_stdout_line("").is_none());
+        assert!(decode_stdout_line("listening on stdio").is_none());
+        assert!(decode_stdout_line(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#).is_some());
+
+        let request = json!({"jsonrpc": "2.0", "id": 7, "method": "roots/list"});
+        assert!(matches!(
+            classify_inbound(&request, 1),
+            Inbound::ServerRequest(_)
+        ));
+        let notification = json!({"jsonrpc": "2.0", "method": "notifications/progress"});
+        assert!(matches!(
+            classify_inbound(&notification, 1),
+            Inbound::Ignore
+        ));
+        let response = json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}});
+        assert!(matches!(classify_inbound(&response, 1), Inbound::Response));
+    }
+
+    fn server_config(
+        command: &str,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    ) -> McpServerConfig {
+        McpServerConfig {
+            id: "demo".into(),
+            name: "Demo".into(),
+            command: command.into(),
+            args,
+            env,
+            enabled: true,
+            tools: vec![McpToolEntry {
+                name: "ping".into(),
+                description: None,
+                input_schema: json!({ "type": "object" }),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_times_out_when_the_server_never_answers() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("hang.py");
+        std::fs::write(&script, "import time\ntime.sleep(30)\n").unwrap();
+        let config = server_config(
+            "python3",
+            vec![script.display().to_string()],
+            HashMap::new(),
+        );
+        match JsonRpcClient::connect_timeouts(
+            &config,
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        )
+        .await
+        {
+            Ok(_) => panic!("a silent server must not pin the client"),
+            Err(error) => assert!(error.to_string().contains("timed out"), "{error:#}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn skips_stdout_logs_and_answers_server_requests() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("server.py");
+        std::fs::write(
+            &script,
+            r#"
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    print("log: " + str(method), flush=True)
+    if method == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": 7, "method": "roots/list"}), flush=True)
+        reply = json.loads(sys.stdin.readline())
+        assert reply["id"] == 7, reply
+        assert reply["error"]["code"] == -32601, reply
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": msg["id"],
+            "result": {"protocolVersion": "2024-11-05", "capabilities": {}}
+        }), flush=True)
+    elif method == "tools/call":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": msg["id"],
+            "result": {"content": [{"type": "text", "text": "pong"}]}
+        }), flush=True)
+"#,
+        )
+        .unwrap();
+        let config = server_config(
+            "python3",
+            vec![script.display().to_string()],
+            HashMap::new(),
+        );
+        let mut client = JsonRpcClient::connect(&config)
+            .await
+            .expect("server should complete the handshake");
+        let result = client
+            .call_tool("ping", json!({}))
+            .await
+            .expect("tool call");
+        assert_eq!(content_to_text(&result), "pong");
     }
 }

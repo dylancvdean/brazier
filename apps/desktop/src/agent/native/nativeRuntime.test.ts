@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   ContextOverflowError,
+  StreamInterruptedError,
   type BrokerClient,
   type StreamChatCompletionCallbacks,
   type StreamChatCompletionRequest,
@@ -12,6 +13,7 @@ import type {
   AgentCompactedEvent,
   AgentEvent,
   AgentMessage,
+  AgentSession,
   AgentToolDefinition,
   SandboxDescription
 } from '../core/types'
@@ -481,5 +483,161 @@ describe('NativeAgentRuntime & NativeAgentSession', () => {
       .map((e) => e.delta)
       .join('')
     expect(streamedVisible).not.toContain('<tool_call>')
+  })
+})
+
+describe('NativeAgentSession run lifecycle', () => {
+  async function sessionFor(broker: BrokerClient): Promise<AgentSession> {
+    const runtime = new NativeAgentRuntime(broker)
+    return runtime.createSession({
+      sessionId: 'sess-life',
+      model: { id: 'gguf:qwen3-32b.gguf', contextWindow: 32768 },
+      systemPrompt: 'Prompt',
+      tools,
+      capabilities: inferModelCapabilities('gguf:qwen3-32b.gguf')
+    })
+  }
+
+  async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
+    const out: AgentEvent[] = []
+    for await (const event of events) out.push(event)
+    return out
+  }
+
+  const terminal = (events: AgentEvent[]): string[] =>
+    events
+      .map((event) => event.type)
+      .filter((type) => type === 'run-completed' || type === 'run-cancelled' || type === 'run-failed')
+
+  it('reports a cancel exactly once and nothing after it, even while a tool unwinds', async () => {
+    let releaseTool!: () => void
+    const toolHeld = new Promise<void>((resolve) => {
+      releaseTool = resolve
+    })
+    let toolStarted!: () => void
+    const toolRunning = new Promise<void>((resolve) => {
+      toolStarted = resolve
+    })
+    const broker = makeMockBroker({
+      execTool: vi.fn(async (req: { tool: string }) => {
+        toolStarted()
+        // Ignores the abort signal, like a daemon call that is slow to notice.
+        await toolHeld
+        return {
+          status: 'completed',
+          tool: req.tool,
+          environment: 'sandbox',
+          risk: 'read',
+          sandbox,
+          output: 'late result',
+          truncated: false,
+          changed_paths: [],
+          duration_ms: 1,
+          is_error: false
+        }
+      }),
+      streamChatCompletion: vi.fn(async () => ({
+        content: '',
+        reasoning: '',
+        toolCalls: [{ id: 'c1', name: 'fs_read', arguments: '{"path":"a.ts"}' }],
+        finishReason: 'tool_calls'
+      }))
+    })
+    const session = await sessionFor(broker)
+
+    const first = collect(session.run({ text: 'read it' }))
+    await toolRunning
+    await session.cancel()
+    const events = await first
+
+    expect(terminal(events)).toEqual(['run-cancelled'])
+    expect(events.at(-1)?.type).toBe('run-cancelled')
+
+    // The next run waits for the old loop instead of sharing the transcript with it.
+    const second = collect(session.run({ text: 'again' }))
+    releaseTool()
+    ;(broker.streamChatCompletion as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+      content: 'Done.',
+      reasoning: '',
+      toolCalls: [],
+      finishReason: 'stop'
+    }))
+    const secondEvents = await second
+    expect(terminal(secondEvents)).toEqual(['run-completed'])
+    expect(new Set(secondEvents.map((event) => event.runId)).size).toBe(1)
+    expect(session.isBusy()).toBe(false)
+  })
+
+  it('refuses a second run while the first is still going', async () => {
+    let finish!: () => void
+    const held = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const broker = makeMockBroker({
+      streamChatCompletion: vi.fn(async () => {
+        await held
+        return { content: 'ok', reasoning: '', toolCalls: [], finishReason: 'stop' }
+      })
+    })
+    const session = await sessionFor(broker)
+    const first = collect(session.run({ text: 'one' }))
+    expect(() => session.run({ text: 'two' })).toThrow(/already running/)
+    finish()
+    expect(terminal(await first)).toEqual(['run-completed'])
+  })
+
+  it('retries a model request that dropped before producing output', async () => {
+    let calls = 0
+    const broker = makeMockBroker({
+      streamChatCompletion: vi.fn(async () => {
+        calls += 1
+        if (calls === 1) throw new StreamInterruptedError()
+        return { content: 'Recovered.', reasoning: '', toolCalls: [], finishReason: 'stop' }
+      })
+    })
+    const session = await sessionFor(broker)
+    const events = await collect(session.run({ text: 'hi' }))
+    expect(calls).toBe(2)
+    expect(terminal(events)).toEqual(['run-completed'])
+  })
+
+  it('does not replay a request that already streamed text', async () => {
+    const broker = makeMockBroker({
+      streamChatCompletion: vi.fn(
+        async (_req: StreamChatCompletionRequest, callbacks?: StreamChatCompletionCallbacks) => {
+          callbacks?.onContentDelta?.('Partial ans')
+          throw new StreamInterruptedError()
+        }
+      )
+    })
+    const session = await sessionFor(broker)
+    const events = await collect(session.run({ text: 'hi' }))
+    expect(broker.streamChatCompletion).toHaveBeenCalledTimes(1)
+    expect(events.at(-1)).toMatchObject({ type: 'run-failed' })
+  })
+
+  it('nudges once instead of ending the run on an empty reply', async () => {
+    const requests: StreamChatCompletionRequest[] = []
+    const broker = makeMockBroker({
+      streamChatCompletion: vi.fn(async (req: StreamChatCompletionRequest) => {
+        requests.push(req)
+        if (requests.length === 1) {
+          return { content: '', reasoning: '', toolCalls: [], finishReason: 'stop' }
+        }
+        return { content: 'Here is the answer.', reasoning: '', toolCalls: [], finishReason: 'stop' }
+      })
+    })
+    const session = await sessionFor(broker)
+    const events = await collect(session.run({ text: 'hi' }))
+
+    expect(requests).toHaveLength(2)
+    const nudge = requests[1]!.messages.at(-1)
+    expect(nudge).toMatchObject({ role: 'user' })
+    expect(String(nudge?.content)).toContain('Your last reply was empty')
+    // The nudge is never persisted into the transcript.
+    expect(
+      session.getState().messages.some((message) => 'text' in message && message.text.includes('last reply was empty'))
+    ).toBe(false)
+    expect(terminal(events)).toEqual(['run-completed'])
   })
 })

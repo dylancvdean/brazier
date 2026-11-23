@@ -6,7 +6,7 @@ import {
   rememberedConnectionProfileId,
   request
 } from './daemonClient'
-import { readSseData } from './sse'
+import { MODEL_STREAM_STALL_MS, readSseData } from './sse'
 
 export { invalidateConnectionCache, rememberedConnectionProfileId } from './daemonClient'
 
@@ -1514,8 +1514,15 @@ export async function streamCompletion(
   let responseText = ''
   let reasoningText = ''
   let generationStats: StreamCompletionResult['generationStats']
-  for await (const data of readSseData(response.body)) {
-    if (data === '[DONE]') break
+  let sawDone = false
+  for await (const data of readSseData(response.body, {
+    stallTimeoutMs: MODEL_STREAM_STALL_MS,
+    signal
+  })) {
+    if (data === '[DONE]') {
+      sawDone = true
+      break
+    }
     if (!data) continue
     const chunk = JSON.parse(data) as {
       choices?: Array<{
@@ -1603,6 +1610,11 @@ export async function streamCompletion(
       responseText += token
       onToken(token)
     }
+  }
+  // The daemon ends every completion with `[DONE]`, including after an error
+  // frame. A socket that just closes has dropped the rest of the answer.
+  if (!sawDone) {
+    throw new GenerationFailure('The model stream ended before the response finished.', [])
   }
   return { responseText, reasoningText, toolRecords, clientToolCalls, transcript, generationStats }
 }

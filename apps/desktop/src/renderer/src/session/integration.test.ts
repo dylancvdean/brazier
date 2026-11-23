@@ -62,13 +62,24 @@ const { FakeChat, FakeVoice, sequentialIds } = await import('./testFakes')
 function installAgentBridge() {
   const listeners = new Set<(message: WorkerMessage) => void>()
   const calls: Array<{ method: string; args: unknown[] }> = []
+  let settleRun: (error?: Error) => void = () => {}
   const record = (method: string) =>
     vi.fn(async (...args: unknown[]) => {
       calls.push({ method, args })
     })
   const bridge = {
     openSession: record('openSession'),
-    run: record('run'),
+    // A real run stays open until the worker finishes, which is after its events.
+    run: vi.fn(
+      (...args: unknown[]) =>
+        new Promise<void>((resolve, reject) => {
+          calls.push({ method: 'run', args })
+          settleRun = (error?: Error) => {
+            if (error) reject(error)
+            else resolve()
+          }
+        })
+    ),
     cancel: record('cancel'),
     compact: record('compact'),
     setModel: record('setModel'),
@@ -87,6 +98,12 @@ function installAgentBridge() {
   })
   return {
     calls,
+    finishRun() {
+      settleRun()
+    },
+    failRun(message = 'worker failed') {
+      settleRun(new Error(message))
+    },
     emit(sessionId: string, event: AgentEvent) {
       for (const listener of [...listeners]) listener({ type: 'event', sessionId, event })
     }
@@ -215,6 +232,44 @@ describe('WorkerAgentAdapter', () => {
     expect(outcomes[0]).toContain('changed 2 file(s)')
     // Bounded: a whole build log is never handed to the speech path.
     expect(outcomes[0].length).toBeLessThan(200)
+  })
+
+  it('maps an approval the model settled onto the turn', async () => {
+    daemon.conversations.set('conv-1', { id: 'conv-1', agent_session_id: 'agent-1' })
+    const adapter = new WorkerAgentAdapter()
+    await adapter.attachSession('conv-1')
+    const seen: string[] = []
+    adapter.subscribe((event) => seen.push(event.type))
+    await adapter.submitTurn({ correlationId: 'turn-1', text: 'edit it', source: 'user_text' })
+    bridge.emit(
+      'agent-1',
+      agentEvent('approval-reviewed', { toolCallId: 'c1', approvalId: 'ap-1', phase: 'started' })
+    )
+    bridge.emit(
+      'agent-1',
+      agentEvent('approval-resolved', {
+        toolCallId: 'c1',
+        approvalId: 'ap-1',
+        status: 'approved',
+        decidedBy: 'model-review'
+      })
+    )
+    expect(seen).toEqual(['statusUpdated', 'approvalResolved'])
+  })
+
+  it('reports a run that resolved without a terminal event', async () => {
+    daemon.conversations.set('conv-1', { id: 'conv-1', agent_session_id: 'agent-1' })
+    const adapter = new WorkerAgentAdapter()
+    await adapter.attachSession('conv-1')
+    const seen: string[] = []
+    adapter.subscribe((event) => {
+      if (event.type === 'runFailed') seen.push(event.error)
+    })
+    await adapter.submitTurn({ correlationId: 'turn-1', text: 'hello', source: 'user_text' })
+    bridge.finishRun()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(seen).toEqual(['The run ended before it reported a result.'])
+    expect(adapter.getStatus('turn-1')?.status).toBe('failed')
   })
 
   it('ignores events from another session', async () => {

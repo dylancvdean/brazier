@@ -351,6 +351,14 @@ exists. The result is allow, ask, or refuse:
 - `skip-permissions` — sandboxed work is auto-approved; host actions still need
   their own separate opt-in.
 
+**Approve for me** is a per-task setting. When it is on, the worker asks the
+same model already running the task to review each sandboxed, non-destructive
+approval against the user's instructions before showing a prompt. The reviewer
+sees those instructions and the proposed action, and it can only allow the
+action or hand it back. Host execution, destructive actions, and anything the
+review cannot confirm stay with the user. The timeline says when a check is in
+progress and records when the model allowed one.
+
 An approval is a daemon-side record bound to one session, tool, and argument
 hash. The worker cannot fabricate or reuse one: a grant issued for different
 arguments, already spent, expired, or belonging to another session is refused.

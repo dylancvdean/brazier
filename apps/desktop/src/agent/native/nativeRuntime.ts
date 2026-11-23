@@ -5,8 +5,10 @@
  * with zero third-party agent framework dependencies.
  */
 
+import { reviewApproval } from '../core/approvalReview'
 import {
   ContextOverflowError,
+  isTransientModelError,
   type BrokerClient,
   type ChatCompletionMessage,
   type ChatCompletionToolSpec,
@@ -47,6 +49,7 @@ import type {
   AgentModelReference,
   AgentPermissionMode,
   AgentRunStatus,
+  AgentRunSummary,
   AgentRuntime,
   AgentRuntimeDescriptor,
   AgentSession,
@@ -200,6 +203,59 @@ type PreparedToolCall = {
   definition?: AgentToolDefinition
 }
 
+type RunOutcome = 'completed' | 'cancelled' | 'failed'
+
+/**
+ * One `run()` call. A run moves through exactly one path:
+ * claimed → started → (completed | cancelled | failed), and `outcome` is set
+ * by the single call that emits the terminal event. The loop may keep
+ * unwinding after a cancel; `settled` is when it has actually stopped.
+ */
+type ActiveRun = {
+  id: string
+  abort: AbortController
+  queue: EventQueue
+  summary: AgentRunSummary
+  outcome?: RunOutcome
+}
+
+/** Retries for a model request that failed before producing any output. */
+const MAX_TRANSIENT_MODEL_RETRIES = 2
+const TRANSIENT_RETRY_DELAY_MS = 1_500
+/** How long a new run waits for a cancelled predecessor to finish unwinding. */
+const PREVIOUS_RUN_SETTLE_MS = 15_000
+const EMPTY_TURN_NUDGE =
+  '[harness notice: Your last reply was empty. Continue with the next step of the task, or give your final answer.]'
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms)
+    function done(): void {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    signal?.addEventListener('abort', done, { once: true })
+  })
+}
+
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), ms)
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export class NativeAgentSession implements AgentSession {
   readonly id: string
   private readonly broker: BrokerClient
@@ -223,12 +279,16 @@ export class NativeAgentSession implements AgentSession {
   private readonly onDisposed: () => void
   private reasoningEnabled: boolean
   private dropReasoningBetweenTurns: boolean
-  private queue?: EventQueue
-  private currentRunId?: string
-  private runAbort?: AbortController
-  private cancelledCurrentRun = false
-  private streaming = false
-  private completing = false
+  /** The newest run, from `run()` until its loop settles. */
+  private currentRun?: ActiveRun
+  /** Runs whose loops have not settled, by id, so late events reach the right stream. */
+  private readonly liveRuns = new Map<string, ActiveRun>()
+  private previousRunSettled: Promise<void> = Promise.resolve()
+  private approvalContext: {
+    settingsSessionId: string
+    instructions?: () => string[]
+    delegatedTask?: string
+  }
   private disposed = false
   private persistence = Promise.resolve()
   private lastKnownPromptTokens = 0
@@ -270,10 +330,11 @@ export class NativeAgentSession implements AgentSession {
     this.spawnSubagent = options.spawnSubagent
     this.cancelChildren = options.cancelChildren
     this.onDisposed = options.onDisposed
+    this.approvalContext = { settingsSessionId: options.state.id }
     this.executor = new AgentToolExecutor({
       broker: options.broker,
       sessionId: options.state.id,
-      emit: (event) => this.queue?.push(event),
+      emit: (event) => this.routeEvent(event),
       sequencer: this.sequencer,
       definitions: options.definitions,
       sandbox: options.sandbox
@@ -281,6 +342,54 @@ export class NativeAgentSession implements AgentSession {
     this.executor.setLocalHandler(SPAWN_SUBAGENT_TOOL, (request) =>
       this.spawnSubagent(this, request)
     )
+    this.executor.setReviewer({
+      enabled: () => this.approveForMeEnabled(),
+      review: (request, approval) =>
+        reviewApproval(
+          this.broker,
+          { model: this.state.model.id, slot: this.llamaSlot, signal: request.signal },
+          {
+            approval,
+            userInstructions: this.approvalContext.instructions?.() ?? this.userInstructions(),
+            delegatedTask: this.approvalContext.delegatedTask,
+            agentReason: request.reason
+          }
+        )
+    })
+  }
+
+  /** The user's own messages in this session, oldest first. */
+  userInstructions(): string[] {
+    return this.state.messages
+      .filter((message): message is Extract<AgentMessage, { role: 'user' }> => message.role === 'user')
+      .map((message) => message.text)
+  }
+
+  /**
+   * Point "Approve for me" at a parent: a subagent follows its parent's
+   * setting and is reviewed against the parent user's instructions, with its
+   * own task shown as agent-written context.
+   */
+  setApprovalContext(context: {
+    settingsSessionId: string
+    instructions: () => string[]
+    delegatedTask: string
+  }): void {
+    this.approvalContext = context
+  }
+
+  /** Read from the daemon so a toggle in the UI applies to the next approval. */
+  private async approveForMeEnabled(): Promise<boolean> {
+    try {
+      const remote = await this.broker.session(this.approvalContext.settingsSessionId)
+      const settings = remote.session.permission_settings
+      if (this.approvalContext.settingsSessionId === this.id) {
+        this.state = { ...this.state, permissionSettings: settings }
+      }
+      return settings.approve_for_me === true
+    } catch {
+      return this.state.permissionSettings.approve_for_me === true
+    }
   }
 
   updateModelReference(model: AgentModelReference): void {
@@ -317,12 +426,26 @@ export class NativeAgentSession implements AgentSession {
     }
   }
 
-  forwardEvent(event: AgentEvent): void {
-    this.queue?.push(event)
+  /** Deliver a subagent's event on the parent run that spawned it. */
+  forwardEvent(event: AgentEvent, parentRunId: string = event.runId): void {
+    const run = this.liveRuns.get(parentRunId)
+    if (run) this.pushTo(run, event)
   }
 
-  private emit(event: AgentEvent): void {
-    this.queue?.push(event)
+  private routeEvent(event: AgentEvent): void {
+    const run = this.liveRuns.get(event.runId)
+    if (run) this.pushTo(run, event)
+  }
+
+  /** Events after a run's terminal event are dropped by its closed queue. */
+  private pushTo(run: ActiveRun, event: AgentEvent): void {
+    if (run.outcome) return
+    run.summary = accumulate(run.summary, event)
+    run.queue.push(event)
+  }
+
+  private emit(run: ActiveRun | undefined, event: AgentEvent): void {
+    if (run) this.pushTo(run, event)
   }
 
   private enqueuePersistence<T>(task: () => Promise<T>): Promise<T> {
@@ -334,7 +457,10 @@ export class NativeAgentSession implements AgentSession {
     return next
   }
 
-  private base(type: AgentEvent['type']): {
+  private base(
+    run: ActiveRun | undefined,
+    type: AgentEvent['type']
+  ): {
     type: AgentEvent['type']
     sessionId: string
     runId: string
@@ -344,15 +470,15 @@ export class NativeAgentSession implements AgentSession {
     return {
       type,
       sessionId: this.id,
-      runId: this.currentRunId ?? 'run',
+      runId: run?.id ?? 'run',
       timestamp: new Date().toISOString(),
       sequence: this.sequencer.take()
     }
   }
 
-  private commitMessage(message: AgentMessage): void {
+  private commitMessage(message: AgentMessage, run?: ActiveRun): void {
     if (message.role !== 'tool') {
-      this.emit({ ...this.base('message-committed'), message } as AgentEvent)
+      this.emit(run, { ...this.base(run, 'message-committed'), message } as AgentEvent)
     }
     this.state = { ...this.state, messages: [...this.state.messages, message] }
     void this.enqueuePersistence(() => this.broker.appendMessages(this.id, [message])).catch(
@@ -389,7 +515,8 @@ export class NativeAgentSession implements AgentSession {
 
   private buildChatMessages(
     inputImages: readonly string[] | undefined,
-    toolImagesByCallId: ReadonlyMap<string, ToolImage[]>
+    toolImagesByCallId: ReadonlyMap<string, ToolImage[]>,
+    nudge?: string
   ): ChatCompletionMessage[] {
     const out: ChatCompletionMessage[] = []
     if (this.systemPrompt.trim().length > 0) {
@@ -468,6 +595,9 @@ export class NativeAgentSession implements AgentSession {
         }
       }
     }
+    // Sent with this request only: a nudge is a harness instruction, not part
+    // of the conversation, so it is never persisted.
+    if (nudge) out.push({ role: 'user', content: nudge })
     return out
   }
 
@@ -506,24 +636,22 @@ export class NativeAgentSession implements AgentSession {
   }
 
   private emitSyntheticToolFailure(
-    runId: string,
+    run: ActiveRun,
     call: PreparedToolCall,
     error: string
   ): void {
     const environment = call.definition?.defaultEnvironment ?? 'sandbox'
     const risk = call.definition?.risk ?? 'execute'
-    this.emit({
-      ...this.base('tool-call-proposed'),
-      runId,
+    this.emit(run, {
+      ...this.base(run, 'tool-call-proposed'),
       toolCallId: call.id,
       tool: call.resolvedName,
       args: call.args,
       environment,
       risk
     } as AgentEvent)
-    this.emit({
-      ...this.base('tool-failed'),
-      runId,
+    this.emit(run, {
+      ...this.base(run, 'tool-failed'),
       toolCallId: call.id,
       tool: call.resolvedName,
       environment,
@@ -535,391 +663,461 @@ export class NativeAgentSession implements AgentSession {
   }
 
   run(input: AgentUserInput): AsyncIterable<AgentEvent> {
-    const runId = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-    this.currentRunId = runId
-    this.completing = true
-    this.streaming = true
-    this.cancelledCurrentRun = false
-    const abortController = new AbortController()
-    this.runAbort = abortController
-
-    const queue = new EventQueue()
-    this.queue = queue
-    this.executor.approvalsRequested = 0
-    let summary = emptySummary()
-    const originalPush = queue.push.bind(queue)
-    queue.push = (event: AgentEvent): void => {
-      summary = accumulate(summary, event)
-      originalPush(event)
+    if (this.disposed) throw new Error('Cannot run a disposed agent session.')
+    if (this.currentRun && !this.currentRun.outcome) {
+      throw new Error('That session is already running. Cancel it first.')
     }
+    const run: ActiveRun = {
+      id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      abort: new AbortController(),
+      queue: new EventQueue(),
+      summary: emptySummary()
+    }
+    this.currentRun = run
+    this.liveRuns.set(run.id, run)
 
-    this.emit({ ...this.base('run-started') } as AgentEvent)
-    void this.setRunStatus('running')
+    const previous = this.previousRunSettled
+    const settled = (async (): Promise<void> => {
+      // A cancelled run reports its terminal event at once but may still be
+      // unwinding a tool call; two loops must never share one transcript.
+      if (!(await settlesWithin(previous, PREVIOUS_RUN_SETTLE_MS))) {
+        await this.finish(run, 'failed', 'The previous run is still stopping. Try again in a moment.')
+        return
+      }
+      if (run.abort.signal.aborted) {
+        await this.finish(run, 'cancelled')
+        return
+      }
+      this.executor.approvalsRequested = 0
+      this.executor.approvalsAutoApproved = 0
+      this.emit(run, { ...this.base(run, 'run-started') } as AgentEvent)
+      await this.setRunStatus('running', run)
+      try {
+        await this.executeRun(run, input)
+        await this.finish(run, run.abort.signal.aborted ? 'cancelled' : 'completed')
+      } catch (cause) {
+        if (run.abort.signal.aborted) {
+          await this.finish(run, 'cancelled')
+        } else {
+          await this.finish(run, 'failed', cause instanceof Error ? cause.message : String(cause))
+        }
+      }
+    })().finally(() => {
+      this.liveRuns.delete(run.id)
+      if (this.currentRun === run) this.currentRun = undefined
+      run.queue.close()
+    })
+    this.previousRunSettled = settled.catch(() => undefined)
 
-    const executeRun = async (): Promise<void> => {
-      await this.refreshInferencePrefs()
+    return run.queue.iterator()
+  }
 
-      this.commitMessage({
+  /**
+   * Emit the run's one terminal event and close its stream. Later calls for
+   * the same run are no-ops, so a cancel racing completion reports once.
+   */
+  private async finish(run: ActiveRun, outcome: RunOutcome, error?: string): Promise<void> {
+    if (run.outcome) return
+    if (outcome === 'completed') {
+      const summary: AgentRunSummary = {
+        ...run.summary,
+        approvalsRequested: this.executor.approvalsRequested,
+        approvalsAutoApproved: this.executor.approvalsAutoApproved
+      }
+      summary.text = describeSummary(summary)
+      this.pushTo(run, { ...this.base(run, 'run-completed'), summary } as AgentEvent)
+    } else if (outcome === 'cancelled') {
+      this.pushTo(run, { ...this.base(run, 'run-cancelled') } as AgentEvent)
+    } else {
+      this.pushTo(run, {
+        ...this.base(run, 'run-failed'),
+        error: error ?? 'The run failed.'
+      } as AgentEvent)
+    }
+    run.outcome = outcome
+    run.queue.close()
+    await this.setRunStatus(outcome, run)
+  }
+
+  private async executeRun(run: ActiveRun, input: AgentUserInput): Promise<void> {
+    const abortController = run.abort
+    await this.refreshInferencePrefs()
+
+    this.commitMessage(
+      {
         role: 'user',
         text: input.text,
         timestamp: new Date().toISOString()
-      })
+      },
+      run
+    )
 
-      const loopGuard = new LoopGuard(
-        this.maxTurnsPerRun !== undefined ? { maxTurnsPerRun: this.maxTurnsPerRun } : undefined
-      )
-      const toolImagesByCallId = new Map<string, ToolImage[]>()
+    const loopGuard = new LoopGuard(
+      this.maxTurnsPerRun !== undefined ? { maxTurnsPerRun: this.maxTurnsPerRun } : undefined
+    )
+    const toolImagesByCallId = new Map<string, ToolImage[]>()
+    let nudge: string | undefined
+    let emptyTurnNudged = false
 
-      while (!abortController.signal.aborted) {
-        const turnGate = loopGuard.startTurn()
-        if (!turnGate.allowed) {
-          this.commitMessage({
+    while (!abortController.signal.aborted) {
+      const turnGate = loopGuard.startTurn()
+      if (!turnGate.allowed) {
+        this.commitMessage(
+          {
             role: 'assistant',
             text: turnGate.message ?? 'Stopped after reaching the turn limit.',
             timestamp: new Date().toISOString()
-          })
-          break
-        }
+          },
+          run
+        )
+        break
+      }
 
-        // Proactive auto-compaction before hitting context ceiling.
-        if (
-          this.state.messages.length > COMPACTION_KEEP_TAIL + 2 &&
-          this.estimatePromptTokens() >= AUTO_COMPACT_THRESHOLD_RATIO * this.effectiveContextWindow()
-        ) {
-          await this.compact()
-        }
+      // Proactive auto-compaction before hitting context ceiling.
+      if (
+        this.state.messages.length > COMPACTION_KEEP_TAIL + 2 &&
+        this.estimatePromptTokens() >= AUTO_COMPACT_THRESHOLD_RATIO * this.effectiveContextWindow()
+      ) {
+        await this.compact(run)
+      }
 
-        const activeDefs = this.activeDefinitions()
-        const activeDefsMap = new Map(activeDefs.map((def) => [def.name, def]))
-        const toolSpecs = this.buildToolSpecs(activeDefs)
+      const activeDefs = this.activeDefinitions()
+      const activeDefsMap = new Map(activeDefs.map((def) => [def.name, def]))
+      const toolSpecs = this.buildToolSpecs(activeDefs)
 
-        let overflowRetried = false
-        let turnResult
-        let splitter = new ThinkStreamSplitter()
+      let overflowRetried = false
+      let transientRetries = 0
+      let turnResult
+      let splitter = new ThinkStreamSplitter()
 
-        while (true) {
-          splitter = new ThinkStreamSplitter()
-          const anchorLen = this.state.messages.length
-          try {
-            turnResult = await this.broker.streamChatCompletion(
-              {
-                model: this.state.model.id,
-                messages: this.buildChatMessages(input.images, toolImagesByCallId),
-                tools: toolSpecs.length > 0 ? toolSpecs : undefined,
-                maxTokens: this.state.model.maxTokens,
-                enableReasoning: this.reasoningEnabled,
-                slot: this.llamaSlot
-              },
-              {
-                onPrefill: (prefill) => {
-                  this.lastKnownPromptTokens = prefill.total
-                  this.lastPromptTokenAnchor = anchorLen
-                  if (typeof prefill.context_total === 'number' && prefill.context_total > 0) {
-                    this.latestContextTotal = prefill.context_total
-                  }
-                  this.emit({
-                    ...this.base('prefill-progress'),
-                    total: prefill.total,
-                    cached: prefill.cached,
-                    processed: prefill.processed,
-                    elapsedMs: prefill.elapsed_ms,
-                    contextTotal: prefill.context_total
-                  } as AgentEvent)
-                },
-                onReasoningDelta: (delta) => {
-                  splitter.markBackendReasoning()
-                  this.emit({
-                    ...this.base('text-delta'),
-                    delta,
-                    channel: 'reasoning'
-                  } as AgentEvent)
-                },
-                onContentDelta: (delta) => {
-                  for (const chunk of splitter.push(delta)) {
-                    this.emit({
-                      ...this.base('text-delta'),
-                      delta: chunk.delta,
-                      channel: chunk.channel
-                    } as AgentEvent)
-                  }
+      while (true) {
+        splitter = new ThinkStreamSplitter()
+        const anchorLen = this.state.messages.length
+        let producedOutput = false
+        try {
+          turnResult = await this.broker.streamChatCompletion(
+            {
+              model: this.state.model.id,
+              messages: this.buildChatMessages(input.images, toolImagesByCallId, nudge),
+              tools: toolSpecs.length > 0 ? toolSpecs : undefined,
+              maxTokens: this.state.model.maxTokens,
+              enableReasoning: this.reasoningEnabled,
+              slot: this.llamaSlot
+            },
+            {
+              onPrefill: (prefill) => {
+                this.lastKnownPromptTokens = prefill.total
+                this.lastPromptTokenAnchor = anchorLen
+                if (typeof prefill.context_total === 'number' && prefill.context_total > 0) {
+                  this.latestContextTotal = prefill.context_total
                 }
+                this.emit(run, {
+                  ...this.base(run, 'prefill-progress'),
+                  total: prefill.total,
+                  cached: prefill.cached,
+                  processed: prefill.processed,
+                  elapsedMs: prefill.elapsed_ms,
+                  contextTotal: prefill.context_total
+                } as AgentEvent)
               },
-              abortController.signal
-            )
-            if (typeof turnResult.promptTokens === 'number' && turnResult.promptTokens > 0) {
-              this.lastKnownPromptTokens = turnResult.promptTokens
-              this.lastPromptTokenAnchor = anchorLen
-            }
-            if (typeof turnResult.contextTotal === 'number' && turnResult.contextTotal > 0) {
-              this.latestContextTotal = turnResult.contextTotal
-            }
-            break
-          } catch (cause) {
+              onReasoningDelta: (delta) => {
+                producedOutput = true
+                splitter.markBackendReasoning()
+                this.emit(run, {
+                  ...this.base(run, 'text-delta'),
+                  delta,
+                  channel: 'reasoning'
+                } as AgentEvent)
+              },
+              onContentDelta: (delta) => {
+                producedOutput = true
+                for (const chunk of splitter.push(delta)) {
+                  this.emit(run, {
+                    ...this.base(run, 'text-delta'),
+                    delta: chunk.delta,
+                    channel: chunk.channel
+                  } as AgentEvent)
+                }
+              }
+            },
+            abortController.signal
+          )
+          nudge = undefined
+          if (typeof turnResult.promptTokens === 'number' && turnResult.promptTokens > 0) {
+            this.lastKnownPromptTokens = turnResult.promptTokens
+            this.lastPromptTokenAnchor = anchorLen
+          }
+          if (typeof turnResult.contextTotal === 'number' && turnResult.contextTotal > 0) {
+            this.latestContextTotal = turnResult.contextTotal
+          }
+          break
+        } catch (cause) {
+          if (abortController.signal.aborted) throw cause
+          if (cause instanceof ContextOverflowError && !overflowRetried) {
+            overflowRetried = true
+            await this.compact(run)
+            await this.truncateOversizedKeptToolOutputs()
+            continue
+          }
+          // Replaying is only safe before anything reached the UI; after
+          // that a retry would show the same text twice.
+          if (
+            !producedOutput &&
+            transientRetries < MAX_TRANSIENT_MODEL_RETRIES &&
+            isTransientModelError(cause)
+          ) {
+            transientRetries += 1
+            await delay(TRANSIENT_RETRY_DELAY_MS * transientRetries, abortController.signal)
             if (abortController.signal.aborted) throw cause
-            if (cause instanceof ContextOverflowError && !overflowRetried) {
-              overflowRetried = true
-              await this.compact()
-              await this.truncateOversizedKeptToolOutputs()
-              continue
-            }
-            throw cause
+            continue
           }
+          throw cause
         }
+      }
 
-        for (const chunk of splitter.flush()) {
-          this.emit({
-            ...this.base('text-delta'),
-            delta: chunk.delta,
-            channel: chunk.channel
-          } as AgentEvent)
-        }
+      for (const chunk of splitter.flush()) {
+        this.emit(run, {
+          ...this.base(run, 'text-delta'),
+          delta: chunk.delta,
+          channel: chunk.channel
+        } as AgentEvent)
+      }
 
-        const combinedReasoning = (turnResult.reasoning + splitter.reasoningText).trim()
-        const rawCombinedProse = splitter.visibleText + splitter.heldBackText
+      const combinedReasoning = (turnResult.reasoning + splitter.reasoningText).trim()
+      const rawCombinedProse = splitter.visibleText + splitter.heldBackText
 
-        let finalAssistantText = rawCombinedProse
-        let rawCalls: Array<{ id: string; name: string; rawArgs: unknown }> = []
+      let finalAssistantText = rawCombinedProse
+      let rawCalls: Array<{ id: string; name: string; rawArgs: unknown }> = []
 
-        if (turnResult.toolCalls.length > 0) {
-          if (splitter.heldBackText) {
-            const checkHeld = extractTextToolCalls(splitter.heldBackText, this.enabledTools)
-            if (checkHeld.toolCalls.length === 0) {
-              this.emit({
-                ...this.base('text-delta'),
-                delta: splitter.heldBackText,
-                channel: 'text'
-              } as AgentEvent)
-            } else {
-              finalAssistantText = (splitter.visibleText + checkHeld.cleanedText).trim()
-            }
-          }
-          rawCalls = turnResult.toolCalls.map((tc) => ({
-            id: tc.id,
-            name: tc.name,
-            rawArgs: parseLooseJson(tc.arguments) ?? tc.arguments
-          }))
-        } else {
-          const fallback = extractTextToolCalls(rawCombinedProse, this.enabledTools)
-          if (fallback.toolCalls.length > 0) {
-            finalAssistantText = fallback.cleanedText
-            rawCalls = fallback.toolCalls.map((tc) => ({
-              id: tc.id,
-              name: tc.name,
-              rawArgs: tc.arguments
-            }))
-          } else if (splitter.heldBackText) {
-            this.emit({
-              ...this.base('text-delta'),
+      if (turnResult.toolCalls.length > 0) {
+        if (splitter.heldBackText) {
+          const checkHeld = extractTextToolCalls(splitter.heldBackText, this.enabledTools)
+          if (checkHeld.toolCalls.length === 0) {
+            this.emit(run, {
+              ...this.base(run, 'text-delta'),
               delta: splitter.heldBackText,
               channel: 'text'
             } as AgentEvent)
+          } else {
+            finalAssistantText = (splitter.visibleText + checkHeld.cleanedText).trim()
           }
         }
-
-        const preparedCalls: PreparedToolCall[] = rawCalls.map((call) => {
-          const resolvedName = resolveToolNameAlias(call.name, this.enabledTools)
-          const definition = activeDefsMap.get(resolvedName)
-          const args = definition
-            ? repairToolArguments(call.rawArgs, definition)
-            : call.rawArgs && typeof call.rawArgs === 'object' && !Array.isArray(call.rawArgs)
-              ? (call.rawArgs as Record<string, unknown>)
-              : {}
-          return {
-            id: call.id,
-            rawName: call.name,
-            resolvedName,
-            rawArgs: call.rawArgs,
-            args,
-            definition
-          }
-        })
-
-        const callSummaries: AgentToolCallSummary[] = preparedCalls.map((call) => ({
-          id: call.id,
-          name: call.resolvedName,
-          arguments: call.args
+        rawCalls = turnResult.toolCalls.map((tc) => ({
+          id: tc.id,
+          name: tc.name,
+          rawArgs: parseLooseJson(tc.arguments) ?? tc.arguments
         }))
+      } else {
+        const fallback = extractTextToolCalls(rawCombinedProse, this.enabledTools)
+        if (fallback.toolCalls.length > 0) {
+          finalAssistantText = fallback.cleanedText
+          rawCalls = fallback.toolCalls.map((tc) => ({
+            id: tc.id,
+            name: tc.name,
+            rawArgs: tc.arguments
+          }))
+        } else if (splitter.heldBackText) {
+          this.emit(run, {
+            ...this.base(run, 'text-delta'),
+            delta: splitter.heldBackText,
+            channel: 'text'
+          } as AgentEvent)
+        }
+      }
 
-        this.commitMessage({
+      const preparedCalls: PreparedToolCall[] = rawCalls.map((call) => {
+        const resolvedName = resolveToolNameAlias(call.name, this.enabledTools)
+        const definition = activeDefsMap.get(resolvedName)
+        const args = definition
+          ? repairToolArguments(call.rawArgs, definition)
+          : call.rawArgs && typeof call.rawArgs === 'object' && !Array.isArray(call.rawArgs)
+            ? (call.rawArgs as Record<string, unknown>)
+            : {}
+        return {
+          id: call.id,
+          rawName: call.name,
+          resolvedName,
+          rawArgs: call.rawArgs,
+          args,
+          definition
+        }
+      })
+
+      const callSummaries: AgentToolCallSummary[] = preparedCalls.map((call) => ({
+        id: call.id,
+        name: call.resolvedName,
+        arguments: call.args
+      }))
+
+      // Local models sometimes return nothing at all, often right after a
+      // tool result. Ending the run there looks like the agent gave up, so
+      // ask once more before accepting the silence.
+      if (
+        preparedCalls.length === 0 &&
+        !finalAssistantText.trim() &&
+        !turnResult.content.trim() &&
+        !emptyTurnNudged
+      ) {
+        emptyTurnNudged = true
+        nudge = EMPTY_TURN_NUDGE
+        continue
+      }
+
+      this.commitMessage(
+        {
           role: 'assistant',
           text: finalAssistantText,
           reasoning: combinedReasoning || undefined,
           toolCalls: callSummaries.length > 0 ? callSummaries : undefined,
           timestamp: new Date().toISOString()
-        })
+        },
+        run
+      )
 
-        if (preparedCalls.length === 0) {
-          break
-        }
+      if (preparedCalls.length === 0) {
+        break
+      }
 
-        const executable =
-          this.maxToolsPerTurn !== undefined
-            ? preparedCalls.slice(0, this.maxToolsPerTurn)
-            : preparedCalls
-        const skipped =
-          this.maxToolsPerTurn !== undefined ? preparedCalls.slice(this.maxToolsPerTurn) : []
+      const executable =
+        this.maxToolsPerTurn !== undefined
+          ? preparedCalls.slice(0, this.maxToolsPerTurn)
+          : preparedCalls
+      const skipped =
+        this.maxToolsPerTurn !== undefined ? preparedCalls.slice(this.maxToolsPerTurn) : []
 
-        const waves = partitionToolWaves(
-          executable.map((call) => ({ ...call, name: call.resolvedName })),
-          activeDefsMap,
-          this.parallelToolCalling
-        )
+      const waves = partitionToolWaves(
+        executable.map((call) => ({ ...call, name: call.resolvedName })),
+        activeDefsMap,
+        this.parallelToolCalling
+      )
 
-        let haltMessage: string | undefined
+      let haltMessage: string | undefined
 
-        for (const wave of waves) {
-          if (abortController.signal.aborted) break
+      for (const wave of waves) {
+        if (abortController.signal.aborted) break
 
-          const waveResults = await Promise.all(
-            wave.map(async (call): Promise<AgentMessage> => {
-              if (!call.definition) {
-                const err = `Tool \`${call.rawName}\` is not available or enabled in this session.`
-                this.emitSyntheticToolFailure(runId, call, err)
-                return {
-                  role: 'tool',
-                  toolCallId: call.id,
-                  tool: call.resolvedName,
-                  output: err,
-                  isError: true,
-                  timestamp: new Date().toISOString()
-                }
-              }
-
-              const validationError = validateToolArguments(call.args, call.definition)
-              if (validationError) {
-                this.emitSyntheticToolFailure(runId, call, validationError)
-                return {
-                  role: 'tool',
-                  toolCallId: call.id,
-                  tool: call.resolvedName,
-                  output: validationError,
-                  isError: true,
-                  timestamp: new Date().toISOString()
-                }
-              }
-
-              const loopDecision = loopGuard.beforeCall(call.resolvedName, call.args)
-              if (loopDecision.action === 'short-circuit') {
-                this.emitSyntheticToolFailure(runId, call, loopDecision.message)
-                return {
-                  role: 'tool',
-                  toolCallId: call.id,
-                  tool: call.resolvedName,
-                  output: loopDecision.message,
-                  isError: true,
-                  timestamp: new Date().toISOString()
-                }
-              }
-              if (loopDecision.action === 'halt-run') {
-                haltMessage = loopDecision.message
-                this.emitSyntheticToolFailure(runId, call, loopDecision.message)
-                return {
-                  role: 'tool',
-                  toolCallId: call.id,
-                  tool: call.resolvedName,
-                  output: loopDecision.message,
-                  isError: true,
-                  timestamp: new Date().toISOString()
-                }
-              }
-
-              const outcome = await this.executor.execute({
-                runId,
-                toolCallId: call.id,
-                tool: call.resolvedName,
-                args: call.args,
-                reason: typeof call.args.reason === 'string' ? call.args.reason : undefined,
-                signal: abortController.signal
-              })
-              if (outcome.images.length > 0) {
-                toolImagesByCallId.set(call.id, outcome.images)
-              }
-              const guardedOutput = loopGuard.afterCall(
-                call.resolvedName,
-                call.args,
-                outcome.isError,
-                outcome.output
-              )
+        const waveResults = await Promise.all(
+          wave.map(async (call): Promise<AgentMessage> => {
+            if (!call.definition) {
+              const err = `Tool \`${call.rawName}\` is not available or enabled in this session.`
+              this.emitSyntheticToolFailure(run, call, err)
               return {
                 role: 'tool',
                 toolCallId: call.id,
                 tool: call.resolvedName,
-                output: guardedOutput,
-                isError: outcome.isError,
+                output: err,
+                isError: true,
                 timestamp: new Date().toISOString()
               }
+            }
+
+            const validationError = validateToolArguments(call.args, call.definition)
+            if (validationError) {
+              this.emitSyntheticToolFailure(run, call, validationError)
+              return {
+                role: 'tool',
+                toolCallId: call.id,
+                tool: call.resolvedName,
+                output: validationError,
+                isError: true,
+                timestamp: new Date().toISOString()
+              }
+            }
+
+            const loopDecision = loopGuard.beforeCall(call.resolvedName, call.args)
+            if (loopDecision.action === 'short-circuit') {
+              this.emitSyntheticToolFailure(run, call, loopDecision.message)
+              return {
+                role: 'tool',
+                toolCallId: call.id,
+                tool: call.resolvedName,
+                output: loopDecision.message,
+                isError: true,
+                timestamp: new Date().toISOString()
+              }
+            }
+            if (loopDecision.action === 'halt-run') {
+              haltMessage = loopDecision.message
+              this.emitSyntheticToolFailure(run, call, loopDecision.message)
+              return {
+                role: 'tool',
+                toolCallId: call.id,
+                tool: call.resolvedName,
+                output: loopDecision.message,
+                isError: true,
+                timestamp: new Date().toISOString()
+              }
+            }
+
+            const outcome = await this.executor.execute({
+              runId: run.id,
+              toolCallId: call.id,
+              tool: call.resolvedName,
+              args: call.args,
+              reason: typeof call.args.reason === 'string' ? call.args.reason : undefined,
+              signal: abortController.signal
             })
-          )
+            if (outcome.images.length > 0) {
+              toolImagesByCallId.set(call.id, outcome.images)
+            }
+            const guardedOutput = loopGuard.afterCall(
+              call.resolvedName,
+              call.args,
+              outcome.isError,
+              outcome.output
+            )
+            return {
+              role: 'tool',
+              toolCallId: call.id,
+              tool: call.resolvedName,
+              output: guardedOutput,
+              isError: outcome.isError,
+              timestamp: new Date().toISOString()
+            }
+          })
+        )
 
-          for (const toolMessage of waveResults) {
-            this.commitMessage(toolMessage)
-          }
-
-          if (haltMessage) break
+        for (const toolMessage of waveResults) {
+          this.commitMessage(toolMessage, run)
         }
 
-        for (const extra of skipped) {
-          this.commitMessage({
+        if (haltMessage) break
+      }
+
+      for (const extra of skipped) {
+        this.commitMessage(
+          {
             role: 'tool',
             toolCallId: extra.id,
             tool: extra.resolvedName,
             output: `Only ${this.maxToolsPerTurn} tool call per turn is allowed for this model. Make the next call after reading this result.`,
             isError: false,
             timestamp: new Date().toISOString()
-          })
-        }
+          },
+          run
+        )
+      }
 
-        if (haltMessage) {
-          this.commitMessage({
+      if (haltMessage) {
+        this.commitMessage(
+          {
             role: 'assistant',
             text: haltMessage,
             timestamp: new Date().toISOString()
-          })
-          break
-        }
+          },
+          run
+        )
+        break
       }
-
-      if (abortController.signal.aborted) {
-        if (!this.cancelledCurrentRun) {
-          this.cancelledCurrentRun = true
-          this.emit({ ...this.base('run-cancelled') } as AgentEvent)
-          await this.setRunStatus('cancelled')
-        }
-        return
-      }
-
-      summary.approvalsRequested = this.executor.approvalsRequested
-      summary.text = describeSummary(summary)
-      this.emit({ ...this.base('run-completed'), summary } as AgentEvent)
-      await this.setRunStatus('completed')
     }
-
-    void executeRun()
-      .catch(async (cause: unknown) => {
-        if (abortController.signal.aborted) {
-          if (!this.cancelledCurrentRun) {
-            this.cancelledCurrentRun = true
-            this.emit({ ...this.base('run-cancelled') } as AgentEvent)
-            await this.setRunStatus('cancelled')
-          }
-          return
-        }
-        const message = cause instanceof Error ? cause.message : String(cause)
-        this.emit({ ...this.base('run-failed'), error: message } as AgentEvent)
-        await this.setRunStatus('failed')
-      })
-      .finally(() => {
-        this.streaming = false
-        if (this.runAbort === abortController) this.runAbort = undefined
-        queue.close()
-        if (this.queue === queue) this.queue = undefined
-        this.completing = false
-      })
-
-    return queue.iterator()
   }
 
-  private async setRunStatus(status: AgentRunStatus): Promise<void> {
+  /**
+   * Record the run status, unless a newer run has already claimed the session:
+   * a cancelled run that finishes unwinding late must not overwrite it.
+   */
+  private async setRunStatus(status: AgentRunStatus, run?: ActiveRun): Promise<void> {
+    if (run && this.currentRun && this.currentRun !== run) return
     this.state = { ...this.state, lastRunStatus: status }
     try {
       await this.enqueuePersistence(() =>
@@ -930,18 +1128,21 @@ export class NativeAgentSession implements AgentSession {
     }
   }
 
+  /**
+   * Stop the current run. The terminal event goes out immediately; the loop
+   * unwinds behind it and the next run waits for that to finish.
+   */
   async cancel(): Promise<void> {
-    this.runAbort?.abort()
-    await this.cancelChildren()
-    await this.broker.cancel(this.id)
-    if (!this.cancelledCurrentRun) {
-      this.cancelledCurrentRun = true
-      this.emit({ ...this.base('run-cancelled') } as AgentEvent)
-    }
-    await this.setRunStatus('cancelled')
+    const run = this.currentRun
+    run?.abort.abort()
+    if (run) await this.finish(run, 'cancelled')
+    await this.cancelChildren().catch(() => undefined)
+    // The supervisor cancels at the daemon as well, so a failure here must
+    // not turn a stopped run into a failed stop.
+    await this.broker.cancel(this.id).catch(() => undefined)
   }
 
-  async compact(): Promise<AgentCompactionState> {
+  async compact(run?: ActiveRun): Promise<AgentCompactionState> {
     const messages = this.state.messages
     let splitIndex = Math.max(0, messages.length - COMPACTION_KEEP_TAIL)
     while (splitIndex < messages.length && messages[splitIndex]?.role === 'tool') {
@@ -958,7 +1159,7 @@ export class NativeAgentSession implements AgentSession {
             model: this.state.model.id,
             transcript: renderTranscript(dropped),
             facts,
-            signal: this.runAbort?.signal
+            signal: run?.abort.signal
           })
         : null
     const summaryText = mergeSummary(prose, facts)
@@ -988,16 +1189,20 @@ export class NativeAgentSession implements AgentSession {
       })
     )
     this.state = { ...this.state, compactionState: compaction }
-    this.emit({
-      ...this.base('compacted'),
+    this.emit(run, {
+      ...this.base(run, 'compacted'),
       state: compaction,
       keptMessages: next
     } as AgentEvent)
     return compaction
   }
 
+  /**
+   * True from `run()` until the run reports its outcome. Settings changed
+   * after that apply to the next run, which waits for any unwinding first.
+   */
   isBusy(): boolean {
-    return this.streaming || this.completing
+    return this.currentRun !== undefined && !this.currentRun.outcome
   }
 
   async setModel(model: AgentModelReference): Promise<void> {
@@ -1044,9 +1249,11 @@ export class NativeAgentSession implements AgentSession {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
-    this.runAbort?.abort()
-    this.queue?.close()
-    this.queue = undefined
+    const run = this.currentRun
+    if (run) {
+      run.abort.abort()
+      void this.finish(run, 'cancelled')
+    }
     this.onDisposed()
   }
 }
@@ -1450,6 +1657,11 @@ export class NativeAgentRuntime implements AgentRuntime {
           capabilities: options.capabilities,
           llamaSlot
         })) as NativeAgentSession
+        childSession.setApprovalContext({
+          settingsSessionId: parent.id,
+          instructions: () => parent.userInstructions(),
+          delegatedTask: prompt
+        })
 
         const abortChild = (): void => {
           void childSession?.cancel()
@@ -1458,8 +1670,13 @@ export class NativeAgentRuntime implements AgentRuntime {
         try {
           for await (const event of childSession.run({ text: prompt })) {
             if (childFinished) continue
-            if (event.type === 'approval-required' || event.type === 'elevation-requested') {
-              parent.forwardEvent(event)
+            if (
+              event.type === 'approval-required' ||
+              event.type === 'elevation-requested' ||
+              event.type === 'approval-reviewed' ||
+              event.type === 'approval-resolved'
+            ) {
+              parent.forwardEvent(event, request.runId)
             }
             const progress = subagentProgressFromChildEvent(
               event,

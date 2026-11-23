@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { BrokerClient, BrokerError, ContextOverflowError } from './brokerClient'
+import {
+  BrokerClient,
+  BrokerError,
+  ContextOverflowError,
+  ModelStallError,
+  StreamInterruptedError
+} from './brokerClient'
 
 function sseResponse(frames: Array<Record<string, unknown> | '[DONE]'>): Response {
   const encoder = new TextEncoder()
@@ -179,5 +185,56 @@ describe('BrokerClient.streamChatCompletion', () => {
         messages: [{ role: 'user', content: 'hi' }]
       })
     ).rejects.toThrow(BrokerError)
+  })
+
+  it('rejects a stream that closes before [DONE]', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      sseResponse([
+        { choices: [{ index: 0, delta: { content: 'Partial' }, finish_reason: null }] }
+      ])
+    )
+    const client = new BrokerClient({ address: 'http://127.0.0.1:1710', apiKey: null })
+    await expect(
+      client.streamChatCompletion({
+        model: 'gguf:demo.gguf',
+        messages: [{ role: 'user', content: 'hi' }]
+      })
+    ).rejects.toBeInstanceOf(StreamInterruptedError)
+  })
+
+  it('rejects a stream that stays silent, including keep-alive comments', async () => {
+    const encoder = new TextEncoder()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(': keep-alive\n\n'))
+          }
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } }
+      )
+    )
+    const client = new BrokerClient(
+      { address: 'http://127.0.0.1:1710', apiKey: null },
+      { modelStallTimeoutMs: 40 }
+    )
+    await expect(
+      client.streamChatCompletion({
+        model: 'gguf:demo.gguf',
+        messages: [{ role: 'user', content: 'hi' }]
+      })
+    ).rejects.toBeInstanceOf(ModelStallError)
+  })
+
+  it('waits for an approval longer than the daemon long-poll', async () => {
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => new AbortController().signal)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: 'ap-1', status: 'pending' }), { status: 200 })
+    )
+    const client = new BrokerClient({ address: 'http://127.0.0.1:1710', apiKey: null })
+    await client.waitForApproval('ap-1', 60_000)
+    expect(timeout).toHaveBeenCalledWith(75_000)
   })
 })

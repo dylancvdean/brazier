@@ -10,10 +10,19 @@
 import { BrokerClient } from './core/brokerClient'
 import { inferModelCapabilities } from './core/modelCompat'
 import type { WorkerCommand, WorkerMessage } from './core/protocol'
-import type { AgentRuntime, AgentSession, AgentToolDefinition } from './core/types'
+import type {
+  AgentEvent,
+  AgentRuntime,
+  AgentSession,
+  AgentSessionState,
+  AgentToolDefinition
+} from './core/types'
 import { createRuntime, DEFAULT_RUNTIME_ID, normalizeRuntimeId } from './registry'
 
 export type PostMessage = (message: WorkerMessage) => void
+
+/** Queue key for commands that are not about one session. */
+const GLOBAL_QUEUE = '*'
 
 export class AgentWorkerCore {
   private readonly post: PostMessage
@@ -24,6 +33,12 @@ export class AgentWorkerCore {
   private readonly sessions = new Map<string, AgentSession>()
   /** Runs in flight, so a cancel can reach the right session. */
   private readonly running = new Set<string>()
+  /** Runs accepted but still opening their session. */
+  private readonly starting = new Set<string>()
+  /** Cancels that arrived while their run was still starting. */
+  private readonly cancelledBeforeStart = new Set<string>()
+  /** Tail of each session's command queue. */
+  private readonly queues = new Map<string, Promise<unknown>>()
 
   constructor(
     post: PostMessage,
@@ -34,14 +49,106 @@ export class AgentWorkerCore {
     this.runtimeFactory = runtimeFactory
   }
 
+  /**
+   * Schedule one command and post its result.
+   *
+   * Commands for the same session run one at a time, so an open/rehydrate
+   * cannot race a run starting. A run only holds its session's queue while it
+   * starts, not while the model works: otherwise Stop would wait behind the
+   * very run it is meant to stop, and one long run would block every other
+   * session. Cancel and shutdown never queue.
+   */
   async handle(command: WorkerCommand): Promise<void> {
+    if (command.type === 'cancel' || command.type === 'shutdown') {
+      await this.respond(command.requestId, () => this.dispatch(command))
+      return
+    }
+    const key = 'sessionId' in command ? command.sessionId : GLOBAL_QUEUE
+    if (command.type === 'run') {
+      this.starting.add(command.sessionId)
+      const started = this.enqueue(key, () => this.startRun(command.sessionId, command.input))
+      await this.respond(command.requestId, async () => {
+        const { session, events } = await started
+        return this.pumpRun(session, events)
+      })
+      return
+    }
+    await this.respond(command.requestId, () => this.enqueue(key, () => this.dispatch(command)))
+  }
+
+  private async respond(requestId: string, task: () => Promise<unknown>): Promise<void> {
     try {
-      const data = await this.dispatch(command)
-      this.post({ type: 'result', requestId: command.requestId, ok: true, data })
+      const data = await task()
+      this.post({ type: 'result', requestId, ok: true, data })
     } catch (cause) {
       const error = cause instanceof Error ? cause.message : String(cause)
-      this.post({ type: 'result', requestId: command.requestId, ok: false, error })
+      this.post({ type: 'result', requestId, ok: false, error })
     }
+  }
+
+  private enqueue<T>(key: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.queues.get(key) ?? Promise.resolve()
+    const next = previous.then(task, task)
+    const tail = next.then(
+      () => undefined,
+      () => undefined
+    )
+    this.queues.set(key, tail)
+    void tail.then(() => {
+      if (this.queues.get(key) === tail) this.queues.delete(key)
+    })
+    return next
+  }
+
+  private async startRun(
+    sessionId: string,
+    input: Extract<WorkerCommand, { type: 'run' }>['input']
+  ): Promise<{ session: AgentSession; events: AsyncIterable<AgentEvent> | null }> {
+    try {
+      const session = await this.openSession(sessionId, { rehydrate: false })
+      if (this.running.has(session.id)) {
+        throw new Error('That session is already running. Cancel it first.')
+      }
+      if (this.cancelledBeforeStart.delete(sessionId)) {
+        return { session, events: null }
+      }
+      const events = session.run(input)
+      this.running.add(session.id)
+      return { session, events }
+    } finally {
+      this.starting.delete(sessionId)
+      this.cancelledBeforeStart.delete(sessionId)
+    }
+  }
+
+  private async pumpRun(
+    session: AgentSession,
+    events: AsyncIterable<AgentEvent> | null
+  ): Promise<AgentSessionState> {
+    if (!events) {
+      // Report the stop so the supervisor and UI see this run end.
+      this.post({
+        type: 'event',
+        sessionId: session.id,
+        event: {
+          type: 'run-cancelled',
+          sessionId: session.id,
+          runId: `run-cancelled-before-start-${Date.now().toString(36)}`,
+          timestamp: new Date().toISOString(),
+          sequence: 0
+        }
+      })
+    } else {
+      try {
+        for await (const event of events) {
+          this.post({ type: 'event', sessionId: session.id, event })
+        }
+      } finally {
+        this.running.delete(session.id)
+      }
+    }
+    this.post({ type: 'session-state', sessionId: session.id, state: session.getState() })
+    return session.getState()
   }
 
   private async dispatch(command: WorkerCommand): Promise<unknown> {
@@ -70,22 +177,13 @@ export class AgentWorkerCore {
         return session.getState()
       }
       case 'run': {
-        const session = await this.openSession(command.sessionId, { rehydrate: false })
-        if (this.running.has(session.id)) {
-          throw new Error('That session is already running. Cancel it first.')
-        }
-        this.running.add(session.id)
-        try {
-          for await (const event of session.run(command.input)) {
-            this.post({ type: 'event', sessionId: session.id, event })
-          }
-        } finally {
-          this.running.delete(session.id)
-        }
-        this.post({ type: 'session-state', sessionId: session.id, state: session.getState() })
-        return session.getState()
+        const { session, events } = await this.startRun(command.sessionId, command.input)
+        return this.pumpRun(session, events)
       }
       case 'cancel': {
+        if (this.starting.has(command.sessionId)) {
+          this.cancelledBeforeStart.add(command.sessionId)
+        }
         const session = this.sessions.get(command.sessionId)
         if (!session) {
           // Nothing is loaded, but processes and approvals may still be live.

@@ -127,7 +127,9 @@ type TimelineEntry = {
   tool: string
   args: Record<string, unknown>
   environment: 'sandbox' | 'host'
-  status: 'running' | 'awaiting-approval' | 'completed' | 'failed' | 'denied'
+  status: 'running' | 'reviewing' | 'awaiting-approval' | 'completed' | 'failed' | 'denied'
+  /** Set while "Approve for me" is checking or has allowed this call. */
+  reviewNote?: string
   sandbox?: SandboxDescription
   output?: string
   error?: string
@@ -166,6 +168,14 @@ const PERMISSION_LABELS: Record<AgentPermissionMode, { title: string; detail: st
     title: 'Skip permissions',
     detail: 'No prompts for sandboxed work. Host actions still need the separate opt-in.'
   }
+}
+
+function reviewNoteFor(event: Extract<AgentEvent, { type: 'approval-reviewed' }>): string {
+  if (event.phase === 'started') return 'Checking against your instructions…'
+  if (event.phase === 'approved') {
+    return event.reason ? `Approved for you: ${event.reason}` : 'Approved for you'
+  }
+  return event.reason ?? 'Needs your approval'
 }
 
 function errorText(cause: unknown): string {
@@ -616,6 +626,8 @@ function TimelineRow({
         : entry.subagent.status
       : entry.status === 'running'
         ? 'running'
+        : entry.status === 'reviewing'
+        ? 'checking your instructions'
         : entry.status === 'awaiting-approval'
           ? 'waiting for you'
           : entry.status === 'denied'
@@ -632,7 +644,9 @@ function TimelineRow({
   return (
     <details className={`agent-tool ${entry.status}${entry.subagent ? ' agent-tool-subagent' : ''}`}>
       <summary>
-        {entry.status === 'running' || entry.subagent?.status === 'running' ? (
+        {entry.status === 'running' ||
+        entry.status === 'reviewing' ||
+        entry.subagent?.status === 'running' ? (
           <LoaderCircle className="spin" size={13} />
         ) : entry.status === 'awaiting-approval' ? (
           <Lock size={13} />
@@ -647,6 +661,7 @@ function TimelineRow({
           {entry.environment === 'host' ? 'host' : 'sandbox'}
         </span>
         <span className="agent-tool-status">{statusLabel}</span>
+        {entry.reviewNote ? <span className="agent-tool-review">{entry.reviewNote}</span> : null}
       </summary>
       <div className="agent-tool-body">
         {entry.subagent && entry.subagent.activity.length > 0 ? (
@@ -724,6 +739,8 @@ export function AgentMode(props: Props): React.JSX.Element {
   /** Permission mode for the next task, until a session exists to own it. */
   const [pendingPermissionMode, setPendingPermissionMode] =
     useState<AgentPermissionMode>('ask')
+  /** "Approve for me" for the next task, until a session exists to own it. */
+  const [pendingApproveForMe, setPendingApproveForMe] = useState(false)
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false)
   const [toolDraft, setToolDraft] = useState<string[]>([])
   const [toolsSaving, setToolsSaving] = useState(false)
@@ -776,6 +793,9 @@ export function AgentMode(props: Props): React.JSX.Element {
   const confinedToWorktree = Boolean(worktree) || (!session && pendingConfineToWorktree)
   const permissionMode: AgentPermissionMode =
     session?.permission_mode ?? pendingPermissionMode
+  const approveForMe = Boolean(
+    session?.permission_settings.approve_for_me ?? pendingApproveForMe
+  )
   const activeRuntimeId = session?.runtime_id ?? defaultRuntimeId
   const powerfulMode = activeRuntimeId === 'powerful'
   /** Tools this mode exposes: power tools are hidden from Simple sessions. */
@@ -881,6 +901,49 @@ export function AgentMode(props: Props): React.JSX.Element {
               : entry
           )
         )
+        return
+      }
+      case 'approval-reviewed': {
+        const note = reviewNoteFor(event)
+        const status =
+          event.phase === 'started'
+            ? 'reviewing'
+            : event.phase === 'approved'
+              ? 'running'
+              : 'awaiting-approval'
+        setTimeline((current) =>
+          current.map((entry) => {
+            if (entry.toolCallId === event.toolCallId) {
+              return { ...entry, status, reviewNote: note }
+            }
+            if (!entry.subagent) return entry
+            const hit = entry.subagent.activity.some((item) => item.id === event.toolCallId)
+            if (!hit) return entry
+            return {
+              ...entry,
+              status: event.phase === 'escalated' ? 'awaiting-approval' : entry.status,
+              subagent: {
+                ...entry.subagent,
+                activity: entry.subagent.activity.map((item) =>
+                  item.id === event.toolCallId
+                    ? {
+                        ...item,
+                        status:
+                          event.phase === 'escalated'
+                            ? ('awaiting-approval' as const)
+                            : item.status,
+                        detail: note
+                      }
+                    : item
+                )
+              }
+            }
+          })
+        )
+        return
+      }
+      case 'approval-resolved': {
+        setApprovals((current) => current.filter((entry) => entry.id !== event.approvalId))
         return
       }
       case 'approval-required': {
@@ -1048,6 +1111,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         setRunning(false)
         setSummary(event.summary)
         setStreaming('')
+        setApprovals([])
         setPrefill(null)
         return
       }
@@ -1061,6 +1125,7 @@ export function AgentMode(props: Props): React.JSX.Element {
       case 'run-failed': {
         setRunning(false)
         setStreaming('')
+        setApprovals([])
         setPrefill(null)
         onError(event.error)
         return
@@ -1251,6 +1316,27 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }
 
+  async function changeApproveForMe(enabled: boolean): Promise<void> {
+    if (!session) {
+      setPendingApproveForMe(enabled)
+      return
+    }
+    try {
+      assertDaemonMutationAllowed({ method: 'POST' })
+      const updated = await updateAgentSession(session.id, {
+        permission_settings: {
+          ...session.permission_settings,
+          approve_for_me: enabled
+        }
+      })
+      setSession(updated)
+      setPendingApproveForMe(enabled)
+      setSessions((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)))
+    } catch (cause) {
+      onError(errorText(cause))
+    }
+  }
+
   async function changePermissionMode(mode: AgentPermissionMode): Promise<void> {
     setModeMenuOpen(false)
     if (mode === 'sandbox-only' && !capabilities?.sandbox.sandboxed_execution) {
@@ -1364,6 +1450,11 @@ export function AgentMode(props: Props): React.JSX.Element {
           model: props.modelId,
           runtime_id: defaultRuntimeId,
           permission_mode: pendingPermissionMode,
+          permission_settings: {
+            auto_approve_sandboxed_actions: true,
+            auto_approve_host_actions: false,
+            approve_for_me: pendingApproveForMe
+          },
           ...(pendingEnabledTools ? { enabled_tools: pendingEnabledTools } : {}),
           confine_to_worktree: requestedWorktree
         })
@@ -1558,6 +1649,9 @@ export function AgentMode(props: Props): React.JSX.Element {
     const nextWorkspaceIsGit = Boolean(nextWorkspace && (previousWorktree || workspaceIsGit))
     const nextEnabledTools = session?.enabled_tools ?? pendingEnabledTools
     const nextPermissionMode = session?.permission_mode ?? pendingPermissionMode
+    const nextApproveForMe = Boolean(
+      session?.permission_settings.approve_for_me ?? pendingApproveForMe
+    )
     if (session) {
       await window.brazier.agent.closeSession(session.id).catch(() => undefined)
     }
@@ -1585,6 +1679,7 @@ export function AgentMode(props: Props): React.JSX.Element {
     setWorkspaceIsGit(nextWorkspaceIsGit)
     setPendingEnabledTools(nextEnabledTools ? [...nextEnabledTools] : null)
     setPendingPermissionMode(nextPermissionMode)
+    setPendingApproveForMe(nextApproveForMe)
     setPendingConfineToWorktree(nextWorkspaceIsGit)
   }
 
@@ -1871,6 +1966,16 @@ export function AgentMode(props: Props): React.JSX.Element {
             </div>
           )}
         </div>
+        <button
+          type="button"
+          className={approveForMe ? 'chip-button subtle active' : 'chip-button subtle'}
+          aria-pressed={approveForMe}
+          title="Let this task's model allow sandboxed actions that stay within your instructions. Host and destructive actions still ask you."
+          onClick={() => void changeApproveForMe(!approveForMe)}
+        >
+          <ShieldCheck size={13} />
+          Approve for me
+        </button>
         <div className="agent-header-spacer" />
         {grants.length > 0 && (
           <span className="agent-grants" title={grants.join('\n')}>
@@ -2080,6 +2185,12 @@ export function AgentMode(props: Props): React.JSX.Element {
               )}
               {summary.approvalsRequested > 0 && (
                 <li>{summary.approvalsRequested} approval request(s)</li>
+              )}
+              {(summary.approvalsAutoApproved ?? 0) > 0 && (
+                <li>
+                  {summary.approvalsAutoApproved} approval
+                  {summary.approvalsAutoApproved === 1 ? '' : 's'} checked and allowed for you
+                </li>
               )}
               {summary.hostActions.length > 0 && (
                 <li className="warn">Outside the sandbox: {summary.hostActions.join(', ')}</li>

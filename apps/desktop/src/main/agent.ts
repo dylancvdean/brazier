@@ -66,6 +66,8 @@ export class AgentSupervisor {
   private crashes = 0
   private readonly sessions = new Set<string>()
   private readonly activeSessions = new Map<string, ActiveSessionRun>()
+  /** Runs that already ended, so a late event cannot make them look active again. */
+  private readonly finishedRuns = new Set<string>()
   private readonly eventListeners = new Set<(message: WorkerMessage) => void>()
   private expectedExit?: UtilityProcess
 
@@ -175,18 +177,7 @@ export class AgentSupervisor {
         return
       }
       case 'event': {
-        if (
-          message.event.type === 'run-completed' ||
-          message.event.type === 'run-cancelled' ||
-          message.event.type === 'run-failed'
-        ) {
-          this.activeSessions.delete(message.sessionId)
-        } else {
-          this.activeSessions.set(message.sessionId, {
-            runId: message.event.runId,
-            sequence: message.event.sequence
-          })
-        }
+        this.trackActiveSession(message.sessionId, message.event)
         this.emitWorkerMessage(message)
         return
       }
@@ -209,6 +200,49 @@ export class AgentSupervisor {
       default:
         return
     }
+  }
+
+  /**
+   * Keep `activeSessions` aligned with the run that is actually in flight.
+   * A terminal event drops it, and anything that arrives afterwards for that
+   * same run is ignored: otherwise a late tool event would put a finished
+   * session back on the list, and the next worker crash would invent a
+   * second failure for it.
+   */
+  private trackActiveSession(
+    sessionId: string,
+    event: Extract<WorkerMessage, { type: 'event' }>['event']
+  ): void {
+    if (this.finishedRuns.has(event.runId)) return
+    const terminal =
+      event.type === 'run-completed' ||
+      event.type === 'run-cancelled' ||
+      event.type === 'run-failed'
+    const tracked = this.activeSessions.get(sessionId)
+    // `invoke` records a placeholder before the worker has chosen a run id.
+    const placeholder =
+      tracked !== undefined &&
+      tracked.sequence === 0 &&
+      tracked.runId.startsWith(`run-${sessionId}-`)
+    const sameRun = tracked?.runId === event.runId
+    if (terminal) {
+      this.rememberFinishedRun(event.runId)
+      if (!tracked || sameRun || placeholder) this.activeSessions.delete(sessionId)
+      return
+    }
+    if (event.type === 'run-started' || sameRun || placeholder) {
+      this.activeSessions.set(sessionId, {
+        runId: event.runId,
+        sequence: event.sequence
+      })
+    }
+  }
+
+  private rememberFinishedRun(runId: string): void {
+    this.finishedRuns.add(runId)
+    if (this.finishedRuns.size <= 64) return
+    const oldest = this.finishedRuns.values().next().value
+    if (oldest) this.finishedRuns.delete(oldest)
   }
 
   /** Start the worker and initialize it against the daemon connection. */
