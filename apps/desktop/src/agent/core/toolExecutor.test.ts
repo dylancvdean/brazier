@@ -185,8 +185,14 @@ describe('AgentToolExecutor', () => {
       'tool-started',
       'approval-required',
       'elevation-requested',
+      'approval-resolved',
       'tool-completed'
     ])
+    expect(events.find((event) => event.type === 'approval-resolved')).toMatchObject({
+      approvalId: 'approval-1',
+      status: 'approved',
+      decidedBy: 'user'
+    })
     // The retry must carry the approval and the same arguments; the daemon
     // rejects a grant spent on anything else.
     expect(broker.execTool).toHaveBeenCalledTimes(2)
@@ -240,19 +246,60 @@ describe('AgentToolExecutor', () => {
     expect(outcome.output).toContain('expired')
   })
 
-  it('does not authorize anything when the approval wait fails', async () => {
-    const approval = pendingApproval()
-    const execTool = vi.fn(async () => approvalRequired(approval))
-    const waitForApproval = vi.fn(async () => {
-      throw new Error('connection reset')
-    })
-    const { executor } = makeExecutor({ execTool, waitForApproval } as unknown as BrokerClient)
+  it('does not authorize anything when the approval wait keeps failing', async () => {
+    vi.useFakeTimers()
+    try {
+      const approval = pendingApproval()
+      const execTool = vi.fn(async () => approvalRequired(approval))
+      const waitForApproval = vi.fn(async () => {
+        throw new Error('connection reset')
+      })
+      const { executor, events } = makeExecutor({
+        execTool,
+        waitForApproval
+      } as unknown as BrokerClient)
 
-    const outcome = await executor.execute(request)
+      const pending = executor.execute(request)
+      await vi.runAllTimersAsync()
+      const outcome = await pending
 
-    expect(outcome.isError).toBe(true)
-    expect(outcome.denied).toBe(true)
-    expect(execTool).toHaveBeenCalledTimes(1)
+      expect(outcome.isError).toBe(true)
+      expect(outcome.denied).toBe(true)
+      expect(execTool).toHaveBeenCalledTimes(1)
+      expect(waitForApproval.mock.calls.length).toBeGreaterThan(1)
+      expect(events.find((event) => event.type === 'approval-resolved')).toMatchObject({
+        status: 'expired',
+        decidedBy: 'system'
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('survives a dropped approval long-poll and still honors the decision', async () => {
+    vi.useFakeTimers()
+    try {
+      const approval = pendingApproval()
+      const execTool = vi
+        .fn()
+        .mockResolvedValueOnce(approvalRequired(approval))
+        .mockResolvedValueOnce(completed())
+      const waitForApproval = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('The operation was aborted due to timeout'))
+        .mockResolvedValueOnce({ ...approval, status: 'approved' })
+      const { executor } = makeExecutor({ execTool, waitForApproval } as unknown as BrokerClient)
+
+      const pending = executor.execute(request)
+      await vi.runAllTimersAsync()
+      const outcome = await pending
+
+      expect(outcome.isError).toBe(false)
+      expect(waitForApproval).toHaveBeenCalledTimes(2)
+      expect(execTool).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('stops after a single approval round trip', async () => {
@@ -377,5 +424,135 @@ describe('AgentToolExecutor', () => {
       'tool-started',
       'tool-completed'
     ])
+  })
+})
+
+describe('AgentToolExecutor approve for me', () => {
+  function reviewBroker(approval: AgentApproval): {
+    client: BrokerClient
+    execTool: ReturnType<typeof vi.fn>
+    waitForApproval: ReturnType<typeof vi.fn>
+    decideApproval: ReturnType<typeof vi.fn>
+  } {
+    const execTool = vi
+      .fn()
+      .mockResolvedValueOnce(approvalRequired(approval))
+      .mockResolvedValueOnce(completed())
+    const waitForApproval = vi.fn(async () => ({ ...approval, status: 'approved' as const }))
+    const decideApproval = vi.fn(async () => ({ ...approval, status: 'approved' as const }))
+    return {
+      client: { execTool, waitForApproval, decideApproval } as unknown as BrokerClient,
+      execTool,
+      waitForApproval,
+      decideApproval
+    }
+  }
+
+  it('approves an in-scope request without asking the user', async () => {
+    const approval = pendingApproval()
+    const broker = reviewBroker(approval)
+    const { executor, events } = makeExecutor(broker.client)
+    const review = vi.fn(async () => ({ decision: 'approve' as const, reason: 'User asked for a.txt.' }))
+    executor.setReviewer({ enabled: async () => true, review })
+
+    const outcome = await executor.execute(request)
+
+    expect(outcome.isError).toBe(false)
+    expect(review).toHaveBeenCalledOnce()
+    expect(broker.decideApproval).toHaveBeenCalledWith(
+      'approval-1',
+      'approve',
+      'once',
+      expect.stringContaining('User asked for a.txt.')
+    )
+    expect(broker.waitForApproval).not.toHaveBeenCalled()
+    const retry = broker.execTool.mock.calls[1]?.[0] as { approvalId?: string }
+    expect(retry.approvalId).toBe('approval-1')
+    const types = events.map((event) => event.type)
+    expect(types).not.toContain('approval-required')
+    expect(events.filter((event) => event.type === 'approval-reviewed')).toMatchObject([
+      { phase: 'started' },
+      { phase: 'approved', reason: 'User asked for a.txt.' }
+    ])
+    expect(events.find((event) => event.type === 'approval-resolved')).toMatchObject({
+      decidedBy: 'model-review',
+      status: 'approved'
+    })
+    expect(executor.approvalsAutoApproved).toBe(1)
+    expect(executor.approvalsRequested).toBe(0)
+  })
+
+  it('hands the request to the user when the review is unsure', async () => {
+    const approval = pendingApproval()
+    const broker = reviewBroker(approval)
+    const { executor, events } = makeExecutor(broker.client)
+    executor.setReviewer({
+      enabled: async () => true,
+      review: async () => ({ decision: 'ask-user', reason: 'Not mentioned by the user.' })
+    })
+
+    const outcome = await executor.execute(request)
+
+    expect(outcome.isError).toBe(false)
+    expect(broker.decideApproval).not.toHaveBeenCalled()
+    expect(broker.waitForApproval).toHaveBeenCalledOnce()
+    const types = events.map((event) => event.type)
+    expect(types.indexOf('approval-reviewed')).toBeLessThan(types.indexOf('approval-required'))
+    expect(events.filter((event) => event.type === 'approval-reviewed').at(-1)).toMatchObject({
+      phase: 'escalated',
+      reason: 'Not mentioned by the user.'
+    })
+    expect(executor.approvalsRequested).toBe(1)
+  })
+
+  it.each([
+    ['host', pendingApproval({ environment: 'host' })],
+    ['destructive', pendingApproval({ risk: 'destructive' })],
+    [
+      'host-elevating',
+      pendingApproval({ elevation: { reason: 'x', requested_host_execution: true } })
+    ]
+  ])('never lets the model decide a %s action', async (_label, approval) => {
+    const broker = reviewBroker(approval)
+    const { executor, events } = makeExecutor(broker.client)
+    const review = vi.fn(async () => ({ decision: 'approve' as const, reason: 'fine' }))
+    executor.setReviewer({ enabled: async () => true, review })
+
+    await executor.execute(request)
+
+    expect(review).not.toHaveBeenCalled()
+    expect(broker.decideApproval).not.toHaveBeenCalled()
+    expect(events.map((event) => event.type)).toContain('approval-required')
+  })
+
+  it('stays out of the way when the setting is off', async () => {
+    const approval = pendingApproval()
+    const broker = reviewBroker(approval)
+    const { executor, events } = makeExecutor(broker.client)
+    const review = vi.fn()
+    executor.setReviewer({ enabled: async () => false, review })
+
+    await executor.execute(request)
+
+    expect(review).not.toHaveBeenCalled()
+    expect(events.map((event) => event.type)).not.toContain('approval-reviewed')
+  })
+
+  it('falls back to the user when the approval cannot be recorded', async () => {
+    const approval = pendingApproval()
+    const broker = reviewBroker(approval)
+    broker.decideApproval.mockRejectedValueOnce(new Error('approval is no longer pending'))
+    const { executor, events } = makeExecutor(broker.client)
+    executor.setReviewer({
+      enabled: async () => true,
+      review: async () => ({ decision: 'approve', reason: 'ok' })
+    })
+
+    const outcome = await executor.execute(request)
+
+    expect(outcome.isError).toBe(false)
+    expect(broker.waitForApproval).toHaveBeenCalledOnce()
+    expect(events.map((event) => event.type)).toContain('approval-required')
+    expect(executor.approvalsAutoApproved).toBe(0)
   })
 })

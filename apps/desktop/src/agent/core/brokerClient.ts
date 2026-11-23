@@ -10,6 +10,7 @@ import type {
   AgentApproval,
   AgentEnvironment,
   AgentMessage,
+  AgentPermissionSettings,
   AgentToolDefinition,
   ApprovalScope,
   SandboxDescription,
@@ -106,10 +107,7 @@ export type DaemonSessionRecord = {
   model: string
   runtime_id: string
   permission_mode: 'ask' | 'sandbox-only' | 'skip-permissions'
-  permission_settings: {
-    auto_approve_sandboxed_actions: boolean
-    auto_approve_host_actions: boolean
-  }
+  permission_settings: AgentPermissionSettings
   enabled_tools?: string[] | null
   last_run_status: string
   compaction?: Record<string, unknown> | null
@@ -212,6 +210,75 @@ export class ContextOverflowError extends BrokerError {
   }
 }
 
+/** The model produced no stream data (keep-alive comments do not count) for too long. */
+export class ModelStallError extends BrokerError {
+  constructor(timeoutMs: number) {
+    super(
+      `The model stopped responding: no output for ${Math.round(timeoutMs / 1000)} seconds.`,
+      504
+    )
+    this.name = 'ModelStallError'
+  }
+}
+
+/** The connection closed before the daemon's terminal `[DONE]` frame. */
+export class StreamInterruptedError extends BrokerError {
+  constructor() {
+    super('The model stream ended before the response finished.', 502)
+    this.name = 'StreamInterruptedError'
+  }
+}
+
+/**
+ * True for failures worth retrying once the same request is replayed: the
+ * connection dropped, the gateway hiccuped, or the stream was cut short.
+ */
+export function isTransientModelError(cause: unknown): boolean {
+  if (cause instanceof ContextOverflowError || cause instanceof ModelStallError) return false
+  if (cause instanceof StreamInterruptedError) return true
+  if (cause instanceof BrokerError) return cause.status === 502 || cause.status === 503
+  // undici reports refused / reset connections as `TypeError: fetch failed`.
+  return cause instanceof TypeError && /fetch failed|network|socket/i.test(cause.message)
+}
+
+function anySignal(signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const present = signals.filter((signal): signal is AbortSignal => Boolean(signal))
+  if (present.length <= 1) return present[0]
+  return AbortSignal.any(present)
+}
+
+/**
+ * Rejects `stalled` when `reset` has not been called for `timeoutMs`. Racing
+ * every network wait against it bounds a wedged engine without bounding a
+ * long generation that keeps producing output.
+ */
+function stallWatchdog(
+  timeoutMs: number,
+  onStall: () => void
+): { stalled: Promise<never>; reset: () => void; stop: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let reject!: (error: Error) => void
+  const stalled = new Promise<never>((_, rejectStall) => {
+    reject = rejectStall
+  })
+  stalled.catch(() => undefined)
+  const reset = (): void => {
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      onStall()
+      reject(new ModelStallError(timeoutMs))
+    }, timeoutMs)
+  }
+  reset()
+  return {
+    stalled,
+    reset,
+    stop: () => {
+      if (timer) clearTimeout(timer)
+    }
+  }
+}
+
 /** Detect prompt / KV-cache context overflow errors across local and remote engines. */
 export function isContextOverflowMessage(message: string, code?: string | null): boolean {
   const normalizedCode = (code ?? '').toLowerCase()
@@ -257,12 +324,31 @@ function normalizeCompleteToolCall(raw: Record<string, unknown>, index: number):
 }
 
 const REQUEST_TIMEOUT_MS = 30_000
+/**
+ * Non-streaming tool calls include project checks and MCP calls that the
+ * daemon itself bounds (shell commands at ten minutes). The client limit only
+ * has to catch a daemon that never answers, so it sits above those.
+ */
+const EXEC_TIMEOUT_MS = 12 * 60_000
+/** Extra time past the daemon's long-poll window before the client gives up. */
+const APPROVAL_WAIT_GRACE_MS = 15_000
+/**
+ * Longest silence tolerated from the model stream. Prefill progress and token
+ * deltas both reset it, so it only fires on a wedged engine or daemon.
+ */
+export const MODEL_STALL_TIMEOUT_MS = 5 * 60_000
+
+export type BrokerClientOptions = {
+  modelStallTimeoutMs?: number
+}
 
 export class BrokerClient {
   private readonly connection: BrokerConnection
+  private readonly modelStallTimeoutMs: number
 
-  constructor(connection: BrokerConnection) {
+  constructor(connection: BrokerConnection, options: BrokerClientOptions = {}) {
     this.connection = connection
+    this.modelStallTimeoutMs = options.modelStallTimeoutMs ?? MODEL_STALL_TIMEOUT_MS
   }
 
   private async request<T>(
@@ -275,15 +361,7 @@ export class BrokerClient {
       headers.set('authorization', `Bearer ${this.connection.apiKey}`)
     }
     const timeoutMs = init?.timeoutMs ?? REQUEST_TIMEOUT_MS
-    const timeoutSignal = AbortSignal.timeout(timeoutMs)
-    const externalSignal = init?.signal
-    const signal =
-      externalSignal && typeof (AbortSignal as unknown as { any?: unknown }).any === 'function'
-        ? (AbortSignal as unknown as { any: (signals: AbortSignal[]) => AbortSignal }).any([
-            externalSignal,
-            timeoutSignal
-          ])
-        : (externalSignal ?? timeoutSignal)
+    const signal = anySignal([init?.signal ?? undefined, AbortSignal.timeout(timeoutMs)])
     const { timeoutMs: _timeout, ...fetchInit } = init ?? {}
     const response = await fetch(`${this.connection.address}${path}`, {
       ...fetchInit,
@@ -478,6 +556,7 @@ export class BrokerClient {
     return this.request('/api/v1/agent/exec', {
       method: 'POST',
       signal,
+      timeoutMs: EXEC_TIMEOUT_MS,
       body: JSON.stringify({
         session_id: request.sessionId,
         run_id: request.runId,
@@ -614,15 +693,40 @@ export class BrokerClient {
       body.enable_reasoning = request.enableReasoning
     }
 
-    const response = await fetch(`${this.openAiBaseUrl()}/chat/completions`, {
-      method: 'POST',
-      headers,
-      signal,
-      body: JSON.stringify(body)
-    })
+    const stallAbort = new AbortController()
+    const watchdog = stallWatchdog(this.modelStallTimeoutMs, () => stallAbort.abort())
+    try {
+      return await this.readChatCompletion(
+        body,
+        headers,
+        anySignal([signal, stallAbort.signal])!,
+        watchdog,
+        callbacks
+      )
+    } finally {
+      watchdog.stop()
+    }
+  }
+
+  private async readChatCompletion(
+    body: Record<string, unknown>,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+    watchdog: ReturnType<typeof stallWatchdog>,
+    callbacks?: StreamChatCompletionCallbacks
+  ): Promise<StreamChatCompletionResult> {
+    const response = await Promise.race([
+      fetch(`${this.openAiBaseUrl()}/chat/completions`, {
+        method: 'POST',
+        headers,
+        signal,
+        body: JSON.stringify(body)
+      }),
+      watchdog.stalled
+    ])
 
     if (!response.ok) {
-      const rawText = await response.text().catch(() => '')
+      const rawText = await Promise.race([response.text(), watchdog.stalled]).catch(() => '')
       let message = `Request failed with status ${response.status}.`
       let code: string | undefined
       try {
@@ -684,6 +788,7 @@ export class BrokerClient {
         }
       }
       if (dataLines.length === 0) return
+      watchdog.reset()
       const dataStr = dataLines.join('\n')
       if (dataStr === '[DONE]') {
         doneFlag = true
@@ -844,9 +949,11 @@ export class BrokerClient {
       }
     }
 
+    let streamEnded = false
     try {
       while (!doneFlag) {
-        const { value, done } = await reader.read()
+        const { value, done } = await Promise.race([reader.read(), watchdog.stalled])
+        streamEnded = done
         buffer += decoder.decode(value, { stream: !done })
         let boundary = buffer.search(/\r?\n\r?\n/)
         while (boundary >= 0) {
@@ -862,8 +969,17 @@ export class BrokerClient {
         consumeBlock(buffer)
       }
     } finally {
-      reader.releaseLock()
+      if (!streamEnded) await reader.cancel().catch(() => undefined)
+      try {
+        reader.releaseLock()
+      } catch {
+        // A read abandoned by the watchdog may still hold the lock.
+      }
     }
+    // The daemon always closes its stream with `[DONE]`, including after an
+    // error frame. Anything else is a dropped connection, and the partial
+    // turn must not be mistaken for the model's final answer.
+    if (!doneFlag) throw new StreamInterruptedError()
 
     const toolCalls: StreamedToolCall[] =
       completeToolCalls && completeToolCalls.length > 0
@@ -897,7 +1013,10 @@ export class BrokerClient {
     waitMs: number,
     signal?: AbortSignal
   ): Promise<AgentApproval> {
-    return this.request(`/api/v1/agent/approvals/${approvalId}?wait_ms=${waitMs}`, { signal })
+    return this.request(`/api/v1/agent/approvals/${approvalId}?wait_ms=${waitMs}`, {
+      signal,
+      timeoutMs: waitMs + APPROVAL_WAIT_GRACE_MS
+    })
   }
 
   async decideApproval(
