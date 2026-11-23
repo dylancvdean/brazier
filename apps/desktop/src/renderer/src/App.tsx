@@ -1495,6 +1495,7 @@ export function App(): React.JSX.Element {
       setDaemonAvailability('healthy')
       setDaemonVersion(result.version)
       daemonWasOfflineRef.current = false
+      setError(null)
       await rehydrateDaemonState()
     } catch {
       daemonWasOfflineRef.current = true
@@ -1569,6 +1570,7 @@ export function App(): React.JSX.Element {
           setDaemonVersion(result.version)
           if (daemonWasOfflineRef.current) {
             daemonWasOfflineRef.current = false
+            setError(null)
             void rehydrateDaemonState()
           }
         })

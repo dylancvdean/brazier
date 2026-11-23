@@ -57,12 +57,25 @@ export type BrazierInputGuardStatus = {
   detail: string
 }
 
+// Electron rewrites handler failures as "Error invoking remote method
+// '<channel>': Error: <message>"; the renderer shows the message to people.
+const REMOTE_ERROR_PREFIX = /^Error invoking remote method '[^']*': (?:[A-Za-z]*Error: )?/
+
+async function invoke(channel: string, ...args: unknown[]): Promise<any> {
+  try {
+    return await ipcRenderer.invoke(channel, ...args)
+  } catch (error) {
+    if (error instanceof Error) error.message = error.message.replace(REMOTE_ERROR_PREFIX, '')
+    throw error
+  }
+}
+
 const invokeAgent = async (command: WorkerCommandInput): Promise<unknown> => {
   // Agent mode can be the first daemon consumer after launch. Resolve the
   // selected profile first so the main-process supervisor receives the same
   // connection that renderer REST calls use.
-  await ipcRenderer.invoke('brazier:connection')
-  return ipcRenderer.invoke(AGENT_IPC.invoke, command)
+  await invoke('brazier:connection')
+  return invoke(AGENT_IPC.invoke, command)
 }
 
 const agentMessageListeners = new Set<(message: WorkerMessage) => void>()
@@ -110,7 +123,7 @@ const agent = {
   closeSession: (sessionId: string): Promise<unknown> =>
     invokeAgent({ type: 'close-session', sessionId }),
   status: (): Promise<{ running: boolean; crashes: number }> =>
-    ipcRenderer.invoke('brazier:agent:status'),
+    invoke('brazier:agent:status'),
   onMessage: (listener: (message: WorkerMessage) => void): (() => void) => {
     agentMessageListeners.add(listener)
     ensureAgentMessageDispatcher()
@@ -124,27 +137,27 @@ const agent = {
 }
 
 contextBridge.exposeInMainWorld('brazier', {
-  getConnection: (): Promise<BrazierConnection> => ipcRenderer.invoke('brazier:connection'),
+  getConnection: (): Promise<BrazierConnection> => invoke('brazier:connection'),
   listConnectionProfiles: (): Promise<BrazierConnectionProfile[]> =>
-    ipcRenderer.invoke('brazier:connection-profiles:list'),
+    invoke('brazier:connection-profiles:list'),
   getCurrentConnectionProfile: (): Promise<BrazierConnectionProfileSummary> =>
-    ipcRenderer.invoke('brazier:connection-profiles:current'),
+    invoke('brazier:connection-profiles:current'),
   upsertConnectionProfile: (
     profile: BrazierRemoteConnectionProfileInput
   ): Promise<BrazierRemoteConnectionProfile> =>
-    ipcRenderer.invoke('brazier:connection-profiles:upsert', profile),
+    invoke('brazier:connection-profiles:upsert', profile),
   testConnectionProfile: (
     idOrProfile: string | BrazierRemoteConnectionProfileInput
   ): Promise<BrazierConnectionTestResult> =>
-    ipcRenderer.invoke('brazier:connection-profiles:test', idOrProfile),
+    invoke('brazier:connection-profiles:test', idOrProfile),
   claimConnectionProfile: (
     input: BrazierPairingClaimInput
   ): Promise<BrazierClaimedConnection> =>
-    ipcRenderer.invoke('brazier:connection-profiles:claim-pairing', input),
+    invoke('brazier:connection-profiles:claim-pairing', input),
   selectConnectionProfile: (id: string): Promise<BrazierConnectionProfileSummary> =>
-    ipcRenderer.invoke('brazier:connection-profiles:select', id),
+    invoke('brazier:connection-profiles:select', id),
   deleteConnectionProfile: (id: string): Promise<boolean> =>
-    ipcRenderer.invoke('brazier:connection-profiles:delete', id),
+    invoke('brazier:connection-profiles:delete', id),
   onConnectionProfileChanged: (
     listener: (profile: BrazierConnectionProfileSummary) => void
   ): (() => void) => {
@@ -153,17 +166,17 @@ contextBridge.exposeInMainWorld('brazier', {
     ipcRenderer.on('brazier:connection-changed', handler)
     return () => ipcRenderer.removeListener('brazier:connection-changed', handler)
   },
-  getServerSettings: (): Promise<BrazierServerSettings> => ipcRenderer.invoke('brazier:server-settings'),
+  getServerSettings: (): Promise<BrazierServerSettings> => invoke('brazier:server-settings'),
   saveServerSettings: (
     settings: Omit<BrazierServerSettings, 'hasApiKeys' | 'keys'>
-  ): Promise<BrazierServerSettings> => ipcRenderer.invoke('brazier:save-server-settings', settings),
+  ): Promise<BrazierServerSettings> => invoke('brazier:save-server-settings', settings),
   addServerApiKey: (
     name: string
-  ): Promise<BrazierServerKey & { value: string }> => ipcRenderer.invoke('brazier:add-server-api-key', name),
+  ): Promise<BrazierServerKey & { value: string }> => invoke('brazier:add-server-api-key', name),
   removeServerApiKey: (id: string): Promise<BrazierServerSettings> =>
-    ipcRenderer.invoke('brazier:remove-server-api-key', id),
-  copyText: (text: string): Promise<void> => ipcRenderer.invoke('brazier:copy-text', text),
-  getFlags: (): Promise<BrazierFlags> => ipcRenderer.invoke('brazier:flags'),
+    invoke('brazier:remove-server-api-key', id),
+  copyText: (text: string): Promise<void> => invoke('brazier:copy-text', text),
+  getFlags: (): Promise<BrazierFlags> => invoke('brazier:flags'),
   qualificationHost: (): Promise<{
     commit: string
     platform: 'macos' | 'linux' | 'windows'
@@ -171,13 +184,13 @@ contextBridge.exposeInMainWorld('brazier', {
     memory_gib: number
     gpu_vram_gib: number | null
     gpu_vendor: string | null
-  }> => ipcRenderer.invoke('brazier:qualification-host'),
-  checkForUpdates: (): Promise<{ supported: boolean }> => ipcRenderer.invoke('brazier:check-for-updates'),
+  }> => invoke('brazier:qualification-host'),
+  checkForUpdates: (): Promise<{ supported: boolean }> => invoke('brazier:check-for-updates'),
   getUpdateSettings: (): Promise<{
     supported: boolean
     checkOnStartup: boolean
     autoDownload: boolean
-  }> => ipcRenderer.invoke('brazier:get-update-settings'),
+  }> => invoke('brazier:get-update-settings'),
   saveUpdateSettings: (settings: {
     checkOnStartup?: boolean
     autoDownload?: boolean
@@ -185,26 +198,26 @@ contextBridge.exposeInMainWorld('brazier', {
     supported: boolean
     checkOnStartup: boolean
     autoDownload: boolean
-  }> => ipcRenderer.invoke('brazier:save-update-settings', settings),
+  }> => invoke('brazier:save-update-settings', settings),
   platform: process.platform,
-  selectDirectory: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-directory'),
-  selectWorkspace: (): Promise<string | null> => ipcRenderer.invoke('brazier:select-workspace'),
+  selectDirectory: (): Promise<string | null> => invoke('brazier:select-directory'),
+  selectWorkspace: (): Promise<string | null> => invoke('brazier:select-workspace'),
   /** Pick a file (or an adapter directory) already on disk. Null when dismissed. */
   selectFile: (
     title: string,
     filters: Array<{ name: string; extensions: string[] }>
-  ): Promise<string | null> => ipcRenderer.invoke('brazier:select-file', title, filters),
+  ): Promise<string | null> => invoke('brazier:select-file', title, filters),
   /** Ask where to put a file and write it. Resolves null when dismissed. */
   saveFile: (suggestedName: string, data: ArrayBuffer): Promise<string | null> =>
-    ipcRenderer.invoke('brazier:save-file', suggestedName, data),
-  revealFile: (path: string): Promise<void> => ipcRenderer.invoke('brazier:reveal-file', path),
+    invoke('brazier:save-file', suggestedName, data),
+  revealFile: (path: string): Promise<void> => invoke('brazier:reveal-file', path),
   computer: {
-    setActive: (active: boolean): Promise<void> => ipcRenderer.invoke('brazier:computer:set-active', active),
-    prepareSafety: (): Promise<void> => ipcRenderer.invoke('brazier:computer:prepare-safety'),
+    setActive: (active: boolean): Promise<void> => invoke('brazier:computer:set-active', active),
+    prepareSafety: (): Promise<void> => invoke('brazier:computer:prepare-safety'),
     inputGuardStatus: (): Promise<BrazierInputGuardStatus> =>
-      ipcRenderer.invoke('brazier:computer:input-guard-status'),
+      invoke('brazier:computer:input-guard-status'),
     setupInputGuard: (): Promise<BrazierInputGuardStatus> =>
-      ipcRenderer.invoke('brazier:computer:setup-input-guard'),
+      invoke('brazier:computer:setup-input-guard'),
     onEscape: (listener: () => void): (() => void) => {
       const handler = (): void => listener()
       ipcRenderer.on('brazier:computer:escape', handler)
