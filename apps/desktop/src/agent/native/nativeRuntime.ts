@@ -1197,9 +1197,12 @@ export class NativeAgentSession implements AgentSession {
     return compaction
   }
 
-  /** True from `run()` until that run's loop has fully settled. */
+  /**
+   * True from `run()` until the run reports its outcome. Settings changed
+   * after that apply to the next run, which waits for any unwinding first.
+   */
   isBusy(): boolean {
-    return this.currentRun !== undefined
+    return this.currentRun !== undefined && !this.currentRun.outcome
   }
 
   async setModel(model: AgentModelReference): Promise<void> {

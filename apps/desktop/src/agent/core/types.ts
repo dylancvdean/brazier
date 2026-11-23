@@ -470,6 +470,8 @@ export type PreloadedInferenceSettings = {
 export interface AgentSession {
   readonly id: string
   run(input: AgentUserInput): AsyncIterable<AgentEvent>
+  /** True from `run()` until that run has reported an outcome. */
+  isBusy(): boolean
   cancel(): Promise<void>
   compact(): Promise<AgentCompactionState>
   setModel(model: AgentModelReference): Promise<void>
