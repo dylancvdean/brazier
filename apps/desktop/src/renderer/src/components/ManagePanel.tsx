@@ -160,7 +160,7 @@ import {
   runtimesForModel
 } from '../model-utils'
 import type { HubModel } from '../types'
-import { daemonPathLabel, useConnectionProfile } from '../connectionProfile'
+import { daemonPathLabel, hostPhrase, useConnectionProfile } from '../connectionProfile'
 import {
   MANAGED_FARA_BUNDLES,
   modelIdForManagedFara,
@@ -2627,7 +2627,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
           </label>
         )}
         <p>
-          Deleting a model removes its files from {connectionProfile.kind === 'local' ? 'this computer' : connectionProfile.hostLabel},
+          Deleting a model removes its files from {hostPhrase(connectionProfile)},
           including files in folders you added.
         </p>
       </header>
@@ -2636,7 +2636,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
         <div className="section-label">Other model folders · {daemonPathLabel(connectionProfile)}</div>
         <p className="model-help">
           Add directories that already contain GGUF or MLX weights. Brazier scans them alongside
-          downloads on {connectionProfile.hostLabel}.
+          downloads on {hostPhrase(connectionProfile)}.
         </p>
         {configuredPaths.length > 0 && (
           <div className="library-path-list">
@@ -6881,9 +6881,15 @@ function McpSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>MCP servers</h2>
         <p>
-          Add tools from stdio MCP servers to chat. Commands run on{' '}
-          <strong>{connectionProfile.name}</strong> ({connectionProfile.hostLabel}), not necessarily
-          this computer.
+          Add tools from stdio MCP servers to chat.{' '}
+          {connectionProfile.kind === 'local' ? (
+            'Commands run on this computer.'
+          ) : (
+            <>
+              Commands run on <strong>{connectionProfile.name}</strong> (
+              {connectionProfile.hostLabel}), not this computer.
+            </>
+          )}
         </p>
       </header>
 
@@ -6968,8 +6974,7 @@ function McpSection(props: SectionProps): React.JSX.Element {
               })}
             </div>
             <p className="model-help">
-              Recipes fill the form below. Review or change the command and arguments before adding a
-              server.
+              Recipes fill in the form below so you can review it first.
             </p>
           </div>
 

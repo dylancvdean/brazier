@@ -25,3 +25,8 @@ export function daemonPathLabel(profile: ActiveConnectionProfile): string {
     ? 'Path on this computer'
     : `Path on ${profile.name} (${profile.hostLabel})`
 }
+
+/** The profile's host, phrased to sit inside a sentence. */
+export function hostPhrase(profile: ActiveConnectionProfile): string {
+  return profile.kind === 'local' ? 'this computer' : profile.hostLabel
+}

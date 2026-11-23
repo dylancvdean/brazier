@@ -1630,10 +1630,27 @@ export function App(): React.JSX.Element {
   // start speaking.
   useEffect(() => {
     if ((appMode !== 'voice' && appMode !== 'agent') || conversationId) return
-    void newConversation().catch((cause: unknown) =>
+    void openUntouchedConversation().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
   }, [appMode, conversationId])
+
+  /** Reuses a never-used chat, so visiting Voice or Agent doesn't pile up empty ones. */
+  async function openUntouchedConversation(): Promise<void> {
+    const candidate = conversations.find(
+      (conversation) =>
+        conversation.title === 'New conversation' &&
+        conversation.created_at === conversation.updated_at &&
+        !conversation.agent_session_id &&
+        !conversation.incognito
+    )
+    if (candidate && (await listMessages(candidate.id)).length === 0) {
+      if (incognito) setIncognito(false)
+      setConversationId(candidate.id)
+      return
+    }
+    await newConversation()
+  }
 
   // Unmounting VoiceMode must actually stop the microphone. The coordinator
   // lives on App, so leaving the tab is the teardown, not App unmount.
