@@ -175,6 +175,15 @@ describe('stream completion boundaries', () => {
     return cancel
   }
 
+  it('rejects a chat stream that closes without the terminal frame', async () => {
+    respond('data: {"choices":[{"delta":{"content":"hel"}}]}\n\n')
+    await expect(
+      streamCompletion([], 'model', new AbortController().signal, () => {}, {
+        dropReasoningBetweenTurns: false
+      })
+    ).rejects.toThrow('before the response finished')
+  })
+
   it('returns chat output and closes the reader at DONE even if the server stays open', async () => {
     const cancel = respond('data: {"choices":[{"delta":{"content":"hello"}}]}\r\n\r\ndata: [DONE]\r\n\r\n', false)
     const token = vi.fn()
