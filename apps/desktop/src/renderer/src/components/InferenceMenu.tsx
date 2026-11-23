@@ -529,8 +529,7 @@ export function InferenceMenu({
                   </label>
                 )}
                 <p className="inference-help">
-                  Thinking models can deliberate before answering. Budget mode maps to
-                  llama.cpp&apos;s per-request thinking token cap.
+                  Budget caps how many tokens the model can spend thinking.
                 </p>
               </>
             )}
@@ -548,9 +547,7 @@ export function InferenceMenu({
               <span>
                 Drop reasoning between turns
                 <small>
-                  Applies to chat and agent on the next turn. Omits prior-turn thinking from the
-                  model request to save context; leave off to keep it (default). Reasoning still
-                  shows in the UI either way.
+                  Saves context by not resending earlier thinking. It still shows here.
                 </small>
               </span>
             </label>
