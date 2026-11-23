@@ -1267,6 +1267,7 @@ mod tests {
         request.permission_settings = AgentPermissionSettings {
             auto_approve_sandboxed_actions: true,
             auto_approve_host_actions: true,
+            approve_for_me: false,
         };
         assert!(matches!(decide(&request), PolicyDecision::Deny { .. }));
     }
@@ -1354,6 +1355,7 @@ mod tests {
         request.permission_settings = AgentPermissionSettings {
             auto_approve_sandboxed_actions: true,
             auto_approve_host_actions: false,
+            approve_for_me: false,
         };
         assert!(matches!(
             decide(&request),

@@ -124,6 +124,29 @@ export class WorkerAgentAdapter implements AgentAdapter {
     // on it, because the response arrives as events.
     void window.brazier.agent
       .run(sessionId, { text: request.text })
+      .then(() => {
+        // The worker posts every event before this promise resolves. Reaching
+        // here with the turn still open means the terminal event never arrived,
+        // and the coordinator would wait forever.
+        if (this.activeCorrelationId !== request.correlationId) return
+        const status = this.statuses.get(request.correlationId)?.status
+        if (status === 'completed' || status === 'cancelled' || status === 'failed') return
+        const text = this.streamed.trim()
+        this.activeRunId = null
+        this.activeCorrelationId = null
+        this.streamed = ''
+        if (text) {
+          this.setStatus(request.correlationId, 'completed')
+          this.publish({ type: 'responseFinal', correlationId: request.correlationId, text })
+          return
+        }
+        this.setStatus(request.correlationId, 'failed')
+        this.publish({
+          type: 'runFailed',
+          correlationId: request.correlationId,
+          error: 'The run ended before it reported a result.'
+        })
+      })
       .catch((cause: unknown) => {
         if (this.activeCorrelationId !== request.correlationId) return
         this.setStatus(request.correlationId, 'failed')
@@ -266,6 +289,28 @@ export class WorkerAgentAdapter implements AgentAdapter {
           correlationId,
           status: `Preparing ${event.tool}…`,
           activeTool: event.tool
+        })
+        return
+      case 'approval-reviewed':
+        this.publish({
+          type: 'statusUpdated',
+          correlationId,
+          status:
+            event.phase === 'started'
+              ? 'Checking against your instructions…'
+              : event.phase === 'approved'
+                ? 'Approved within your instructions'
+                : 'Waiting for your approval'
+        })
+        return
+      case 'approval-resolved':
+        if (this.statuses.get(correlationId)?.status === 'awaiting-approval') {
+          this.setStatus(correlationId, 'running')
+        }
+        this.publish({
+          type: 'approvalResolved',
+          correlationId,
+          approvalId: event.approvalId
         })
         return
       case 'approval-required':

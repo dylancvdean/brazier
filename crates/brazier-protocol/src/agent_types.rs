@@ -98,6 +98,11 @@ pub struct AgentPermissionSettings {
     pub auto_approve_sandboxed_actions: bool,
     #[serde(default)]
     pub auto_approve_host_actions: bool,
+    /// When set, the session's own model may allow a sandboxed, non-destructive
+    /// action that stays inside the user's instructions. Host and destructive
+    /// actions still wait for the user.
+    #[serde(default)]
+    pub approve_for_me: bool,
 }
 
 fn default_true() -> bool {
@@ -109,6 +114,7 @@ impl Default for AgentPermissionSettings {
         Self {
             auto_approve_sandboxed_actions: true,
             auto_approve_host_actions: false,
+            approve_for_me: false,
         }
     }
 }

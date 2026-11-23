@@ -3939,6 +3939,7 @@ mod tests {
                     permission_settings: Some(AgentPermissionSettings {
                         auto_approve_sandboxed_actions: true,
                         auto_approve_host_actions,
+                        approve_for_me: false,
                     }),
                     enabled_tools: None,
                     confine_to_worktree: false,
