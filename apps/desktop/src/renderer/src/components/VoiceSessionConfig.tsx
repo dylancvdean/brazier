@@ -10,7 +10,6 @@
  */
 
 import {
-  AlertTriangle,
   Check,
   ChevronDown,
   ChevronRight,
@@ -441,8 +440,8 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
         {runtimes.length === 0 ? (
           <>
             <p className="voice-notice">
-              None built yet. On Apple Silicon build PersonaPlex MLX under Manage → Runtimes; on Linux
-              CUDA build PersonaPlex / Moshi.
+              None built yet. Use PersonaPlex MLX on Apple Silicon (needs a Hugging Face token and the
+              nvidia/personaplex-7b-v1 license), or PersonaPlex / Moshi on Linux with CUDA.
             </p>
             {props.onOpenManage ? (
               <div className="mode-empty-actions compact">
@@ -483,7 +482,7 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
         {voiceModels.length === 0 ? (
           <>
             <p className="voice-notice">
-              No <code>personaplex:</code> model downloaded yet — get one from Manage → Discover.
+              No voice model downloaded yet.
             </p>
             {props.onOpenManage ? (
               <div className="mode-empty-actions compact">
@@ -566,38 +565,12 @@ export function VoiceSessionConfig(props: Props): React.JSX.Element {
               </select>
             </label>
           ) : null}
-          <p className="voice-notice">
-            {resolved === undefined && !props.asrAvailable.batch
-              ? 'Nothing chosen would transcribe: this would go to Whisper, which is not installed.'
-              : `A spoken turn will be transcribed by ${
-                  resolved === 'streaming-asr' ? 'Nemotron streaming' : 'Whisper'
-                }.`}
-          </p>
-          {!props.asrAvailable.batch && !props.asrAvailable.streaming ? (
-            <>
-              <p className="voice-notice">
-                <AlertTriangle size={13} /> Nothing installed to transcribe with. Build WhisperKit
-                under Manage → Runtimes, or download a Whisper or Nemotron ASR model from Discover.
-              </p>
-              {props.onOpenManage ? (
-                <div className="mode-empty-actions compact">
-                  <button
-                    type="button"
-                    className="chip-button subtle"
-                    onClick={() => props.onOpenManage?.('runtimes')}
-                  >
-                    Open Runtimes
-                  </button>
-                  <button
-                    type="button"
-                    className="chip-button subtle"
-                    onClick={() => props.onOpenManage?.('discover')}
-                  >
-                    Download ASR model
-                  </button>
-                </div>
-              ) : null}
-            </>
+          {props.asrAvailable.batch || props.asrAvailable.streaming ? (
+            <p className="voice-notice">
+              {resolved === undefined && !props.asrAvailable.batch
+                ? 'Whisper is selected but not installed.'
+                : `Transcribed by ${resolved === 'streaming-asr' ? 'Nemotron streaming' : 'Whisper'}.`}
+            </p>
           ) : null}
         </section>
       ) : null}

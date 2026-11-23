@@ -102,19 +102,19 @@ const PERMISSION_LABELS: Record<
 > = {
   ask: {
     title: 'Ask first',
-    detail: 'Approve navigate, type, click, and other interactive actions.'
+    detail: 'Approve each click, keystroke, and page load.'
   },
   'browser-only': {
     title: 'Browser only',
-    detail: 'Host desktop control is refused. Browser actions still prompt as needed.'
+    detail: 'No desktop control. Browser actions still ask.'
   },
   'skip-permissions': {
     title: 'Skip low-risk',
-    detail: 'Low-risk browser actions run without prompts. Sensitive ones still ask.'
+    detail: 'Routine browser actions run freely. Sensitive ones ask.'
   },
   'allow-all': {
     title: 'Allow all',
-    detail: 'Run all supported actions without approval. The always-visible emergency shortcut remains active.'
+    detail: 'Nothing asks first. The emergency stop shortcut still works.'
   }
 }
 
@@ -1038,27 +1038,27 @@ export function ComputerMode(props: Props): React.JSX.Element {
 
   const targetUnavailable =
     daemonPlatform === null
-      ? 'Checking whether Computer Use is available on this daemon…'
+      ? 'Checking for Computer Use…'
       : target === 'desktop' && connectionProfile.kind === 'remote'
-        ? `Desktop control must be activated on ${connectionProfile.name}; use Browser for this remote daemon.`
+        ? `Desktop control isn’t enabled on ${connectionProfile.name}. Use Browser instead.`
         : daemonPlatform === 'windows'
-          ? 'Computer Use is unavailable on this Windows daemon; Agent mode remains sandboxed and supported.'
+          ? 'Computer Use isn’t available on Windows yet. Agent mode works.'
           : ''
   const blockedReason =
     targetUnavailable ||
     (!modelId && !session?.model_id
-      ? 'Choose a computer-use model in the top bar…'
+      ? 'Pick a computer-use model in the top bar'
       : pendingApproval
-        ? 'Approve or deny the pending action before continuing…'
+        ? 'Approve or deny the pending action first'
         : '')
   const composerPlaceholder =
     targetUnavailable ||
     (!modelId && !session?.model_id
-      ? 'Choose a computer-use model in the top bar…'
+      ? 'Pick a computer-use model in the top bar'
       : running
-        ? 'Computer Use is working. Stop it to send something else…'
+        ? 'Working… stop it to send something else'
         : pendingApproval
-          ? 'Approve or deny the pending action before continuing…'
+          ? 'Approve or deny the pending action first'
           : pendingUserQuestion
             ? `Answer the agent: ${pendingUserQuestion}`
             : `Ask ${modelLabel} to use the ${target}…`)
@@ -1128,7 +1128,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
               disabled={running || Boolean(session)}
               title={
                 session
-                  ? 'This session target is fixed. Start a new session to pick another.'
+                  ? 'Start a new session to change the target'
                   : 'Target for the next session'
               }
               onChange={(event) => setTarget(event.target.value as ComputerTarget)}
@@ -1168,7 +1168,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
             title={
               fullscreenActive
                 ? 'Exit fullscreen'
-                : 'Fill the window with the browser and steps side by side'
+                : 'Show the browser and steps side by side'
             }
             onClick={toggleFullscreen}
           >

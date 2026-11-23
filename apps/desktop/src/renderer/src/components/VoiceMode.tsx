@@ -81,17 +81,17 @@ const TARGETS: Array<[VoiceSessionTarget, string, string]> = [
   [
     'chat',
     'Chat',
-    'Spoken turns go to the chat model and join this conversation.'
+    'Your words go to the chat model and are saved in this conversation.'
   ],
   [
     'agent',
     'Agent',
-    'Spoken turns go to the agent session bound to this conversation. Its results are saved in this shared conversation and tagged Agent. With no task bound, a turn is refused rather than answered without the workspace and tools you expected.'
+    'Your words go to this conversation’s agent task. Without a task attached, turns are refused.'
   ],
   [
     'neither',
     'Neither',
-    'Nothing is recorded and nothing is invoked. PersonaPlex answers in its own voice, as it does with voice mode used on its own.'
+    'Talk to the voice model directly. Nothing is saved.'
   ]
 ]
 
@@ -131,11 +131,11 @@ export function VoiceMode(props: Props): React.JSX.Element {
    * actually missing was ASR.
    */
   const blockedReason = !props.realtimeAvailable
-    ? 'No PersonaPlex runtime or model — see below'
+    ? 'Voice isn’t set up yet'
     : !props.audioSupported
-      ? 'This build cannot capture audio — see below'
+      ? 'Audio capture unavailable'
       : needsTranscripts && !anyAsr
-        ? 'No transcription installed — see below'
+        ? 'Transcription not installed'
         : ''
   const blocked = blockedReason !== ''
 
@@ -256,23 +256,22 @@ export function VoiceMode(props: Props): React.JSX.Element {
     <p className="voice-danger">
       <AlertTriangle size={14} />
       <span>
-        Voice control for agents is extremely experimental. Anything the permission broker holds is
-        shown here and needs a spoken yes — but only what its mode holds, so a session set to
-        skip permissions acts on what it thought it heard. Please don't use it on anything you care
-        about, and even then only if you know what you're doing.
+        Voice control of agents is very experimental. Held actions need a spoken yes, but with
+        permissions skipped the agent acts on whatever it thought it heard. Don’t point it at
+        anything you care about.
       </span>
     </p>
   )
 
   const statusLabel = starting
-    ? 'Loading the voice model — first run takes a minute…'
+    ? 'Loading voice model…'
     : live
       ? muted
         ? 'Microphone muted'
         : speaking
           ? 'Speaking'
           : working
-            ? 'Working on your request'
+            ? 'Working…'
             : // Speech detection and transcription can each stall without a
               // word, so the bar names the step the microphone has reached.
               snapshot.hearing === 'speaking'
@@ -282,7 +281,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
                 : 'Listening'
       : snapshot.voiceStatus === 'error'
         ? `Stopped: ${snapshot.voiceError ?? 'unknown error'}`
-        : blockedReason || 'Ready — press Start conversation'
+        : blockedReason || 'Ready'
 
   return (
     <section className="voice-mode">
@@ -323,7 +322,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
         {qualificationTrial?.phase === 'noise' ? (
           <button
             type="button"
-            title="Save commit-bound hardware qualification evidence."
+            title="Save the trial report"
             onClick={() => void guard(saveTrialReport)}
           >
             <Download size={15} /> Save qualification
@@ -339,7 +338,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
                 answer, and abandoning the task are different decisions. */}
             <button
               type="button"
-              title="Silence PersonaPlex until you start speaking again. The task keeps running."
+              title="Silence the voice. Any task keeps running."
               onClick={() => void guard(() => session.stopSpeaking())}
             >
               <VolumeX size={15} /> Stop speaking
@@ -348,7 +347,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
               type="button"
               className="danger"
               disabled={!working}
-              title="Cancel the current response. Anything already answered stays in the conversation."
+              title="Stop the current response"
               onClick={() => void guard(() => session.cancelResponse())}
             >
               <Square size={13} fill="currentColor" /> Cancel task
@@ -382,10 +381,10 @@ export function VoiceMode(props: Props): React.JSX.Element {
                 disabled={!anyAsr || snapshot.capture.vad !== 'silero-v5'}
                 title={
                   !anyAsr
-                    ? 'Install a transcription runtime first.'
+                    ? 'Install a transcription runtime first'
                     : snapshot.capture.vad !== 'silero-v5'
-                      ? 'Silero VAD must be active before starting the trial.'
-                      : 'Start the fixed speech and noise hardware protocol.'
+                      ? 'Needs Silero voice detection'
+                      : 'Run the speech and noise test'
                 }
                 onClick={startQualificationTrial}
               >
@@ -488,23 +487,23 @@ export function VoiceMode(props: Props): React.JSX.Element {
             <>
               <p className="voice-hint">
                 {config.voiceSessionTarget === 'neither'
-                  ? 'Speak whenever you like. Nothing is recorded — this is PersonaPlex on its own.'
+                  ? 'Go ahead. Nothing is saved.'
                   : config.voiceBackgroundRouting === 'always'
-                    ? 'Speak whenever you like. Pause when you are done and the turn is sent to the background.'
+                    ? 'Go ahead. Each turn is sent when you pause.'
                     : config.voiceBackgroundRouting === 'auto'
-                      ? 'Speak whenever you like. Lightweight turns stay with PersonaPlex; work and checked facts go to the background.'
-                      : 'Speak whenever you like. PersonaPlex handles the turn unless you explicitly ask for background work.'}
+                      ? 'Go ahead. Ask for real work and it goes to the background.'
+                      : 'Go ahead. Ask explicitly when you want background work.'}
               </p>
               {/* Until the first turn lands, say what the microphone is
                   actually delivering. "Nothing happened" has two causes that
                   look identical — no audio arriving, and audio too quiet to
-                  count as speech — and only this tells them apart. */}
-              <p className="voice-capture">
-                {snapshot.capture.frames === 0
-                  ? `No audio is reaching the microphone tap yet${
-                      snapshot.capture.status ? ` — ${snapshot.capture.status}` : ''
-                    }.`
-                  : snapshot.capture.vad === 'silero-v5'
+                  count as speech — and the tooltip tells them apart. */}
+              <p
+                className="voice-capture"
+                title={
+                  snapshot.capture.frames === 0
+                    ? undefined
+                    : snapshot.capture.vad === 'silero-v5'
                     ? `Microphone: ${snapshot.capture.frames} frames, Silero speech probability ${(
                       snapshot.capture.speechProbability ?? 0
                       ).toFixed(2)}, VAD ${snapshot.capture.vadInferenceMs.toFixed(
@@ -520,7 +519,14 @@ export function VoiceMode(props: Props): React.JSX.Element {
                         snapshot.capture.gate || SPEECH_THRESHOLD
                       ).toFixed(3)}, the room reads ${snapshot.capture.noiseFloor.toFixed(4)}. ${
                         snapshot.capture.status
-                      }`}
+                      }`
+                }
+              >
+                {snapshot.capture.frames === 0
+                  ? `No audio from the microphone yet${
+                      snapshot.capture.status ? ` — ${snapshot.capture.status}` : ''
+                    }`
+                  : 'Microphone is live'}
               </p>
             </>
           ) : (
@@ -573,53 +579,20 @@ export function VoiceMode(props: Props): React.JSX.Element {
             </div>
             <h2>Talk to it</h2>
             <p className="mode-empty">
-              Full-duplex speech with PersonaPlex. Use headphones — the model hears your speakers.
+              Full-duplex speech with PersonaPlex. Use headphones so it doesn’t hear itself.
             </p>
 
-            {!props.realtimeAvailable ? (
-              <div className="mode-empty-state">
-                <p className="mode-empty">
-                  Realtime voice needs a PersonaPlex runtime and a downloaded{' '}
-                  <code>personaplex:</code> model. On Apple Silicon build PersonaPlex MLX from Manage →
-                  Runtimes (accept the nvidia/personaplex-7b-v1 license and set an HF token); on Linux
-                  CUDA build PersonaPlex / Moshi.
-                </p>
-                {props.onOpenManage ? (
-                  <div className="mode-empty-actions">
-                    <button
-                      type="button"
-                      className="primary-action"
-                      onClick={() => props.onOpenManage?.('runtimes')}
-                    >
-                      Open Runtimes
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-action"
-                      onClick={() => props.onOpenManage?.('discover')}
-                    >
-                      Download models
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
             {props.realtimeAvailable && !props.audioSupported ? (
               <p className="mode-empty">
-                This build has no WebCodecs Opus support, which realtime voice needs for audio in
-                and out.
+                This build can’t encode voice audio (WebCodecs Opus is missing).
               </p>
             ) : null}
             {props.realtimeAvailable && !anyAsr && needsTranscripts ? (
               <div className="mode-empty-state">
                 <p className="mode-empty">
-                  Sending what you say to a model needs transcription, which is separate from
-                  PersonaPlex: the voice model reports only what <em>it</em> says. Any ASR interface
-                  will do — build WhisperKit under Manage → Runtimes, download a Whisper model from
-                  Discover if you already built whisper.cpp, or download the Nemotron ASR Streaming
-                  snapshot if you already built streaming ASR. Until then, use{' '}
-                  <strong>Neither</strong>, which talks to PersonaPlex directly and needs no
-                  transcript.
+                  Sending your words to a model needs transcription: WhisperKit, whisper.cpp with a
+                  Whisper model, or streaming ASR with the Nemotron model. Or choose{' '}
+                  <strong>Neither</strong> to talk to the voice model directly.
                 </p>
                 <div className="mode-empty-actions">
                   {props.onOpenManage ? (
@@ -743,7 +716,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
                     session.setConfig({ ...config, interruptCancelsAgent: event.target.checked })
                   }
                 />
-                Talking over the assistant also cancels the task
+                Interrupting also cancels the task
               </label>
             </div>
 
@@ -770,11 +743,13 @@ export function VoiceMode(props: Props): React.JSX.Element {
         <p className="voice-asr-cost">
           <Timer size={12} />
           {snapshot.transcription.map((cost) => (
-            <span key={cost.engine}>
+            <span
+              key={cost.engine}
+              title={`${cost.startedAtPause} of ${cost.utterances} started at a pause`}
+            >
               {ASR_LABELS[cost.engine] ?? cost.engine}: {(cost.averageMs / 1000).toFixed(2)}s per
-              utterance ({cost.realTimeFactor.toFixed(2)}× real time), of which{' '}
-              {(cost.averageWaitMs / 1000).toFixed(2)}s waited for — {cost.startedAtPause} of{' '}
-              {cost.utterances} started at a pause
+              turn ({cost.realTimeFactor.toFixed(2)}× real time, {(cost.averageWaitMs / 1000).toFixed(2)}s
+              wait)
             </span>
           ))}
         </p>
@@ -783,12 +758,11 @@ export function VoiceMode(props: Props): React.JSX.Element {
       {live && config.showVoiceTranscripts && snapshot.voiceModelText ? (
         <details className="voice-model-text">
           <summary>
-            <Bot size={12} /> What PersonaPlex said on its own
+            <Bot size={12} /> Voice model’s own words
           </summary>
           <p>{snapshot.voiceModelText.slice(-600)}</p>
           <small>
-            Not part of the conversation and not checked against anything. Only the turns above are
-            authoritative.
+            Unchecked and not saved to the conversation.
           </small>
         </details>
       ) : null}

@@ -19,6 +19,9 @@ import {
   LoaderCircle,
   MessageSquare,
   Mic,
+  Monitor,
+  Network,
+  Palette,
   Pin,
   Plug,
   RefreshCw,
@@ -140,6 +143,7 @@ import {
   type AgentToolCatalogEntry
 } from '../agentApi'
 import { RecommendedModels } from './RecommendedModels'
+import { InlineCode } from './InlineCode'
 import { CapabilityIcons, capabilityFlags, hubCapabilityFlags } from './CapabilityIcons'
 import {
   engineBadgeClass,
@@ -156,7 +160,7 @@ import {
   runtimesForModel
 } from '../model-utils'
 import type { HubModel } from '../types'
-import { daemonPathLabel, useConnectionProfile } from '../connectionProfile'
+import { daemonPathLabel, hostPhrase, useConnectionProfile } from '../connectionProfile'
 import {
   MANAGED_FARA_BUNDLES,
   modelIdForManagedFara,
@@ -343,22 +347,22 @@ type ManagePanelProps = {
 }
 
 const SECTIONS: Array<{ id: ManageSection; label: string; icon: React.JSX.Element }> = [
-  { id: 'connections', label: 'Connections', icon: <Globe size={15} /> },
   { id: 'library', label: 'Model library', icon: <Box size={15} /> },
-  { id: 'recommended', label: 'Recommended models', icon: <Sparkles size={15} /> },
+  { id: 'recommended', label: 'Recommended', icon: <Sparkles size={15} /> },
   { id: 'discover', label: 'Download models', icon: <Download size={15} /> },
   { id: 'runtimes', label: 'Runtimes', icon: <Cpu size={15} /> },
   { id: 'chat', label: 'Chat', icon: <MessageSquare size={15} /> },
   { id: 'agent', label: 'Agent', icon: <Bot size={15} /> },
-  { id: 'computer', label: 'Computer use', icon: <LayoutDashboard size={15} /> },
+  { id: 'computer', label: 'Computer use', icon: <Monitor size={15} /> },
   { id: 'generate', label: 'Generate', icon: <Image size={15} /> },
   { id: 'voice', label: 'Voice', icon: <Mic size={15} /> },
   { id: 'websearch', label: 'Web search', icon: <Search size={15} /> },
   { id: 'mcp', label: 'MCP servers', icon: <Plug size={15} /> },
+  { id: 'connections', label: 'Connections', icon: <Network size={15} /> },
   { id: 'remote', label: 'Remote servers', icon: <Globe size={15} /> },
   { id: 'engine', label: 'Engine configuration', icon: <Settings2 size={15} /> },
   { id: 'server', label: 'OpenAI server', icon: <KeyRound size={15} /> },
-  { id: 'customization', label: 'Customization', icon: <LayoutDashboard size={15} /> },
+  { id: 'customization', label: 'Customization', icon: <Palette size={15} /> },
   { id: 'support', label: 'Support', icon: <ShieldAlert size={15} /> }
 ]
 
@@ -531,7 +535,9 @@ function JobProgressPanel({
       {progress.hints.length > 0 && (
         <ul className="build-hints">
           {progress.hints.map((hint) => (
-            <li key={hint}>{hint}</li>
+            <li key={hint}>
+              <InlineCode text={hint} />
+            </li>
           ))}
         </ul>
       )}
@@ -898,8 +904,7 @@ function ChatSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Chat</h2>
         <p>
-          Long-term memory the chat model can draw on and write to, plus how
-          often it reflects on what it has learned.
+          What the chat model remembers between conversations.
         </p>
       </header>
 
@@ -1260,8 +1265,7 @@ function GenerateSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Generate</h2>
         <p>
-          The models Image and Video use when the user has not picked one, plus
-          how long a generation job is allowed to run.
+          Default models for Image and Video, and how long a job may run.
         </p>
       </header>
 
@@ -1369,8 +1373,7 @@ function VoiceSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Voice</h2>
         <p>
-          Which PersonaPlex model speaks by default, and how it introduces
-          itself.
+          The default voice model and how it introduces itself.
         </p>
       </header>
 
@@ -1778,8 +1781,7 @@ function RecommendedSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Recommended models</h2>
         <p>
-          One model per thing you might want to do, chosen for how much memory this machine has
-          and at the largest quantisation it can hold comfortably.
+          One pick per task, sized for this machine’s memory.
         </p>
       </header>
 
@@ -2001,8 +2003,7 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Computer use</h2>
         <p>
-          Configure desktop permissions, timing, screenshot history, or install a ready-to-run
-          computer-use model stack. Any vision-capable chat model can also drive Computer Use.
+          Permissions, timing, and screenshot history. Any vision-capable chat model can drive it.
         </p>
       </header>
 
@@ -2626,7 +2627,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
           </label>
         )}
         <p>
-          Deleting a model removes its files from {connectionProfile.kind === 'local' ? 'this computer' : connectionProfile.hostLabel},
+          Deleting a model removes its files from {hostPhrase(connectionProfile)},
           including files in folders you added.
         </p>
       </header>
@@ -2635,7 +2636,7 @@ function LibrarySection(props: SectionProps): React.JSX.Element {
         <div className="section-label">Other model folders · {daemonPathLabel(connectionProfile)}</div>
         <p className="model-help">
           Add directories that already contain GGUF or MLX weights. Brazier scans them alongside
-          downloads on {connectionProfile.hostLabel}.
+          downloads on {hostPhrase(connectionProfile)}.
         </p>
         {configuredPaths.length > 0 && (
           <div className="library-path-list">
@@ -3461,11 +3462,11 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
             : discoverEngine === 'whisper.cpp'
               ? 'Whisper speech-to-text weights for whisper.cpp'
               : discoverEngine === 'streaming-asr'
-                ? 'Nemotron ASR Streaming snapshots for low-latency transcription'
+                ? 'Nemotron streaming speech-to-text models'
                 : discoverEngine === 'stable-diffusion.cpp'
-                  ? 'image and video generation checkpoints for stable-diffusion.cpp'
+                  ? 'image and video models for stable-diffusion.cpp'
                   : discoverEngine === 'personaplex'
-                    ? 'PersonaPlex / Moshi speech-to-speech snapshots'
+                    ? 'PersonaPlex and Moshi voice models'
                     : `${engineLabel(discoverEngine)} models for Apple Silicon`}
           .
         </p>
@@ -4896,8 +4897,8 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Runtimes</h2>
         <p>
-          Install or build an inference engine for your hardware, then activate it below. GGUF models
-          use llama.cpp; MLX models on Apple Silicon use MLX-LM or MLX-VLM.
+          Install or build an engine, then activate it. GGUF models run on llama.cpp; MLX models run
+          on MLX-LM or MLX-VLM.
         </p>
       </header>
 
@@ -5537,7 +5538,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             </div>
             <p className="model-help">
               {isStreamingAsrBuild
-                ? 'Installs a bundled Transformers worker and its current upstream dependencies with uv (no Git checkout). Then download a Nemotron ASR Streaming snapshot from Discover.'
+                ? 'Installs a bundled Transformers worker and its current upstream dependencies with uv (no Git checkout). Then download a Nemotron ASR Streaming model from Download models.'
                 : isSwiftBuild
                   ? 'WhisperKit builds require Xcode or the Swift toolchain. CoreML models download on first transcription (or install via `brew install whisperkit-cli`).'
                   : isPythonBuild
@@ -5673,8 +5674,8 @@ function EngineSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Engine configuration</h2>
         <p>
-          Launch parameters for llama-server. Applying restarts the model server on the next
-          generation. Sampling defaults live in the inference menu next to the model picker.
+          llama-server launch flags. Changes take effect on the next generation. Sampling lives in
+          the menu next to the model picker.
         </p>
       </header>
       <div className="settings-group">
@@ -5958,9 +5959,8 @@ function WebSearchSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Web search</h2>
         <p>
-          Choose the search engine behind the <code>web_search</code> tool. Both chat and agent
-          search use it. DuckDuckGo needs no key; Brave needs a paid API key and is the reliable
-          option when DuckDuckGo rate-limits this machine.
+          The engine behind web search in chat and agent. DuckDuckGo needs no key; Brave needs an
+          API key but doesn’t rate-limit.
         </p>
       </header>
       <div className="settings-group">
@@ -6183,7 +6183,7 @@ function ServerSection(props: SectionProps): React.JSX.Element {
     <section>
       <header className="manage-heading">
         <h2>OpenAI-compatible server</h2>
-        <p>Expose Brazier’s Chat Completions, Responses, Models, transcription, and generation APIs to clients that speak the OpenAI protocol.</p>
+        <p>Serve local models to any app that speaks the OpenAI API.</p>
       </header>
       <div className="settings-group">
         <div className="section-label">Network access</div>
@@ -6419,9 +6419,8 @@ function RemoteSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Remote servers</h2>
         <p>
-          Talk to an OpenAI-compatible server you already run — vLLM, llama-server, or anything
-          else speaking the same protocol. Its models appear in the model list, marked with the
-          connection they came from, so a conversation records where its answers were produced.
+          Use models from an OpenAI-compatible server you already run, like vLLM or llama-server.
+          They appear in the model picker alongside local ones.
         </p>
       </header>
 
@@ -6578,9 +6577,9 @@ function ToolchainChecklist({ tools }: { tools: ToolchainTool[] }): React.JSX.El
               {tool.path ?? 'found'}
             </span>
           ) : (
-            <code className="toolchain-tool-detail" title={tool.required_for}>
-              {tool.install_hint ?? 'not found'}
-            </code>
+            <span className="toolchain-tool-detail" title={tool.required_for}>
+              {tool.install_hint ? <InlineCode text={tool.install_hint} /> : 'not found'}
+            </span>
           )}
         </div>
       ))}
@@ -6664,9 +6663,8 @@ function AgentSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>Agent</h2>
         <p>
-          Agent tasks run through two modes. Simple exposes the standard broker-sandboxed tool set.
-          Powerful adds the extra tools you enable below; both keep approvals, sandboxing, and
-          execution under one trust boundary.
+          Simple uses the standard sandboxed tools. Powerful adds the extra tools you enable below.
+          Both keep approvals and sandboxing.
         </p>
       </header>
 
@@ -6883,10 +6881,15 @@ function McpSection(props: SectionProps): React.JSX.Element {
       <header className="manage-heading">
         <h2>MCP servers</h2>
         <p>
-          Connect Model Context Protocol servers over stdio. Their tools are merged with bundled
-          tools when tools are enabled in chat. Commands and path arguments run on{' '}
-          <strong>{connectionProfile.name}</strong> ({connectionProfile.hostLabel}), not necessarily
-          on this desktop.
+          Add tools from stdio MCP servers to chat.{' '}
+          {connectionProfile.kind === 'local' ? (
+            'Commands run on this computer.'
+          ) : (
+            <>
+              Commands run on <strong>{connectionProfile.name}</strong> (
+              {connectionProfile.hostLabel}), not this computer.
+            </>
+          )}
         </p>
       </header>
 
@@ -6971,8 +6974,7 @@ function McpSection(props: SectionProps): React.JSX.Element {
               })}
             </div>
             <p className="model-help">
-              Recipes fill the form below. Review or change the command and arguments before adding a
-              server.
+              Recipes fill in the form below so you can review it first.
             </p>
           </div>
 

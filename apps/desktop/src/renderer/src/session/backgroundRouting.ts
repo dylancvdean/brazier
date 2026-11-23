@@ -16,21 +16,21 @@ export const VOICE_BACKGROUND_ROUTING_OPTIONS: ReadonlyArray<{
 }> = [
   {
     value: 'auto',
-    label: 'Auto — skip lightweight turns',
+    label: 'Auto',
     detail:
-      'PersonaPlex handles short conversational turns immediately. Work, tools, files, current facts, and active-task follow-ups still go to the background model.'
+      'Small talk stays with the voice model. Requests for work, tools, or current facts go to the background model.'
   },
   {
     value: 'always',
     label: 'Always',
     detail:
-      'Every usable transcript also goes to the selected background model. This is the slowest and matches the original behavior.'
+      'Every turn goes to the background model. Slowest.'
   },
   {
     value: 'explicit',
-    label: 'Only explicit work requests',
+    label: 'When asked',
     detail:
-      'The background model runs only when you explicitly ask to check, search, run, edit, use a tool, or do similar work.'
+      'The background model runs only when you ask it to check, search, run, or edit something.'
   }
 ]
 

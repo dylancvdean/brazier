@@ -339,7 +339,7 @@ pub fn install_command(package: ToolchainPackage, os: &OsInfo) -> Option<String>
         | (PackageManager::Apk, ToolchainPackage::Uv)
         | (PackageManager::Xbps, ToolchainPackage::Uv)
         | (PackageManager::Unknown, ToolchainPackage::Uv) => Some(
-            "Install uv from https://docs.astral.sh/uv/ and ensure it is on your PATH.".into(),
+            "curl -LsSf https://astral.sh/uv/install.sh | sh".into(),
         ),
 
         (PackageManager::Unknown, ToolchainPackage::Git)
@@ -361,7 +361,14 @@ pub fn install_hint(package: ToolchainPackage) -> String {
 pub fn install_hint_for_os(package: ToolchainPackage, os: &OsInfo) -> String {
     let fallback = generic_fallback(package, os.family);
     if let Some(command) = install_command(package, os) {
-        format!("On {}: `{}`.", os.pretty_name, command)
+        // Some entries are instructions rather than shell commands; only
+        // commands belong in a code span.
+        if command.starts_with(|c: char| c.is_ascii_uppercase()) {
+            let command = command.trim_end_matches('.');
+            format!("On {}: {command}.", os.pretty_name)
+        } else {
+            format!("On {}: `{command}`", os.pretty_name)
+        }
     } else {
         fallback
     }

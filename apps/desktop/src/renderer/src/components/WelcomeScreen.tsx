@@ -27,6 +27,7 @@ import {
   type ToolchainTool
 } from '../api'
 import { CATEGORY_LABELS, RecommendedModels } from './RecommendedModels'
+import { InlineCode } from './InlineCode'
 
 type WelcomeScreenProps = {
   onContinue: () => void
@@ -99,7 +100,9 @@ function ToolRow({ tool }: { tool: ToolchainTool }) {
         </div>
         <p>{tool.required_for}</p>
         {!tool.available && tool.install_hint && (
-          <code className="welcome-hint">{tool.install_hint}</code>
+          <p className="welcome-hint">
+            <InlineCode text={tool.install_hint} />
+          </p>
         )}
       </div>
     </li>
@@ -384,7 +387,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
               {hfTokenSource === 'none' ? 'Skip for now' : 'Continue'} <ArrowRight size={15} />
             </button>
           </div>
-          <p className="first-run-footnote">You can change this later in Manage → Discover.</p>
+          <p className="first-run-footnote">You can change this later in Manage → Download models.</p>
         </div>
       </div>
     )

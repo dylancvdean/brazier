@@ -54,6 +54,7 @@ import { prefillProgressLabel, type LocalModel, type PrefillProgress } from '../
 import { AGENT_SLASH_SUGGESTIONS } from '../composerCompletions'
 import { useDialogOverlay } from '../hooks/useDialogOverlay'
 import { modelDisplayName } from '../model-utils'
+import { InlineCode } from './InlineCode'
 import { Markdown } from './Markdown'
 import { ReasoningDisclosure } from './ReasoningDisclosure'
 import { ToolsMenu } from './ToolsMenu'
@@ -1654,7 +1655,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   // Keep the shared composer in step with what the agent can currently do.
   const { onComposerChange, onSidebarChange } = props
   const blockedReason = !props.modelId
-    ? 'Choose a model in the top bar…'
+    ? 'Pick a model in the top bar'
     : !workspace
       ? 'Choose a workspace folder…'
       : ''
@@ -1936,7 +1937,7 @@ export function AgentMode(props: Props): React.JSX.Element {
           <AlertTriangle size={15} />
           <span>
             Commands run unsandboxed with your privileges, so each one asks first.{' '}
-            {capitalize(sandbox.detail.replace(/^no sandbox:\s*/i, ''))}
+            <InlineCode text={capitalize(sandbox.detail.replace(/^no sandbox:\s*/i, ''))} />
           </span>
         </div>
       )}
