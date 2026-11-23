@@ -1501,11 +1501,15 @@ code {
   border-radius: 8px;
   color: #d6d6d6;
   background: #050505;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.45;
-  white-space: pre-wrap;
   word-break: break-word;
+}
+
+.welcome-hint code {
+  color: #f2f2f2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  user-select: all;
 }
 
 /* The first-run tools are advisory. Keep their scan readable without making a

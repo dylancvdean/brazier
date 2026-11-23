@@ -143,6 +143,7 @@ import {
   type AgentToolCatalogEntry
 } from '../agentApi'
 import { RecommendedModels } from './RecommendedModels'
+import { InlineCode } from './InlineCode'
 import { CapabilityIcons, capabilityFlags, hubCapabilityFlags } from './CapabilityIcons'
 import {
   engineBadgeClass,
@@ -534,7 +535,9 @@ function JobProgressPanel({
       {progress.hints.length > 0 && (
         <ul className="build-hints">
           {progress.hints.map((hint) => (
-            <li key={hint}>{hint}</li>
+            <li key={hint}>
+              <InlineCode text={hint} />
+            </li>
           ))}
         </ul>
       )}
@@ -5535,7 +5538,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
             </div>
             <p className="model-help">
               {isStreamingAsrBuild
-                ? 'Installs a bundled Transformers worker and its current upstream dependencies with uv (no Git checkout). Then download a Nemotron ASR Streaming snapshot from Discover.'
+                ? 'Installs a bundled Transformers worker and its current upstream dependencies with uv (no Git checkout). Then download a Nemotron ASR Streaming model from Download models.'
                 : isSwiftBuild
                   ? 'WhisperKit builds require Xcode or the Swift toolchain. CoreML models download on first transcription (or install via `brew install whisperkit-cli`).'
                   : isPythonBuild
@@ -6574,9 +6577,9 @@ function ToolchainChecklist({ tools }: { tools: ToolchainTool[] }): React.JSX.El
               {tool.path ?? 'found'}
             </span>
           ) : (
-            <code className="toolchain-tool-detail" title={tool.required_for}>
-              {tool.install_hint ?? 'not found'}
-            </code>
+            <span className="toolchain-tool-detail" title={tool.required_for}>
+              {tool.install_hint ? <InlineCode text={tool.install_hint} /> : 'not found'}
+            </span>
           )}
         </div>
       ))}
