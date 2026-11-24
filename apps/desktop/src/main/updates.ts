@@ -46,7 +46,8 @@ async function configurePlatformUpdateFeed(report: Report): Promise<void> {
   autoUpdater.allowPrerelease = includePrerelease
   try {
     const response = await fetch(GITHUB_RELEASES_API, {
-      headers: { Accept: 'application/vnd.github+json' }
+      headers: { Accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(15_000)
     })
     if (!response.ok) throw new Error(`GitHub releases request failed (${response.status})`)
     const releases = (await response.json()) as GithubRelease[]
@@ -130,11 +131,13 @@ export function startUpdates(report: Report): { checkForUpdates: () => Promise<U
   autoUpdater.autoInstallOnAppQuit = false
 
   let checking = false
+  let activeCheck: Promise<UpdateCheckResult> | null = null
   let interactiveCheck = false
   let downloadPromptOpen = false
   let downloading = false
 
   autoUpdater.on('error', async (error) => {
+    downloading = false
     // Update availability must never prevent an offline/local application from
     // launching. Record enough detail to diagnose a release-feed failure.
     report(`[updater] failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`, 'warn')
@@ -164,7 +167,8 @@ export function startUpdates(report: Report): { checkForUpdates: () => Promise<U
   autoUpdater.on('update-available', async (info) => {
     report(`[updater] update available: ${info.version}`)
     if (autoUpdater.autoDownload) {
-      // Already downloading; skip the confirmation prompt.
+      // Already downloading; track state so subsequent checks don't overlap.
+      downloading = true
       return
     }
     if (downloadPromptOpen || downloading) return
@@ -187,6 +191,7 @@ export function startUpdates(report: Report): { checkForUpdates: () => Promise<U
       report(`[updater] download approved for ${info.version}`)
       await autoUpdater.downloadUpdate()
     } catch (error) {
+      downloading = false
       report(
         `[updater] download failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
         'error'
@@ -216,24 +221,32 @@ export function startUpdates(report: Report): { checkForUpdates: () => Promise<U
   })
 
   async function checkForUpdates(interactive = false): Promise<UpdateCheckResult> {
-    if (checking) return { supported: true }
+    if (checking && activeCheck) {
+      if (interactive) interactiveCheck = true
+      return activeCheck
+    }
     checking = true
     interactiveCheck = interactive
-    try {
-      await configurePlatformUpdateFeed(report)
-      await autoUpdater.checkForUpdates()
-    } catch (error) {
-      // electron-updater usually emits `error`, but retain this fallback so a
-      // rejected check is never invisible in the log.
-      report(
-        `[updater] check rejected: ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
-        'warn'
-      )
-    } finally {
-      checking = false
-      interactiveCheck = false
-    }
-    return { supported: true }
+    const run = (async (): Promise<UpdateCheckResult> => {
+      try {
+        await configurePlatformUpdateFeed(report)
+        await autoUpdater.checkForUpdates()
+      } catch (error) {
+        // electron-updater usually emits `error`, but retain this fallback so a
+        // rejected check is never invisible in the log.
+        report(
+          `[updater] check rejected: ${error instanceof Error ? error.stack ?? error.message : String(error)}`,
+          'warn'
+        )
+      } finally {
+        checking = false
+        activeCheck = null
+        interactiveCheck = false
+      }
+      return { supported: true }
+    })()
+    activeCheck = run
+    return run
   }
 
   if (settings.checkOnStartup) {

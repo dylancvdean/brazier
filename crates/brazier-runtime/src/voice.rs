@@ -563,6 +563,11 @@ impl VoiceServer {
         let mut child = command
             .spawn()
             .with_context(|| format!("spawn {} -m {module}", python.display()))?;
+        let stderr_pipe = child
+            .stderr
+            .take()
+            .context("capture PersonaPlex server stderr")?;
+        let (stderr_output, stderr_task) = crate::llama::spawn_stderr_drain(stderr_pipe);
 
         let base_url = format!("http://127.0.0.1:{port}");
         // MLX first-run model download can exceed Moshi's typical warm-up.
@@ -571,7 +576,15 @@ impl VoiceServer {
             VoiceBackend::Mlx => 600,
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
-        wait_until_listening(&mut child, port, &base_url, deadline).await?;
+        wait_until_listening(
+            &mut child,
+            port,
+            &base_url,
+            deadline,
+            &stderr_output,
+            stderr_task,
+        )
+        .await?;
 
         Ok(Self {
             child,
@@ -625,16 +638,17 @@ async fn wait_until_listening(
     port: u16,
     base_url: &str,
     deadline: tokio::time::Instant,
+    stderr_output: &Arc<std::sync::Mutex<Vec<u8>>>,
+    stderr_task: tokio::task::JoinHandle<Result<(), std::io::Error>>,
 ) -> anyhow::Result<()> {
     loop {
         if let Some(status) = child.try_wait().context("poll PersonaPlex server")? {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                use tokio::io::AsyncReadExt;
-                let mut buf = Vec::new();
-                let _ = pipe.read_to_end(&mut buf).await;
-                stderr = String::from_utf8_lossy(&buf).into_owned();
-            }
+            let _ = stderr_task.await;
+            let bytes = stderr_output
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            let stderr = String::from_utf8_lossy(&bytes).into_owned();
             anyhow::bail!("PersonaPlex server exited during startup with {status}: {stderr}");
         }
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -645,6 +659,7 @@ async fn wait_until_listening(
         }
         if tokio::time::Instant::now() > deadline {
             let _ = child.start_kill();
+            let _ = child.wait().await;
             anyhow::bail!("PersonaPlex server health check timed out at {base_url}");
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -742,6 +757,11 @@ impl SessionManager {
         request: VoiceSessionRequest<'_>,
     ) -> anyhow::Result<VoiceSession> {
         let mut guard = self.session.lock().await;
+        if let Some(existing) = guard.as_ref()
+            && !existing.server.lock().await.is_running()
+        {
+            *guard = None;
+        }
         anyhow::ensure!(
             guard.is_none(),
             "a realtime voice session is already active; end it before starting another"
@@ -782,7 +802,13 @@ impl SessionManager {
     }
 
     pub async fn active_session(&self) -> Option<VoiceSession> {
-        self.session.lock().await.clone()
+        let mut guard = self.session.lock().await;
+        if let Some(existing) = guard.as_ref()
+            && !existing.server.lock().await.is_running()
+        {
+            *guard = None;
+        }
+        guard.clone()
     }
 
     /// Stop the backing server and clear the active session.

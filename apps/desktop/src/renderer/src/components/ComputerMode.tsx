@@ -247,6 +247,8 @@ export function ComputerMode(props: Props): React.JSX.Element {
     []
   )
 
+  const loadGenRef = useRef(0)
+
   const loadSession = useCallback(
     async (id: string): Promise<void> => {
       onError(null)
@@ -254,8 +256,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
         onError('Stop Computer Use before switching sessions.')
         return
       }
+      const loadGen = ++loadGenRef.current
       try {
         const list = await refreshSessions()
+        if (loadGen !== loadGenRef.current) return
         const found = list.find((entry) => entry.id === id) ?? null
         setSession(found)
         sessionRef.current = found
@@ -267,6 +271,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
         setTarget(found.target)
         setPermissionMode(found.permission_mode)
         const nextSteps = await listComputerSteps(id)
+        if (loadGen !== loadGenRef.current || sessionRef.current?.id !== id) return
         setSteps(nextSteps)
         const lastShot = [...nextSteps]
           .reverse()
@@ -278,7 +283,9 @@ export function ComputerMode(props: Props): React.JSX.Element {
         turnStateRef.current = restoredState
         setTurnState(restoredState)
       } catch (cause) {
-        onError(errorText(cause))
+        if (loadGen === loadGenRef.current) {
+          onError(errorText(cause))
+        }
       }
     },
     [dispatchTurn, onError, refreshSessions]
@@ -309,18 +316,23 @@ export function ComputerMode(props: Props): React.JSX.Element {
     setPermissionMode(mode)
     const active = sessionRef.current
     if (!active) return
+    const activeId = active.id
     try {
-      const updated = await updateComputerSession(active.id, mode)
+      const updated = await updateComputerSession(activeId, mode)
+      if (sessionRef.current?.id !== activeId) return
       sessionRef.current = updated
       setSession(updated)
     } catch (cause) {
-      onError(errorText(cause))
-      setPermissionMode(active.permission_mode)
+      if (sessionRef.current?.id === activeId) {
+        onError(errorText(cause))
+        setPermissionMode(active.permission_mode)
+      }
     }
   }
 
   function startNewSession(): void {
     if (isComputerTurnBusy(turnStateRef.current)) return
+    loadGenRef.current += 1
     setSession(null)
     sessionRef.current = null
     setSteps([])
@@ -330,9 +342,14 @@ export function ComputerMode(props: Props): React.JSX.Element {
   }
 
   async function removeSession(id: string): Promise<void> {
+    if (isComputerTurnBusy(turnStateRef.current) && sessionRef.current?.id === id) {
+      onError('Stop Computer Use before deleting the running session.')
+      return
+    }
     try {
       await deleteComputerSession(id)
       if (sessionRef.current?.id === id) {
+        loadGenRef.current += 1
         setSession(null)
         sessionRef.current = null
         setSteps([])
@@ -346,10 +363,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
   }
 
   function applyResultViewport(sessionId: string, result: ComputerActionResult | null | undefined): void {
-    if (!result) return
+    if (!result || sessionRef.current?.id !== sessionId) return
     const url = computerScreenshotDataUrl(result)
     if (url) setViewportUrl(url)
-    if (result.viewport && sessionRef.current?.id === sessionId) {
+    if (result.viewport) {
       const updated: ComputerSession = {
         ...sessionRef.current,
         viewport: result.viewport,
@@ -481,10 +498,28 @@ export function ComputerMode(props: Props): React.JSX.Element {
     const sessionId = session?.id
     if (!sessionId || session.target !== 'browser') return
     const controller = new AbortController()
-    let streaming = true
+    let pollTimer: number | undefined
+    const scheduleFallbackPoll = (): void => {
+      if (controller.signal.aborted) return
+      pollTimer = window.setTimeout(() => {
+        void computerPreview(sessionId)
+          .then((shot) => {
+            if (controller.signal.aborted || sessionRef.current?.id !== sessionId) return
+            const url = computerScreenshotDataUrl(shot)
+            if (url) {
+              setViewportUrl((current) => (url === current ? current : url))
+            }
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            scheduleFallbackPoll()
+          })
+      }, 300)
+    }
     void streamComputerPreview(
       sessionId,
       (data) => {
+        if (controller.signal.aborted || sessionRef.current?.id !== sessionId) return
         setViewportUrl((current) => {
           const url = `data:image/jpeg;base64,${data}`
           return url === current ? current : url
@@ -492,24 +527,14 @@ export function ComputerMode(props: Props): React.JSX.Element {
       },
       controller.signal
     )
-      .catch(() => {})
+      .catch(() => undefined)
       .finally(() => {
-        streaming = false
+        // Only fall back to sequential polling after the SSE stream actually ends.
+        scheduleFallbackPoll()
       })
-    const timer = window.setInterval(() => {
-      if (streaming) return
-      void computerPreview(sessionId)
-        .then((shot) => {
-          const url = computerScreenshotDataUrl(shot)
-          if (url) {
-            setViewportUrl((current) => (url === current ? current : url))
-          }
-        })
-        .catch(() => {})
-    }, 50)
     return () => {
       controller.abort()
-      window.clearInterval(timer)
+      if (pollTimer !== undefined) window.clearTimeout(pollTimer)
     }
   }, [session?.id, session?.target])
 
@@ -591,7 +616,9 @@ export function ComputerMode(props: Props): React.JSX.Element {
 
   async function syncSteps(sessionId: string): Promise<ComputerStep[]> {
     const next = await listComputerSteps(sessionId)
-    setSteps(next)
+    if (sessionRef.current?.id === sessionId) {
+      setSteps(next)
+    }
     return next
   }
 
@@ -610,6 +637,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
         await refreshActiveSession(active.id)
       }
       await syncSteps(active.id)
+      if (controller.signal.aborted) return { outcome: { kind: 'aborted' } }
 
       if (
         active.target === 'desktop' &&
@@ -685,12 +713,14 @@ export function ComputerMode(props: Props): React.JSX.Element {
     let active = sessionRef.current?.id === initialSession.id ? sessionRef.current : initialSession
     if (!options.skipInitialScreenshot) {
       const observation = await refreshViewport(active.id)
+      if (controller.signal.aborted) return { kind: 'aborted' }
       const observationFailure = observationError(observation)
       if (observationFailure) {
         return { kind: 'failed', error: observationFailure }
       }
       active = sessionRef.current?.id === active.id ? sessionRef.current : active
       await syncSteps(active.id)
+      if (controller.signal.aborted) return { kind: 'aborted' }
     }
 
     const repairBudget = { count: 0 }
@@ -745,6 +775,7 @@ export function ComputerMode(props: Props): React.JSX.Element {
         responseText: completion.responseText || streamedText
       }
       const parsed = await parseCompletionWithAdapter(effectiveCompletion, active, activeModelId)
+      if (controller.signal.aborted) return { kind: 'aborted' }
       if (parsed.thought) setLiveThought(parsed.thought)
 
       await appendComputerStep(active.id, {
@@ -840,6 +871,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
   async function send(text: string): Promise<void> {
     const userText = text.trim()
     if (!userText || !canSendComputerPrompt(turnStateRef.current)) return
+    if (targetUnavailable) {
+      onError(targetUnavailable)
+      return
+    }
     if (!modelId && !sessionRef.current?.model_id) {
       onError('Choose a computer-use model in the top bar.')
       return
@@ -952,6 +987,10 @@ export function ComputerMode(props: Props): React.JSX.Element {
           throw cause
         }
       }
+      if (controller.signal.aborted) {
+        applyLoopOutcome({ kind: 'aborted' })
+        return
+      }
 
       const result = await executeApprovedAction(session, approval)
       if (result) {
@@ -1010,13 +1049,19 @@ export function ComputerMode(props: Props): React.JSX.Element {
       applyLoopOutcome(outcome)
     } catch (cause) {
       if ((cause as Error).name !== 'AbortError') onError(errorText(cause))
-      try {
-        const nextSteps = await syncSteps(session.id)
-        const restored = computerTurnStateFromPause(recoverComputerPause(nextSteps))
-        turnStateRef.current = restored
-        setTurnState(restored)
-      } catch {
-        dispatchTurn({ type: 'turn_finished' })
+      if (controller.signal.aborted || turnStateRef.current.kind === 'stopped') {
+        applyLoopOutcome({ kind: 'aborted' })
+      } else {
+        try {
+          const nextSteps = await syncSteps(session.id)
+          if (sessionRef.current?.id === session.id && !controller.signal.aborted) {
+            const restored = computerTurnStateFromPause(recoverComputerPause(nextSteps))
+            turnStateRef.current = restored
+            setTurnState(restored)
+          }
+        } catch {
+          dispatchTurn({ type: 'turn_finished' })
+        }
       }
     } finally {
       if (safetyActive) {

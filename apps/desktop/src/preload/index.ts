@@ -112,7 +112,8 @@ const agent = {
     invokeAgent({ type: 'open-session', sessionId }),
   run: (sessionId: string, input: AgentUserInput): Promise<unknown> =>
     invokeAgent({ type: 'run', sessionId, input }),
-  cancel: (sessionId: string): Promise<unknown> => invokeAgent({ type: 'cancel', sessionId }),
+  cancel: (sessionId: string): Promise<unknown> =>
+    ipcRenderer.invoke(AGENT_IPC.invoke, { type: 'cancel', sessionId }),
   compact: (sessionId: string): Promise<unknown> => invokeAgent({ type: 'compact', sessionId }),
   setModel: (sessionId: string, model: AgentModelReference): Promise<unknown> =>
     invokeAgent({ type: 'set-model', sessionId, model }),
@@ -121,7 +122,7 @@ const agent = {
   setPermissionMode: (sessionId: string, mode: AgentPermissionMode): Promise<unknown> =>
     invokeAgent({ type: 'set-permission-mode', sessionId, mode }),
   closeSession: (sessionId: string): Promise<unknown> =>
-    invokeAgent({ type: 'close-session', sessionId }),
+    ipcRenderer.invoke(AGENT_IPC.invoke, { type: 'close-session', sessionId }),
   status: (): Promise<{ running: boolean; crashes: number }> =>
     invoke('brazier:agent:status'),
   onMessage: (listener: (message: WorkerMessage) => void): (() => void) => {

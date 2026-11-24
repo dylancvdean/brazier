@@ -60,6 +60,7 @@ type ActiveSessionRun = {
 export class AgentSupervisor {
   private worker?: UtilityProcess
   private connection?: WorkerConnection
+  private workerConnection?: WorkerConnection
   private readonly pending = new Map<string, Pending>()
   private nextId = 0
   private ready?: Promise<void>
@@ -69,7 +70,7 @@ export class AgentSupervisor {
   /** Runs that already ended, so a late event cannot make them look active again. */
   private readonly finishedRuns = new Set<string>()
   private readonly eventListeners = new Set<(message: WorkerMessage) => void>()
-  private expectedExit?: UtilityProcess
+  private readonly terminatedWorkers = new WeakSet<UtilityProcess>()
 
   constructor(
     private readonly options: {
@@ -166,12 +167,12 @@ export class AgentSupervisor {
     }
   }
 
-  private onMessage(message: WorkerMessage): void {
+  private onMessage(worker: UtilityProcess, message: WorkerMessage): void {
+    if (this.worker !== worker) return
     switch (message.type) {
       case 'result': {
         const pending = this.pending.get(message.requestId)
         if (!pending) return
-        this.pending.delete(message.requestId)
         if (message.ok) pending.resolve(message.data)
         else pending.reject(new Error(message.error))
         return
@@ -248,7 +249,8 @@ export class AgentSupervisor {
   /** Start the worker and initialize it against the daemon connection. */
   private async ensureWorker(): Promise<void> {
     if (this.ready) return this.ready
-    this.ready = (async () => {
+    let spawnedWorker: UtilityProcess | undefined
+    const readyPromise = (async () => {
       const connection = this.connection
       if (!connection) {
         throw new Error('The Brazier daemon connection is not available yet.')
@@ -270,64 +272,110 @@ export class AgentSupervisor {
             stdio: 'inherit',
             env: workerEnv
           })
+      spawnedWorker = worker
       this.worker = worker
-      worker.on('message', (message: WorkerMessage) => this.onMessage(message))
+      this.workerConnection = connection
+      worker.on('message', (message: WorkerMessage) => this.onMessage(worker, message))
       worker.on('exit', (code) => {
-        const expected = this.expectedExit === worker
+        console.error(`[agent-worker] exited with code ${code}`)
+        const expected = this.terminatedWorkers.has(worker)
+        if (this.worker !== worker) {
+          // A stale exit from an already-replaced or already-terminated worker
+          // must never clobber the replacement worker or its pending requests.
+          return
+        }
         if (!expected) this.crashes += 1
         const exitError = `The agent worker exited (code ${code}).`
         for (const [, pending] of this.pending) {
           pending.reject(new Error(exitError))
         }
         this.pending.clear()
-        const known = [...this.sessions]
+        const activeIds = [...this.activeSessions.keys()]
         if (expected) {
           this.sessions.clear()
           this.activeSessions.clear()
         }
         this.worker = undefined
-        this.ready = undefined
-        if (expected) {
-          this.expectedExit = undefined
-        } else {
+        if (this.ready === readyPromise) this.ready = undefined
+        if (!expected) {
           this.synthesizeTerminalRunFailures(exitError)
-          void this.markSessionsFailed(known, code)
+          void this.markSessionsFailed(connection, activeIds, code)
         }
-        console.error(`[agent-worker] exited with code ${code}`)
       })
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(
-          () => reject(new Error('The agent worker did not start in time.')),
-          20_000
-        )
-        worker.once('spawn', () => {
-          clearTimeout(timer)
+        const onSpawn = (): void => {
+          cleanup()
           resolve()
-        })
+        }
+        const onExit = (code: number): void => {
+          cleanup()
+          reject(new Error(`The agent worker exited before starting (code ${code}).`))
+        }
+        const timer = setTimeout(() => {
+          cleanup()
+          reject(new Error('The agent worker did not start in time.'))
+        }, 20_000)
+        const cleanup = (): void => {
+          clearTimeout(timer)
+          worker.removeListener('spawn', onSpawn)
+          worker.removeListener('exit', onExit)
+        }
+        worker.once('spawn', onSpawn)
+        worker.once('exit', onExit)
       })
+      if (this.worker !== worker || this.terminatedWorkers.has(worker)) {
+        throw new Error('The agent worker was replaced before it finished starting.')
+      }
       await this.send({ type: 'init', requestId: this.requestId(), connection })
     })()
+    this.ready = readyPromise
     try {
-      await this.ready
+      await readyPromise
     } catch (error) {
-      this.ready = undefined
+      if (this.ready === readyPromise) this.ready = undefined
+      if (spawnedWorker && this.worker === spawnedWorker) {
+        this.terminatedWorkers.add(spawnedWorker)
+        this.worker = undefined
+        for (const [, pending] of this.pending) {
+          pending.reject(error instanceof Error ? error : new Error(String(error)))
+        }
+        this.pending.clear()
+        spawnedWorker.kill()
+      }
       throw error
     }
   }
 
-  private send(command: WorkerCommand): Promise<unknown> {
+  private send(command: WorkerCommand, timeoutMs = SHORT_REQUEST_TIMEOUT_MS): Promise<unknown> {
     const worker = this.worker
     if (!worker) return Promise.reject(new Error('The agent worker is not running.'))
     return new Promise((resolve, reject) => {
-      this.pending.set(command.requestId, { resolve, reject })
-      if (!LONG_RUNNING.includes(command.type)) {
-        setTimeout(() => {
-          if (!this.pending.has(command.requestId)) return
-          this.pending.delete(command.requestId)
-          reject(new Error(`The agent worker did not answer \`${command.type}\` in time.`))
-        }, SHORT_REQUEST_TIMEOUT_MS)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const cleanup = (): void => {
+        clearTimeout(timer)
+        this.pending.delete(command.requestId)
       }
-      worker.postMessage(command)
+      const pending: Pending = {
+        resolve: (value) => {
+          cleanup()
+          resolve(value)
+        },
+        reject: (error) => {
+          cleanup()
+          reject(error)
+        }
+      }
+      this.pending.set(command.requestId, pending)
+      if (!LONG_RUNNING.includes(command.type)) {
+        timer = setTimeout(() => {
+          pending.reject(new Error(`The agent worker did not answer \`${command.type}\` in time.`))
+        }, timeoutMs)
+      }
+      try {
+        worker.postMessage(command)
+      } catch (error) {
+        pending.reject(error instanceof Error ? error : new Error(String(error)))
+      }
     })
   }
 
@@ -338,9 +386,7 @@ export class AgentSupervisor {
    * process owns the model loop. Stopping both independently means a wedged
    * renderer or runtime cannot leave one half of a run alive.
    */
-  private async cancelDaemon(sessionId: string): Promise<void> {
-    const connection = this.connection
-    if (!connection) throw new Error('The Brazier daemon connection is not available yet.')
+  private async cancelDaemon(connection: WorkerConnection, sessionId: string): Promise<void> {
     const headers = new Headers({ 'content-type': 'application/json' })
     if (connection.apiKey) headers.set('authorization', `Bearer ${connection.apiKey}`)
     const fetch_ = this.options.fetch ?? fetch
@@ -359,20 +405,20 @@ export class AgentSupervisor {
   }
 
   private async patchSession(
+    connection: WorkerConnection,
     sessionId: string,
     update: Record<string, unknown>
   ): Promise<void> {
-    const connection = this.connection
-    if (!connection) return
     const headers = new Headers({ 'content-type': 'application/json' })
     if (connection.apiKey) headers.set('authorization', `Bearer ${connection.apiKey}`)
-    const response = await fetch(
+    const fetch_ = this.options.fetch ?? fetch
+    const response = await fetch_(
       `${connection.address}/api/v1/agent/sessions/${encodeURIComponent(sessionId)}`,
       {
         method: 'PATCH',
         headers,
         body: JSON.stringify(update),
-        signal: AbortSignal.timeout(DAEMON_CANCEL_TIMEOUT_MS)
+        signal: AbortSignal.timeout(DAEMON_PATCH_TIMEOUT_MS)
       }
     ).catch(() => null)
     if (!response || !response.ok) {
@@ -380,15 +426,16 @@ export class AgentSupervisor {
     }
   }
 
-  private async markSessionsFailed(sessionIds: string[], code: number): Promise<void> {
-    const known = new Set(sessionIds)
-    const extra = await this.listRelatedAgentSessions(known)
-    const ids = [...new Set([...sessionIds, ...extra])]
-    if (ids.length === 0) return
+  private async markSessionsFailed(
+    connection: WorkerConnection,
+    sessionIds: string[],
+    code: number
+  ): Promise<void> {
     await Promise.all(
-      ids.map(async (sessionId) => {
-        await this.cancelDaemon(sessionId).catch(() => undefined)
-        await this.patchSession(sessionId, {
+      sessionIds.map(async (sessionId) => {
+        // The daemon also cancels active children owned by this session's client.
+        await this.cancelDaemon(connection, sessionId).catch(() => undefined)
+        await this.patchSession(connection, sessionId, {
           last_run_status: 'failed',
           agent_note: `The agent worker exited (code ${code}).`
         })
@@ -396,80 +443,42 @@ export class AgentSupervisor {
     )
   }
 
-  private async listRelatedAgentSessions(parentIds: Set<string>): Promise<string[]> {
-    const connection = this.connection
-    if (!connection || parentIds.size === 0) return []
-    try {
-      const headers = new Headers()
-      if (connection.apiKey) headers.set('authorization', `Bearer ${connection.apiKey}`)
-      const response = await fetch(`${connection.address}/api/v1/agent/sessions`, {
-        headers,
-        signal: AbortSignal.timeout(DAEMON_CANCEL_TIMEOUT_MS)
-      })
-      if (!response.ok) return []
-      const body = (await response.json()) as {
-        data?: Array<{
-          id: string
-          last_run_status?: string
-          runtime_metadata?: { kind?: string; parent_session_id?: string }
-        }>
-      }
-      const related: string[] = []
-      for (const session of body.data ?? []) {
-        const parent = session.runtime_metadata?.parent_session_id
-        const childOfKnown =
-          session.runtime_metadata?.kind === 'subagent' && parent && parentIds.has(parent)
-        const stillRunning =
-          session.last_run_status === 'running' || session.last_run_status === 'awaiting-approval'
-        if (childOfKnown || stillRunning) related.push(session.id)
-      }
-      return related
-    } catch {
-      return []
-    }
-  }
-
   /** Kill a worker that did not acknowledge cancellation and reject its run. */
-  private killUnresponsiveWorker(): void {
-    const worker = this.worker
-    if (!worker) return
+  private killUnresponsiveWorker(worker: UtilityProcess, connection: WorkerConnection): void {
+    if (this.worker !== worker || this.terminatedWorkers.has(worker)) return
     const error = new Error('The agent worker was terminated because it did not stop in time.')
+    this.terminatedWorkers.add(worker)
+    const activeIds = [...this.activeSessions.keys()]
     this.worker = undefined
     this.ready = undefined
     for (const [, pending] of this.pending) pending.reject(error)
     this.pending.clear()
     this.synthesizeTerminalRunFailures(error.message)
     worker.kill()
+    if (activeIds.length > 0) {
+      void this.markSessionsFailed(connection, activeIds, 137)
+    }
   }
 
   private async cancel(sessionId: string): Promise<{ cancelled: true }> {
     if (!this.sessions.has(sessionId)) {
       throw new Error('Refusing to cancel a session the agent worker does not know about.')
     }
-    if (!this.worker) {
+    const worker = this.worker
+    const connection = this.workerConnection
+    if (!worker || !connection) {
       throw new Error('The agent worker is not running; nothing to cancel.')
     }
     const graceMs = this.options.cancelGraceMs ?? CANCEL_GRACE_MS
-    // Start both cancellation paths immediately. In particular, do not queue
-    // daemon cleanup behind a runtime that may be precisely what is wedged.
-    const daemonCancellation = this.cancelDaemon(sessionId)
-    const workerWasRunning = Boolean(this.worker)
-    const workerCancellation = workerWasRunning
-      ? Promise.race([
-          this.send({ type: 'cancel', requestId: this.requestId(), sessionId }),
-          new Promise<never>((_, reject) => {
-            setTimeout(
-              () => reject(new Error('The agent worker did not acknowledge cancellation.')),
-              graceMs
-            )
-          })
-        ]).catch((error: unknown) => {
-          // Do this in the rejection path rather than after waiting for daemon
-          // cleanup, so the two-second grace period is a real upper bound.
-          this.killUnresponsiveWorker()
-          throw error
-        })
-      : Promise.resolve()
+    // Start daemon cleanup immediately, even if the runtime is wedged.
+    const daemonCancellation = this.cancelDaemon(connection, sessionId)
+    const workerCancellation = this.send(
+      { type: 'cancel', requestId: this.requestId(), sessionId },
+      graceMs
+    ).catch((error: unknown) => {
+      this.killUnresponsiveWorker(worker, connection)
+      throw error
+    })
 
     const [daemonResult, workerResult] = await Promise.allSettled([
       daemonCancellation,
@@ -479,10 +488,7 @@ export class AgentSupervisor {
     // Either boundary can conclusively stop the active model loop. Report a
     // failure only if neither could be reached; otherwise Stop remains
     // successful even when its hard-kill fallback was needed.
-    if (
-      daemonResult.status === 'rejected' &&
-      (!workerWasRunning || workerResult.status === 'rejected')
-    ) {
+    if (daemonResult.status === 'rejected' && workerResult.status === 'rejected') {
       throw new Error(
         `Could not stop the agent safely: ${daemonResult.reason instanceof Error ? daemonResult.reason.message : String(daemonResult.reason)}`
       )
@@ -495,16 +501,26 @@ export class AgentSupervisor {
     if (!ALLOWED_COMMAND_TYPES.has(command.type)) {
       throw new Error(`Unknown agent command type \`${command.type}\`.`)
     }
+    if (command.type === 'cancel') return this.cancel(command.sessionId)
+    if (command.type === 'close-session' && !this.worker) {
+      this.sessions.delete(command.sessionId)
+      this.activeSessions.delete(command.sessionId)
+      return { closed: true }
+    }
     if ('sessionId' in command && typeof command.sessionId === 'string') {
       this.sessions.add(command.sessionId)
     }
-    if (command.type === 'cancel') return this.cancel(command.sessionId)
     await this.ensureWorker()
-    if (command.type === 'run' && !this.activeSessions.has(command.sessionId)) {
-      this.activeSessions.set(command.sessionId, {
+    let active: ActiveSessionRun | undefined
+    if (command.type === 'run') {
+      if (this.activeSessions.has(command.sessionId)) {
+        throw new Error('That session is already running. Cancel it first.')
+      }
+      active = {
         runId: `run-${command.sessionId}-${this.nextId + 1}`,
         sequence: 0
-      })
+      }
+      this.activeSessions.set(command.sessionId, active)
     }
     try {
       const result = await this.send({ ...command, requestId: this.requestId() } as WorkerCommand)
@@ -514,7 +530,7 @@ export class AgentSupervisor {
       }
       return result
     } catch (error) {
-      if (command.type === 'run') {
+      if (command.type === 'run' && this.activeSessions.get(command.sessionId) === active) {
         this.activeSessions.delete(command.sessionId)
       }
       throw error
@@ -524,7 +540,7 @@ export class AgentSupervisor {
   async shutdown(): Promise<void> {
     const worker = this.worker
     if (!worker) return
-    this.expectedExit = worker
+    this.terminatedWorkers.add(worker)
     const exited = new Promise<void>((resolve) => {
       worker.once('exit', () => resolve())
     })
@@ -556,11 +572,14 @@ export class AgentSupervisor {
       ])
     } finally {
       if (killTimer) clearTimeout(killTimer)
-    }
-    if (this.worker === worker) {
-      this.worker = undefined
-      this.ready = undefined
-      // Keep expectedExit set so a delayed exit remains intentional.
+      if (this.worker === worker) {
+        const error = new Error('The agent worker was shut down.')
+        for (const pending of this.pending.values()) pending.reject(error)
+        this.worker = undefined
+        this.ready = undefined
+        this.sessions.clear()
+        this.activeSessions.clear()
+      }
     }
   }
 

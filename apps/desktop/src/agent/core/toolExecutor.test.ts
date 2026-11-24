@@ -186,6 +186,7 @@ describe('AgentToolExecutor', () => {
       'approval-required',
       'elevation-requested',
       'approval-resolved',
+      'tool-started',
       'tool-completed'
     ])
     expect(events.find((event) => event.type === 'approval-resolved')).toMatchObject({

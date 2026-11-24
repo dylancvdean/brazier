@@ -172,7 +172,7 @@ async fn run_one(
     match db.get_download_job_public(&work.job_id).await {
         Ok(job) if matches!(job.status.as_str(), "pending" | "downloading") => {}
         Ok(_) => {
-            active.finish(&work.job_id);
+            active.finish_if_matches(&work.job_id, &cancel);
             return false;
         }
         Err(error) => {
@@ -181,7 +181,7 @@ async fn run_one(
                 error = %error,
                 "refusing to start download without durable job state"
             );
-            active.finish(&work.job_id);
+            active.finish_if_matches(&work.job_id, &cancel);
             return false;
         }
     }
@@ -249,8 +249,11 @@ async fn run_one(
         .map(|_| ()),
     };
 
-    let stop = active.stop_reason(&work.job_id);
-    active.finish(&work.job_id);
+    // Read our own worker's flag and persist the terminal DB state BEFORE
+    // unregistering from `active`, so a concurrent `resume_model_download`
+    // cannot observe `is_running() == false`, requeue to `pending`, and then
+    // get overwritten back to `paused` by this exiting worker.
+    let stop = cancel.reason();
     if let Err(error) = result {
         match stop {
             // A paused job keeps its partial file and its place in the list.
@@ -264,8 +267,10 @@ async fn run_one(
                 let _ = db.fail_download_job(&work.job_id, &error.to_string()).await;
             }
         }
+        active.finish_if_matches(&work.job_id, &cancel);
         return false;
     }
+    active.finish_if_matches(&work.job_id, &cancel);
     true
 }
 

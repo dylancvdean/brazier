@@ -220,4 +220,93 @@ describe('AgentSupervisor unresponsive worker handling', () => {
     )
     expect(failed).toHaveLength(0)
   })
+
+  it('reconciles only interrupted sessions on the daemon that owned the worker', async () => {
+    const worker = new FakeUtilityProcess()
+    let finishCancellation!: (response: Response) => void
+    const cancellation = new Promise<Response>((resolve) => {
+      finishCancellation = resolve
+    })
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/cancel')) return cancellation
+      return new Response('{}')
+    })
+    const supervisor = new AgentSupervisor({
+      forkWorker: () => {
+        queueMicrotask(() => worker.emit('spawn'))
+        return worker as unknown as UtilityProcess
+      },
+      fetch: fetchMock as unknown as typeof fetch
+    })
+    const original = 'http://127.0.0.1:7614'
+    supervisor.setConnection({ address: original, apiKey: null })
+    await supervisor.invoke({ type: 'open-session', sessionId: 'idle' })
+    await supervisor.invoke({ type: 'open-session', sessionId: 'active' })
+    const run = supervisor.invoke({ type: 'run', sessionId: 'active', input: { text: 'run' } })
+    const rejected = expect(run).rejects.toThrow('exited')
+    await vi.waitFor(() => expect(worker.sent.some((command) => command.type === 'run')).toBe(true))
+    await expect(
+      supervisor.invoke({ type: 'run', sessionId: 'active', input: { text: 'duplicate' } })
+    ).rejects.toThrow('already running')
+    worker.emit('exit', 1)
+    supervisor.setConnection({ address: 'http://127.0.0.1:7615', apiKey: null })
+    finishCancellation(new Response('{}'))
+
+    await rejected
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `${original}/api/v1/agent/sessions/active/cancel`,
+      `${original}/api/v1/agent/sessions/active`
+    ])
+  })
+
+  it('refuses to cancel unknown sessions and ignores stale exits from killed workers', async () => {
+    const workers: FakeUtilityProcess[] = []
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 })) as unknown as typeof fetch
+    const supervisor = new AgentSupervisor({
+      cancelGraceMs: 15,
+      forkWorker: () => {
+        const w = new FakeUtilityProcess()
+        workers.push(w)
+        queueMicrotask(() => w.emit('spawn'))
+        return w as unknown as UtilityProcess
+      },
+      fetch: fetchMock
+    })
+    supervisor.setConnection({ address: 'http://127.0.0.1:7614', apiKey: null })
+
+    await expect(
+      supervisor.invoke({ type: 'cancel', sessionId: 'never-opened' })
+    ).rejects.toThrow('does not know about')
+
+    await supervisor.invoke({ type: 'open-session', sessionId: 'session-1' })
+    const firstWorker = workers[0]!
+    // Delay the first worker's OS exit so the replacement spawns before it exits.
+    firstWorker.ignoreCancel = true
+    firstWorker.kill = () => {
+      firstWorker.killed = true
+      return true
+    }
+
+    const hungRun = supervisor.invoke({
+      type: 'run',
+      sessionId: 'session-1',
+      input: { text: 'hang' }
+    })
+    await vi.waitFor(() => {
+      expect(firstWorker.sent.some((cmd) => cmd.type === 'run')).toBe(true)
+    })
+
+    await supervisor.invoke({ type: 'cancel', sessionId: 'session-1' })
+    await expect(hungRun).rejects.toThrow('did not stop in time')
+
+    // Spawn a replacement worker, then deliver the stale exit from worker 1.
+    await supervisor.invoke({ type: 'open-session', sessionId: 'session-2' })
+    expect(workers).toHaveLength(2)
+    firstWorker.emit('exit', 137)
+
+    // Replacement worker must remain healthy and running.
+    expect(supervisor.status().running).toBe(true)
+    expect(supervisor.status().crashes).toBe(0)
+  })
 })

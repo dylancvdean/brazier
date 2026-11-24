@@ -576,9 +576,7 @@ async function setComputerUseActive(active: boolean): Promise<void> {
         await computerSafetyOverlay.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html><style>body{margin:0;background:transparent;font:600 14px -apple-system,BlinkMacSystemFont,sans-serif;color:#fff}div{height:48px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;gap:10px;border:1px solid #ff8c69;border-radius:12px;background:#31140eeF;box-shadow:0 8px 30px #0008}b{color:#ffad91}kbd{padding:3px 7px;border:1px solid #ffffff55;border-radius:5px;background:#0008;font:600 12px inherit}</style><div><b>Computer Use active</b><span><kbd>Esc</kbd> to stop</span></div>`))
       }
       if (generation !== computerSafetyGeneration) {
-        computerSafetyOverlay?.hide()
-        if (!computerUseActive) globalShortcut.unregister('Escape')
-        return
+        throw new Error('Computer Use safety startup was cancelled.')
       }
       positionComputerSafetyOverlay()
       computerSafetyOverlay.setAlwaysOnTop(true, 'screen-saver')
@@ -595,8 +593,10 @@ async function setComputerUseActive(active: boolean): Promise<void> {
       writeSafetyOverlayMarker()
       computerUseActive = true
     } catch (error) {
-      computerSafetyOverlay?.hide()
-      if (!computerUseActive) globalShortcut.unregister('Escape')
+      if (generation === computerSafetyGeneration) {
+        computerSafetyOverlay?.hide()
+        globalShortcut.unregister('Escape')
+      }
       throw error
     }
   })()
@@ -836,7 +836,8 @@ process.on('unhandledRejection', (reason) => {
   report(`[main] unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`, 'error')
 })
 
-function startDaemon(): Promise<Connection> {
+async function startDaemon(): Promise<Connection> {
+  await daemonCleanup
   const directory = dataDirectory()
   const installedDaemon = join(__dirname, '../..', process.platform === 'win32' ? 'brazierd.exe' : 'brazierd')
   const useInstalledDaemon = process.env.BRAZIER_INSTALLED === '1' || existsSync(installedDaemon)
@@ -927,10 +928,15 @@ function startDaemon(): Promise<Connection> {
       settled = true
       clearTimeout(timeout)
       reject(error)
-      if (daemon === child) daemon = undefined
-      void terminateChildAndWait(child).catch((shutdownError) => {
-        report(`[brazierd] cleanup after failed startup: ${shutdownError.message}`, 'error')
-      })
+      if (daemon === child) {
+        daemon = undefined
+        daemonProcessId = undefined
+      }
+      void trackDaemonCleanup(
+        terminateChildAndWait(child).catch((shutdownError) => {
+          report(`[brazierd] cleanup after failed startup: ${shutdownError.message}`, 'error')
+        })
+      )
     }
     const timeout = setTimeout(() => {
       fail(new Error('The Brazier daemon did not become ready in time.'))
@@ -948,7 +954,7 @@ function startDaemon(): Promise<Connection> {
         try {
           const connection = JSON.parse(line.slice('BRAZIER_READY '.length)) as Connection
           if (!connection.address) throw new Error('readiness payload has no address')
-          if (Number.isInteger(connection.pid) && Number(connection.pid) > 0) {
+          if (daemon === child && Number.isInteger(connection.pid) && Number(connection.pid) > 0) {
             daemonProcessId = Number(connection.pid)
           }
           settled = true
@@ -962,29 +968,40 @@ function startDaemon(): Promise<Connection> {
   })
 }
 
+let daemonCleanup: Promise<void> = Promise.resolve()
+
+function trackDaemonCleanup(cleanup: Promise<void>): Promise<void> {
+  const next = daemonCleanup.then(() => cleanup, () => cleanup)
+  daemonCleanup = next.catch(() => undefined)
+  return next
+}
+
 /** Stop the owned daemon and prove that the child actually exited. */
 function stopLocalDaemonAndWait(timeoutMs = 10_000): Promise<void> {
   const child = daemon
   const processId = daemonProcessId
   daemon = undefined
   daemonProcessId = undefined
-  return terminateChildAndWait(child, {
-    gracefulTimeoutMs: timeoutMs,
-    sendSignal: (signal) => {
-      // In development the owned child is `cargo run`; signal the brazierd PID
-      // it reported, then wait for Cargo to observe that exit. Killing Cargo
-      // itself can orphan the real daemon and poison the next launch.
-      if (processId && processId !== child?.pid) {
-        try {
-          process.kill(processId, signal)
-          return true
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false
+  if (!child) return daemonCleanup
+  return trackDaemonCleanup(
+    terminateChildAndWait(child, {
+      gracefulTimeoutMs: timeoutMs,
+      sendSignal: (signal) => {
+        // In development the owned child is `cargo run`; signal the brazierd PID
+        // it reported, then wait for Cargo to observe that exit. Killing Cargo
+        // itself can orphan the real daemon and poison the next launch.
+        if (processId && processId !== child.pid) {
+          try {
+            process.kill(processId, signal)
+            return true
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return false
+          }
         }
+        return child.kill(signal)
       }
-      return child?.kill(signal) ?? true
-    }
-  })
+    })
+  )
 }
 
 /** Confirm that the installed artifact contains its Computer Use safety helper. */
@@ -1191,21 +1208,25 @@ function installRendererConnectionGuard(profiles: ConnectionProfileManager): voi
 
 function broadcastConnectionChanged(summary: ConnectionProfileSummary): void {
   for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) window.webContents.send('brazier:connection-changed', summary)
+    if (window === computerSafetyOverlay || window.isDestroyed()) continue
+    window.webContents.send('brazier:connection-changed', summary)
   }
 }
 
 async function resetForConnectionSwitch(ready: DaemonConnection): Promise<void> {
   // An agent worker is initialized with one immutable daemon credential. Stop
-  // it before publishing the new selection so no request can cross profiles.
+  // it before publishing the new selection so no request can cross profiles,
+  // and immediately point the supervisor at the new connection.
   await agent.shutdown()
+  agent.setConnection({ address: ready.address, apiKey: ready.api_key })
   broadcastConnectionChanged(ready.profile)
   // The event invalidates small API caches immediately. Reloading is the reset
   // boundary for long-lived streams, voice graphs, and daemon-owned ids held by
   // mounted React components. Delay slightly so the IPC reply can be delivered.
   setTimeout(() => {
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.reload()
+      if (window === computerSafetyOverlay || window.isDestroyed()) continue
+      window.webContents.reload()
     }
   }, 50)
 }
@@ -1355,17 +1376,6 @@ async function createWindow(): Promise<void> {
     })
   }
 
-  // Renderer logs go to the developer tools console, which is a different place
-  // from the terminal `pnpm dev` prints to — so "the console is silent" can mean
-  // either. Development builds forward them, making the terminal the one place
-  // to look.
-  if (!app.isPackaged) {
-    window.webContents.on('console-message', (event) => {
-      const level = event.level === 'error' ? 'error' : event.level === 'warning' ? 'warn' : 'log'
-      report(`[renderer] ${event.message}`, level)
-    })
-  }
-
   window.webContents.on('did-fail-load', (_event, code, description, validatedURL) => {
     report(`[brazier] renderer failed to load (${code}): ${description} @ ${validatedURL}`, 'error')
     if (!window.isDestroyed() && !window.isVisible()) window.show()
@@ -1378,14 +1388,25 @@ async function createWindow(): Promise<void> {
   window.webContents.on('render-process-gone', (_event, details) => {
     console.error('[brazier] renderer process gone', details)
   })
+  // Renderer logs go to the developer tools console, which is a different place
+  // from the terminal `pnpm dev` prints to. Development builds forward all
+  // levels; packaged builds record warnings and errors to the session log.
   window.webContents.on('console-message', (event) => {
-    // Electron ≥39: prefer the event object form.
-    const level = 'level' in event ? Number(event.level) : 0
+    const rawLevel = 'level' in event ? event.level : 'info'
+    const isError = rawLevel === 'error' || (typeof rawLevel === 'number' && rawLevel >= 3)
+    const isWarning = rawLevel === 'warning' || (typeof rawLevel === 'number' && rawLevel === 2)
     const message = 'message' in event ? String(event.message) : ''
-    const line = 'line' in event ? Number(event.line) : 0
+    const line = 'lineNumber' in event
+      ? Number((event as { lineNumber?: unknown }).lineNumber)
+      : 'line' in event
+        ? Number((event as { line?: unknown }).line)
+        : 0
     const sourceId = 'sourceId' in event ? String(event.sourceId) : ''
-    if (level >= 2) {
-      report(`[renderer:${level}] ${message} (${sourceId}:${line})`, 'error')
+    if (isError || isWarning) {
+      const location = sourceId ? ` (${sourceId}:${line})` : ''
+      report(`[renderer:${String(rawLevel)}] ${message}${location}`, isError ? 'error' : 'warn')
+    } else if (!app.isPackaged) {
+      report(`[renderer] ${message}`, 'log')
     }
   })
 
@@ -1516,11 +1537,24 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   })
   handleTrusted('brazier:connection-profiles:list', () => profiles.list())
   handleTrusted('brazier:connection-profiles:current', () => profiles.current())
+  const revokeComputerUseBeforeSwitch = async (): Promise<void> => {
+    if (computerUseActive || computerSafetyStarting) {
+      await setComputerUseActive(false).catch((error) => {
+        report(
+          `[computer] failed to revoke desktop authority before profile switch: ${error instanceof Error ? error.message : String(error)}`,
+          'warn'
+        )
+      })
+    }
+  }
+
   handleTrusted(
     'brazier:connection-profiles:upsert',
     async (_event, input: RemoteConnectionProfileInput) => {
       const activeId = profiles.current().id
-      const generation = input.id === activeId ? ++ipcSwitchGeneration : ipcSwitchGeneration
+      const isActive = input.id === activeId
+      const generation = isActive ? ++ipcSwitchGeneration : ipcSwitchGeneration
+      if (isActive) await revokeComputerUseBeforeSwitch()
       const profile = await profiles.upsert(input)
       if (profile.id === activeId && generation === ipcSwitchGeneration) {
         const ready = await profiles.connection()
@@ -1540,7 +1574,9 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     'brazier:connection-profiles:claim-pairing',
     async (_event, input: PairingClaimInput): Promise<ClaimedConnection> => {
       const activeId = profiles.current().id
-      const generation = input.id === activeId ? ++ipcSwitchGeneration : ipcSwitchGeneration
+      const isActive = input.id === activeId
+      const generation = isActive ? ++ipcSwitchGeneration : ipcSwitchGeneration
+      if (isActive) await revokeComputerUseBeforeSwitch()
       const claimed = await profiles.claimAndSave(input)
       if (claimed.profile.id === activeId && generation === ipcSwitchGeneration) {
         await resetForConnectionSwitch(await profiles.connection())
@@ -1551,6 +1587,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   handleTrusted('brazier:connection-profiles:select', async (_event, id: string) => {
     const previousId = profiles.current().id
     const generation = ++ipcSwitchGeneration
+    if (id !== previousId) await revokeComputerUseBeforeSwitch()
     const ready = await profiles.select(id)
     if (generation === ipcSwitchGeneration) {
       if (ready.profile.id !== previousId) await resetForConnectionSwitch(ready)
@@ -1561,6 +1598,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   handleTrusted('brazier:connection-profiles:delete', async (_event, id: string) => {
     const wasActive = profiles.current().id === id
     const generation = wasActive ? ++ipcSwitchGeneration : ipcSwitchGeneration
+    if (wasActive) await revokeComputerUseBeforeSwitch()
     const deleted = await profiles.delete(id)
     if (deleted && wasActive && generation === ipcSwitchGeneration) {
       await resetForConnectionSwitch(await profiles.connection())
@@ -1720,7 +1758,9 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   await createWindow()
   checkForUpdates = startUpdates(report).checkForUpdates
   app.on('activate', () => {
-    showMainWindow()
+    if (desktopLifecycle.requestActivation() === 'show-window') {
+      showMainWindow()
+    }
   })
 })
 

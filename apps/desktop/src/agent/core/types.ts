@@ -354,7 +354,13 @@ export type AgentSubagentCompletedEvent = EventBase & {
   status: 'completed' | 'failed' | 'cancelled'
   summary: string
 }
-/** Live nested work from a child session, for the parent's timeline pill. */
+export type AgentModelLoadingEvent = EventBase & {
+  type: 'model-loading'
+  phase: string
+  message: string
+}
+
+/** Live nested work from a child session, for the parent timeline. */
 export type AgentSubagentProgressEvent = EventBase & {
   type: 'subagent-progress'
   toolCallId: string
@@ -371,6 +377,7 @@ export type AgentSubagentProgressEvent = EventBase & {
 
 export type AgentEvent =
   | AgentRunStartedEvent
+  | AgentModelLoadingEvent
   | AgentPrefillProgressEvent
   | AgentTextDeltaEvent
   | AgentToolCallProposedEvent

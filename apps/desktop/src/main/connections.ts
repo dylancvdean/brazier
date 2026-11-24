@@ -771,6 +771,7 @@ export class ConnectionProfileManager {
     if (isEditingActive && generation !== this.switchGeneration) {
       const existing = this.store.get(candidate.id)
       if (existing?.kind === 'remote') return existing
+      throw new Error('The connection profile was deleted while it was being updated.')
     }
     const profile = this.store.upsert(candidate)
     if (
@@ -980,7 +981,11 @@ export class ConnectionProfileManager {
       try {
         return await handshakeLocal()
       } catch (error) {
+        const shouldStop = this.localStarted
         this.invalidateLocalConnection()
+        if (shouldStop) {
+          await Promise.resolve(this.dependencies.stopLocal()).catch(() => undefined)
+        }
         if (!hadCachedLocal || this.stopped) throw error
         return handshakeLocal()
       }

@@ -32,6 +32,7 @@ import {
   profileIsEmpty,
   type InheritedDefaults
 } from './ModelSettingsFields'
+import { useDialogOverlay } from '../hooks/useDialogOverlay'
 
 type Props = {
   model: LocalModel
@@ -62,6 +63,7 @@ export function ModelSettingsModal(props: Props): React.JSX.Element {
   const [adapters, setAdapters] = useState<Adapter[]>([])
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const dialogRef = useDialogOverlay(true, props.onClose)
 
   const refreshAdapters = useCallback(() => {
     void listAdapters()
@@ -133,8 +135,10 @@ export function ModelSettingsModal(props: Props): React.JSX.Element {
   return (
     <div className="menu-backdrop model-settings-backdrop" onMouseDown={props.onClose}>
       <div
+        ref={dialogRef}
         className="model-settings-modal"
         role="dialog"
+        aria-modal="true"
         aria-label={`Configure ${meta.title}`}
         onMouseDown={(event) => event.stopPropagation()}
       >

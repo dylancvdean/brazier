@@ -29,6 +29,13 @@ export class ObjectUrlCache {
       }
       entry = created
       this.entries.set(key, entry)
+      // Evict failed fetches so a transient error (e.g. daemon reconnect)
+      // does not poison later consumers while an earlier view stays mounted.
+      void created.promise.catch(() => {
+        if (this.entries.get(key) === created) {
+          this.entries.delete(key)
+        }
+      })
     }
     entry.references++
     let released = false

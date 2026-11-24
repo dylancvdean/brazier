@@ -79,6 +79,30 @@ async fn track_resumable_download(
     Ok((job.id, cancel))
 }
 
+async fn finalize_direct_download(
+    db: &crate::db::Database,
+    active_downloads: &crate::active_downloads::ActiveDownloads,
+    job_id: &str,
+    cancel: &std::sync::Arc<crate::active_downloads::StopFlag>,
+    error: Option<&anyhow::Error>,
+) {
+    let stop = cancel.reason();
+    if let Some(error) = error {
+        match stop {
+            Some(crate::active_downloads::StopReason::Pause) => {
+                let _ = db.pause_download_job(job_id).await;
+            }
+            Some(crate::active_downloads::StopReason::Cancel) => {
+                let _ = db.cancel_download_job(job_id).await;
+            }
+            None => {
+                let _ = db.fail_download_job(job_id, &error.to_string()).await;
+            }
+        }
+    }
+    active_downloads.finish_if_matches(job_id, cancel);
+}
+
 #[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
@@ -98,6 +122,14 @@ impl ApiError {
     fn not_found(error: impl ToString) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: error.to_string(),
+            fork_hints: None,
+        }
+    }
+
+    fn conflict(error: impl ToString) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: error.to_string(),
             fork_hints: None,
         }
@@ -849,6 +881,12 @@ async fn require_auth(State(state): State<AppState>, mut request: Request, next:
     next.run(request).await
 }
 
+static DAEMON_BOOT_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn daemon_boot_id() -> &'static str {
+    DAEMON_BOOT_ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
+
 async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     state.db.ping().await.map_err(ApiError::internal)?;
     Ok(Json(json!({
@@ -856,6 +894,7 @@ async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
         "engine": state.runtime.id(),
         "version": env!("CARGO_PKG_VERSION"),
         "database": "ok",
+        "boot_id": daemon_boot_id(),
     })))
 }
 
@@ -5160,8 +5199,7 @@ struct GenerateVideoApiRequest {
 fn generation_model_bytes(data_dir: &std::path::Path, model_id: &str) -> u64 {
     sdcpp::path_for_model_id(data_dir, model_id)
         .ok()
-        .and_then(|path| std::fs::metadata(path).ok())
-        .map(|meta| meta.len())
+        .map(|path| sdcpp::path_disk_bytes(&path))
         .unwrap_or(0)
 }
 
@@ -5744,7 +5782,7 @@ async fn build_runtime(
             kind: "runtime-build",
             payload: None,
             label: Some(&label),
-            status: "downloading",
+            status: "pending",
         })
         .await
     {
@@ -5972,27 +6010,17 @@ async fn download_model(
             request,
             Box::new(|_| {}),
             Some((state.db.clone(), job_id.clone())),
-            Some(cancel),
+            Some(cancel.clone()),
         )
         .await;
-        let stop = state.active_downloads.stop_reason(&job_id);
-        state.active_downloads.finish(&job_id);
-        if let Err(error) = &result {
-            match stop {
-                Some(crate::active_downloads::StopReason::Pause) => {
-                    let _ = state.db.pause_download_job(&job_id).await;
-                }
-                Some(crate::active_downloads::StopReason::Cancel) => {
-                    let _ = state.db.cancel_download_job(&job_id).await;
-                }
-                None => {
-                    let _ = state
-                        .db
-                        .fail_download_job(&job_id, &error.to_string())
-                        .await;
-                }
-            }
-        }
+        finalize_direct_download(
+            &state.db,
+            &state.active_downloads,
+            &job_id,
+            &cancel,
+            result.as_ref().err(),
+        )
+        .await;
         return match result {
             Ok(result) => {
                 state.invalidate_models_cache().await;
@@ -6028,24 +6056,17 @@ async fn download_model(
                 push_progress(&progress_tx, event);
             }),
             Some((db.clone(), job_id.clone())),
-            Some(cancel),
+            Some(cancel.clone()),
         )
         .await;
-        let stop = active_downloads.stop_reason(&job_id);
-        active_downloads.finish(&job_id);
-        if let Err(error) = &result {
-            match stop {
-                Some(crate::active_downloads::StopReason::Pause) => {
-                    let _ = db.pause_download_job(&job_id).await;
-                }
-                Some(crate::active_downloads::StopReason::Cancel) => {
-                    let _ = db.cancel_download_job(&job_id).await;
-                }
-                None => {
-                    let _ = db.fail_download_job(&job_id, &error.to_string()).await;
-                }
-            }
-        }
+        finalize_direct_download(
+            &db,
+            &active_downloads,
+            &job_id,
+            &cancel,
+            result.as_ref().err(),
+        )
+        .await;
         match result {
             Ok(download_result) => {
                 cache_state.invalidate_models_cache().await;
@@ -6114,24 +6135,17 @@ async fn download_mlx_model(
                 push_progress(&progress_tx, event);
             }),
             Some((db.clone(), job_id.clone())),
-            Some(cancel),
+            Some(cancel.clone()),
         )
         .await;
-        let stop = active_downloads.stop_reason(&job_id);
-        active_downloads.finish(&job_id);
-        if let Err(error) = &result {
-            match stop {
-                Some(crate::active_downloads::StopReason::Pause) => {
-                    let _ = db.pause_download_job(&job_id).await;
-                }
-                Some(crate::active_downloads::StopReason::Cancel) => {
-                    let _ = db.cancel_download_job(&job_id).await;
-                }
-                None => {
-                    let _ = db.fail_download_job(&job_id, &error.to_string()).await;
-                }
-            }
-        }
+        finalize_direct_download(
+            &db,
+            &active_downloads,
+            &job_id,
+            &cancel,
+            result.as_ref().err(),
+        )
+        .await;
         match result {
             Ok(download_result) => {
                 cache_state.invalidate_models_cache().await;
@@ -6353,6 +6367,11 @@ async fn resume_model_download(
     State(state): State<AppState>,
     Json(request): Json<DownloadJobRequest>,
 ) -> ApiResult<Json<Value>> {
+    if state.active_downloads.is_running(&request.job_id) {
+        return Err(ApiError::conflict(
+            "this download is still stopping; wait a moment and try resuming again",
+        ));
+    }
     let job = state
         .db
         .get_download_job_public(&request.job_id)
@@ -6519,30 +6538,47 @@ async fn create_streaming_transcription(
     let lookahead = request.lookahead;
     let cleanup_id = id.clone();
     tokio::spawn(async move {
-        let _ = runtime
-            .transcribe_streaming_pcm(&model_path, sample_rate, lookahead, audio_rx, event_tx)
-            .await;
+        if let Err(error) = runtime
+            .transcribe_streaming_pcm(
+                &model_path,
+                sample_rate,
+                lookahead,
+                audio_rx,
+                event_tx.clone(),
+            )
+            .await
+        {
+            let _ = event_tx.send(Err(error)).await;
+        }
         streaming_transcription_sessions()
             .lock()
             .await
             .remove(&cleanup_id);
     });
     // A renderer that creates a session and disappears before opening either
-    // channel must not leave the worker waiting forever.
+    // channel must not leave the worker waiting forever (or blocked on a full
+    // unread events channel while holding the streaming_asr mutex).
     let expiry_id = id.clone();
     let expiry_session = Arc::downgrade(&session);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
-        let unopened = if let Some(session) = expiry_session.upgrade() {
-            session.audio.lock().await.is_some()
-        } else {
-            false
-        };
-        if unopened {
-            streaming_transcription_sessions()
-                .lock()
-                .await
-                .remove(&expiry_id);
+        if let Some(session) = expiry_session.upgrade() {
+            let audio_unopened = session.audio.lock().await.is_some();
+            let events_unopened = session.events.lock().await.is_some();
+            if audio_unopened || events_unopened {
+                // Drop any unopened channel halves so `transcribe_streaming_pcm`
+                // unblocks immediately instead of holding the runtime lock.
+                if audio_unopened {
+                    let _ = session.audio.lock().await.take();
+                }
+                if events_unopened {
+                    let _ = session.events.lock().await.take();
+                }
+                streaming_transcription_sessions()
+                    .lock()
+                    .await
+                    .remove(&expiry_id);
+            }
         }
     });
 
@@ -6963,24 +6999,17 @@ async fn download_streaming_asr_model(
                 push_progress(&progress_tx, event);
             }),
             Some((db.clone(), job_id.clone())),
-            Some(cancel),
+            Some(cancel.clone()),
         )
         .await;
-        let stop = active_downloads.stop_reason(&job_id);
-        active_downloads.finish(&job_id);
-        if let Err(error) = &result {
-            match stop {
-                Some(crate::active_downloads::StopReason::Pause) => {
-                    let _ = db.pause_download_job(&job_id).await;
-                }
-                Some(crate::active_downloads::StopReason::Cancel) => {
-                    let _ = db.cancel_download_job(&job_id).await;
-                }
-                None => {
-                    let _ = db.fail_download_job(&job_id, &error.to_string()).await;
-                }
-            }
-        }
+        finalize_direct_download(
+            &db,
+            &active_downloads,
+            &job_id,
+            &cancel,
+            result.as_ref().err(),
+        )
+        .await;
         match result {
             Ok(download_result) => {
                 cache_state.invalidate_models_cache().await;
@@ -7049,24 +7078,17 @@ async fn download_personaplex_model(
                 push_progress(&progress_tx, event);
             }),
             Some((db.clone(), job_id.clone())),
-            Some(cancel),
+            Some(cancel.clone()),
         )
         .await;
-        let stop = active_downloads.stop_reason(&job_id);
-        active_downloads.finish(&job_id);
-        if let Err(error) = &result {
-            match stop {
-                Some(crate::active_downloads::StopReason::Pause) => {
-                    let _ = db.pause_download_job(&job_id).await;
-                }
-                Some(crate::active_downloads::StopReason::Cancel) => {
-                    let _ = db.cancel_download_job(&job_id).await;
-                }
-                None => {
-                    let _ = db.fail_download_job(&job_id, &error.to_string()).await;
-                }
-            }
-        }
+        finalize_direct_download(
+            &db,
+            &active_downloads,
+            &job_id,
+            &cancel,
+            result.as_ref().err(),
+        )
+        .await;
         match result {
             Ok(download_result) => {
                 cache_state.invalidate_models_cache().await;
@@ -7362,24 +7384,17 @@ async fn install_sdcpp_bundle(
                 push_progress(&progress_tx, event);
             }),
             Some((db.clone(), job_id.clone())),
-            Some(cancel),
+            Some(cancel.clone()),
         )
         .await;
-        let stop = active_downloads.stop_reason(&job_id);
-        active_downloads.finish(&job_id);
-        if let Err(error) = &result {
-            match stop {
-                Some(crate::active_downloads::StopReason::Pause) => {
-                    let _ = db.pause_download_job(&job_id).await;
-                }
-                Some(crate::active_downloads::StopReason::Cancel) => {
-                    let _ = db.cancel_download_job(&job_id).await;
-                }
-                None => {
-                    let _ = db.fail_download_job(&job_id, &error.to_string()).await;
-                }
-            }
-        }
+        finalize_direct_download(
+            &db,
+            &active_downloads,
+            &job_id,
+            &cancel,
+            result.as_ref().err(),
+        )
+        .await;
         match result {
             Ok(install) => {
                 cache_state.invalidate_models_cache().await;
@@ -8219,6 +8234,7 @@ async fn patch_agent_session(
         .update_agent_session(&id, update)
         .await
         .map_err(ApiError::internal)?;
+    state.agent_broker.notify_approvals();
     Ok(Json(session))
 }
 
@@ -8228,6 +8244,13 @@ struct DeleteAgentSessionQuery {
     discard_unapplied: bool,
 }
 
+fn is_subagent_session(metadata: Option<&Value>) -> bool {
+    metadata
+        .and_then(|value| value.get("kind"))
+        .and_then(Value::as_str)
+        == Some("subagent")
+}
+
 async fn delete_agent_session(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -8235,12 +8258,17 @@ async fn delete_agent_session(
     Query(query): Query<DeleteAgentSessionQuery>,
 ) -> ApiResult<Json<Value>> {
     let session = authorized_agent_session(&state, &auth, &id).await?;
+    // Subagents share their parent's worktree metadata for workspace visibility;
+    // the parent owns the worktree lifecycle, never the child.
+    let owned_worktree = if is_subagent_session(session.runtime_metadata.as_ref()) {
+        None
+    } else {
+        crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
+    };
     // Refuse discardable worktrees before tearing down the agent, so a missing
     // discard flag cannot kill the run and then leave the session behind.
-    if let Some(info) =
-        crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
-    {
-        let status = crate::agent_worktree::inspect_worktree(&info)
+    if let Some(info) = owned_worktree.as_ref() {
+        let status = crate::agent_worktree::inspect_worktree(info)
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
         if status.has_discardable_changes && !query.discard_unapplied {
@@ -8251,10 +8279,8 @@ async fn delete_agent_session(
         }
     }
     state.agent_broker.terminate_session_processes(&id).await;
-    if let Some(info) =
-        crate::agent_worktree::worktree_from_metadata(session.runtime_metadata.as_ref())
-    {
-        crate::agent_worktree::remove_worktree(&info, query.discard_unapplied)
+    if let Some(info) = owned_worktree.as_ref() {
+        crate::agent_worktree::remove_worktree(info, query.discard_unapplied)
             .await
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
@@ -8263,6 +8289,7 @@ async fn delete_agent_session(
         .delete_agent_session(&id)
         .await
         .map_err(ApiError::internal)?;
+    state.agent_broker.notify_approvals();
     Ok(Json(json!({ "deleted": true })))
 }
 
@@ -8381,20 +8408,46 @@ async fn list_agent_approvals(
     Ok(Json(json!({ "data": pending })))
 }
 
-/// Stop a run: kill the session's processes and refuse anything still waiting
-/// on the user, so no approved-after-the-fact command runs later.
+/// Stop a run: kill the session's processes (and any child subagents) and
+/// expire anything still waiting on the user, so no approved-after-the-fact
+/// command runs later.
 async fn cancel_agent_run(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    authorized_agent_session(&state, &auth, &id).await?;
-    let terminated = state.agent_broker.terminate_session_processes(&id).await;
-    let expired = state
+    let session = authorized_agent_session(&state, &auth, &id).await?;
+    let mut terminated = state.agent_broker.terminate_session_processes(&id).await;
+    let mut expired = state
         .db
         .expire_pending_approvals(Some(&id))
         .await
         .map_err(ApiError::internal)?;
+    if let Ok(children) = state
+        .db
+        .list_active_child_agent_sessions(&id, &session.owner_client_id)
+        .await
+    {
+        for child_id in children {
+            terminated += state
+                .agent_broker
+                .terminate_session_processes(&child_id)
+                .await;
+            if let Ok(child_expired) = state.db.expire_pending_approvals(Some(&child_id)).await {
+                expired += child_expired;
+            }
+            let _ = state
+                .db
+                .update_agent_session(
+                    &child_id,
+                    crate::agent_types::UpdateAgentSession {
+                        last_run_status: Some("cancelled".to_owned()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+        }
+    }
     state.agent_broker.notify_approvals();
     state
         .db
@@ -8798,6 +8851,12 @@ async fn get_agent_approval(
         std::time::Instant::now() + Duration::from_millis(query.wait_ms.unwrap_or(0).min(600_000));
     let notifier = state.agent_broker.approvals_notifier();
     loop {
+        // Register the waiter BEFORE querying SQLite so a concurrent decision,
+        // cancel, or session delete cannot slip through between read and wait.
+        let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
         // Time out stale requests before reporting, so a forgotten dialog does
         // not leave a run blocked forever.
         state
@@ -8818,8 +8877,7 @@ async fn get_agent_approval(
         if now >= deadline {
             return Ok(Json(approval));
         }
-        // Woken by a decision, or re-checked periodically for expiry.
-        let notified = notifier.notified();
+        // Woken immediately by a decision/cancel/delete, or re-checked periodically for expiry.
         let _ = tokio::time::timeout((deadline - now).min(Duration::from_millis(1_000)), notified)
             .await;
     }
@@ -10146,13 +10204,11 @@ mod tests {
     #[tokio::test]
     async fn approval_decisions_record_the_authenticated_client_and_daemon() {
         let dir = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
         let computer_session_id = "computer-session-audit";
-        let computer_approval_id = "computer-approval-audit";
+        let workspace = tempdir().unwrap();
         let bootstrap_db = Database::open(&dir.path().join("brazier.sqlite"))
             .await
             .unwrap();
-        let computer_location = bootstrap_db.execution_location().await.unwrap();
         let pairing = bootstrap_db
             .create_pairing_request(
                 "Approval tablet",
@@ -10192,15 +10248,7 @@ mod tests {
                         "memories": []
                     },
                     "steps": [],
-                    "pending": {
-                        (computer_approval_id): {
-                            "id": computer_approval_id,
-                            "session_id": computer_session_id,
-                            "action": { "type": "visit_url", "url": "https://example.com" },
-                            "created_at": "1",
-                            "execution_location": computer_location
-                        }
-                    }
+                    "pending": {}
                 }]
             }))
             .unwrap(),
@@ -10253,6 +10301,20 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{decided}");
         assert_eq!(decided["decided_by_client_id"], client_id);
+
+        let (status, held) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/computer/exec",
+            json!({
+                "session_id": computer_session_id,
+                "action": { "type": "visit_url", "url": "https://example.com" }
+            }),
+            &issued.api_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{held}");
+        let computer_approval_id = held["approval_id"].as_str().unwrap();
 
         let (status, denied) = request_with_api_key(
             &app,

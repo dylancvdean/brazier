@@ -129,11 +129,33 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
   const [customRuntimes, setCustomRuntimes] = useState(false)
   const [recommendations, setRecommendations] = useState<Recommendations | null>(null)
   const [loadingRecommendations, setLoadingRecommendations] = useState(false)
+  const [recommendationsFailed, setRecommendationsFailed] = useState(false)
   const [settingUp, setSettingUp] = useState(false)
   const [setupOutput, setSetupOutput] = useState<string | null>(null)
   const [hfTokenSource, setHfTokenSource] = useState('none')
   const [hfTokenDraft, setHfTokenDraft] = useState('')
   const [savingHfToken, setSavingHfToken] = useState(false)
+
+  const goToStage = useCallback((next: 'features' | 'token' | 'checklist' | 'models'): void => {
+    setError(null)
+    setStage(next)
+  }, [])
+
+  const loadRecommendations = useCallback((): void => {
+    setLoadingRecommendations(true)
+    setRecommendationsFailed(false)
+    setError(null)
+    void fetchRecommendations()
+      .then((result) => {
+        setRecommendations(result)
+        setRecommendationsFailed(false)
+      })
+      .catch((cause: unknown) => {
+        setRecommendationsFailed(true)
+        setError(cause instanceof Error ? cause.message : String(cause))
+      })
+      .finally(() => setLoadingRecommendations(false))
+  }, [])
 
   useEffect(() => {
     void huggingFaceTokenStatus()
@@ -154,15 +176,11 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
   // Fetched when the model stage is reached rather than on mount: it costs a
   // round trip to Hugging Face per recommended model, to size the download.
   useEffect(() => {
-    if (stage !== 'models' || recommendations) return
-    setLoadingRecommendations(true)
-    void fetchRecommendations()
-      .then(setRecommendations)
-      .catch((cause: unknown) =>
-        setError(cause instanceof Error ? cause.message : String(cause))
-      )
-      .finally(() => setLoadingRecommendations(false))
-  }, [stage, recommendations])
+    if (stage !== 'models' || recommendations || loadingRecommendations || recommendationsFailed) {
+      return
+    }
+    loadRecommendations()
+  }, [stage, recommendations, loadingRecommendations, recommendationsFailed, loadRecommendations])
 
   function toggleFeature(feature: RecommendationCategory): void {
     setWanted((current) =>
@@ -180,6 +198,9 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
       setHfTokenDraft('')
       const status = await huggingFaceTokenStatus()
       setHfTokenSource(status.source)
+      // Re-evaluate gated model recommendations (e.g. Voice) when returning to Step 4.
+      setRecommendations(null)
+      setRecommendationsFailed(false)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -287,7 +308,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
               type="button"
               className="primary-button"
               disabled={wanted.length === 0}
-              onClick={() => setStage('token')}
+              onClick={() => goToStage('token')}
             >
               Continue <ArrowRight size={15} />
             </button>
@@ -372,17 +393,14 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
             <button
               type="button"
               className="chip-button subtle"
-              onClick={() => setStage('features')}
+              onClick={() => goToStage('features')}
             >
               <ArrowLeft size={15} /> Back
             </button>
             <button
               type="button"
               className="primary-button"
-              onClick={() => {
-                setError(null)
-                setStage('checklist')
-              }}
+              onClick={() => goToStage('checklist')}
             >
               {hfTokenSource === 'none' ? 'Skip for now' : 'Continue'} <ArrowRight size={15} />
             </button>
@@ -406,10 +424,21 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
 
           {error && <div className="runtime-notice">{error}</div>}
 
-          {loadingRecommendations || !recommendations ? (
+          {loadingRecommendations ? (
             <div className="manage-placeholder compact">
               <LoaderCircle className="spin" size={16} />
               Finding models that fit…
+            </div>
+          ) : !recommendations ? (
+            <div className="manage-placeholder compact">
+              <span>Couldn’t load model recommendations.</span>
+              <button
+                type="button"
+                className="chip-button subtle"
+                onClick={loadRecommendations}
+              >
+                <RefreshCw size={13} /> Retry
+              </button>
             </div>
           ) : (
             <RecommendedModels
@@ -432,7 +461,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
             <button
               type="button"
               className="chip-button subtle"
-              onClick={() => setStage('checklist')}
+              onClick={() => goToStage('checklist')}
             >
               <ArrowLeft size={15} /> Back
             </button>
@@ -537,7 +566,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
         {setupOutput && <div className="runtime-notice">{setupOutput}</div>}
 
         <div className="first-run-actions">
-          <button type="button" className="chip-button subtle" onClick={() => setStage('token')}>
+          <button type="button" className="chip-button subtle" onClick={() => goToStage('token')}>
             <ArrowLeft size={15} /> Back
           </button>
           {toolchain?.os.family === 'macos' && missing.length > 0 && (
@@ -570,7 +599,7 @@ export function WelcomeScreen(props: WelcomeScreenProps) {
           <button type="button" className="chip-button" onClick={props.onOpenRuntimes}>
             Open Runtimes
           </button>
-          <button type="button" className="primary-button" onClick={() => setStage('models')}>
+          <button type="button" className="primary-button" onClick={() => goToStage('models')}>
             Choose models <ArrowRight size={15} />
           </button>
         </div>

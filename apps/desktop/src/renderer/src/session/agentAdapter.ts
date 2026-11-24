@@ -53,6 +53,9 @@ export class WorkerAgentAdapter implements AgentAdapter {
   private bridge: (() => void) | undefined
   /** Text accumulated for the current run, to synthesize a final if needed. */
   private streamed = ''
+  private lastAssistantText = ''
+  private attachGeneration = 0
+  private readonly cancelledCorrelations = new Set<string>()
 
   constructor(private readonly model?: () => string | undefined) {}
 
@@ -64,9 +67,15 @@ export class WorkerAgentAdapter implements AgentAdapter {
 
   /** Adopt whichever agent session the conversation already records. */
   async attachSession(conversationId: string): Promise<string | null> {
+    const generation = ++this.attachGeneration
     this.conversationId = conversationId
+    if (conversationId === 'incognito') {
+      this.sessionId = null
+      return null
+    }
     try {
       const conversation = await getConversation(conversationId)
+      if (generation !== this.attachGeneration) return this.sessionId
       const sessionId = conversation.agent_session_id ?? null
       if (!sessionId) {
         this.sessionId = null
@@ -74,11 +83,14 @@ export class WorkerAgentAdapter implements AgentAdapter {
       }
       // Confirm the session still exists before claiming it is bound.
       await fetchAgentSession(sessionId)
+      if (generation !== this.attachGeneration) return this.sessionId
       this.sessionId = sessionId
       assertDaemonMutationAllowed({ method: 'POST' })
       await window.brazier.agent.openSession(sessionId)
+      if (generation !== this.attachGeneration) return this.sessionId
       return sessionId
     } catch {
+      if (generation !== this.attachGeneration) return this.sessionId
       this.sessionId = null
       return null
     }
@@ -90,8 +102,9 @@ export class WorkerAgentAdapter implements AgentAdapter {
 
   /** Bind a session to this conversation, so both surfaces share it. */
   async bindSession(sessionId: string | null): Promise<void> {
+    this.attachGeneration += 1
     this.sessionId = sessionId
-    if (this.conversationId) {
+    if (this.conversationId && this.conversationId !== 'incognito') {
       await updateConversation(this.conversationId, { agent_session_id: sessionId })
     }
     if (sessionId) {
@@ -103,6 +116,18 @@ export class WorkerAgentAdapter implements AgentAdapter {
   async submitTurn(request: AgentTurnRequest): Promise<void> {
     const sessionId = this.sessionId
     if (!sessionId) throw new Error('No agent session is bound to this conversation.')
+    const attachGen = this.attachGeneration
+    if (this.activeRunId) this.staleRunIds.add(this.activeRunId)
+    this.activeCorrelationId = request.correlationId
+    this.activeRunId = null
+    this.ignoreUnboundRuns = false
+    this.streamed = ''
+    this.lastAssistantText = ''
+    this.statuses.set(request.correlationId, {
+      correlationId: request.correlationId,
+      status: 'running'
+    })
+
     const model = this.model?.()
     if (model) {
       // Model changes only take effect between runs, which is where we are.
@@ -110,16 +135,15 @@ export class WorkerAgentAdapter implements AgentAdapter {
       await window.brazier.agent.setModel(sessionId, { id: model }).catch(() => undefined)
       await updateAgentSession(sessionId, { model }).catch(() => undefined)
     }
+    if (
+      this.cancelledCorrelations.delete(request.correlationId) ||
+      this.activeCorrelationId !== request.correlationId ||
+      this.sessionId !== sessionId ||
+      attachGen !== this.attachGeneration
+    ) {
+      return
+    }
     assertDaemonMutationAllowed({ method: 'POST' })
-    if (this.activeRunId) this.staleRunIds.add(this.activeRunId)
-    this.activeCorrelationId = request.correlationId
-    this.activeRunId = null
-    this.ignoreUnboundRuns = false
-    this.streamed = ''
-    this.statuses.set(request.correlationId, {
-      correlationId: request.correlationId,
-      status: 'running'
-    })
     // The worker resolves this when the run ends; the coordinator does not wait
     // on it, because the response arrives as events.
     void window.brazier.agent
@@ -153,6 +177,7 @@ export class WorkerAgentAdapter implements AgentAdapter {
         this.activeRunId = null
         this.activeCorrelationId = null
         this.streamed = ''
+        this.lastAssistantText = ''
         this.publish({
           type: 'runFailed',
           correlationId: request.correlationId,
@@ -197,6 +222,7 @@ export class WorkerAgentAdapter implements AgentAdapter {
   }
 
   async cancelRun(correlationId: string): Promise<void> {
+    this.cancelledCorrelations.add(correlationId)
     if (!this.sessionId) return
     if (this.activeCorrelationId && this.activeCorrelationId !== correlationId) return
     if (this.activeRunId !== null) {
@@ -206,6 +232,8 @@ export class WorkerAgentAdapter implements AgentAdapter {
       this.ignoreUnboundRuns = true
     }
     this.activeRunId = null
+    this.activeCorrelationId = null
+    this.lastAssistantText = ''
     assertDaemonMutationAllowed({ method: 'POST' })
     await window.brazier.agent.cancel(this.sessionId)
   }
@@ -358,23 +386,29 @@ export class WorkerAgentAdapter implements AgentAdapter {
         })
         return
       case 'message-committed': {
-        // The committed assistant message is the authoritative answer.
+        // Multi-step turns commit intermediate assistant messages alongside
+        // tool calls; only treat tool-free assistant messages as the final
+        // authoritative answer so we do not prematurely end a running turn.
         if (event.message.role !== 'assistant') return
+        if (event.message.toolCalls && event.message.toolCalls.length > 0) return
         const text = event.message.text.trim()
         if (!text) return
+        this.lastAssistantText = text
         this.publish({ type: 'responseFinal', correlationId, text, runId: event.runId })
         return
       }
       case 'run-completed': {
         this.setStatus(correlationId, 'completed')
-        // Duplicate finals are deduped by the coordinator, so publishing the
-        // summary text as a fallback cannot produce a second answer.
-        const text = event.summary.text.trim() || this.streamed.trim()
-        if (text) this.publish({ type: 'responseFinal', correlationId, text, runId: event.runId })
+        const text =
+          this.lastAssistantText || event.summary.text.trim() || this.streamed.trim()
+        // Always deliver a final signal on run-completed so the coordinator
+        // clears `activeCorrelationId` even for silent tool-only runs.
+        this.publish({ type: 'responseFinal', correlationId, text, runId: event.runId })
         this.lastRunId = event.runId
         this.activeRunId = null
         this.activeCorrelationId = null
         this.streamed = ''
+        this.lastAssistantText = ''
         return
       }
       case 'run-cancelled':
@@ -384,6 +418,7 @@ export class WorkerAgentAdapter implements AgentAdapter {
         this.activeRunId = null
         this.activeCorrelationId = null
         this.streamed = ''
+        this.lastAssistantText = ''
         return
       case 'run-failed':
         this.setStatus(correlationId, 'failed')
@@ -392,6 +427,7 @@ export class WorkerAgentAdapter implements AgentAdapter {
         this.activeRunId = null
         this.activeCorrelationId = null
         this.streamed = ''
+        this.lastAssistantText = ''
         return
       default:
         return

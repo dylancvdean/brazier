@@ -5,7 +5,8 @@ import {
   BrokerError,
   ContextOverflowError,
   ModelStallError,
-  StreamInterruptedError
+  StreamInterruptedError,
+  isContextOverflowMessage
 } from './brokerClient'
 
 function sseResponse(frames: Array<Record<string, unknown> | '[DONE]'>): Response {
@@ -236,5 +237,13 @@ describe('BrokerClient.streamChatCompletion', () => {
     const client = new BrokerClient({ address: 'http://127.0.0.1:1710', apiKey: null })
     await client.waitForApproval('ap-1', 60_000)
     expect(timeout).toHaveBeenCalledWith(75_000)
+  })
+
+  it('does not misclassify unrelated errors containing the word context as context overflow', () => {
+    expect(isContextOverflowMessage('context deadline exceeded')).toBe(false)
+    expect(isContextOverflowMessage('request context canceled by peer')).toBe(false)
+    expect(isContextOverflowMessage('TLS context initialization failed')).toBe(false)
+    expect(isContextOverflowMessage('maximum context length exceeded')).toBe(true)
+    expect(isContextOverflowMessage('input exceeds context window')).toBe(true)
   })
 })

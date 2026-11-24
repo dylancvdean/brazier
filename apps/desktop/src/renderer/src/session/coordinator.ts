@@ -320,6 +320,23 @@ export class SessionCoordinator {
     this.task = null
   }
 
+  /** Sync freshly loaded messages for the already-attached conversation. */
+  syncMessages(
+    conversationId: string,
+    messages: ConversationMessage[],
+    summary?: string
+  ): void {
+    if (this.conversationId !== conversationId) return
+    this.messages = messages
+    if (summary !== undefined) this.summary = summary
+    this.publish()
+  }
+
+  /** Notify listeners after the agent session binding changes externally. */
+  notifyAgentSessionChanged(): void {
+    this.publish()
+  }
+
   /**
    * Point persistence at a different conversation. The chat adapter is bound to
    * one conversation id, but the voice session and the agent binding are not, so
@@ -477,24 +494,41 @@ export class SessionCoordinator {
   }): Promise<string | null> {
     if (!this.conversationId) {
       // Nothing to write into. Say so rather than dropping what the user said.
+      this.releasePersonaPlexRoutingHold()
       this.report('No conversation is open, so that turn was not recorded.')
+      this.publish()
       return null
     }
-    const userMessage = await this.chat.appendMessage({
-      role: 'user',
-      source: input.source,
-      content: input.text,
-      correlationId: input.correlationId,
-      status: 'final'
-    })
+    const generation = this.attachGeneration
+    const chat = this.chat
+    let userMessage: ConversationMessage
+    try {
+      userMessage = await chat.appendMessage({
+        role: 'user',
+        source: input.source,
+        content: input.text,
+        correlationId: input.correlationId,
+        status: 'final'
+      })
+    } catch (cause) {
+      if (generation === this.attachGeneration) {
+        this.releasePersonaPlexRoutingHold()
+      }
+      throw cause
+    }
+    if (generation !== this.attachGeneration) {
+      return null
+    }
     this.recordMessage(userMessage)
 
     const owner = this.ownerFor(input.source)
     if (!owner) {
+      this.releasePersonaPlexRoutingHold()
       this.report(
         'Voice is set to reach the agent, but no agent session is bound to this conversation. Start a task in Agent mode, or change what voice is connected to.'
       )
-      await this.patchMessage(userMessage.id, { status: 'failed' })
+      await chat.updateMessage(userMessage.id, { status: 'failed' }).catch(() => undefined)
+      this.publish()
       return input.correlationId
     }
     this.responses.set(input.correlationId, {
@@ -702,6 +736,9 @@ export class SessionCoordinator {
         return
       }
       case 'toolStarted': {
+        if (this.pendingApproval?.correlationId === event.correlationId) {
+          this.pendingApproval = null
+        }
         if (this.task?.correlationId === event.correlationId) {
           this.task = { ...this.task, activeTool: event.tool, updatedAt: this.now() }
         }
@@ -710,6 +747,9 @@ export class SessionCoordinator {
         return
       }
       case 'toolCompleted': {
+        if (this.pendingApproval?.correlationId === event.correlationId) {
+          this.pendingApproval = null
+        }
         if (this.task?.correlationId === event.correlationId) {
           this.task = {
             ...this.task,
@@ -728,6 +768,9 @@ export class SessionCoordinator {
         return
       }
       case 'toolFailed': {
+        if (this.pendingApproval?.correlationId === event.correlationId) {
+          this.pendingApproval = null
+        }
         if (this.task?.correlationId === event.correlationId) {
           this.task = { ...this.task, activeTool: undefined, updatedAt: this.now() }
         }
@@ -749,8 +792,11 @@ export class SessionCoordinator {
           state.status = 'cancelled'
           state.cancellable = false
         }
+        if (this.pendingApproval?.correlationId === event.correlationId) {
+          this.pendingApproval = null
+        }
         if (this.task?.correlationId === event.correlationId) {
-          this.task = { ...this.task, status: 'cancelled', updatedAt: this.now() }
+          this.task = { ...this.task, status: 'cancelled', activeTool: undefined, updatedAt: this.now() }
         }
         this.releasePersonaPlexRoutingHold()
         this.streamingText = ''
@@ -775,25 +821,39 @@ export class SessionCoordinator {
       return
     }
 
-    const message = await this.chat.appendMessage({
-      role: 'assistant',
-      source: response.owner === 'agent' ? 'assistant_agent' : 'assistant_chat',
-      content: text,
-      correlationId,
-      status: 'final'
-    })
+    const generation = this.attachGeneration
+    const chat = this.chat
+    const trimmed = text.trim()
+    let message: ConversationMessage | null = null
+    if (trimmed) {
+      message = await chat.appendMessage({
+        role: 'assistant',
+        source: response.owner === 'agent' ? 'assistant_agent' : 'assistant_chat',
+        content: text,
+        correlationId,
+        status: 'final'
+      })
+    }
     const latest = this.responses.get(correlationId)
     if (
+      generation !== this.attachGeneration ||
       !latest ||
       latest.status === 'cancelled' ||
       latest.status === 'failed' ||
       latest.status === 'delivered'
     ) {
-      await this.patchMessage(message.id, { status: 'cancelled' })
+      if (message) {
+        await chat.updateMessage(message.id, { status: 'cancelled' }).catch(() => undefined)
+      }
       return
     }
-    this.recordMessage(message)
-    latest.authoritativeMessageId = message.id
+    if (message) {
+      this.recordMessage(message)
+      latest.authoritativeMessageId = message.id
+    }
+    if (this.pendingApproval?.correlationId === correlationId) {
+      this.pendingApproval = null
+    }
     latest.status = 'delivered'
     latest.cancellable = false
     latest.finalizedAt = this.now()
@@ -819,6 +879,9 @@ export class SessionCoordinator {
       // a late rejection from the chat responder must not rewrite it or
       // drain the queue a second time.
       return
+    }
+    if (this.pendingApproval?.correlationId === correlationId) {
+      this.pendingApproval = null
     }
     if (response) {
       response.status = 'failed'
@@ -1065,16 +1128,26 @@ export class SessionCoordinator {
     }
 
     const intent = classifyUtterance(trimmed, { taskActive: this.activeCorrelationId !== null })
-    if (isControlIntent(intent)) {
-      await this.applyControl(intent, trimmed)
+    if (this.pendingApproval) {
+      // Explicit speech-only silence ("stop talking", "be quiet") or explicit
+      // task cancellation ("cancel that", "cancel the task") still act as
+      // controls; bare "stop", "wait", "hold on", "cancel", or "never mind"
+      // answer the held approval as a refusal.
+      const isExplicitVoiceSilence =
+        intent === 'stop_speaking' && /\b(talking|speaking|reading|quiet|shut up)\b/i.test(trimmed)
+      const isExplicitTaskCancel =
+        intent === 'cancel_task' && /\b(task|job|that|it|everything)\b/i.test(trimmed)
+      if (isExplicitVoiceSilence || isExplicitTaskCancel) {
+        await this.applyControl(intent, trimmed)
+        this.publish()
+        return
+      }
+      await this.answerApproval(trimmed)
       this.publish()
       return
     }
-
-    // A held tool call takes the next thing said, but only after controls:
-    // "cancel that" and "stop talking" must not be swallowed as an unclear yes.
-    if (this.pendingApproval) {
-      await this.answerApproval(trimmed)
+    if (isControlIntent(intent)) {
+      await this.applyControl(intent, trimmed)
       this.publish()
       return
     }
@@ -1220,9 +1293,9 @@ export class SessionCoordinator {
       )
     } catch (cause) {
       const message = errorText(cause)
-      // The broker already committed if this is a double-decide; treat that as
-      // success so the card does not stick while the tool runs.
-      if (/already (decided|approved|denied|consumed)/i.test(message)) {
+      // The broker already settled or dropped this approval; clear the card so
+      // the user is never trapped on a stale approval prompt.
+      if (/(already (decided|approved|denied|consumed)|expired|cancelled|not found|status (404|409|410))/i.test(message)) {
         this.pendingApproval = null
         this.publish()
         return
@@ -1354,6 +1427,12 @@ export class SessionCoordinator {
         await this.patchMessage(response.userMessageId, { metadata: { cancelled: true } })
       }
     }
+    if (this.pendingApproval?.correlationId === target) {
+      this.pendingApproval = null
+    }
+    if (this.task?.correlationId === target) {
+      this.task = { ...this.task, status: 'cancelled', activeTool: undefined, updatedAt: this.now() }
+    }
     this.streamingText = ''
     this.releasePersonaPlexRoutingHold()
     if (response?.owner === 'agent') {
@@ -1383,6 +1462,9 @@ export class SessionCoordinator {
       return false
     }
     this.emit('RESPONSE_CANCEL_REQUESTED', target, 'coordinator', { scope: 'agent_task' })
+    if (this.pendingApproval?.correlationId === target) {
+      this.pendingApproval = null
+    }
     await this.deps.agent.cancelRun(target).catch(() => undefined)
     const response = this.responses.get(target)
     if (response && response.status !== 'delivered') {
@@ -1422,6 +1504,9 @@ export class SessionCoordinator {
       this.voiceStartedAt = handle.startedAt
       this.voiceStatus = 'live'
       this.applyAudioOwnership()
+      if (this.pendingRenewal) {
+        this.track(this.runPendingRenewal(), 'Refreshing voice')
+      }
     } catch (cause) {
       if (generation !== this.voiceGeneration) return
       this.voiceStatus = 'error'

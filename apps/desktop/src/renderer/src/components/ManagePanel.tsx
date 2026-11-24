@@ -192,6 +192,7 @@ import {
   type LibrarySort
 } from './manage/library'
 import { readChatTitleMode, writeChatTitleMode, type ChatTitleMode } from '../chatTitleMode'
+import { useDialogOverlay } from '../hooks/useDialogOverlay'
 
 export {
   appendBuildDiagnostics,
@@ -340,6 +341,8 @@ type ManagePanelProps = {
   onPendingBuildConsumed?: () => void
   /** Fired after workspace mode toggles are saved. */
   onWorkspaceModesChange?: (modes: WorkspaceModesPreference) => void
+  /** Fired after memory/dreaming preferences are saved so App stays in sync. */
+  onMemoryPreferenceSaved?: (preference: MemoryPreference) => void
   /** Fired after a runtime is installed, activated, or deleted. */
   onRuntimesChanged?: () => void
   /** The user asked Settings to run a dreaming pass with the current model. */
@@ -840,6 +843,7 @@ function ChatSection(props: SectionProps): React.JSX.Element {
     try {
       const saved = await saveMemoryPreference({ ...preference, ...patch })
       setPreference(saved)
+      props.onMemoryPreferenceSaved?.(saved)
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -880,13 +884,15 @@ function ChatSection(props: SectionProps): React.JSX.Element {
 
   async function applyMemoryMutation(
     action: () => Promise<void>
-  ): Promise<void> {
+  ): Promise<boolean> {
     props.onError(null)
     try {
       await action()
       await loadMemories()
+      return true
     } catch (cause) {
       props.onError(errorText(cause))
+      return false
     }
   }
 
@@ -1127,10 +1133,13 @@ function ChatSection(props: SectionProps): React.JSX.Element {
                         setBusyId(memory.id)
                         void applyMemoryMutation(async () => {
                           await updateMemory(memory.id, { text: editText.trim() })
-                        }).finally(() => {
-                          setEditingId(null)
-                          setBusyId(null)
                         })
+                          .then((ok) => {
+                            if (ok) setEditingId(null)
+                          })
+                          .finally(() => {
+                            setBusyId(null)
+                          })
                       }}
                     >
                       Save
@@ -2848,6 +2857,12 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [showAllBundles, setShowAllBundles] = useState(false)
   /** A licensed bundle awaiting explicit acceptance before it can install. */
   const [consentBundle, setConsentBundle] = useState<SdcppBundle | null>(null)
+  const queuedBundleReposRef = useRef<Record<string, string[]>>({})
+  const searchReqIdRef = useRef(0)
+  const consentDialogRef = useDialogOverlay(Boolean(consentBundle?.consent), () => {
+    setPendingChoices({})
+    setConsentBundle(null)
+  })
   const [acceptingConsent, setAcceptingConsent] = useState(false)
   /** Variant choices pending the consent dialog, so agreeing keeps the picks. */
   const [pendingChoices, setPendingChoices] = useState<Record<number, string>>({})
@@ -2964,30 +2979,35 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
 
   // The instant "Queued" flag is never cleared on its own, which permanently
   // disabled an in-place bundle (MiniMax-H3's FL2VA/Ref2VA and quant switches
-  // share one id) from being queued again. The download queue is the source of
-  // truth: once its job for the bundle settles, forget the flag.
+  // share one id) or variant bundle from being queued again. The download queue
+  // is the source of truth: once its job for the bundle settles (or is gone),
+  // forget the flag.
   useEffect(() => {
     if (Object.keys(queuedRepos).length === 0) return
     setQueuedRepos((current) => {
       let next = current
       for (const id of Object.keys(current)) {
+        const recordedRepos = queuedBundleReposRef.current[id]
         const bundle = bundles.find((candidate) => candidate.id === id)
-        if (!bundle) continue
-        const repos = new Set(bundle.components.map((component) => component.repo_id))
+        if (!recordedRepos && !bundle) continue
+        const repos = new Set(
+          recordedRepos ?? bundle?.components.map((component) => component.repo_id) ?? []
+        )
         const bundleJobs = downloadJobs.filter(
           (job) => job.kind === 'sdcpp-bundle' && job.repo_id != null && repos.has(job.repo_id)
         )
         const stillActive = bundleJobs.some(
           (job) => job.status === 'pending' || job.status === 'downloading'
         )
-        if (bundleJobs.length > 0 && !stillActive) {
+        if (!stillActive) {
           if (next === current) next = { ...current }
           delete next[id]
+          delete queuedBundleReposRef.current[id]
         }
       }
       return next
     })
-  }, [downloadJobs])
+  }, [downloadJobs, bundles])
 
   async function saveHubToken(event: FormEvent): Promise<void> {
     event.preventDefault()
@@ -3027,6 +3047,8 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   // so opening (or switching category) shows curated picks, not stale results.
   useEffect(() => {
     let cancelled = false
+    searchReqIdRef.current += 1
+    setSearching(false)
     setResults([])
     setHasSearched(false)
     setExpandedRepo(null)
@@ -3049,16 +3071,23 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   async function findModels(event?: FormEvent): Promise<void> {
     event?.preventDefault()
     if (!query.trim()) return
+    const reqId = ++searchReqIdRef.current
     setSearching(true)
     setHasSearched(true)
     props.onError(null)
     setExpandedRepo(null)
     try {
-      setResults(await searchHub(query.trim(), discoverEngine))
+      const nextResults = await searchHub(query.trim(), discoverEngine)
+      if (reqId !== searchReqIdRef.current) return
+      setResults(nextResults)
     } catch (cause) {
-      props.onError(errorText(cause))
+      if (reqId === searchReqIdRef.current) {
+        props.onError(errorText(cause))
+      }
     } finally {
-      setSearching(false)
+      if (reqId === searchReqIdRef.current) {
+        setSearching(false)
+      }
     }
   }
 
@@ -3167,7 +3196,11 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       await queueSdcppInstall(
         choicesMade ? { bundle: resolved } : { id: bundle.id }
       )
+      queuedBundleReposRef.current[resolved.id] = resolved.components.map(
+        (component) => component.repo_id
+      )
       setQueuedRepos((current) => ({ ...current, [resolved.id]: true }))
+      void refreshDownloadJobs()
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -3315,9 +3348,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         setTrustByRepo((current) => ({ ...current, [model.id]: trust }))
       } catch (cause) {
         props.onError(errorText(cause))
-        setExpandedRepo(null)
+        setExpandedRepo((current) => (current === model.id ? null : current))
       } finally {
-        setLoadingFilesFor(null)
+        setLoadingFilesFor((current) => (current === model.id ? null : current))
       }
       return
     }
@@ -3334,9 +3367,9 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       setTrustByRepo((current) => ({ ...current, [model.id]: trust }))
     } catch (cause) {
       props.onError(errorText(cause))
-      setExpandedRepo(null)
+      setExpandedRepo((current) => (current === model.id ? null : current))
     } finally {
-      setLoadingFilesFor(null)
+      setLoadingFilesFor((current) => (current === model.id ? null : current))
     }
   }
 
@@ -4221,8 +4254,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
           }}
         >
           <div
+            ref={consentDialogRef}
             className="model-settings-modal license-consent-modal"
             role="dialog"
+            aria-modal="true"
             aria-label={`${consentBundle.label} license agreement`}
             onMouseDown={(event) => event.stopPropagation()}
           >
@@ -4599,15 +4634,20 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
     return () => window.clearTimeout(timer)
   }, [updateCheckPending, managedStatuses])
 
+  const runtimeRefreshIdRef = useRef(0)
+
   async function refreshRuntimes(
     notifyParent = false,
     includeSystem = showSystemBinaries
   ): Promise<void> {
+    const refreshId = ++runtimeRefreshIdRef.current
     try {
       const response = await listRuntimes({ includeSystem })
+      if (refreshId !== runtimeRefreshIdRef.current) return
       setRuntimes(response.data)
       if (notifyParent) props.onRuntimesChanged?.()
     } catch (cause) {
+      if (refreshId !== runtimeRefreshIdRef.current) return
       if (props.initialRuntimes?.length) {
         setRuntimes(props.initialRuntimes)
       } else {
@@ -5043,7 +5083,7 @@ function RuntimesSection(props: SectionProps): React.JSX.Element {
                 </div>
                 <button
                   className="chip-button"
-                  disabled={savingTarget || !target.available || installing || (installed && !updateAvailable)}
+                  disabled={savingTarget || !target.available || installingTarget !== null || (installed && !updateAvailable)}
                   title={
                     !target.available
                       ? target.detail
@@ -5628,12 +5668,24 @@ function EngineSection(props: SectionProps): React.JSX.Element {
   const connectionProfile = useConnectionProfile()
   const [draft, setDraft] = useState<RuntimeSettings | null>(props.settings)
   const [saving, setSaving] = useState(false)
-  useEffect(() => setDraft(props.settings), [props.settings])
+  const lastSyncedRef = useRef<string | null>(
+    props.settings ? JSON.stringify(props.settings) : null
+  )
+  const dirtyRef = useRef(false)
+  useEffect(() => {
+    if (!props.settings) return
+    const serialized = JSON.stringify(props.settings)
+    if (dirtyRef.current && lastSyncedRef.current !== null) return
+    if (lastSyncedRef.current === serialized) return
+    lastSyncedRef.current = serialized
+    setDraft(props.settings)
+  }, [props.settings])
 
   const dirty =
     draft != null &&
     props.settings != null &&
     JSON.stringify(draft) !== JSON.stringify(props.settings)
+  dirtyRef.current = dirty
 
   async function apply(): Promise<void> {
     if (!draft) return
@@ -5919,12 +5971,24 @@ function EngineSection(props: SectionProps): React.JSX.Element {
 function WebSearchSection(props: SectionProps): React.JSX.Element {
   const [draft, setDraft] = useState<RuntimeSettings | null>(props.settings)
   const [saving, setSaving] = useState(false)
-  useEffect(() => setDraft(props.settings), [props.settings])
+  const lastSyncedRef = useRef<string | null>(
+    props.settings ? JSON.stringify(props.settings) : null
+  )
+  const dirtyRef = useRef(false)
+  useEffect(() => {
+    if (!props.settings) return
+    const serialized = JSON.stringify(props.settings)
+    if (dirtyRef.current && lastSyncedRef.current !== null) return
+    if (lastSyncedRef.current === serialized) return
+    lastSyncedRef.current = serialized
+    setDraft(props.settings)
+  }, [props.settings])
 
   const dirty =
     draft != null &&
     props.settings != null &&
     JSON.stringify(draft) !== JSON.stringify(props.settings)
+  dirtyRef.current = dirty
 
   async function apply(): Promise<void> {
     if (!draft) return
@@ -6105,12 +6169,21 @@ function ServerSection(props: SectionProps): React.JSX.Element {
   }
 
   async function addKey(): Promise<void> {
+    if (adding) return
     setAdding(true)
     props.onError(null)
     try {
       const key = await window.brazier.addServerApiKey(keyName)
       setKeyName('')
-      if (settings) setSettings({ ...settings, hasApiKeys: true, keys: [...settings.keys, { id: key.id, name: key.name, createdAt: key.createdAt }] })
+      setSettings((current) =>
+        current
+          ? {
+              ...current,
+              hasApiKeys: true,
+              keys: [...current.keys, { id: key.id, name: key.name, createdAt: key.createdAt }]
+            }
+          : current
+      )
       reveal(key)
     } catch (cause) {
       props.onError(errorText(cause))
@@ -6122,7 +6195,13 @@ function ServerSection(props: SectionProps): React.JSX.Element {
   async function removeKey(id: string): Promise<void> {
     props.onError(null)
     try {
-      setSettings(await window.brazier.removeServerApiKey(id))
+      const updated = await window.brazier.removeServerApiKey(id)
+      // Preserve unsaved form edits (port, enabled, localhostOnly, jitLoading).
+      setSettings((current) =>
+        current
+          ? { ...current, hasApiKeys: updated.hasApiKeys, keys: updated.keys }
+          : updated
+      )
       if (revealed?.id === id) setRevealed(null)
     } catch (cause) {
       props.onError(errorText(cause))
@@ -6499,6 +6578,25 @@ function RemoteSection(props: SectionProps): React.JSX.Element {
 
           <form className="settings-group" onSubmit={(event) => void addConnection(event)}>
             <div className="section-label">Add a server</div>
+            <div className="setting-row">
+              <span>Start Strata with a model loaded, then use its server address.</span>
+              <button
+                type="button"
+                className="chip-button"
+                disabled={saving}
+                onClick={() =>
+                  setDraft({
+                    id: 'strata',
+                    label: 'Strata',
+                    base_url: 'http://127.0.0.1:8080/v1',
+                    api_key: '',
+                    llama_cpp_compatible: false
+                  })
+                }
+              >
+                Use Strata defaults
+              </button>
+            </div>
             <label className="setting-row">
               <span>Name</span>
               <input

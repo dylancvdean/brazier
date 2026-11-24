@@ -29,6 +29,7 @@ describe('CommandPalette search and ranking', () => {
     expect(filterAndRankPaletteItems(items, 'mcp')[0]?.id).toBe('manage:mcp')
     expect(filterAndRankPaletteItems(items, 'remote')[0]?.id).toBe('manage:remote')
     expect(filterAndRankPaletteItems(items, 'ollama')[0]?.id).toBe('manage:remote')
+    expect(filterAndRankPaletteItems(items, 'strata')[0]?.id).toBe('manage:remote')
     expect(
       filterAndRankPaletteItems(items, 'api key')
         .slice(0, 3)

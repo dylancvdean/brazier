@@ -194,7 +194,7 @@ export class StreamingSileroVad {
       }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
-      await this.fail(message)
+      await this.fail(message, true)
     }
   }
 
@@ -211,12 +211,15 @@ export class StreamingSileroVad {
     }
   }
 
-  private async fail(message: string): Promise<void> {
+  private async fail(message: string, fromDrain = false): Promise<void> {
     if (this.released) return
     this.released = true
     this.frames = []
     this.samples = new Float32Array(0)
     this.onError?.(message)
+    if (!fromDrain) {
+      await this.drainPromise?.catch(() => undefined)
+    }
     await this.releaseModel().catch(() => undefined)
   }
 

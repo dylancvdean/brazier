@@ -251,6 +251,14 @@ export class AgentToolExecutor {
           (await this.awaitDecision(request, response.approval))
         if (decided.status === 'approved') {
           approvalId = response.approval.id
+          // Transition timeline pills back from awaiting-approval to running.
+          this.event(request.runId, 'tool-started', {
+            toolCallId: request.toolCallId,
+            tool: request.tool,
+            args: request.args,
+            environment: response.environment,
+            sandbox: response.sandbox
+          })
           continue
         }
         return this.fail(
@@ -351,13 +359,19 @@ export class AgentToolExecutor {
   ): Promise<DecidedApproval> {
     // Transport failures are retried for as long as the approval itself can
     // live: one dropped long-poll must not turn into a refused tool call.
+    const deadlineMs = Date.now() + 16 * 60_000
     let consecutiveFailures = 0
     while (!request.signal?.aborted) {
+      const remainingMs = deadlineMs - Date.now()
+      if (remainingMs <= 0) {
+        return { ...approval, status: 'expired' }
+      }
+      const waitMs = Math.min(APPROVAL_WAIT_MS, remainingMs)
       let current: AgentApproval
       try {
         current = await this.broker.waitForApproval(
           approval.id,
-          APPROVAL_WAIT_MS,
+          waitMs,
           request.signal
         )
         consecutiveFailures = 0

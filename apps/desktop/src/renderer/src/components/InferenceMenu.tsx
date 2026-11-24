@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, LoaderCircle } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   formatBytes,
   listAdapters,
@@ -249,12 +249,21 @@ export function InferenceMenu({
   const reasoningModes = caps?.reasoning_modes ?? (caps?.reasoning ? ['off', 'on'] : [])
   const contextOptions = useMemo(() => contextPresets(maxContext), [maxContext])
 
+  const lastSyncedSettingsRef = useRef<string | null>(null)
+  const dirtyRef = useRef(false)
+
   useEffect(() => {
     if (!settings) return
     let next = settings
     if (maxContext && next.context_size > maxContext) {
       next = { ...next, context_size: maxContext }
     }
+    const serialized = JSON.stringify(next)
+    if (dirtyRef.current && lastSyncedSettingsRef.current !== null) {
+      return
+    }
+    if (lastSyncedSettingsRef.current === serialized) return
+    lastSyncedSettingsRef.current = serialized
     setDraft(next)
     setReasoningMode(reasoningModeFromSettings(next))
     setReasoningBudget(next.reasoning_budget_tokens ?? 1024)
@@ -262,6 +271,7 @@ export function InferenceMenu({
 
   const dirty =
     draft != null && settings != null && JSON.stringify(draft) !== JSON.stringify(settings)
+  dirtyRef.current = dirty
 
   const advancedModel = advancedModelId ?? selectedModel
   const advancedEntry = models.find((entry) => entry.id === advancedModel)
@@ -307,9 +317,11 @@ export function InferenceMenu({
   async function saveAll(): Promise<void> {
     if (!draft || !anyDirty || anySaving) return
     setProfileError(null)
+    let appliedGlobalWithSkipReload = false
     try {
       if (dirty) {
         await onApply(draft, { skipReload: profileDirty })
+        appliedGlobalWithSkipReload = profileDirty
       }
       if (profileDirty && profileDraft && advancedModel) {
         setSavingProfile(true)
@@ -322,6 +334,11 @@ export function InferenceMenu({
         }
       }
     } catch (cause) {
+      if (appliedGlobalWithSkipReload) {
+        // Global settings were already saved with skipReload; still reload
+        // them into the resident model even though saving per-model overrides failed.
+        void Promise.resolve(onApply(draft, { skipReload: false })).catch(() => undefined)
+      }
       setProfileError(cause instanceof Error ? cause.message : String(cause))
     }
   }

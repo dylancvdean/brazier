@@ -186,6 +186,57 @@ describe('AgentWorkerCore.openSession', () => {
 
     expect(createSession).toHaveBeenCalled()
   })
+
+  it('delivers cancel immediately while a run is active instead of deadlocking behind it', async () => {
+    const posts: WorkerMessage[] = []
+    const core = new AgentWorkerCore((message) => {
+      posts.push(message)
+    })
+    const runtime = {
+      descriptor: { id: 'simple', name: 'Simple', version: '0', capabilities: {} },
+      createSession: vi.fn(),
+      restoreSession: vi.fn(),
+      dispose: vi.fn()
+    } as unknown as AgentRuntime
+    installBrokerAndRuntime(core, {}, runtime)
+
+    let releaseRun!: () => void
+    const runBlocked = new Promise<void>((resolve) => {
+      releaseRun = resolve
+    })
+    const session = mockSession('sess-cancel')
+    session.run = vi.fn(async function* () {
+      await runBlocked
+    })
+    session.cancel = vi.fn(async () => {
+      releaseRun()
+    })
+    ;(core as unknown as { sessions: Map<string, AgentSession> }).sessions.set(
+      'sess-cancel',
+      session
+    )
+
+    const runPromise = core.handle({
+      type: 'run',
+      requestId: 'req-run',
+      sessionId: 'sess-cancel',
+      input: { text: 'long task' }
+    })
+    const cancelPromise = core.handle({
+      type: 'cancel',
+      requestId: 'req-cancel',
+      sessionId: 'sess-cancel'
+    })
+
+    await Promise.all([runPromise, cancelPromise])
+    expect(session.cancel).toHaveBeenCalledOnce()
+    expect(posts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'result', requestId: 'req-cancel', ok: true }),
+        expect.objectContaining({ type: 'result', requestId: 'req-run', ok: true })
+      ])
+    )
+  })
 })
 
 describe('AgentWorkerCore scheduling', () => {

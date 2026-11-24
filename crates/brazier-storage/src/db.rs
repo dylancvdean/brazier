@@ -1684,7 +1684,7 @@ impl Database {
             r#"UPDATE download_jobs
                SET status = 'failed', error = 'Brazier restarted before this build completed',
                    updated_at = datetime('now')
-               WHERE kind = 'runtime-build' AND status = 'downloading'"#,
+               WHERE kind = 'runtime-build' AND status IN ('pending', 'downloading')"#,
         )
         .execute(&mut *tx)
         .await?;

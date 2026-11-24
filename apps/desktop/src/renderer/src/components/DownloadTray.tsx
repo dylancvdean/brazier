@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronRight, Download, Hammer, Pause, Play, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   cancelDownloadJob,
   cancelBuildJob,
@@ -12,10 +12,20 @@ import {
   type DownloadJob,
   type LocalModel
 } from '../api'
+import { useConnectionProfile } from '../connectionProfile'
 import { stripGgufShardSuffix } from '../model-utils'
+import { startPolling } from '../polling'
 
 /** Statuses that mean the job still wants to finish. */
 const OPEN_STATUSES = new Set(['pending', 'downloading', 'paused'])
+
+/** Parse both SQLite UTC timestamps ("YYYY-MM-DD HH:MM:SS") and RFC3339 ISO strings ("...Z"). */
+export function parseDownloadTimestampMs(value: string): number {
+  const trimmed = value.trim()
+  if (!trimmed) return Number.NaN
+  const normalized = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(trimmed) ? trimmed : `${trimmed}Z`
+  return Date.parse(normalized)
+}
 
 function jobTitle(job: DownloadJob): string {
   if (job.label) return job.label
@@ -179,6 +189,7 @@ export function DownloadTray({
   onUseModel?: (model: LocalModel) => void
   onChanged?: () => void
 }): React.JSX.Element | null {
+  const profile = useConnectionProfile()
   const [jobs, setJobs] = useState<DownloadJob[]>([])
   const [collapsed, setCollapsed] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
@@ -186,36 +197,44 @@ export function DownloadTray({
   const rates = useTransferRates(jobs)
   /** Job ids seen as open (pending/downloading/paused) on the last poll. */
   const seenOpen = useRef<Set<string>>(new Set())
+  const onChangedRef = useRef(onChanged)
+  onChangedRef.current = onChanged
 
-  async function refresh(): Promise<void> {
-    try {
-      const [next] = await Promise.all([listDownloadJobs(), listRecommendationSetups()])
-      setJobs(next)
-      for (const job of next) {
-        if (seenOpen.current.has(job.id) && !OPEN_STATUSES.has(job.status)) {
-          onChanged?.()
-          break
-        }
+  const applyJobs = useCallback((next: DownloadJob[]): void => {
+    setJobs(next)
+    for (const job of next) {
+      if (seenOpen.current.has(job.id) && !OPEN_STATUSES.has(job.status)) {
+        onChangedRef.current?.()
+        break
       }
-      seenOpen.current = new Set(
-        next.filter((job) => OPEN_STATUSES.has(job.status)).map((job) => job.id)
-      )
-    } catch {
-      // Daemon may still be starting; the next tick retries.
     }
-  }
+    seenOpen.current = new Set(
+      next.filter((job) => OPEN_STATUSES.has(job.status)).map((job) => job.id)
+    )
+  }, [])
+
+  const fetchLatestJobs = useCallback(async (): Promise<DownloadJob[]> => {
+    // Reconcile recommendation setups best-effort without letting its failure
+    // drop download queue updates.
+    void listRecommendationSetups().catch(() => undefined)
+    return listDownloadJobs()
+  }, [])
 
   useEffect(() => {
-    void refresh()
-    const timer = window.setInterval(() => void refresh(), 1200)
-    return () => window.clearInterval(timer)
-  }, [])
+    setJobs([])
+    setActionError(null)
+    seenOpen.current = new Set()
+    return startPolling(fetchLatestJobs, applyJobs, 1200)
+  }, [profile.id, fetchLatestJobs, applyJobs])
 
   const open = jobs.filter((job) => OPEN_STATUSES.has(job.status))
   // Keep a finished job visible briefly so the outcome is not missed.
   const recentlyFinished = jobs
     .filter((job) => !OPEN_STATUSES.has(job.status))
-    .filter((job) => Date.now() - new Date(`${job.updated_at}Z`).getTime() < 30_000)
+    .filter((job) => {
+      const updatedMs = parseDownloadTimestampMs(job.updated_at)
+      return Number.isFinite(updatedMs) && Date.now() - updatedMs < 30_000
+    })
   const visible = [...open, ...recentlyFinished]
   if (visible.length === 0) return null
 
@@ -227,7 +246,9 @@ export function DownloadTray({
     setActionError(null)
     try {
       await action(job.id)
-      if (action === cancelDownloadJob || action === cancelBuildJob) {
+      if (action === dismissDownloadJob) {
+        setJobs((current) => current.filter((currentJob) => currentJob.id !== job.id))
+      } else if (action === cancelDownloadJob || action === cancelBuildJob) {
         setJobs((current) =>
           current.map((currentJob) =>
             currentJob.id === job.id
@@ -241,7 +262,8 @@ export function DownloadTray({
           )
         )
       }
-      onChanged?.()
+      onChangedRef.current?.()
+      void fetchLatestJobs().then(applyJobs).catch(() => undefined)
     } catch (cause) {
       setActionError({
         id: job.id,

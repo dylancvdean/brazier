@@ -78,10 +78,32 @@ pub fn launch_key(
         .iter()
         .find(|entry| entry.repository == model_ref);
     let prefix_caching = configured.map(|entry| entry.prefix_caching).unwrap_or(true);
+    let revision = configured
+        .and_then(|entry| entry.revision.as_deref())
+        .unwrap_or("");
+    let dtype = configured
+        .and_then(|entry| entry.dtype.as_deref())
+        .unwrap_or("");
+    let gpu_mem = configured
+        .and_then(|entry| entry.gpu_memory_utilization)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let tp = configured
+        .and_then(|entry| entry.tensor_parallel_size)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let trust_remote = configured
+        .map(|entry| entry.trust_remote_code)
+        .unwrap_or(false);
+    let configured_extra = configured
+        .map(|entry| entry.extra_args.join("\u{1f}"))
+        .unwrap_or_default();
     let extra = profile
         .map(|p| p.extra_args.join("\u{1f}"))
         .unwrap_or_default();
-    format!("{context}|{prefix_caching}|{extra}")
+    format!(
+        "{context}|{prefix_caching}|{revision}|{dtype}|{gpu_mem}|{tp}|{trust_remote}|{configured_extra}|{extra}"
+    )
 }
 
 fn apply_hugging_face_token(command: &mut Command, token: Option<&str>) {
@@ -192,6 +214,8 @@ impl Server {
         let mut child = command
             .spawn()
             .with_context(|| format!("spawn {} vLLM", python.display()))?;
+        let stderr_pipe = child.stderr.take().context("capture vLLM stderr")?;
+        let (stderr_output, stderr_task) = crate::llama::spawn_stderr_drain(stderr_pipe);
         let base_url = format!("http://127.0.0.1:{port}");
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
@@ -199,13 +223,12 @@ impl Server {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
         loop {
             if let Some(status) = child.try_wait().context("poll vLLM server")? {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    use tokio::io::AsyncReadExt;
-                    let mut bytes = Vec::new();
-                    let _ = pipe.read_to_end(&mut bytes).await;
-                    stderr = String::from_utf8_lossy(&bytes).into_owned();
-                }
+                let _ = stderr_task.await;
+                let stderr = stderr_output
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                let stderr = String::from_utf8_lossy(&stderr).into_owned();
                 anyhow::bail!(crate::llama::describe_server_startup_failure(
                     "vLLM server",
                     status,
@@ -222,6 +245,7 @@ impl Server {
             }
             if tokio::time::Instant::now() > deadline {
                 let _ = child.start_kill();
+                let _ = child.wait().await;
                 anyhow::bail!("vLLM server health check timed out at {base_url}");
             }
             tokio::time::sleep(Duration::from_millis(250)).await;

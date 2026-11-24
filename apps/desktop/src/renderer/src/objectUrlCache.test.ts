@@ -69,4 +69,17 @@ describe('attachment memory ownership', () => {
     await expect(retry.url).resolves.toMatch(/^blob:/)
     retry.release()
   })
+
+  it('evicts failed entries immediately so a later consumer retries even if the first stays mounted', async () => {
+    const cache = new ObjectUrlCache()
+    const first = cache.acquire('local/transient', async () => {
+      throw new Error('offline')
+    })
+    await expect(first.url).rejects.toThrow('offline')
+    // Keep `first` unreleased (still mounted in a sidebar) and retry from another view.
+    const second = cache.acquire('local/transient', async () => new Blob(['recovered']))
+    await expect(second.url).resolves.toMatch(/^blob:/)
+    first.release()
+    second.release()
+  })
 })

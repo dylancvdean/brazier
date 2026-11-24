@@ -38,6 +38,7 @@ export function useDialogOverlay(
     ;(preferred ?? items[0])?.focus()
 
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented) return
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()
@@ -53,16 +54,18 @@ export function useDialogOverlay(
       if (event.shiftKey && (active === first || !root.contains(active))) {
         event.preventDefault()
         last.focus()
-      } else if (!event.shiftKey && active === last) {
+      } else if (!event.shiftKey && (active === last || !root.contains(active))) {
         event.preventDefault()
         first.focus()
       }
     }
 
-    root.addEventListener('keydown', onKeyDown)
+    document.addEventListener('keydown', onKeyDown)
     return () => {
-      root.removeEventListener('keydown', onKeyDown)
-      previouslyFocused?.focus?.()
+      document.removeEventListener('keydown', onKeyDown)
+      if (previouslyFocused && previouslyFocused.isConnected) {
+        previouslyFocused.focus?.()
+      }
     }
   }, [open])
 

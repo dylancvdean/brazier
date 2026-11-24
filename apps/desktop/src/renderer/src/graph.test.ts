@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { messageChain, childCounts, branchSiblings } from './graph'
+import { messageChain, childCounts, branchSiblings, ROOT_TIP } from './graph'
 import type { Message } from './types'
 
 const base = {
@@ -21,11 +21,23 @@ describe('message graph', () => {
     expect(messageChain(messages, 'fork').map((message) => message.id)).toEqual(['root', 'fork'])
   })
 
+  it('returns an empty chain when rewound to ROOT_TIP so editing the first message branches cleanly', () => {
+    expect(messageChain(messages, ROOT_TIP)).toEqual([])
+  })
+
   it('counts branch points', () => {
     expect(childCounts(messages).get('root')).toBe(2)
   })
 
-  it('orders the alternatives for a branch message', () => {
+  it('orders the alternatives for a branch message including root siblings', () => {
     expect(branchSiblings(messages, 'fork').map((message) => message.id)).toEqual(['first', 'fork'])
+    const withRootBranch: Message[] = [
+      ...messages,
+      { ...base, id: 'root-2', parent_id: null }
+    ]
+    expect(branchSiblings(withRootBranch, 'root').map((message) => message.id)).toEqual([
+      'root',
+      'root-2'
+    ])
   })
 })

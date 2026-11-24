@@ -217,7 +217,13 @@ export function GenerateMode(props: Props): React.JSX.Element {
   const [refImages, setRefImages] = useState<StoredBlob[]>([])
   const [refVideos, setRefVideos] = useState<{ blob: StoredBlob; soundtrack: StoredBlob | null }[]>([])
   const [refAudios, setRefAudios] = useState<StoredBlob[]>([])
-  const [uploading, setUploading] = useState<string | null>(null)
+  const [uploadingCount, setUploadingCount] = useState(0)
+  const uploading = uploadingCount > 0
+  const selectedRef = useRef(props.modelId)
+  selectedRef.current = props.modelId
+  const seedLockedRef = useRef(seedLocked)
+  seedLockedRef.current = seedLocked
+  const lastGeneratedHistoryIdRef = useRef<string | null>(null)
 
   const { urls, failed } = useBlobUrls(results.map((result) => result.blob.sha256))
 
@@ -270,13 +276,19 @@ export function GenerateMode(props: Props): React.JSX.Element {
     file: File,
     onUploaded: (blob: StoredBlob) => void
   ): Promise<void> {
-    setUploading(file.name)
+    const modelAtStart = selectedRef.current
+    setUploadingCount((count) => count + 1)
     try {
-      onUploaded(await uploadAttachmentBlob(file))
+      const uploaded = await uploadAttachmentBlob(file)
+      if (selectedRef.current === modelAtStart) {
+        onUploaded(uploaded)
+      }
     } catch (cause) {
-      props.onError(errorText(cause))
+      if (selectedRef.current === modelAtStart) {
+        props.onError(errorText(cause))
+      }
     } finally {
-      setUploading(null)
+      setUploadingCount((count) => Math.max(0, count - 1))
     }
   }
 
@@ -315,22 +327,29 @@ export function GenerateMode(props: Props): React.JSX.Element {
   }
 
   function attachSoundtrack(entry: { blob: StoredBlob; soundtrack: StoredBlob | null }): void {
+    const targetSha = entry.blob.sha256
     pickFiles(refAudioInput.current, ['audio/wav', 'audio/mpeg', 'audio/mp4', 'audio/flac'], (files) => {
-      for (const file of files) {
-        void uploadFile(file, (blob) => {
-          setRefVideos((latest) =>
-            latest.map((candidate) =>
-              candidate === entry ? { ...candidate, soundtrack: blob } : candidate
-            )
+      const first = files[0]
+      if (!first) return
+      void uploadFile(first, (blob) => {
+        setRefVideos((latest) =>
+          latest.map((candidate) =>
+            candidate.blob.sha256 === targetSha ? { ...candidate, soundtrack: blob } : candidate
           )
-        })
-      }
+        )
+      })
     })
   }
 
   useEffect(() => {
     if (!props.activeHistoryId) {
+      lastGeneratedHistoryIdRef.current = null
       setResults([])
+      return
+    }
+    if (props.activeHistoryId === lastGeneratedHistoryIdRef.current) {
+      // Keep the multi-item session gallery intact after generating a new item;
+      // only replace the gallery when the user explicitly selects a past entry.
       return
     }
     const entry = props.history.find((candidate) => candidate.id === props.activeHistoryId)
@@ -371,27 +390,26 @@ export function GenerateMode(props: Props): React.JSX.Element {
     setGuidance(nextGuidance != null ? String(nextGuidance) : '')
     if (nextFrames) setFrames(nextFrames)
     if (nextFps) setFps(nextFps)
-    if (configured?.seed != null && !seedLocked) {
+    if (configured?.seed != null && !seedLockedRef.current) {
       setSeed(String(configured.seed))
     }
-  }, [selected, modality, defaultsByModel, configuredByModel, useIntegratedDefaults, seedLocked])
+  }, [selected, modality, defaultsByModel, configuredByModel, useIntegratedDefaults])
 
   function toggleSeedLock(): void {
-    setSeedLocked((locked) => {
-      const next = !locked
-      if (next && !seed.trim()) {
-        const lastSeed = results.length > 0 ? parseGenerationMetadata(results[0].metadata).seed : undefined
-        const chosen = lastSeed ?? Math.floor(Math.random() * 2_147_483_647)
-        setSeed(String(chosen))
-      } else if (!next) {
-        setSeed('')
-      }
-      return next
-    })
+    const next = !seedLocked
+    setSeedLocked(next)
+    if (next && !seed.trim()) {
+      const lastSeed = results.length > 0 ? parseGenerationMetadata(results[0].metadata).seed : undefined
+      const chosen = lastSeed ?? Math.floor(Math.random() * 2_147_483_647)
+      setSeed(String(chosen))
+    } else if (!next) {
+      setSeed('')
+    }
   }
 
   async function onSubmit(event: FormEvent): Promise<void> {
     event.preventDefault()
+    if (busy) return
     const modelId =
       selected ||
       (modality === 'image'
@@ -456,9 +474,11 @@ export function GenerateMode(props: Props): React.JSX.Element {
           ...existingMeta
         }
       }
+      const historyId = crypto.randomUUID()
+      lastGeneratedHistoryIdRef.current = historyId
       setResults((current) => [enriched, ...current])
       props.onGenerated({
-        id: crypto.randomUUID(),
+        id: historyId,
         prompt: body.prompt,
         negativePrompt: body.negative_prompt ?? '',
         modality,
@@ -699,10 +719,12 @@ export function GenerateMode(props: Props): React.JSX.Element {
                       className="chip-button subtle"
                       onClick={() =>
                         pickFiles(refImageInput.current, ['image/png', 'image/jpeg', 'image/webp'], (files) => {
-                          for (const file of files) {
-                            if (refImages.length >= 9) break
+                          const remaining = Math.max(0, 9 - refImages.length)
+                          for (const file of files.slice(0, remaining)) {
                             void uploadFile(file, (blob) =>
-                              setRefImages((current) => [...current, blob])
+                              setRefImages((current) =>
+                                current.length >= 9 ? current : [...current, blob]
+                              )
                             )
                           }
                         })
@@ -773,10 +795,12 @@ export function GenerateMode(props: Props): React.JSX.Element {
                           refAudioInput.current,
                           ['audio/wav', 'audio/mpeg', 'audio/mp4', 'audio/flac', 'audio/ogg'],
                           (files) => {
-                            for (const file of files) {
-                              if (refAudios.length >= 3) break
+                            const remaining = Math.max(0, 3 - refAudios.length)
+                            for (const file of files.slice(0, remaining)) {
                               void uploadFile(file, (blob) =>
-                                setRefAudios((current) => [...current, blob])
+                                setRefAudios((current) =>
+                                  current.length >= 3 ? current : [...current, blob]
+                                )
                               )
                             }
                           }

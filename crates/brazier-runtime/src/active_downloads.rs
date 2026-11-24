@@ -19,13 +19,16 @@ pub enum StopReason {
     Cancel,
 }
 
-/// Shared stop signal polled by the downloader between chunks.
+/// Shared stop signal polled or awaited by the downloader between chunks.
 ///
 /// The reason travels with the flag because the two stops differ on disk: a
 /// pause keeps the partial file so the transfer can pick up where it left off,
 /// while a cancel discards it.
 #[derive(Debug, Default)]
-pub struct StopFlag(AtomicU8);
+pub struct StopFlag {
+    state: AtomicU8,
+    notify: tokio::sync::Notify,
+}
 
 impl StopFlag {
     pub fn request(&self, reason: StopReason) {
@@ -36,12 +39,13 @@ impl StopFlag {
         // Stop requests are monotonic. In particular, a pause arriving after
         // a cancel must not downgrade cancellation and cause the downloader to
         // retain a partial file the user asked it to discard.
-        self.0.fetch_max(requested, Ordering::Relaxed);
+        self.state.fetch_max(requested, Ordering::Release);
+        self.notify.notify_waiters();
     }
 
     /// The requested stop, if any.
     pub fn reason(&self) -> Option<StopReason> {
-        match self.0.load(Ordering::Relaxed) {
+        match self.state.load(Ordering::Acquire) {
             1 => Some(StopReason::Pause),
             2 => Some(StopReason::Cancel),
             _ => None,
@@ -50,6 +54,19 @@ impl StopFlag {
 
     pub fn should_stop(&self) -> bool {
         self.reason().is_some()
+    }
+
+    /// Resolve as soon as a stop is requested (returning immediately if already set).
+    pub async fn wait_stopped(&self) -> StopReason {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(reason) = self.reason() {
+                return reason;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -116,6 +133,21 @@ impl ActiveDownloads {
             .unwrap_or_else(|poison| poison.into_inner())
             .remove(job_id);
     }
+
+    /// Remove `job_id` only if the registered entry is still this worker's flag,
+    /// preventing a stopping worker from removing a newer resumed worker's flag.
+    pub fn finish_if_matches(&self, job_id: &str, flag: &Arc<StopFlag>) {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if jobs
+            .get(job_id)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.flag, flag))
+        {
+            jobs.remove(job_id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -148,5 +180,24 @@ mod tests {
         flag.request(StopReason::Cancel);
         flag.request(StopReason::Pause);
         assert_eq!(flag.reason(), Some(StopReason::Cancel));
+    }
+
+    #[test]
+    fn finish_if_matches_preserves_a_replacement_worker() {
+        let active = ActiveDownloads::new();
+        let old_flag = active.register("job-1");
+        let new_flag = active.register("job-1");
+
+        active.finish_if_matches("job-1", &old_flag);
+        assert!(
+            active.is_running("job-1"),
+            "old worker finishing must not remove replacement worker"
+        );
+
+        active.finish_if_matches("job-1", &new_flag);
+        assert!(
+            !active.is_running("job-1"),
+            "current worker finishing removes its own registration"
+        );
     }
 }

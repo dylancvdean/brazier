@@ -3511,13 +3511,10 @@ where
     let mut content_length: Option<usize> = None;
     loop {
         let mut line = String::new();
-        match tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await {
-            Ok(Ok(0)) => return Ok(None),
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => return Err(error.into()),
-            // A quiet server is not a failure; the caller's overall deadline
-            // decides how long to keep waiting.
-            Err(_) => return Ok(None),
+        // Let the caller's overall LSP deadline govern the wait instead of
+        // aborting after 5s while a language server is still indexing.
+        if reader.read_line(&mut line).await? == 0 {
+            return Ok(None);
         }
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
@@ -3584,6 +3581,9 @@ async fn lsp_diagnostics(
     let (mut command, _) = build_command(context, plan, workspace, arguments, &command_line)
         .await
         .with_context(|| format!("cannot prepare `{binary}`"))?;
+    // Discard LSP stderr so indexing logs cannot fill the OS pipe buffer and
+    // deadlock the language server.
+    command.stderr(Stdio::null());
     let mut child = command
         .spawn()
         .with_context(|| format!("cannot start `{binary}`"))?;

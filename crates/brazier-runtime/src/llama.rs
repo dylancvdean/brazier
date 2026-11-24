@@ -2530,6 +2530,12 @@ pub async fn probe_server(client: &reqwest::Client, base_url: &str) -> serde_jso
     probe
 }
 
+/// Backoff schedule for transient HTTP 503 responses (e.g., server still
+/// loading weights or waiting for a free continuous-batching slot).
+const TRANSIENT_503_BACKOFF_MS: &[u64] = &[500, 1_000, 2_000, 4_000, 4_000, 4_000];
+const STREAM_INITIAL_TIMEOUT: Duration = Duration::from_secs(300);
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Send one non-streamed chat completion to a running llama-server and return
 /// the full response body.
 pub async fn chat_once(
@@ -2538,38 +2544,48 @@ pub async fn chat_once(
     api_key: Option<&str>,
     body: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    let mut request = client
-        .post(format!("{base_url}/v1/chat/completions"))
-        .json(body)
-        .timeout(Duration::from_secs(300));
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
-    let mut response = request.send().await.context("llama-server chat request")?;
-    let status = response.status();
-    anyhow::ensure!(
-        response
-            .content_length()
-            .is_none_or(|length| length <= 64 * 1024 * 1024),
-        "llama-server response exceeds 64 MiB"
-    );
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .context("read llama-server chat response")?
-    {
+    let mut attempt = 0usize;
+    loop {
+        let mut request = client
+            .post(format!("{base_url}/v1/chat/completions"))
+            .json(body)
+            .timeout(Duration::from_secs(300));
+        if let Some(key) = api_key {
+            request = request.bearer_auth(key);
+        }
+        let mut response = request.send().await.context("llama-server chat request")?;
+        let status = response.status();
         anyhow::ensure!(
-            bytes.len() + chunk.len() <= 64 * 1024 * 1024,
+            response
+                .content_length()
+                .is_none_or(|length| length <= 64 * 1024 * 1024),
             "llama-server response exceeds 64 MiB"
         );
-        bytes.extend_from_slice(&chunk);
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("read llama-server chat response")?
+        {
+            anyhow::ensure!(
+                bytes.len() + chunk.len() <= 64 * 1024 * 1024,
+                "llama-server response exceeds 64 MiB"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+            && let Some(&delay_ms) = TRANSIENT_503_BACKOFF_MS.get(attempt)
+        {
+            attempt += 1;
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            continue;
+        }
+        if !status.is_success() {
+            let text = String::from_utf8_lossy(&bytes);
+            anyhow::bail!("llama-server returned {status}: {text}");
+        }
+        return serde_json::from_slice(&bytes).context("decode llama-server chat");
     }
-    if !status.is_success() {
-        let text = String::from_utf8_lossy(&bytes);
-        anyhow::bail!("llama-server returned {status}: {text}");
-    }
-    serde_json::from_slice(&bytes).context("decode llama-server chat")
 }
 
 /// Open a streamed chat completion against a running llama-server.
@@ -2581,18 +2597,23 @@ pub async fn open_chat_stream(
     api_key: Option<&str>,
     body: &serde_json::Value,
 ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<StreamChunk>>> {
-    let mut request = client
-        .post(format!("{base_url}/v1/chat/completions"))
-        .json(body)
-        .timeout(Duration::from_secs(600));
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
-    let mut response = request
-        .send()
-        .await
-        .context("llama-server stream request")?;
-    if !response.status().is_success() {
+    let mut attempt = 0usize;
+    let response = loop {
+        let mut request = client
+            .post(format!("{base_url}/v1/chat/completions"))
+            .json(body);
+        if let Some(key) = api_key {
+            request = request.bearer_auth(key);
+        }
+        let mut response = tokio::time::timeout(STREAM_INITIAL_TIMEOUT, request.send())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("llama-server stream timed out waiting for response headers")
+            })?
+            .context("llama-server stream request")?;
+        if response.status().is_success() {
+            break response;
+        }
         let status = response.status();
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.unwrap_or(None) {
@@ -2601,23 +2622,55 @@ pub async fn open_chat_stream(
             }
             bytes.extend_from_slice(&chunk);
         }
+        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+            && let Some(&delay_ms) = TRANSIENT_503_BACKOFF_MS.get(attempt)
+        {
+            attempt += 1;
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            continue;
+        }
         let text = String::from_utf8_lossy(&bytes);
         anyhow::bail!("llama-server stream returned {status}: {text}");
-    }
+    };
 
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     tokio::spawn(async move {
         use futures::StreamExt;
         let mut byte_stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = Vec::<u8>::new();
         let mut received = 0usize;
-        while let Some(chunk) = byte_stream.next().await {
-            let chunk = match chunk {
-                Ok(bytes) => bytes,
-                Err(error) => {
+        let mut saw_first_chunk = false;
+        let mut saw_done = false;
+        let mut saw_finish_reason = false;
+        loop {
+            let idle_limit = if saw_first_chunk {
+                STREAM_IDLE_TIMEOUT
+            } else {
+                STREAM_INITIAL_TIMEOUT
+            };
+            let next = tokio::select! {
+                _ = tx.closed() => return,
+                result = tokio::time::timeout(idle_limit, byte_stream.next()) => result,
+            };
+            let chunk = match next {
+                Ok(Some(Ok(bytes))) => {
+                    saw_first_chunk = true;
+                    bytes
+                }
+                Ok(Some(Err(error))) => {
                     let _ = tx
                         .send(Err(anyhow::anyhow!(
                             "llama-server stream read failed: {error}"
+                        )))
+                        .await;
+                    return;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!(
+                            "llama-server stream stalled with no output for {}s",
+                            idle_limit.as_secs()
                         )))
                         .await;
                     return;
@@ -2634,26 +2687,31 @@ pub async fn open_chat_stream(
                     .await;
                 return;
             }
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(frame_end) = buffer.find("\n\n") {
-                let frame = buffer[..frame_end].to_owned();
-                buffer = buffer[frame_end + 2..].to_owned();
-                let data = frame
-                    .lines()
-                    .find_map(|line| line.strip_prefix("data:").map(str::trim));
-                let Some(data) = data else {
-                    continue;
-                };
-                match parse_stream_chunk(data) {
-                    ChunkParse::Done => return,
-                    ChunkParse::Chunk(decoded) => {
-                        if tx.send(Ok(decoded)).await.is_err() {
-                            return;
-                        }
-                    }
-                    ChunkParse::Skip => {}
+            buffer.extend_from_slice(&chunk);
+            while let Some((frame_end, sep_len)) = find_sse_frame_boundary(&buffer) {
+                let frame = buffer[..frame_end].to_vec();
+                buffer.drain(..frame_end + sep_len);
+                match emit_sse_frame(&frame, &tx, &mut saw_finish_reason).await {
+                    SseFrameOutcome::Continue => {}
+                    SseFrameOutcome::Done | SseFrameOutcome::ReceiverClosed => return,
                 }
             }
+        }
+        if !buffer.is_empty() {
+            match emit_sse_frame(&buffer, &tx, &mut saw_finish_reason).await {
+                SseFrameOutcome::Continue => {}
+                SseFrameOutcome::Done => {
+                    saw_done = true;
+                }
+                SseFrameOutcome::ReceiverClosed => return,
+            }
+        }
+        if !saw_done && !saw_finish_reason {
+            let _ = tx
+                .send(Err(anyhow::anyhow!(
+                    "upstream stream ended unexpectedly before finishing (the model may have crashed or been unloaded)"
+                )))
+                .await;
         }
     });
     Ok(rx)
@@ -2665,7 +2723,100 @@ impl Drop for LlamaServer {
     }
 }
 
-/// Bind address helper kept for tests that spin up stub engines.
+type StderrDrain = (
+    Arc<StdMutex<Vec<u8>>>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+);
+
+/// Continuously drain a child server's stderr pipe so it can never deadlock
+/// on a full OS pipe buffer, while retaining a bounded tail for startup errors.
+pub(crate) fn spawn_stderr_drain(mut stderr_pipe: tokio::process::ChildStderr) -> StderrDrain {
+    let stderr_output = Arc::new(StdMutex::new(Vec::new()));
+    let stderr_capture = Arc::clone(&stderr_output);
+    let task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+
+        let mut chunk = [0_u8; 8_192];
+        loop {
+            let read = stderr_pipe.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            let mut output = stderr_capture
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            output.extend_from_slice(&chunk[..read]);
+            if output.len() > STARTUP_TELEMETRY_LIMIT {
+                let first = output.len() - STARTUP_TELEMETRY_LIMIT;
+                output.drain(..first);
+            }
+        }
+        Ok::<_, std::io::Error>(())
+    });
+    (stderr_output, task)
+}
+
+/// Find the earliest SSE frame boundary (`\n\n` or `\r\n\r\n`) in raw bytes.
+fn find_sse_frame_boundary(bytes: &[u8]) -> Option<(usize, usize)> {
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'\n' && bytes[index + 1] == b'\n' {
+            return Some((index, 2));
+        }
+        if index + 3 < bytes.len()
+            && bytes[index] == b'\r'
+            && bytes[index + 1] == b'\n'
+            && bytes[index + 2] == b'\r'
+            && bytes[index + 3] == b'\n'
+        {
+            return Some((index, 4));
+        }
+        index += 1;
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SseFrameOutcome {
+    Continue,
+    Done,
+    ReceiverClosed,
+}
+
+async fn emit_sse_frame(
+    frame_bytes: &[u8],
+    tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamChunk>>,
+    saw_finish_reason: &mut bool,
+) -> SseFrameOutcome {
+    let frame = String::from_utf8_lossy(frame_bytes);
+    let data_lines: Vec<&str> = frame
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end_matches('\r');
+            line.strip_prefix("data:")
+                .map(|rest| rest.strip_prefix(' ').unwrap_or(rest))
+        })
+        .collect();
+    if data_lines.is_empty() {
+        return SseFrameOutcome::Continue;
+    }
+    let data = data_lines.join("\n");
+    match parse_stream_chunk(data.trim()) {
+        ChunkParse::Done => SseFrameOutcome::Done,
+        ChunkParse::Chunk(decoded) => {
+            if decoded.finish_reason.is_some() {
+                *saw_finish_reason = true;
+            }
+            if tx.send(Ok(decoded)).await.is_ok() {
+                SseFrameOutcome::Continue
+            } else {
+                SseFrameOutcome::ReceiverClosed
+            }
+        }
+        ChunkParse::Skip => SseFrameOutcome::Continue,
+    }
+}
+
 pub fn loopback_url(addr: SocketAddr) -> String {
     format!("http://{addr}")
 }
@@ -3984,5 +4135,47 @@ llama_kv_cache_init:   ROCm_Host KV buffer size = 2048.00 MiB
         );
         assert_eq!(body["id_slot"], 2);
         assert_eq!(body["cache_prompt"], true);
+    }
+
+    #[tokio::test]
+    async fn sse_frame_boundary_handles_lf_crlf_and_multibyte_utf8() {
+        assert_eq!(
+            find_sse_frame_boundary(b"data: a\n\ndata: b\r\n\r\n"),
+            Some((7, 2))
+        );
+        assert_eq!(
+            find_sse_frame_boundary(b"data: a\r\n\r\ndata: b\n\n"),
+            Some((7, 4))
+        );
+        assert_eq!(find_sse_frame_boundary(b"data: partial\r\n"), None);
+
+        // Simulate a 4-byte emoji split across transport chunks; buffering bytes
+        // before decoding preserves the full UTF-8 scalar once the frame completes.
+        let full = "data: {\"choices\":[{\"delta\":{\"content\":\"🔥\"}}]}\r\n\r\n";
+        let bytes = full.as_bytes();
+        let split_at = bytes.iter().position(|&b| b == 0xF0).expect("emoji byte") + 2;
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&bytes[..split_at]);
+        assert_eq!(find_sse_frame_boundary(&buffer), None);
+        buffer.extend_from_slice(&bytes[split_at..]);
+
+        let (frame_end, sep_len) = find_sse_frame_boundary(&buffer).expect("frame boundary");
+        let frame = buffer[..frame_end].to_vec();
+        buffer.drain(..frame_end + sep_len);
+        assert!(buffer.is_empty());
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut saw_finish = false;
+        assert_eq!(
+            emit_sse_frame(&frame, &tx, &mut saw_finish).await,
+            SseFrameOutcome::Continue
+        );
+        assert!(!saw_finish);
+        let chunk = rx
+            .recv()
+            .await
+            .expect("chunk")
+            .expect("valid utf8 json chunk");
+        assert_eq!(chunk.content.as_deref(), Some("🔥"));
     }
 }

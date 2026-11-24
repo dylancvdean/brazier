@@ -1113,6 +1113,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         setStreaming('')
         setApprovals([])
         setPrefill(null)
+        reconcileActiveSession()
         return
       }
       case 'run-cancelled': {
@@ -1120,6 +1121,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         setStreaming('')
         setApprovals([])
         setPrefill(null)
+        reconcileActiveSession()
         return
       }
       case 'run-failed': {
@@ -1128,6 +1130,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         setApprovals([])
         setPrefill(null)
         onError(event.error)
+        reconcileActiveSession()
         return
       }
       case 'compacted': {
@@ -1157,6 +1160,37 @@ export function AgentMode(props: Props): React.JSX.Element {
     return unsubscribe
   }, [applyEvent, onError])
 
+  const loadGenRef = useRef(0)
+  const submittingRef = useRef(false)
+
+  const reconcileActiveSession = useCallback((): void => {
+    const activeId = sessionIdRef.current
+    if (!activeId) return
+    void fetchAgentSession(activeId)
+      .then((detail) => {
+        if (sessionIdRef.current !== activeId) return
+        setTimeline((current) => {
+          const records = timelineFromRecords(detail.tool_executions)
+          const subagents = current.filter((entry) => entry.subagent != null)
+          const merged = records.map((record) => {
+            const existing = current.find((entry) => entry.toolCallId === record.toolCallId)
+            return existing ? { ...record, timestamp: existing.timestamp } : record
+          })
+          const seenIds = new Set(merged.map((entry) => entry.toolCallId))
+          for (const sub of subagents) {
+            if (!seenIds.has(sub.toolCallId)) merged.push(sub)
+          }
+          return merged
+        })
+        setGrants(detail.grants)
+        setSession(detail.session)
+        setSessions((current) =>
+          current.map((entry) => (entry.id === detail.session.id ? detail.session : entry))
+        )
+      })
+      .catch(() => undefined)
+  }, [])
+
   const loadSession = useCallback(
     async (id: string): Promise<void> => {
       try {
@@ -1164,10 +1198,13 @@ export function AgentMode(props: Props): React.JSX.Element {
           onError('Stop the agent before switching tasks.')
           return
         }
+        const loadGen = ++loadGenRef.current
         const detail = await fetchAgentSession(id)
-        setSession(detail.session)
-        sessionIdRef.current = detail.session.id
+        if (loadGen !== loadGenRef.current) return
         await onSessionBound?.(detail.session.id)
+        if (loadGen !== loadGenRef.current) return
+        sessionIdRef.current = detail.session.id
+        setSession(detail.session)
         try {
           window.sessionStorage.setItem(lastAgentSessionKey, detail.session.id)
         } catch {
@@ -1190,8 +1227,14 @@ export function AgentMode(props: Props): React.JSX.Element {
         const path = detail.session.workspace_path
         if (path) {
           void validateAgentWorkspace(path)
-            .then((validated) => setWorkspaceIsGit(validated.git_repository))
-            .catch(() => setWorkspaceIsGit(Boolean(detail.session.runtime_metadata?.worktree)))
+            .then((validated) => {
+              if (loadGen === loadGenRef.current) setWorkspaceIsGit(validated.git_repository)
+            })
+            .catch(() => {
+              if (loadGen === loadGenRef.current) {
+                setWorkspaceIsGit(Boolean(detail.session.runtime_metadata?.worktree))
+              }
+            })
         } else {
           setWorkspaceIsGit(false)
         }
@@ -1438,6 +1481,9 @@ export function AgentMode(props: Props): React.JSX.Element {
       onError('Choose a workspace folder first. The agent works inside it.')
       return
     }
+    if (submittingRef.current || runningRef.current) return
+    submittingRef.current = true
+    setRunning(true)
     try {
       assertDaemonMutationAllowed({ method: 'POST' })
       setWorktreeNotice(null)
@@ -1488,7 +1534,11 @@ export function AgentMode(props: Props): React.JSX.Element {
       const submittedAt = new Date().toISOString()
       if (props.onSubmitTurn) {
         const correlationId = await props.onSubmitTurn(text)
-        if (!correlationId) return
+        if (!correlationId) {
+          setRunning(false)
+          onError('Could not start that agent turn. Try again.')
+          return
+        }
         setMessages((current) => [
           ...current,
           { role: 'user', text, timestamp: submittedAt }
@@ -1498,31 +1548,14 @@ export function AgentMode(props: Props): React.JSX.Element {
           ...current,
           { role: 'user', text, timestamp: submittedAt }
         ])
-        setRunning(true)
         await window.brazier.agent.run(active.id, { text })
+        reconcileActiveSession()
       }
     } catch (cause) {
       setRunning(false)
       onError(errorText(cause))
     } finally {
-      if (sessionIdRef.current) {
-        void fetchAgentSession(sessionIdRef.current)
-          .then((detail) => {
-            setTimeline((current) => {
-              const records = timelineFromRecords(detail.tool_executions)
-              return records.map((record) => {
-                const existing = current.find((entry) => entry.toolCallId === record.toolCallId)
-                return existing ? { ...record, timestamp: existing.timestamp } : record
-              })
-            })
-            setGrants(detail.grants)
-            setSession(detail.session)
-            setSessions((current) =>
-              current.map((entry) => (entry.id === detail.session.id ? detail.session : entry))
-            )
-          })
-          .catch(() => undefined)
-      }
+      submittingRef.current = false
     }
   }
 
@@ -1643,6 +1676,11 @@ export function AgentMode(props: Props): React.JSX.Element {
   }
 
   async function startNewTask(): Promise<void> {
+    if (runningRef.current) {
+      onError('Stop the agent before starting a new task.')
+      return
+    }
+    loadGenRef.current += 1
     const previousWorktree = sessionWorktree(session)
     const nextWorkspace =
       previousWorktree?.source_path ?? session?.workspace_path ?? pendingWorkspace
@@ -1655,6 +1693,8 @@ export function AgentMode(props: Props): React.JSX.Element {
     if (session) {
       await window.brazier.agent.closeSession(session.id).catch(() => undefined)
     }
+    setRunning(false)
+    setPrefill(null)
     setSession(null)
     sessionIdRef.current = null
     try {
@@ -1684,6 +1724,10 @@ export function AgentMode(props: Props): React.JSX.Element {
   }
 
   async function removeSession(id: string): Promise<void> {
+    if (runningRef.current && sessionIdRef.current === id) {
+      onError('Stop the agent before deleting the running task.')
+      return
+    }
     onError(null)
     const entry =
       sessions.find((sessionEntry) => sessionEntry.id === id) ??
@@ -1777,16 +1821,18 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   // Same pattern for the app sidebar: Agent mode replaces conversations with
   // directory-grouped tasks, so the list and its actions live up there.
+  const sidebarActionsRef = useRef({ loadSession, removeSession, startNewTask })
+  sidebarActionsRef.current = { loadSession, removeSession, startNewTask }
   useEffect(() => {
     onSidebarChange?.({
       sessions,
       activeId: session?.id ?? null,
-      select: (id) => void loadSession(id),
-      remove: (id) => void removeSession(id),
-      newTask: () => void startNewTask()
+      select: (id) => void sidebarActionsRef.current.loadSession(id),
+      remove: (id) => void sidebarActionsRef.current.removeSession(id),
+      newTask: () => void sidebarActionsRef.current.startNewTask()
     })
     return () => onSidebarChange?.(null)
-  }, [onSidebarChange, sessions, session?.id, loadSession])
+  }, [onSidebarChange, sessions, session?.id])
 
   return (
     <div className="agent-mode">

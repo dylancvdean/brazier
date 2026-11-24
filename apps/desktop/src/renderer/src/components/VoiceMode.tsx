@@ -117,7 +117,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
   const needsTranscripts = config.voiceSessionTarget !== 'neither'
   const anyAsr = props.asrAvailable.batch || props.asrAvailable.streaming
   const live = snapshot.voiceStatus === 'live'
-  const starting = snapshot.voiceStatus === 'starting' || busy
+  const starting = snapshot.voiceStatus === 'starting'
   const selected = props.models.find((model) => model.id === props.modelId)
   const task = snapshot.task
   const speaking = outputLevel > 0.02
@@ -150,6 +150,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
   useEffect(() => {
     if (snapshot.voiceStatus === 'off' || snapshot.voiceStatus === 'error') {
       setQualificationTrial(null)
+      setMuted(false)
     }
   }, [snapshot.voiceStatus])
 
@@ -328,9 +329,23 @@ export function VoiceMode(props: Props): React.JSX.Element {
             <Download size={15} /> Save qualification
           </button>
         ) : null}
-        {live ? (
+        {starting ? (
+          <button
+            type="button"
+            className="danger"
+            disabled={busy}
+            onClick={() => void guard(() => session.endVoice())}
+          >
+            <PhoneOff size={15} /> Cancel
+          </button>
+        ) : live ? (
           <>
-            <button type="button" className={muted ? 'toggled' : ''} onClick={toggleMute}>
+            <button
+              type="button"
+              className={muted ? 'toggled' : ''}
+              disabled={busy}
+              onClick={toggleMute}
+            >
               {muted ? <MicOff size={15} /> : <Mic size={15} />}
               {muted ? 'Unmute' : 'Mute'}
             </button>
@@ -355,6 +370,7 @@ export function VoiceMode(props: Props): React.JSX.Element {
             <button
               type="button"
               className="danger"
+              disabled={busy}
               onClick={() => void guard(() => session.endVoice())}
             >
               <PhoneOff size={15} /> End

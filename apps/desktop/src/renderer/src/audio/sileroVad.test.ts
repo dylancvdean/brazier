@@ -86,7 +86,9 @@ describe('StreamingSileroVad', () => {
     await vi.waitFor(() => expect(error).toHaveBeenCalledOnce())
     expect(error.mock.calls[0][0]).toContain('behind realtime')
     expect(stream.diagnostics().maxQueueLagMs).toBeGreaterThan(2_000)
-    expect(model.release).toHaveBeenCalledOnce()
+    // Do not dispose ONNX tensors while `model.process()` is still in flight.
+    expect(model.release).not.toHaveBeenCalled()
     unblock?.()
+    await vi.waitFor(() => expect(model.release).toHaveBeenCalledOnce())
   })
 })

@@ -201,9 +201,9 @@ pub async fn request_os_permissions() -> Result<OsPermissionStatus, String> {
 async fn command(program: &str, args: &[String]) -> Result<Vec<u8>, String> {
     let mut command = Command::new(program);
     command.args(args).kill_on_drop(true);
-    let output = command
-        .output()
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
         .await
+        .map_err(|_| format!("{program} timed out after 30s"))?
         .map_err(|e| format!("start {program}: {e}"))?;
     if output.status.success() {
         Ok(output.stdout)

@@ -660,6 +660,7 @@ impl Database {
     }
 
     pub async fn pending_approvals(&self, session_id: &str) -> anyhow::Result<Vec<AgentApproval>> {
+        self.expire_pending_approvals(None).await?;
         let rows = sqlx::query(
             r#"SELECT id, session_id, tool, arguments_json, arguments_hash, environment, risk,
                       scope_key, allow_session_scope, elevation_json, sandbox_json, summary,
@@ -752,7 +753,7 @@ impl Database {
         Ok(())
     }
 
-    /// Mark in-flight agent runs failed and expire every pending approval.
+    /// Mark in-flight agent runs failed and expire every pending or unconsumed approval.
     ///
     /// A process restart cannot still be executing those runs; leaving
     /// `last_run_status = running` blocks worktree ops and keeps approvals live.
@@ -765,16 +766,47 @@ impl Database {
         .await?;
         sqlx::query(
             r#"UPDATE agent_approvals SET status = 'expired', decided_at = datetime('now')
-               WHERE status = 'pending'"#,
+               WHERE status IN ('pending', 'approved')"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"UPDATE agent_tool_executions
+               SET status = 'failed',
+                   error = COALESCE(error, 'Interrupted by daemon restart')
+               WHERE status = 'awaiting-approval'"#,
         )
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
     }
 
+    /// Return active subagents owned by the same client as the parent.
+    pub async fn list_active_child_agent_sessions(
+        &self,
+        parent_id: &str,
+        owner_client_id: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            r#"SELECT id FROM agent_sessions
+               WHERE owner_client_id = ?
+                 AND id != ?
+                 AND last_run_status IN ('running', 'awaiting-approval')
+                 AND json_extract(runtime_metadata_json, '$.kind') = 'subagent'
+                 AND json_extract(runtime_metadata_json, '$.parent_session_id') = ?"#,
+        )
+        .bind(owner_client_id)
+        .bind(parent_id)
+        .bind(parent_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Expire stale pending approvals, and deny everything still pending for a
     /// session when the run is cancelled.
     pub async fn expire_pending_approvals(&self, session_id: Option<&str>) -> anyhow::Result<u64> {
+        let mut tx = self.pool.begin().await?;
         let result =
             match session_id {
                 Some(session_id) => sqlx::query(
@@ -782,7 +814,7 @@ impl Database {
                        WHERE session_id = ? AND status = 'pending'"#,
                 )
                 .bind(session_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?,
                 None => sqlx::query(
                     r#"UPDATE agent_approvals SET status = 'expired', decided_at = datetime('now')
@@ -790,9 +822,35 @@ impl Database {
                          AND created_at <= datetime('now', ?)"#,
                 )
                 .bind(format!("-{APPROVAL_TTL_SECONDS} seconds"))
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?,
             };
+        if result.rows_affected() > 0 {
+            sqlx::query(
+                r#"UPDATE agent_tool_executions
+                   SET status = 'failed',
+                       error = COALESCE(error, 'Approval expired')
+                   WHERE status = 'awaiting-approval'
+                     AND approval_id IN (
+                         SELECT id FROM agent_approvals WHERE status = 'expired'
+                     )"#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"UPDATE agent_sessions
+                   SET last_run_status = 'idle', updated_at = datetime('now')
+                   WHERE last_run_status = 'awaiting-approval'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM agent_approvals
+                         WHERE agent_approvals.session_id = agent_sessions.id
+                           AND agent_approvals.status = 'pending'
+                     )"#,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(result.rows_affected())
     }
 
@@ -1622,6 +1680,36 @@ mod tests {
                 .expect("pending")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn pending_approvals_expires_overdue_rows_automatically() {
+        let (_dir, db) = database().await;
+        let session = db
+            .create_agent_session(session_request(Some("/ws")))
+            .await
+            .expect("create session");
+        let approval = db
+            .create_approval(new_approval(&session.id, true))
+            .await
+            .expect("create approval");
+        sqlx::query(
+            "UPDATE agent_approvals SET created_at = datetime('now', '-1 hour') WHERE id = ?",
+        )
+        .bind(&approval.id)
+        .execute(&db.pool)
+        .await
+        .expect("backdate approval");
+
+        assert!(
+            db.pending_approvals(&session.id)
+                .await
+                .expect("pending")
+                .is_empty(),
+            "overdue approval must not be returned as pending"
+        );
+        let stored = db.approval(&approval.id).await.expect("get approval");
+        assert_eq!(stored.status, ApprovalStatus::Expired);
     }
 
     #[tokio::test]

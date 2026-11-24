@@ -130,17 +130,22 @@ pub trait Engine: Send + Sync {
 struct LlamaState {
     binary: Option<PathBuf>,
     server: Option<LlamaServer>,
+    generation: u64,
+    last_model_id: Option<String>,
+    last_profile: Option<crate::model_settings::TextProfile>,
 }
 
 struct MlxState {
     lm_python: Option<PathBuf>,
     vlm_python: Option<PathBuf>,
     server: Option<MlxServer>,
+    generation: u64,
 }
 
 struct VllmState {
     python: Option<PathBuf>,
     server: Option<vllm::Server>,
+    generation: u64,
 }
 
 struct WhisperState {
@@ -233,6 +238,8 @@ pub struct GenerationMemoryPlan {
     /// Human-readable explanation of the decision (for logs/telemetry).
     pub reason: String,
     reload_llama_path: Option<PathBuf>,
+    reload_llama_model_id: Option<String>,
+    reload_llama_profile: Option<crate::model_settings::TextProfile>,
 }
 
 impl GenerationMemoryPlan {
@@ -241,6 +248,8 @@ impl GenerationMemoryPlan {
             ejected: false,
             reason: reason.into(),
             reload_llama_path: None,
+            reload_llama_model_id: None,
+            reload_llama_profile: None,
         }
     }
 }
@@ -264,6 +273,8 @@ pub struct Runtime {
     settings: Mutex<RuntimeSettings>,
     models_cache: Mutex<Option<Vec<ModelDescriptor>>>,
     llama_op: Mutex<()>,
+    mlx_op: Mutex<()>,
+    vllm_op: Mutex<()>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -315,15 +326,20 @@ impl Runtime {
             llama: Mutex::new(LlamaState {
                 binary: discovered,
                 server: None,
+                generation: 0,
+                last_model_id: None,
+                last_profile: None,
             }),
             mlx: Mutex::new(MlxState {
                 lm_python: settings.mlx_lm_python.as_ref().map(PathBuf::from),
                 vlm_python: settings.mlx_vlm_python.as_ref().map(PathBuf::from),
                 server: None,
+                generation: 0,
             }),
             vllm: Mutex::new(VllmState {
                 python: settings.vllm_python.as_ref().map(PathBuf::from),
                 server: None,
+                generation: 0,
             }),
             whisper: Mutex::new(WhisperState {
                 binary: whisper_binary,
@@ -343,6 +359,8 @@ impl Runtime {
             settings: Mutex::new(settings),
             models_cache: Mutex::new(None),
             llama_op: Mutex::new(()),
+            mlx_op: Mutex::new(()),
+            vllm_op: Mutex::new(()),
         })
     }
 
@@ -808,61 +826,116 @@ impl Runtime {
             crate::model_library::normalize_library_paths(&settings.extra_model_library_paths)?;
         settings.validate()?;
         runtime_settings::save(&self.data_dir, &settings).await?;
-        let (target_changed, library_paths_changed, needs_restart) = {
+        let (
+            target_changed,
+            library_paths_changed,
+            llama_needs_restart,
+            mlx_needs_restart,
+            vllm_needs_restart,
+            any_changed,
+        ) = {
             let current = self.settings.lock().await;
+            let llama_changed = current.target != settings.target
+                || current.context_size != settings.context_size
+                || current.batch_size != settings.batch_size
+                || current.threads != settings.threads
+                || current.gpu_layers != settings.gpu_layers
+                || current.flash_attention != settings.flash_attention
+                || current.kv_cache_type_k != settings.kv_cache_type_k
+                || current.kv_cache_type_v != settings.kv_cache_type_v
+                || current.jinja != settings.jinja
+                || current.binary_override != settings.binary_override;
+            let mlx_changed = current.mlx_lm_python != settings.mlx_lm_python
+                || current.mlx_vlm_python != settings.mlx_vlm_python
+                || current.context_size != settings.context_size
+                || current.kv_cache_type_k != settings.kv_cache_type_k
+                || current.kv_cache_type_v != settings.kv_cache_type_v;
+            let vllm_changed = current.vllm_python != settings.vllm_python
+                || current.vllm_model != settings.vllm_model
+                || current.vllm_models != settings.vllm_models
+                || current.context_size != settings.context_size;
             (
                 current.target != settings.target,
                 current.extra_model_library_paths != settings.extra_model_library_paths,
+                llama_changed,
+                mlx_changed,
+                vllm_changed,
                 *current != settings,
             )
         };
-        if needs_restart {
-            let mut llama = self.llama.lock().await;
-            if let Some(mut server) = llama.server.take() {
-                let _ = server.stop().await;
+        if any_changed {
+            if llama_needs_restart {
+                let old_server = {
+                    let mut llama = self.llama.lock().await;
+                    llama.generation = llama.generation.wrapping_add(1);
+                    if target_changed && settings.binary_override.is_none() {
+                        llama.binary = None;
+                    }
+                    llama.server.take()
+                };
+                if let Some(mut server) = old_server {
+                    let _ = server.stop().await;
+                }
             }
-            let mut mlx = self.mlx.lock().await;
-            if let Some(mut server) = mlx.server.take() {
-                let _ = server.stop().await;
+            if mlx_needs_restart {
+                let old_server = {
+                    let mut mlx = self.mlx.lock().await;
+                    mlx.generation = mlx.generation.wrapping_add(1);
+                    mlx.lm_python = settings.mlx_lm_python.as_ref().map(PathBuf::from);
+                    mlx.vlm_python = settings.mlx_vlm_python.as_ref().map(PathBuf::from);
+                    mlx.server.take()
+                };
+                if let Some(mut server) = old_server {
+                    let _ = server.stop().await;
+                }
             }
-            if target_changed && settings.binary_override.is_none() {
-                llama.binary = None;
+            if vllm_needs_restart {
+                let old_server = {
+                    let mut vllm_state = self.vllm.lock().await;
+                    vllm_state.generation = vllm_state.generation.wrapping_add(1);
+                    vllm_state.python = settings.vllm_python.as_ref().map(PathBuf::from);
+                    vllm_state.server.take()
+                };
+                if let Some(mut server) = old_server {
+                    let _ = server.stop().await;
+                }
             }
-            mlx.lm_python = settings.mlx_lm_python.as_ref().map(PathBuf::from);
-            mlx.vlm_python = settings.mlx_vlm_python.as_ref().map(PathBuf::from);
-            let mut vllm_state = self.vllm.lock().await;
-            if let Some(mut server) = vllm_state.server.take() {
-                let _ = server.stop().await;
+            {
+                let mut whisper = self.whisper.lock().await;
+                whisper.binary = settings
+                    .whisper_binary
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .or_else(|| whisper::resolve_binary(&self.data_dir, None));
             }
-            vllm_state.python = settings.vllm_python.as_ref().map(PathBuf::from);
-            let mut whisper = self.whisper.lock().await;
-            whisper.binary = settings
-                .whisper_binary
-                .as_ref()
-                .map(PathBuf::from)
-                .or_else(|| whisper::resolve_binary(&self.data_dir, None));
-            let mut streaming_asr = self.streaming_asr.lock().await;
-            let next_python = settings
-                .streaming_asr_python
-                .as_ref()
-                .map(PathBuf::from)
-                .or_else(|| streaming_asr::resolve_python(&self.data_dir, None));
-            if streaming_asr.python != next_python {
-                streaming_asr.worker = None;
+            {
+                let mut streaming_asr = self.streaming_asr.lock().await;
+                let next_python = settings
+                    .streaming_asr_python
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .or_else(|| streaming_asr::resolve_python(&self.data_dir, None));
+                if streaming_asr.python != next_python {
+                    streaming_asr.worker = None;
+                }
+                streaming_asr.python = next_python;
             }
-            streaming_asr.python = next_python;
-            let mut sdcpp_state = self.sdcpp.lock().await;
-            sdcpp_state.binary = settings
-                .sdcpp_binary
-                .as_ref()
-                .map(PathBuf::from)
-                .or_else(|| sdcpp::resolve_binary(&self.data_dir, None));
-            let mut voice_state = self.voice.lock().await;
-            voice_state.python = settings
-                .voice_python
-                .as_ref()
-                .map(PathBuf::from)
-                .or_else(|| voice::resolve_python(&self.data_dir, None));
+            {
+                let mut sdcpp_state = self.sdcpp.lock().await;
+                sdcpp_state.binary = settings
+                    .sdcpp_binary
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .or_else(|| sdcpp::resolve_binary(&self.data_dir, None));
+            }
+            {
+                let mut voice_state = self.voice.lock().await;
+                voice_state.python = settings
+                    .voice_python
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .or_else(|| voice::resolve_python(&self.data_dir, None));
+            }
         }
         {
             let mut current = self.settings.lock().await;
@@ -1215,13 +1288,20 @@ impl Runtime {
             if let Ok(model_path) =
                 models_store::path_for_model_id(&self.data_dir, model_id, &extra)
             {
-                let mut guard = self.llama.lock().await;
-                if guard
-                    .server
-                    .as_ref()
-                    .is_some_and(|server| server.model_path == model_path)
-                    && let Some(mut server) = guard.server.take()
-                {
+                let old = {
+                    let mut guard = self.llama.lock().await;
+                    if guard
+                        .server
+                        .as_ref()
+                        .is_some_and(|server| server.model_path == model_path)
+                    {
+                        guard.generation = guard.generation.wrapping_add(1);
+                        guard.server.take()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(mut server) = old {
                     let _ = server.stop().await;
                 }
             }
@@ -1237,13 +1317,39 @@ impl Runtime {
                 &self.extra_library_paths().await,
             )
         {
-            let mut guard = self.mlx.lock().await;
-            if guard
-                .server
-                .as_ref()
-                .is_some_and(|server| server.model_ref == model_ref)
-                && let Some(mut server) = guard.server.take()
-            {
+            let old = {
+                let mut guard = self.mlx.lock().await;
+                if guard
+                    .server
+                    .as_ref()
+                    .is_some_and(|server| server.model_ref == model_ref)
+                {
+                    guard.generation = guard.generation.wrapping_add(1);
+                    guard.server.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(mut server) = old {
+                let _ = server.stop().await;
+            }
+            return;
+        }
+        if let Some(model_ref) = model_id.strip_prefix("vllm:") {
+            let old = {
+                let mut guard = self.vllm.lock().await;
+                if guard
+                    .server
+                    .as_ref()
+                    .is_some_and(|server| server.model_ref == model_ref)
+                {
+                    guard.generation = guard.generation.wrapping_add(1);
+                    guard.server.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(mut server) = old {
                 let _ = server.stop().await;
             }
         }
@@ -1260,19 +1366,40 @@ impl Runtime {
             return GenerationMemoryPlan::noop("policy: keep chat and generation models resident");
         }
 
-        let (llama_path, resident_bytes) = {
+        let (llama_path, llama_model_id, llama_profile, llama_bytes) = {
             let guard = self.llama.lock().await;
             match guard.server.as_ref() {
                 Some(server) => {
                     let path = server.model_path.clone();
                     let bytes = file_size(&path);
-                    (Some(path), bytes)
+                    (
+                        Some(path),
+                        guard.last_model_id.clone(),
+                        guard.last_profile.clone(),
+                        bytes,
+                    )
                 }
-                None => (None, 0),
+                None => (None, None, None, 0),
             }
         };
-        let mlx_resident = self.mlx.lock().await.server.is_some();
-        if llama_path.is_none() && !mlx_resident {
+        let (mlx_resident, mlx_bytes) = {
+            let guard = self.mlx.lock().await;
+            match guard.server.as_ref() {
+                Some(server) => {
+                    let path = std::path::Path::new(&server.model_ref);
+                    let bytes = if path.exists() {
+                        crate::sdcpp::path_disk_bytes(path)
+                    } else {
+                        0
+                    };
+                    (true, bytes)
+                }
+                None => (false, 0),
+            }
+        };
+        let vllm_resident = self.vllm.lock().await.server.is_some();
+        let resident_bytes = llama_bytes.saturating_add(mlx_bytes);
+        if llama_path.is_none() && !mlx_resident && !vllm_resident {
             return GenerationMemoryPlan::noop("no chat model resident");
         }
 
@@ -1280,24 +1407,33 @@ impl Runtime {
             GenerationMemoryPolicy::Exclusive => true,
             GenerationMemoryPolicy::Coresident => false,
             GenerationMemoryPolicy::Auto => {
-                const MAX_PLAUSIBLE_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024 * 1024;
-                let detected = crate::hardware::detect().memory_bytes.unwrap_or(0);
-                let total = if detected == 0 || detected > MAX_PLAUSIBLE_MEMORY_BYTES {
-                    0
+                if vllm_resident {
+                    // vLLM reserves GPU memory aggressively via gpu_memory_utilization.
+                    true
                 } else {
-                    detected
-                };
-                if total == 0 {
-                    // Unknown system memory: keep the chat model to avoid churn.
-                    false
-                } else {
-                    let headroom =
-                        (settings.generation_memory_headroom_mb as u64).saturating_mul(1024 * 1024);
-                    let budget = (total as u128 * 85 / 100) as u64;
-                    resident_bytes
-                        .saturating_add(gen_bytes)
-                        .saturating_add(headroom)
-                        > budget
+                    const MAX_PLAUSIBLE_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024 * 1024;
+                    let hw = crate::hardware::detect();
+                    let detected = hw
+                        .usable_model_memory_bytes
+                        .or(hw.memory_bytes)
+                        .unwrap_or(0);
+                    let total = if detected == 0 || detected > MAX_PLAUSIBLE_MEMORY_BYTES {
+                        0
+                    } else {
+                        detected
+                    };
+                    if total == 0 {
+                        // Unknown system memory: keep the chat model to avoid churn.
+                        false
+                    } else {
+                        let headroom = (settings.generation_memory_headroom_mb as u64)
+                            .saturating_mul(1024 * 1024);
+                        let budget = (total as u128 * 85 / 100) as u64;
+                        resident_bytes
+                            .saturating_add(gen_bytes)
+                            .saturating_add(headroom)
+                            > budget
+                    }
                 }
             }
         };
@@ -1310,30 +1446,34 @@ impl Runtime {
         } else {
             "evicted chat model so the generation model fits in memory".to_owned()
         };
-        let reload_llama_path = if settings.reload_llm_after_generation {
-            llama_path.clone()
-        } else {
-            None
-        };
-        if let Some(mut server) = self.llama.lock().await.server.take() {
-            let _ = server.stop().await;
-        }
-        if let Some(mut server) = self.mlx.lock().await.server.take() {
-            let _ = server.stop().await;
-        }
+        let (reload_llama_path, reload_llama_model_id, reload_llama_profile) =
+            if settings.reload_llm_after_generation {
+                (llama_path.clone(), llama_model_id, llama_profile)
+            } else {
+                (None, None, None)
+            };
+        self.unload_chat_model().await;
         tracing::info!(reason = %reason, "pre-generation memory arbitration evicted chat model");
         GenerationMemoryPlan {
             ejected: true,
             reason,
             reload_llama_path,
+            reload_llama_model_id,
+            reload_llama_profile,
         }
     }
 
     /// Reload a chat model evicted by [`Runtime::prepare_generation_memory`].
-    /// MLX servers are left to reload lazily on the next chat request.
+    /// MLX and vLLM servers are left to reload lazily on the next chat request.
     pub async fn restore_after_generation(&self, plan: GenerationMemoryPlan) {
         if let Some(path) = plan.reload_llama_path
-            && let Err(error) = self.ensure_server_for_model(&path).await
+            && let Err(error) = self
+                .ensure_server_for_model_with_profile(
+                    &path,
+                    plan.reload_llama_profile.as_ref(),
+                    plan.reload_llama_model_id.as_deref(),
+                )
+                .await
         {
             tracing::warn!(%error, "failed to reload chat model after generation");
         }
@@ -1840,11 +1980,6 @@ impl Runtime {
         Ok(path)
     }
 
-    async fn ensure_server_for_model(&self, model_path: &std::path::Path) -> anyhow::Result<()> {
-        self.ensure_server_for_model_with_profile(model_path, None, None)
-            .await
-    }
-
     /// Start llama-server for a model, or confirm the running one was started
     /// the way that model is configured now.
     ///
@@ -1890,39 +2025,54 @@ impl Runtime {
         // only phase that releases the lock (a download would otherwise
         // serialize every chat request); after it returns we re-acquire and use
         // whatever binary is now pinned rather than the stale local copy.
-        let mut guard = self.llama.lock().await;
-        let binary = match guard.binary.as_ref().filter(|path| path.is_file()) {
-            Some(path) => path.clone(),
-            None => {
-                drop(guard);
-                self.ensure_llama_binary().await?;
-                guard = self.llama.lock().await;
-                guard
-                    .binary
-                    .clone()
-                    .filter(|path| path.is_file())
-                    .ok_or_else(|| anyhow::anyhow!("llama-server binary is not available"))?
-            }
-        };
+        let (binary, old_server, start_gen) = {
+            let mut guard = self.llama.lock().await;
+            let binary = match guard.binary.as_ref().filter(|path| path.is_file()) {
+                Some(path) => path.clone(),
+                None => {
+                    drop(guard);
+                    self.ensure_llama_binary().await?;
+                    guard = self.llama.lock().await;
+                    guard
+                        .binary
+                        .clone()
+                        .filter(|path| path.is_file())
+                        .ok_or_else(|| anyhow::anyhow!("llama-server binary is not available"))?
+                }
+            };
 
-        if let Some(server) = guard.server.as_mut() {
-            if server.model_path == model_path
+            if let Some(server) = guard.server.as_mut()
+                && server.model_path == model_path
                 && server.projector_path == models_store::projector_for_model(model_path)
                 && server.launch_key == wanted_key
                 && server.is_running()
             {
+                guard.last_model_id = model_id.map(str::to_owned);
+                guard.last_profile = profile.cloned();
                 return Ok(());
             }
+            let old_server = guard.server.take();
+            (binary, old_server, guard.generation)
+        };
+
+        if let Some(mut server) = old_server {
             let _ = server.stop().await;
-            guard.server = None;
         }
 
-        let server = LlamaServer::start_with_profile(
+        let mut server = LlamaServer::start_with_profile(
             &binary, model_path, &settings, harmony, profile, loras,
         )
         .await?;
+        let mut guard = self.llama.lock().await;
+        if guard.generation != start_gen {
+            drop(guard);
+            let _ = server.stop().await;
+            anyhow::bail!("model load was interrupted by an unload or configuration change");
+        }
         guard.server = Some(server);
         guard.binary = Some(binary);
+        guard.last_model_id = model_id.map(str::to_owned);
+        guard.last_profile = profile.cloned();
         Ok(())
     }
 
@@ -1932,6 +2082,7 @@ impl Runtime {
         kind: MlxKind,
         profile: Option<&crate::model_settings::TextProfile>,
     ) -> anyhow::Result<()> {
+        let _op_guard = self.mlx_op.lock().await;
         let settings = self.settings.lock().await.clone();
         // mlx-lm loads one adapter directory, so the first LoRA it can read is
         // the one served and the rest are left to the interface to explain.
@@ -1961,9 +2112,10 @@ impl Runtime {
         let model_ref = models_store::mlx_server_model_ref(&self.data_dir, model_id, &extra)?;
 
         let wanted_key = mlx::launch_key(kind, &settings, profile, adapter.as_deref());
-        let mut guard = self.mlx.lock().await;
-        if let Some(server) = guard.server.as_mut() {
-            if server.kind == kind
+        let (old_server, start_gen) = {
+            let mut guard = self.mlx.lock().await;
+            if let Some(server) = guard.server.as_mut()
+                && server.kind == kind
                 && server.model_ref == model_ref
                 && server.python == python
                 && server.launch_key == wanted_key
@@ -1971,11 +2123,13 @@ impl Runtime {
             {
                 return Ok(());
             }
+            (guard.server.take(), guard.generation)
+        };
+        if let Some(mut server) = old_server {
             let _ = server.stop().await;
-            guard.server = None;
         }
 
-        let server = MlxServer::start_with_profile(
+        let mut server = MlxServer::start_with_profile(
             &python,
             kind,
             &model_ref,
@@ -1984,6 +2138,12 @@ impl Runtime {
             adapter.as_deref(),
         )
         .await?;
+        let mut guard = self.mlx.lock().await;
+        if guard.generation != start_gen {
+            drop(guard);
+            let _ = server.stop().await;
+            anyhow::bail!("MLX model load was interrupted by an unload or configuration change");
+        }
         guard.server = Some(server);
         match kind {
             MlxKind::Lm => guard.lm_python = Some(python),
@@ -1997,6 +2157,7 @@ impl Runtime {
         model_ref: &str,
         profile: Option<&crate::model_settings::TextProfile>,
     ) -> anyhow::Result<()> {
+        let _op_guard = self.vllm_op.lock().await;
         let settings = self.settings.lock().await.clone();
         let python = self
             .vllm
@@ -2009,23 +2170,32 @@ impl Runtime {
                 anyhow::anyhow!("no active vLLM runtime; build and activate one in Runtimes first")
             })?;
         let wanted_key = vllm::launch_key(&settings, model_ref, profile);
-        let mut state = self.vllm.lock().await;
-        if state.server.as_mut().is_some_and(|server| {
-            server.model_ref == model_ref
-                && server.python == python
-                && server.launch_key == wanted_key
-                && server.is_running()
-        }) {
-            return Ok(());
-        }
-        if let Some(mut server) = state.server.take() {
+        let (old_server, start_gen) = {
+            let mut state = self.vllm.lock().await;
+            if state.server.as_mut().is_some_and(|server| {
+                server.model_ref == model_ref
+                    && server.python == python
+                    && server.launch_key == wanted_key
+                    && server.is_running()
+            }) {
+                return Ok(());
+            }
+            (state.server.take(), state.generation)
+        };
+        if let Some(mut server) = old_server {
             let _ = server.stop().await;
         }
         let hf_token = crate::hf_auth::load_token(&self.data_dir);
-        state.server = Some(
+        let mut server =
             vllm::Server::start(&python, model_ref, &settings, profile, hf_token.as_deref())
-                .await?,
-        );
+                .await?;
+        let mut state = self.vllm.lock().await;
+        if state.generation != start_gen {
+            drop(state);
+            let _ = server.stop().await;
+            anyhow::bail!("vLLM model load was interrupted by an unload or configuration change");
+        }
+        state.server = Some(server);
         state.python = Some(python);
         Ok(())
     }
@@ -2162,8 +2332,6 @@ impl Runtime {
                     )
                     .await
                 {
-                    let mut guard = self.llama.lock().await;
-                    guard.server = None;
                     return Err(fork_hints::load_error_with_hints(
                         &self.http,
                         &self.data_dir,
@@ -2186,8 +2354,6 @@ impl Runtime {
                     .ensure_mlx_server_for_model(&model_id, kind, effective_profile.as_ref())
                     .await
                 {
-                    let mut guard = self.mlx.lock().await;
-                    guard.server = None;
                     return Err(fork_hints::load_error_with_hints(
                         &self.http,
                         &self.data_dir,
@@ -2201,16 +2367,11 @@ impl Runtime {
             ActiveBackend::Vllm => {
                 emit(&load_tx, "server", "Starting vLLM server…").await;
                 emit(&load_tx, "load", "Loading vLLM model weights…").await;
-                if let Err(error) = self
-                    .ensure_vllm_server_for_model(
-                        model_id.strip_prefix("vllm:").unwrap_or(&model_id),
-                        effective_profile.as_ref(),
-                    )
-                    .await
-                {
-                    self.vllm.lock().await.server = None;
-                    return Err(error);
-                }
+                self.ensure_vllm_server_for_model(
+                    model_id.strip_prefix("vllm:").unwrap_or(&model_id),
+                    effective_profile.as_ref(),
+                )
+                .await?;
             }
         }
         emit(&load_tx, "ready", "Model ready — preparing media…").await;
@@ -2498,11 +2659,96 @@ impl Runtime {
         {
             guard.server = None;
         }
+        drop(guard);
+        let mut guard = self.vllm.lock().await;
+        if let Some(server) = guard.server.as_mut()
+            && !server.is_running()
+        {
+            guard.server = None;
+        }
     }
 
     /// Stream content deltas from llama-server (true token streaming, not fake
     /// chunking). When bundled tools are enabled, tool calls are executed
     /// server-side and generation continues in additional rounds.
+    /// Ensure the local backend is still alive before a follow-up tool round
+    /// and return a fresh endpoint (reloading if the server exited or was
+    /// evicted during a slow tool call while JIT loading is enabled).
+    async fn ensure_round_endpoint(
+        &self,
+        backend: &ActiveBackend,
+        model_id: &str,
+        profile: Option<&crate::model_settings::TextProfile>,
+        load_tx: &LoadNotifier,
+    ) -> anyhow::Result<Endpoint> {
+        let alive = match backend {
+            ActiveBackend::Remote { .. } => true,
+            ActiveBackend::Llama(_) => self
+                .llama
+                .lock()
+                .await
+                .server
+                .as_mut()
+                .is_some_and(LlamaServer::is_running),
+            ActiveBackend::Mlx => self
+                .mlx
+                .lock()
+                .await
+                .server
+                .as_mut()
+                .is_some_and(MlxServer::is_running),
+            ActiveBackend::Vllm => self
+                .vllm
+                .lock()
+                .await
+                .server
+                .as_mut()
+                .is_some_and(vllm::Server::is_running),
+        };
+        if !alive {
+            let jit_loading = self.settings.lock().await.jit_loading;
+            if !jit_loading {
+                anyhow::bail!(
+                    "model `{model_id}` was unloaded mid-turn and JIT loading is disabled"
+                );
+            }
+            if let Some(tx) = load_tx {
+                let _ = tx
+                    .send(Ok(StreamEvent::Load {
+                        phase: "load".to_owned(),
+                        message: "Reloading model to continue turn…".to_owned(),
+                    }))
+                    .await;
+            }
+            match backend {
+                ActiveBackend::Llama(model_path) => {
+                    self.ensure_server_for_model_with_profile(
+                        std::path::Path::new(model_path),
+                        profile,
+                        Some(model_id),
+                    )
+                    .await?;
+                }
+                ActiveBackend::Mlx => {
+                    let extra = self.extra_library_paths().await;
+                    let (kind, _) =
+                        models_store::resolve_mlx_launch_kind(&self.data_dir, model_id, &extra)?;
+                    self.ensure_mlx_server_for_model(model_id, kind, profile)
+                        .await?;
+                }
+                ActiveBackend::Vllm => {
+                    self.ensure_vllm_server_for_model(
+                        model_id.strip_prefix("vllm:").unwrap_or(model_id),
+                        profile,
+                    )
+                    .await?;
+                }
+                ActiveBackend::Remote { .. } => {}
+            }
+        }
+        self.backend_endpoint(backend).await
+    }
+
     pub async fn generate_stream(
         self: &Arc<Self>,
         request: &ChatCompletionRequest,
@@ -2543,7 +2789,8 @@ impl Runtime {
             );
             if let Err(error) = stream_tool_rounds(
                 &runtime,
-                &endpoint,
+                &backend,
+                endpoint,
                 request,
                 settings,
                 profile,
@@ -2606,13 +2853,28 @@ impl Runtime {
     /// Stop the resident local chat model without shutting down the daemon or
     /// any media/voice runtimes.
     pub async fn unload_chat_model(&self) {
-        if let Some(mut server) = self.llama.lock().await.server.take() {
+        let llama_server = {
+            let mut guard = self.llama.lock().await;
+            guard.generation = guard.generation.wrapping_add(1);
+            guard.server.take()
+        };
+        if let Some(mut server) = llama_server {
             let _ = server.stop().await;
         }
-        if let Some(mut server) = self.mlx.lock().await.server.take() {
+        let mlx_server = {
+            let mut guard = self.mlx.lock().await;
+            guard.generation = guard.generation.wrapping_add(1);
+            guard.server.take()
+        };
+        if let Some(mut server) = mlx_server {
             let _ = server.stop().await;
         }
-        if let Some(mut server) = self.vllm.lock().await.server.take() {
+        let vllm_server = {
+            let mut guard = self.vllm.lock().await;
+            guard.generation = guard.generation.wrapping_add(1);
+            guard.server.take()
+        };
+        if let Some(mut server) = vllm_server {
             let _ = server.stop().await;
         }
     }
@@ -2620,6 +2882,18 @@ impl Runtime {
     /// Stop any child inference servers (called on daemon shutdown).
     pub async fn shutdown(&self) {
         self.unload_chat_model().await;
+        let voice_server = {
+            let mut voice = self.voice.lock().await;
+            if let Some(active) = voice.sessions.active_session().await {
+                let id = active.id.clone();
+                let _ = voice.sessions.end_session(&id).await;
+            }
+            voice.server.take()
+        };
+        if let Some(mut server) = voice_server {
+            let _ = server.stop().await;
+        }
+        self.streaming_asr.lock().await.worker = None;
     }
 }
 
@@ -2642,7 +2916,7 @@ impl Engine for Runtime {
             images,
             documents,
         } = self.prepare_generation(request, None).await?;
-        let endpoint = self.backend_endpoint(&backend).await?;
+        let mut endpoint = self.backend_endpoint(&backend).await?;
         let tools_active = tool_registry::tools_enabled(
             &self.data_dir,
             &request,
@@ -2659,6 +2933,11 @@ impl Engine for Runtime {
         };
         let mut audio_fallback_attempted = false;
         for round in 0..MAX_TOOL_ROUNDS {
+            if round > 0 {
+                endpoint = self
+                    .ensure_round_endpoint(&backend, &request.model, profile.as_ref(), &None)
+                    .await?;
+            }
             let last_round = round + 1 == MAX_TOOL_ROUNDS;
             let mut body = llama::translate_chat_request(
                 &request,
@@ -3041,7 +3320,8 @@ async fn generated_media_context_messages(
 #[allow(clippy::too_many_arguments)]
 async fn stream_tool_rounds(
     runtime: &Runtime,
-    endpoint: &Endpoint,
+    backend: &ActiveBackend,
+    mut endpoint: Endpoint,
     mut request: ChatCompletionRequest,
     settings: RuntimeSettings,
     profile: Option<crate::model_settings::TextProfile>,
@@ -3070,7 +3350,13 @@ async fn stream_tool_rounds(
             .and_then(|profile| profile.context_size)
             .unwrap_or(settings.context_size),
     );
+    let load_tx = Some(tx.clone());
     for round in 0..MAX_TOOL_ROUNDS {
+        if round > 0 {
+            endpoint = runtime
+                .ensure_round_endpoint(backend, &request.model, profile.as_ref(), &load_tx)
+                .await?;
+        }
         let last_round = round + 1 == MAX_TOOL_ROUNDS;
         let mut body = llama::translate_chat_request(
             &request,
@@ -3116,6 +3402,7 @@ async fn stream_tool_rounds(
                         continue;
                     }
                 }
+                runtime.reap_dead_server().await;
                 return Err(error);
             }
         };
@@ -3125,7 +3412,13 @@ async fn stream_tool_rounds(
         let mut stream_content = None;
         let mut pending_content = String::new();
         while let Some(item) = chunks.recv().await {
-            let chunk = item?;
+            let chunk = match item {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    runtime.reap_dead_server().await;
+                    return Err(error);
+                }
+            };
             if let Some(usage) = chunk.usage {
                 prompt_tokens = usage.prompt_tokens.or(prompt_tokens);
                 if let Some(reported) = usage.completion_tokens {
@@ -3152,29 +3445,37 @@ async fn stream_tool_rounds(
                     first_token_at.get_or_insert_with(Instant::now);
                 }
                 round_text.push_str(&content);
-                match stream_content {
-                    Some(true) => {
-                        if tx.send(Ok(StreamEvent::Content(content))).await.is_err() {
-                            return Ok(());
-                        }
+                if !tools_active {
+                    stream_content = Some(true);
+                    if tx.send(Ok(StreamEvent::Content(content))).await.is_err() {
+                        return Ok(());
                     }
-                    Some(false) => {}
-                    None => {
-                        pending_content.push_str(&content);
-                        if let Some(first) = pending_content.chars().find(|ch| !ch.is_whitespace())
-                        {
-                            if first == '{' || first == '`' {
-                                stream_content = Some(false);
-                            } else {
-                                stream_content = Some(true);
-                                if tx
-                                    .send(Ok(StreamEvent::Content(std::mem::take(
-                                        &mut pending_content,
-                                    ))))
-                                    .await
-                                    .is_err()
-                                {
-                                    return Ok(());
+                } else {
+                    match stream_content {
+                        Some(true) => {
+                            if tx.send(Ok(StreamEvent::Content(content))).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                        Some(false) => {}
+                        None => {
+                            pending_content.push_str(&content);
+                            if let Some(first) =
+                                pending_content.chars().find(|ch| !ch.is_whitespace())
+                            {
+                                if first == '{' || first == '`' {
+                                    stream_content = Some(false);
+                                } else {
+                                    stream_content = Some(true);
+                                    if tx
+                                        .send(Ok(StreamEvent::Content(std::mem::take(
+                                            &mut pending_content,
+                                        ))))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return Ok(());
+                                    }
                                 }
                             }
                         }
@@ -3209,11 +3510,8 @@ async fn stream_tool_rounds(
         let calls = accumulator.into_calls();
         if !tools_active || calls.is_empty() {
             if stream_content != Some(true)
-                && !pending_content.is_empty()
-                && tx
-                    .send(Ok(StreamEvent::Content(pending_content)))
-                    .await
-                    .is_err()
+                && !round_text.is_empty()
+                && tx.send(Ok(StreamEvent::Content(round_text))).await.is_err()
             {
                 return Ok(());
             }

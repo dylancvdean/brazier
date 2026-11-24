@@ -350,6 +350,56 @@ describe('coordinator over the real agent adapter', () => {
     expect(coordinator.metrics().duplicateEventsIgnored).toBe(1)
   })
 
+  it('does not prematurely complete a multi-step agent turn on intermediate tool-calling messages', async () => {
+    const { bridge, voice, chat, coordinator } = await wired()
+    voice.emit({ type: 'userTranscriptFinal', utteranceId: 'utt-ms', text: 'Run the test suite.' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    bridge.emit('agent-1', agentEvent('run-started'))
+    bridge.emit(
+      'agent-1',
+      agentEvent('message-committed', {
+        message: {
+          role: 'assistant',
+          text: 'Let me run the tests.',
+          toolCalls: [{ id: 'tc-1', name: 'shell_run', arguments: { command: 'pnpm test' } }],
+          timestamp: ''
+        }
+      })
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // Turn must still be active after the intermediate tool-calling message.
+    expect(coordinator.snapshot().activeCorrelationId).not.toBeNull()
+    expect(chat.assistantMessages()).toHaveLength(0)
+
+    bridge.emit(
+      'agent-1',
+      agentEvent('message-committed', {
+        message: { role: 'assistant', text: 'All 42 tests passed.', timestamp: '' }
+      })
+    )
+    bridge.emit(
+      'agent-1',
+      agentEvent('run-completed', {
+        summary: {
+          filesChanged: [],
+          commandsRun: ['pnpm test'],
+          toolCalls: 1,
+          failures: [],
+          hostActions: [],
+          approvalsRequested: 0,
+          text: 'All 42 tests passed.'
+        }
+      })
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(coordinator.snapshot().activeCorrelationId).toBeNull()
+    expect(chat.assistantMessages()).toHaveLength(1)
+    expect(chat.assistantMessages()[0].content).toBe('All 42 tests passed.')
+  })
+
   it('cancels through the bridge only for the live turn', async () => {
     const { bridge, voice, coordinator } = await wired()
     voice.emit({ type: 'userTranscriptFinal', utteranceId: 'utt-1', text: 'Start the long build.' })

@@ -149,8 +149,12 @@ impl ComputerBroker {
                     .sessions
                     .into_iter()
                     .map(|mut item| {
-                        // A process cannot still be executing after daemon restart.
+                        // A process cannot still be executing after daemon restart,
+                        // and any pending approvals from before restart are stale.
                         item.record.running = false;
+                        item.pending.retain(|_, approval| {
+                            approval.approved == Some(false) || approval.consumed_at.is_some()
+                        });
                         (
                             item.record.id.clone(),
                             LiveSession {
@@ -408,14 +412,27 @@ impl ComputerBroker {
         Ok(frames.subscribe())
     }
     pub async fn list_steps(&self, id: &str) -> Result<Vec<ComputerStep>> {
-        Ok(self
-            .sessions
-            .lock()
-            .await
+        let sessions = self.sessions.lock().await;
+        let session = sessions
             .get(id)
-            .with_context(|| format!("unknown computer session {id}"))?
-            .steps
-            .clone())
+            .with_context(|| format!("unknown computer session {id}"))?;
+        let mut steps = session.steps.clone();
+        for step in &mut steps {
+            if let Some(result) = &mut step.result
+                && result.status == ComputerActionStatus::NeedsApproval
+                && result
+                    .approval_id
+                    .as_ref()
+                    .is_none_or(|id| session.pending.get(id).is_none_or(approval_is_expired))
+            {
+                let message = "This approval expired or was cancelled.";
+                result.status = ComputerActionStatus::Refused;
+                result.needs_approval = false;
+                result.message = Some(message.into());
+                step.content = message.into();
+            }
+        }
+        Ok(steps)
     }
 
     /// Only narrative/user/model steps should use this. Tool results are
@@ -449,6 +466,9 @@ impl ComputerBroker {
             let session = sessions
                 .get_mut(session_id)
                 .with_context(|| format!("unknown computer session {session_id}"))?;
+            if role == "user" {
+                session.cancel.reset();
+            }
             session.record.updated_at = step.created_at.clone();
             session.steps.push(step.clone());
         }
@@ -464,6 +484,17 @@ impl ComputerBroker {
             .map(|s| Arc::clone(&s.action_gate))
             .with_context(|| format!("unknown computer session {session_id}"))
     }
+    async fn clear_dead_browser(&self, session_id: &str, browser_id: &str) {
+        self.browsers.close(browser_id).await;
+        self.screencasts.lock().await.remove(session_id);
+        let mut sessions = self.sessions.lock().await;
+        if let Some(session) = sessions.get_mut(session_id)
+            && session.browser_id.as_deref() == Some(browser_id)
+        {
+            session.browser_id = None;
+        }
+    }
+
     async fn ensure_browser(&self, session_id: &str) -> Result<String> {
         if let Some(id) = self
             .sessions
@@ -472,7 +503,10 @@ impl ComputerBroker {
             .get(session_id)
             .and_then(|s| s.browser_id.clone())
         {
-            return Ok(id);
+            if self.browsers.is_alive(&id).await {
+                return Ok(id);
+            }
+            self.clear_dead_browser(session_id, &id).await;
         }
         let viewport = self
             .sessions
@@ -485,9 +519,16 @@ impl ComputerBroker {
             .clone();
         let id = self.browsers.open(viewport).await?;
         let mut sessions = self.sessions.lock().await;
-        let session = sessions
-            .get_mut(session_id)
-            .context("session disappeared while starting browser")?;
+        let Some(session) = sessions.get_mut(session_id) else {
+            drop(sessions);
+            self.browsers.close(&id).await;
+            bail!("session disappeared while starting browser");
+        };
+        if let Some(existing) = session.browser_id.clone() {
+            drop(sessions);
+            self.browsers.close(&id).await;
+            return Ok(existing);
+        }
         session.browser_id = Some(id.clone());
         Ok(id)
     }
@@ -647,9 +688,8 @@ impl ComputerBroker {
                         decided_by_client_id: None,
                     }
                 };
-                // The pending request is itself an authoritative tool record:
-                // after a daemon/UI restart the renderer can recover its
-                // approval id from this durable `needs_approval` step.
+                // Record the request so a reconnected renderer can recover the
+                // pending approval while this daemon is still running.
                 self.record(&request.session_id, request.action, result.clone())
                     .await?;
                 return Ok(result);
@@ -669,7 +709,7 @@ impl ComputerBroker {
                 if pending.approved != Some(true) {
                     bail!("approval has not been approved through the decision endpoint");
                 }
-                if pending.consumed_at.is_some() {
+                if pending.consumed_at.is_some() || approval_is_expired(pending) {
                     bail!("approval not found or already spent");
                 }
                 pending.consumed_at = Some(now_stamp());
@@ -696,11 +736,16 @@ impl ComputerBroker {
         // driver receives the action.
         let driver_action = request.action.scaled_for_viewport(&viewport);
         let cancel = {
-            let sessions = self.sessions.lock().await;
+            let mut sessions = self.sessions.lock().await;
             let session = sessions
-                .get(&request.session_id)
+                .get_mut(&request.session_id)
                 .context("session disappeared")?;
-            session.cancel.reset();
+            if session.cancel.is_cancelled() {
+                session.record.running = false;
+                drop(sessions);
+                let _ = self.persist().await;
+                return Ok(self.located_result(Self::refusal("Computer Use was stopped.")));
+            }
             session.cancel.clone()
         };
         let executed = match &request.action {
@@ -746,7 +791,8 @@ impl ComputerBroker {
             _ => match target {
                 ComputerTarget::Browser => match self.ensure_browser(&request.session_id).await {
                     Ok(id) => {
-                        self.browsers
+                        let res = self
+                            .browsers
                             .execute(
                                 &id,
                                 &driver_action,
@@ -755,7 +801,11 @@ impl ComputerBroker {
                                     .unwrap_or_else(|| self.action_settle_delay_ms()),
                                 Some(cancel.as_ref()),
                             )
-                            .await
+                            .await;
+                        if res.is_err() && !self.browsers.is_alive(&id).await {
+                            self.clear_dead_browser(&request.session_id, &id).await;
+                        }
+                        res
                     }
                     Err(error) => Err(error),
                 },
@@ -809,11 +859,24 @@ impl ComputerBroker {
     ) -> Result<Option<ComputerActionResult>> {
         let (session_id, action, execution_location) = {
             let mut sessions = self.sessions.lock().await;
-            let pending = sessions
-                .values_mut()
-                .find_map(|session| session.pending.get_mut(approval_id))
-                .context("unknown approval")?;
+            let Some((session_id, pending)) = sessions.values_mut().find_map(|session| {
+                session
+                    .pending
+                    .get_mut(approval_id)
+                    .map(|pending| (session.record.id.clone(), pending))
+            }) else {
+                bail!("unknown approval");
+            };
             anyhow::ensure!(pending.approved.is_none(), "approval was already decided");
+            if approval_is_expired(pending) {
+                let id = approval_id.to_owned();
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.pending.remove(&id);
+                }
+                drop(sessions);
+                let _ = self.persist().await;
+                bail!("approval expired");
+            }
             if let Some(expected) = expected_execution_location {
                 anyhow::ensure!(
                     pending.execution_location.as_ref() == Some(expected),
@@ -898,15 +961,9 @@ impl ComputerBroker {
             bail!("live preview is only available for browser sessions");
         }
         let id = self.ensure_browser(session_id).await?;
-        let cancel = {
-            let sessions = self.sessions.lock().await;
-            let session = sessions.get(session_id).context("session disappeared")?;
-            session.cancel.reset();
-            session.cancel.clone()
-        };
         let result = self
             .browsers
-            .execute(&id, &ComputerAction::Screenshot, 0, Some(cancel.as_ref()))
+            .execute(&id, &ComputerAction::Screenshot, 0, None)
             .await?;
         Ok(self.located_result(result))
     }
@@ -959,6 +1016,7 @@ impl ComputerBroker {
                     session.desktop_authorized = false;
                     session.record.running = false;
                     session.cancel.trip();
+                    session.pending.retain(|_, item| item.approved.is_some());
                     had_desktop = true;
                 }
             }
@@ -983,7 +1041,9 @@ impl ComputerBroker {
             bail!("desktop safety authority can only be granted to a desktop session");
         }
         session.desktop_authorized = authorized;
-        if !authorized {
+        if authorized {
+            session.cancel.reset();
+        } else {
             session.record.running = false;
         }
         Ok(())
@@ -1025,13 +1085,25 @@ impl Default for ComputerBroker {
         Self::new()
     }
 }
-fn now_stamp() -> String {
+const COMPUTER_APPROVAL_TTL_MS: u128 = 15 * 60 * 1_000;
+
+fn now_millis() -> u128 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
-        .to_string()
+}
+
+fn now_stamp() -> String {
+    now_millis().to_string()
+}
+
+fn approval_is_expired(pending: &PendingComputerApproval) -> bool {
+    let Ok(created) = pending.created_at.parse::<u128>() else {
+        return false;
+    };
+    now_millis().saturating_sub(created) > COMPUTER_APPROVAL_TTL_MS
 }
 
 #[cfg(test)]
@@ -1124,27 +1196,22 @@ mod tests {
                 },
             );
         }
-        broker.persist().await.unwrap();
-        drop(broker);
-        let restored = ComputerBroker::open_at(
-            &path,
-            ExecutionLocation::daemon("daemon-42", "Renamed daemon"),
-        )
-        .await
-        .unwrap();
-        let restored_session = restored.get_session(&session.id).await.unwrap();
-        assert_eq!(restored_session.owner_client_id, "paired-client-42");
-        assert!(!restored_session.running);
-        assert_eq!(restored_session.memories, vec!["persist me"]);
-        assert_eq!(restored.list_steps(&session.id).await.unwrap().len(), 1);
+        let stale_id = Uuid::new_v4().to_string();
+        {
+            let mut sessions = broker.sessions.lock().await;
+            let pending = &mut sessions.get_mut(&session.id).unwrap().pending;
+            let mut stale = pending[&approval_id].clone();
+            stale.id = stale_id.clone();
+            pending.insert(stale_id.clone(), stale);
+        }
         assert!(
-            restored
+            broker
                 .decide_approval(&approval_id, false, Some(&location), "desktop-client")
                 .await
                 .unwrap()
                 .is_some()
         );
-        drop(restored);
+        drop(broker);
 
         let recovered = ComputerBroker::open_at(
             &path,
@@ -1152,7 +1219,13 @@ mod tests {
         )
         .await
         .unwrap();
+        let restored_session = recovered.get_session(&session.id).await.unwrap();
+        assert_eq!(restored_session.owner_client_id, "paired-client-42");
+        assert!(!restored_session.running);
+        assert_eq!(restored_session.memories, vec!["persist me"]);
+        assert_eq!(recovered.list_steps(&session.id).await.unwrap().len(), 2);
         let sessions = recovered.sessions.lock().await;
+        assert!(!sessions[&session.id].pending.contains_key(&stale_id));
         let audit = &sessions[&session.id].pending[&approval_id];
         assert_eq!(audit.approved, Some(false));
         assert_eq!(
@@ -1347,5 +1420,60 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(approved.approval_id.as_deref(), Some(approval_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn stop_persists_until_a_new_user_turn_or_desktop_authority_resumes() {
+        let broker = ComputerBroker::new();
+        let session = broker
+            .create_session(
+                None,
+                ComputerTarget::Desktop,
+                None,
+                ComputerPermissionMode::Ask,
+                None,
+            )
+            .await
+            .unwrap();
+
+        broker.stop(&session.id).await.unwrap();
+        {
+            let sessions = broker.sessions.lock().await;
+            assert!(
+                sessions.get(&session.id).unwrap().cancel.is_cancelled(),
+                "stop must latch cancel on the session"
+            );
+        }
+
+        // Appending an assistant step must not clear a latched stop.
+        broker
+            .append_step(&session.id, "assistant", "stopped", None, None, None)
+            .await
+            .unwrap();
+        {
+            let sessions = broker.sessions.lock().await;
+            assert!(sessions.get(&session.id).unwrap().cancel.is_cancelled());
+        }
+
+        // Starting a new user turn clears the latched stop.
+        broker
+            .append_step(&session.id, "user", "continue", None, None, None)
+            .await
+            .unwrap();
+        {
+            let sessions = broker.sessions.lock().await;
+            assert!(!sessions.get(&session.id).unwrap().cancel.is_cancelled());
+        }
+
+        // Granting desktop authority also clears a latched stop.
+        broker.stop(&session.id).await.unwrap();
+        broker
+            .set_desktop_authority(&session.id, true)
+            .await
+            .unwrap();
+        {
+            let sessions = broker.sessions.lock().await;
+            assert!(!sessions.get(&session.id).unwrap().cancel.is_cancelled());
+        }
     }
 }

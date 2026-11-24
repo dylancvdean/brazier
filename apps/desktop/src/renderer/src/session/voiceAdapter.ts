@@ -139,9 +139,20 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     // assigning `this.stream`. Without this check, the stream we build here is
     // orphaned: nobody can stop it, and the Silero model it loaded stays resident.
     const generation = ++this.sessionGeneration
-    const bailBeforeStream = async (session: VoiceSessionInfo | null) => {
-      await this.stopVad()
-      if (session) await endVoiceSession(session.id).catch(() => undefined)
+    let localVad: StreamingSileroVad | null = null
+    const cleanupAttempt = async (session: VoiceSessionInfo | null) => {
+      if (localVad) {
+        if (this.vad === localVad) {
+          this.vad = null
+          this.vadHealthy = false
+          this.speechProbability = null
+        }
+        await localVad.release().catch(() => undefined)
+        localVad = null
+      }
+      if (session && session.id !== this.sessionId) {
+        await endVoiceSession(session.id).catch(() => undefined)
+      }
     }
 
     // The bounded context becomes the launch persona: it is the only runtime
@@ -149,7 +160,7 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     const persona = renderVoicePrompt(context)
     const session = await this.openSession(persona)
     if (generation !== this.sessionGeneration) {
-      await bailBeforeStream(session)
+      await cleanupAttempt(session)
       throw new Error('Voice session was cancelled before it started.')
     }
     this.sessionInfo = session
@@ -175,28 +186,29 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
         this.publish({ type: 'utteranceDiscarded', utteranceId })
       }
     })
-    await this.startVad()
+    localVad = await this.createVad(generation)
     if (generation !== this.sessionGeneration) {
-      await bailBeforeStream(session)
+      await cleanupAttempt(session)
       throw new Error('Voice session was cancelled before it started.')
     }
+    this.vad = localVad
+    this.vadHealthy = localVad !== null
 
     const stream = this.createStream()
     try {
       await stream.start(this.wsUrl(session, persona), session.ws_protocol)
     } catch (cause) {
       await stream.stop()
-      await this.stopVad()
-      await endVoiceSession(session.id).catch(() => undefined)
+      await cleanupAttempt(session)
       throw cause
     }
     if (generation !== this.sessionGeneration) {
       await stream.stop()
-      await this.stopVad()
-      await endVoiceSession(session.id).catch(() => undefined)
+      await cleanupAttempt(session)
       throw new Error('Voice session was cancelled before it started.')
     }
     this.stream = stream
+    stream.setMuted(this.muted)
     this.applyModelAudioGate()
     this.sessionId = session.id
     this.captureFrames = 0
@@ -266,7 +278,6 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
     this.sessionInfo = null
     this.sessionGeneration += 1
     this.stopCaptureReports()
-    this.segmenter?.flush()
     this.segmenter = null
     await this.stopVad()
     this.abandonSpeculative()
@@ -367,17 +378,25 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
   }
 
   /** Load the bundled model before capture starts, falling back without failing voice. */
-  private async startVad(): Promise<void> {
+  private async createVad(generation: number): Promise<StreamingSileroVad | null> {
     try {
       const model = await SileroVadModel.create()
-      this.vadHealthy = true
-      this.vad = new StreamingSileroVad(
+      return new StreamingSileroVad(
         model,
-        (frame) => this.onVadFrame(frame),
-        (error) => this.onVadError(error)
+        (frame) => {
+          if (generation !== this.sessionGeneration) return
+          this.onVadFrame(frame)
+        },
+        (error) => {
+          if (generation !== this.sessionGeneration) return
+          this.onVadError(error)
+        }
       )
     } catch (cause) {
-      this.onVadError(cause instanceof Error ? cause.message : String(cause))
+      if (generation === this.sessionGeneration) {
+        this.onVadError(cause instanceof Error ? cause.message : String(cause))
+      }
+      return null
     }
   }
 
@@ -703,6 +722,12 @@ export class PersonaPlexVoiceAdapter implements VoiceAdapter {
       }
       this.publish({ type: 'userTranscriptFinal', utteranceId: utterance.id, text })
     } catch (cause) {
+      if (
+        generation !== this.sessionGeneration ||
+        (cause instanceof Error && cause.name === 'AbortError')
+      ) {
+        return
+      }
       const message = cause instanceof Error ? cause.message : String(cause)
       console.warn(`[voice] transcription failed: ${message}`)
       this.options.onTranscriptionError?.(message)

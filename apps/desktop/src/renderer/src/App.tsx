@@ -153,7 +153,7 @@ import {
   visionCapabilityTitle,
   withMergedCapabilities
 } from './model-utils'
-import { branchSiblings, messageChain } from './graph'
+import { branchSiblings, messageChain, ROOT_TIP } from './graph'
 import { buildChatDisplayItems } from './chatDisplay'
 import {
   CHAT_SLASH_SUGGESTIONS,
@@ -700,6 +700,27 @@ export function App(): React.JSX.Element {
   const [agentSidebar, setAgentSidebar] = useState<AgentSidebarControls | null>(null)
   const [computerSidebar, setComputerSidebar] = useState<ComputerSidebarControls | null>(null)
   const profileId = connectionProfile?.id ?? initialProfileId
+  const profileIdRef = useRef(profileId)
+  profileIdRef.current = profileId
+  const conversationIdRef = useRef(conversationId)
+  conversationIdRef.current = conversationId
+  const conversationsRef = useRef(conversations)
+  conversationsRef.current = conversations
+  const conversationSearchRef = useRef(conversationSearch)
+  conversationSearchRef.current = conversationSearch
+  const selectedModelRef = useRef(selectedModel)
+  selectedModelRef.current = selectedModel
+  const busyRef = useRef(busy)
+  busyRef.current = busy
+  const memoryPreferenceRef = useRef(memoryPreference)
+  memoryPreferenceRef.current = memoryPreference
+  const skipNextConversationLoadRef = useRef<string | null>(null)
+  const creatingConversationRef = useRef(false)
+  const pendingIncognitoActionRef = useRef<(() => void) | null>(null)
+  const renameCancelledRef = useRef(false)
+  const titleAbortControllersRef = useRef<Map<string, AbortController>>(new Map())
+  const chatScrollContainerRef = useRef<HTMLDivElement>(null)
+  const stickToBottomRef = useRef(true)
   const modelOpIdRef = useRef(0)
   const userUnloadedRef = useRef(false)
 
@@ -713,8 +734,19 @@ export function App(): React.JSX.Element {
     let active = true
     const apply = (profile: ConnectionProfileSummary): void => {
       if (!active) return
-      if (profile.id !== profileId) {
+      if (profile.id !== profileIdRef.current) {
+        profileIdRef.current = profile.id
         userUnloadedRef.current = false
+        prepareAbortRef.current?.abort()
+        abortRef.current?.abort()
+        abortRef.current = undefined
+        chatTurnRef.current += 1
+        messageRefreshRef.current += 1
+        conversationRefreshRef.current += 1
+        for (const controller of titleAbortControllersRef.current.values()) {
+          controller.abort()
+        }
+        titleAbortControllersRef.current.clear()
         const cachedModels = readCachedModels(profile.id)
         setConversations(readCachedConversations(profile.id))
         setLocalModels(cachedModels)
@@ -723,8 +755,21 @@ export function App(): React.JSX.Element {
         setPrefetchedRuntimes(cachedRuntimes.length > 0 ? cachedRuntimes : null)
         setEnabledTools(readEnabledTools(profile.id))
         setGenerateHistory(readGenerateHistory(profile.id))
+        setSelectedModel('')
+        setModelResidency(null)
+        setModelPrepareState('idle')
+        setModelProfiles({})
+        setRuntime(null)
+        setAttachments([])
+        setBusy(false)
+        setStreamingText('')
+        setStreamingReasoning('')
+        setStreamingTools([])
+        setStreamingToolOffsets([])
+        conversationIdRef.current = null
         setConversationId(null)
         setMessages([])
+        setTipId(null)
       }
       setConnectionProfile(profile)
     }
@@ -916,15 +961,17 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function refreshLocalModels(): Promise<void> {
+  const refreshLocalModels = useCallback(async (): Promise<void> => {
+    const activeProfile = profileIdRef.current
     const models = await listModels()
+    if (profileIdRef.current !== activeProfile) return
     setLocalModels(models)
-    writeCachedModels(profileId, models)
+    writeCachedModels(activeProfile, models)
     setSelectedModel((current) => {
       if (current && models.some((model) => model.id === current)) return current
       return ''
     })
-  }
+  }, [])
 
   const selectModel = useCallback((modelId: string, mode?: ModelLoadMode): void => {
     if (modelId.startsWith('whisper:') || modelId.startsWith('streaming-asr:')) {
@@ -1001,7 +1048,7 @@ export function App(): React.JSX.Element {
   }, [appMode, refreshCapabilities])
 
   const switchAppMode = useCallback(
-    (next: AppMode): void => {
+    (next: AppMode, options?: { skipModelPrepare?: boolean }): void => {
       if (next === appMode) return
       const draftKey = (mode: AppMode): 'chat' | 'agent' | 'computer' =>
         mode === 'agent' || mode === 'computer' ? mode : 'chat'
@@ -1010,18 +1057,19 @@ export function App(): React.JSX.Element {
       if (next !== 'chat') setAttachments([])
       if (appMode === 'chat' && busy && next !== 'chat') abortChatGeneration()
       setAppMode(next)
-      if ((next === 'chat' || next === 'agent') && selectedModel) {
+      const currentModel = selectedModelRef.current
+      if (!options?.skipModelPrepare && (next === 'chat' || next === 'agent') && currentModel) {
         if (busy) abortChatGeneration()
-        selectModel(selectedModel, next)
+        selectModel(currentModel, next)
       }
       // Chat stays mounted while other modes are active; re-read the open
       // conversation when returning so the next completion uses the same
       // history shown on screen (mirrors agent session rehydrate).
-      if (next === 'chat' && conversationId) {
-        void refreshMessages(conversationId).catch(() => undefined)
+      if (next === 'chat' && conversationIdRef.current) {
+        void refreshMessages(conversationIdRef.current).catch(() => undefined)
       }
     },
-    [appMode, selectedModel, selectModel, conversationId, draft, busy, abortChatGeneration]
+    [appMode, selectModel, draft, busy, abortChatGeneration]
   )
 
   const unloadSelectedModel = useCallback(async (): Promise<void> => {
@@ -1301,6 +1349,7 @@ export function App(): React.JSX.Element {
     incognito,
     responder: voiceResponder,
     onMessage: (message) => {
+      if (message.conversation_id !== conversationIdRef.current) return
       setMessages((current) =>
         current.some((entry) => entry.id === message.id)
           ? current.map((entry) => (entry.id === message.id ? message : entry))
@@ -1402,25 +1451,33 @@ export function App(): React.JSX.Element {
   }
 
   async function prefetchRuntimes(): Promise<void> {
+    const activeProfile = profileIdRef.current
     try {
       const response = await listRuntimes()
+      if (profileIdRef.current !== activeProfile) return
       setPrefetchedRuntimes(response.data)
-      writeCachedRuntimes(profileId, response.data)
+      writeCachedRuntimes(activeProfile, response.data)
     } catch {
       // Best-effort prefetch — Manage panel falls back to its own fetch.
     }
   }
 
-  async function refreshConversations(query = conversationSearch): Promise<void> {
+  async function refreshConversations(query = conversationSearchRef.current): Promise<void> {
+    const activeProfile = profileIdRef.current
     const refreshId = ++conversationRefreshRef.current
     const data = await listConversations(query)
     // Search requests can resolve out of order while the user types. Only the
-    // newest query is allowed to replace the visible results or selection.
-    if (refreshId !== conversationRefreshRef.current) return
+    // newest query for the current profile is allowed to replace results.
+    if (refreshId !== conversationRefreshRef.current || profileIdRef.current !== activeProfile) {
+      return
+    }
     setConversations(data)
     // Only an unfiltered list is worth caching for the next cold start.
-    if (!query.trim()) writeCachedConversations(profileId, data)
-    if (!conversationId && data[0]) setConversationId(data[0].id)
+    if (!query.trim()) writeCachedConversations(activeProfile, data)
+    if (!conversationIdRef.current && !incognitoRef.current && data[0]) {
+      conversationIdRef.current = data[0].id
+      setConversationId(data[0].id)
+    }
   }
 
   async function exportConversationFile(id: string): Promise<void> {
@@ -1460,7 +1517,7 @@ export function App(): React.JSX.Element {
     if (id === INCOGNITO_ID) return
     const refreshId = ++messageRefreshRef.current
     const data = await listMessages(id)
-    if (refreshId !== messageRefreshRef.current || id !== conversationId) return
+    if (refreshId !== messageRefreshRef.current || id !== conversationIdRef.current) return
     setMessages(data)
     setTipId(preferredTip ?? data.at(-1)?.id ?? null)
   }
@@ -1594,6 +1651,8 @@ export function App(): React.JSX.Element {
     // stale, even if it completes after this effect has begun loading the new
     // conversation.
     messageRefreshRef.current += 1
+    const loadId = messageRefreshRef.current
+    stickToBottomRef.current = true
     if (incognito) {
       // The ephemeral session lives entirely in renderer state: no daemon
       // conversation to load, no runs, and any stale fetch is abandoned.
@@ -1606,17 +1665,34 @@ export function App(): React.JSX.Element {
       setExpandedRunId(null)
       return
     }
+    if (skipNextConversationLoadRef.current === conversationId) {
+      // `submit()` just created this conversation and owns its first-turn load;
+      // avoid racing with `persistChatMessage` and wiping optimistic state.
+      skipNextConversationLoadRef.current = null
+      return
+    }
     setError(null)
-    refreshMessages(conversationId).catch((cause: unknown) =>
-      setError(cause instanceof Error ? cause.message : String(cause))
-    )
+    refreshMessages(conversationId).catch((cause: unknown) => {
+      if (messageRefreshRef.current === loadId) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      }
+    })
     void listRunSnapshots(conversationId)
-      .then(setRunSnapshots)
-      .catch(() => setRunSnapshots([]))
+      .then((snapshots) => {
+        if (messageRefreshRef.current === loadId && conversationIdRef.current === conversationId) {
+          setRunSnapshots(snapshots)
+        }
+      })
+      .catch(() => {
+        if (messageRefreshRef.current === loadId && conversationIdRef.current === conversationId) {
+          setRunSnapshots([])
+        }
+      })
   }, [conversationId, incognito])
 
   useEffect(() => {
-    scrollAnchor.current?.scrollIntoView({ behavior: 'smooth' })
+    if (!stickToBottomRef.current) return
+    scrollAnchor.current?.scrollIntoView({ behavior: liveText ? 'auto' : 'smooth' })
   }, [chain.length, liveText])
 
   // Entering Voice mode is exactly when a runtime or model installed since
@@ -1660,28 +1736,61 @@ export function App(): React.JSX.Element {
     void session.endVoice()
   }, [appMode, session.endVoice, session.snapshot.voiceStatus])
 
-  async function newConversation(): Promise<void> {
-    abortChatGeneration()
-    if (incognito) setIncognito(false)
-    setIncognitoDiscardOpen(false)
-    const conversation = await createConversation()
-    await refreshConversations()
-    // Invalidate in-flight loads for the previous chat before clearing its
-    // display. This matters most after Stop, when a final fetch may still be
-    // resolving in the background.
-    messageRefreshRef.current += 1
-    setConversationId(conversation.id)
-    setMessages([])
-    setTipId(null)
-    setDraft('')
+  function confirmOrLeaveIncognito(proceed: () => void): void {
+    if (incognitoRef.current && messages.length > 0) {
+      pendingIncognitoActionRef.current = proceed
+      setIncognitoDiscardOpen(true)
+      return
+    }
+    proceed()
+  }
+
+  async function newConversation(options?: { bypassIncognitoConfirm?: boolean }): Promise<void> {
+    if (!options?.bypassIncognitoConfirm && incognitoRef.current && messages.length > 0) {
+      pendingIncognitoActionRef.current = () => {
+        void newConversation({ bypassIncognitoConfirm: true })
+      }
+      setIncognitoDiscardOpen(true)
+      return
+    }
+    if (creatingConversationRef.current) return
+    creatingConversationRef.current = true
+    try {
+      abortChatGeneration()
+      if (incognitoRef.current) {
+        incognitoRef.current = false
+        setIncognito(false)
+      }
+      setIncognitoDiscardOpen(false)
+      pendingIncognitoActionRef.current = null
+      const conversation = await createConversation()
+      // Invalidate in-flight loads for the previous chat before clearing its
+      // display. This matters most after Stop, when a final fetch may still be
+      // resolving in the background.
+      messageRefreshRef.current += 1
+      conversationIdRef.current = conversation.id
+      setConversationId(conversation.id)
+      setMessages([])
+      setTipId(null)
+      setDraft('')
+      setAttachments([])
+      await refreshConversations()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      creatingConversationRef.current = false
+    }
   }
 
   /** Begin a private session: no persistence, no memory, discarded on leave. */
   function startIncognito(): void {
     if (busy || dreamAbortRef.current) return
+    incognitoRef.current = true
     setIncognito(true)
     setIncognitoDiscardOpen(false)
+    pendingIncognitoActionRef.current = null
     messageRefreshRef.current += 1
+    conversationIdRef.current = INCOGNITO_ID
     setConversationId(INCOGNITO_ID)
     setMessages([])
     setTipId(null)
@@ -1695,16 +1804,20 @@ export function App(): React.JSX.Element {
   /** Leave incognito, discarding the ephemeral conversation. */
   function leaveIncognito(): void {
     if (busy) return
+    incognitoRef.current = false
     setIncognito(false)
     setIncognitoDiscardOpen(false)
+    pendingIncognitoActionRef.current = null
     messageRefreshRef.current += 1
+    conversationIdRef.current = null
     setConversationId(null)
     setMessages([])
     setTipId(null)
     setRunSnapshots([])
     setExpandedRunId(null)
     setDraft('')
-    void refreshConversations()
+    setAttachments([])
+    void refreshConversations().catch(() => undefined)
   }
 
   function toggleIncognito(): void {
@@ -1712,6 +1825,7 @@ export function App(): React.JSX.Element {
       // Discarding a non-empty session is destructive; arm the inline confirm
       // rather than popping a native dialog.
       if (messages.length > 0) {
+        pendingIncognitoActionRef.current = null
         setIncognitoDiscardOpen(true)
         return
       }
@@ -1726,7 +1840,8 @@ export function App(): React.JSX.Element {
   async function runDream(): Promise<void> {
     setDreamPromptOpen(false)
     if (dreamAbortRef.current) return
-    if (!selectedModel) {
+    const dreamModel = selectedModelRef.current
+    if (!dreamModel) {
       setError('Select a chat model before running dreaming.')
       return
     }
@@ -1749,11 +1864,11 @@ export function App(): React.JSX.Element {
         }))
       const memories = await listMemories()
       const result = await dream({
-        model: selectedModel,
+        model: dreamModel,
         signal: controller.signal,
         memories,
         conversations,
-        prompt: memoryPreference?.dream_prompt ?? undefined,
+        prompt: memoryPreferenceRef.current?.dream_prompt ?? undefined,
         onLoad: (event) => setDreamStatus(dreamStatusForLoad(event))
       })
       markDreamed()
@@ -1775,6 +1890,8 @@ export function App(): React.JSX.Element {
       dreamAbortRef.current = undefined
     }
   }
+  const runDreamRef = useRef(runDream)
+  runDreamRef.current = runDream
 
   /** Clear the dreaming notice a few seconds after a pass ends. */
   function scheduleDreamStatusDismiss(): void {
@@ -1790,9 +1907,12 @@ export function App(): React.JSX.Element {
   function markDreamed(): void {
     const now = Date.now()
     lastDreamAtRef.current = now
+    const latest = memoryPreferenceRef.current
     setMemoryPreference((current) => (current ? { ...current, last_dream_at: now } : current))
-    if (memoryPreference) {
-      void saveMemoryPreference({ ...memoryPreference, last_dream_at: now }).catch(() => undefined)
+    if (latest) {
+      const next = { ...latest, last_dream_at: now }
+      memoryPreferenceRef.current = next
+      void saveMemoryPreference(next).catch(() => undefined)
     }
   }
 
@@ -1803,25 +1923,37 @@ export function App(): React.JSX.Element {
    * configured interval (default weekly).
    */
   function scheduleDream(): void {
-    const mode = memoryPreference?.dreaming
-    if (!mode || mode === 'off' || incognito || !selectedModel) return
+    const pref = memoryPreferenceRef.current
+    const mode = pref?.dreaming
+    if (!mode || mode === 'off' || incognitoRef.current || !selectedModelRef.current) return
     const intervalMs =
-      (memoryPreference?.dream_interval_days ?? DEFAULT_MEMORY_PREFERENCE.dream_interval_days) *
+      (pref?.dream_interval_days ?? DEFAULT_MEMORY_PREFERENCE.dream_interval_days) *
       24 *
       60 *
       60 *
       1000
-    const lastDreamAt = memoryPreference?.last_dream_at ?? lastDreamAtRef.current
+    const lastDreamAt = pref?.last_dream_at ?? lastDreamAtRef.current
     // Don't re-dream within the interval, or while the user is actively using
     // the app (a new submit clears this timer).
     if (Date.now() - lastDreamAt < intervalMs) return
     if (dreamTimerRef.current !== undefined) window.clearTimeout(dreamTimerRef.current)
     dreamTimerRef.current = window.setTimeout(() => {
       dreamTimerRef.current = undefined
-      if (busy || dreamAbortRef.current) return
-      if (mode === 'auto') {
-        void runDream()
-      } else if (mode === 'ask') {
+      const livePref = memoryPreferenceRef.current
+      const liveMode = livePref?.dreaming
+      if (
+        busyRef.current ||
+        dreamAbortRef.current ||
+        incognitoRef.current ||
+        !selectedModelRef.current ||
+        !liveMode ||
+        liveMode === 'off'
+      ) {
+        return
+      }
+      if (liveMode === 'auto') {
+        void runDreamRef.current()
+      } else if (liveMode === 'ask') {
         setDreamPromptOpen(true)
       }
     }, 2 * 60 * 1000)
@@ -1855,6 +1987,11 @@ export function App(): React.JSX.Element {
     ) {
       return
     }
+    const modelForTitle = selectedModelRef.current
+    if (!modelForTitle) return
+    titleAbortControllersRef.current.get(id)?.abort()
+    const controller = new AbortController()
+    titleAbortControllersRef.current.set(id, controller)
     const titleMessages: Message[] = [
       {
         id: 'title-instruction',
@@ -1876,56 +2013,90 @@ export function App(): React.JSX.Element {
         created_at: new Date().toISOString()
       }
     ]
-    void streamCompletion(titleMessages, selectedModel, new AbortController().signal, () => {}, {
+    void streamCompletion(titleMessages, modelForTitle, controller.signal, () => {}, {
       toolChoice: 'none'
     })
       .then(({ responseText }) => {
+        if (controller.signal.aborted) return
         const title = titleFromCompletion(responseText)
         if (!title) return
-        return updateConversation(id, { title }).then(() => refreshConversations(''))
+        // Do not overwrite if the user manually renamed this conversation while
+        // the background title request was in flight.
+        const current = conversationsRef.current.find((entry) => entry.id === id)
+        if (current && current.title !== 'New conversation') return
+        return updateConversation(id, { title }).then(() =>
+          refreshConversations(conversationSearchRef.current)
+        )
       })
       .catch(() => {
         // Naming is a convenience. A completed chat must not report an error
         // because its optional title request failed.
       })
+      .finally(() => {
+        if (titleAbortControllersRef.current.get(id) === controller) {
+          titleAbortControllersRef.current.delete(id)
+        }
+      })
   }
 
   function startRename(conversation: Conversation): void {
     setConversationMenuId(null)
+    renameCancelledRef.current = false
     setRenaming({ id: conversation.id, draft: conversation.title })
   }
 
   async function commitRename(conversation: Conversation, draftTitle: string): Promise<void> {
+    if (renameCancelledRef.current) {
+      renameCancelledRef.current = false
+      return
+    }
     setRenaming(null)
     const title = draftTitle.trim()
     if (!title || title === conversation.title) return
+    titleAbortControllersRef.current.get(conversation.id)?.abort()
     setConversations((current) =>
       current.map((entry) => (entry.id === conversation.id ? { ...entry, title } : entry))
     )
     try {
       await updateConversation(conversation.id, { title })
-      await refreshConversations(conversationSearch)
+      await refreshConversations(conversationSearchRef.current)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
-      void refreshConversations(conversationSearch).catch(() => undefined)
+      void refreshConversations(conversationSearchRef.current).catch(() => undefined)
     }
   }
 
   async function removeConversation(conversation: Conversation): Promise<void> {
     setConversationMenuId(null)
     setConfirmDeleteId(null)
+    titleAbortControllersRef.current.get(conversation.id)?.abort()
+    titleAbortControllersRef.current.delete(conversation.id)
+    const wasSelected = conversation.id === conversationIdRef.current
+    if (wasSelected) {
+      abortChatGeneration()
+      messageRefreshRef.current += 1
+      conversationIdRef.current = null
+      setConversationId(null)
+      setMessages([])
+      setTipId(null)
+      setAttachments([])
+    }
     try {
       await deleteConversation(conversation.id)
-      if (conversation.id === conversationId) {
-        setConversationId(null)
-        setMessages([])
-        setTipId(null)
-      }
+      const refreshId = ++conversationRefreshRef.current
+      const activeProfile = profileIdRef.current
       const remaining = await listConversations('')
+      if (refreshId !== conversationRefreshRef.current || profileIdRef.current !== activeProfile) {
+        return
+      }
       setConversations(remaining)
-      writeCachedConversations(profileId, remaining)
+      writeCachedConversations(activeProfile, remaining)
       setConversationSearch('')
-      if (conversation.id === conversationId) setConversationId(remaining[0]?.id ?? null)
+      if (wasSelected && conversationIdRef.current === null && !incognitoRef.current) {
+        const nextId = remaining[0]?.id ?? null
+        conversationIdRef.current = nextId
+        setConversationId(nextId)
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -1959,6 +2130,7 @@ export function App(): React.JSX.Element {
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
+      throw cause
     } finally {
       setSavingInference(false)
     }
@@ -2001,9 +2173,10 @@ export function App(): React.JSX.Element {
         setComputerModel(model.id)
         return
       }
-      selectModel(model.id)
+      const targetMode: ModelLoadMode = appMode === 'agent' ? 'agent' : 'chat'
+      selectModel(model.id, targetMode)
       if (appMode !== 'chat' && appMode !== 'agent' && workspaceModes.chat) {
-        switchAppMode('chat')
+        switchAppMode('chat', { skipModelPrepare: true })
       }
     },
     [appMode, selectModel, switchAppMode, workspaceModes]
@@ -2597,11 +2770,13 @@ export function App(): React.JSX.Element {
       setModelMenuOpen(true)
       return
     }
+    if (!canChat) return
     if (runtimeWarning) {
       setError(runtimeWarning)
       openManage('runtimes')
       return
     }
+    stickToBottomRef.current = true
     const activeConversationId = incognito ? INCOGNITO_ID : conversationId
     if (!activeConversationId) return
     const turn = ++chatTurnRef.current
@@ -2663,12 +2838,15 @@ export function App(): React.JSX.Element {
     if (appMode === 'agent' || appMode === 'computer') {
       const composer = appMode === 'agent' ? agentComposer : computerComposer
       if (!text || !composer || composer.running) return
+      const isAllowedSlash =
+        Boolean(composer.suggestions) && isExactSlashCommand(draft, composer.suggestions!)
+      if (composer.blockedReason !== '' && !isAllowedSlash) return
       setDraft('')
       setError(null)
       await composer.send(text)
       return
     }
-    if ((!text && attachments.length === 0) || busy) return
+    if ((!text && attachments.length === 0) || busy || coordinatorWorking) return
     if (attachments.length === 0 && text.startsWith('/')) {
       const cmd = text.toLowerCase()
       if (cmd === '/new') {
@@ -2725,11 +2903,13 @@ export function App(): React.JSX.Element {
       setModelMenuOpen(true)
       return
     }
+    if (!canChat) return
     if (runtimeWarning) {
       setError(runtimeWarning)
       openManage('runtimes')
       return
     }
+    stickToBottomRef.current = true
     const turn = ++chatTurnRef.current
     const submittedAttachments = attachments
     const baseChainSnapshot = chain
@@ -2764,6 +2944,8 @@ export function App(): React.JSX.Element {
         const created = await createConversation()
         if (turn !== chatTurnRef.current) return
         activeConversationId = created.id
+        conversationIdRef.current = created.id
+        skipNextConversationLoadRef.current = created.id
         setConversationId(created.id)
       }
       const parts: ContentPart[] = [
@@ -2884,7 +3066,11 @@ export function App(): React.JSX.Element {
           <GenerateHistorySidebar
             entries={generateHistory}
             activeId={activeGenerateHistoryId}
-            onSelect={setActiveGenerateHistoryId}
+            onSelect={(id) => {
+              const entry = id ? generateHistory.find((item) => item.id === id) : undefined
+              if (entry) setGenerateModality(entry.modality)
+              setActiveGenerateHistoryId(id)
+            }}
           />
         ) : appMode === 'computer' ? (
           <ComputerSessionSidebar controls={computerSidebar} />
@@ -2948,8 +3134,15 @@ export function App(): React.JSX.Element {
                       }
                       onBlur={(event) => void commitRename(conversation, event.currentTarget.value)}
                       onKeyDown={(event) => {
-                        if (event.key === 'Enter') event.currentTarget.blur()
-                        if (event.key === 'Escape') setRenaming(null)
+                        if (event.key === 'Enter') {
+                          event.preventDefault()
+                          event.currentTarget.blur()
+                        } else if (event.key === 'Escape') {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          renameCancelledRef.current = true
+                          setRenaming(null)
+                        }
                       }}
                     />
                   ) : (
@@ -2957,9 +3150,20 @@ export function App(): React.JSX.Element {
                       className="conversation-select"
                       onClick={() => {
                         if (conversation.id === conversationId && !incognito) return
-                        abortChatGeneration()
-                        if (incognito) setIncognito(false)
-                        setConversationId(conversation.id)
+                        confirmOrLeaveIncognito(() => {
+                          abortChatGeneration()
+                          if (incognitoRef.current) {
+                            incognitoRef.current = false
+                            setIncognito(false)
+                          }
+                          setIncognitoDiscardOpen(false)
+                          pendingIncognitoActionRef.current = null
+                          conversationIdRef.current = conversation.id
+                          setMessages([])
+                          setTipId(null)
+                          setAttachments([])
+                          setConversationId(conversation.id)
+                        })
                       }}
                       onDoubleClick={() => startRename(conversation)}
                     >
@@ -3228,15 +3432,24 @@ export function App(): React.JSX.Element {
                 <button
                   type="button"
                   onClick={() => {
-                    leaveIncognito()
+                    const pending = pendingIncognitoActionRef.current
+                    pendingIncognitoActionRef.current = null
                     setIncognitoDiscardOpen(false)
+                    if (pending) {
+                      pending()
+                    } else {
+                      leaveIncognito()
+                    }
                   }}
                 >
                   Discard
                 </button>
                 <button
                   type="button"
-                  onClick={() => setIncognitoDiscardOpen(false)}
+                  onClick={() => {
+                    pendingIncognitoActionRef.current = null
+                    setIncognitoDiscardOpen(false)
+                  }}
                   className="incognito-keep"
                 >
                   Keep
@@ -3365,7 +3578,15 @@ export function App(): React.JSX.Element {
           />
         ) : null}
 
-        <div className="chat" hidden={appMode !== 'chat'}>
+        <div
+          ref={chatScrollContainerRef}
+          className="chat"
+          hidden={appMode !== 'chat'}
+          onScroll={(event) => {
+            const el = event.currentTarget
+            stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96
+          }}
+        >
           {modelLoadStatus &&
             modelPrepareState !== 'loading' &&
             busy &&
@@ -3584,6 +3805,7 @@ export function App(): React.JSX.Element {
                         <button
                           type="button"
                           className="fork-button"
+                          disabled={busy || coordinatorWorking}
                           title="Edit and resend as a new branch"
                           onClick={() => {
                             const restoredAttachments: Attachment[] = contentBlobs(message).map(
@@ -3604,7 +3826,7 @@ export function App(): React.JSX.Element {
                             )
                             setDraft(contentText(message))
                             setAttachments(restoredAttachments)
-                            setTipId(message.parent_id)
+                            setTipId(message.parent_id ?? ROOT_TIP)
                           }}
                         >
                           <Pencil size={13} /> Edit
@@ -3764,6 +3986,7 @@ export function App(): React.JSX.Element {
                     return
                   }
                 }
+                if (event.nativeEvent.isComposing || event.keyCode === 229) return
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault()
                   event.currentTarget.form?.requestSubmit()
@@ -4100,9 +4323,20 @@ export function App(): React.JSX.Element {
         onSelectConversation={(id) => {
           if (appMode !== 'chat') switchAppMode('chat')
           if (id === conversationId && !incognito) return
-          abortChatGeneration()
-          if (incognito) setIncognito(false)
-          setConversationId(id)
+          confirmOrLeaveIncognito(() => {
+            abortChatGeneration()
+            if (incognitoRef.current) {
+              incognitoRef.current = false
+              setIncognito(false)
+            }
+            setIncognitoDiscardOpen(false)
+            pendingIncognitoActionRef.current = null
+            conversationIdRef.current = id
+            setMessages([])
+            setTipId(null)
+            setAttachments([])
+            setConversationId(id)
+          })
         }}
         onNewAction={triggerNewForActiveMode}
         onToggleIncognito={() => {
@@ -4122,6 +4356,7 @@ export function App(): React.JSX.Element {
       />
       {configuringModel && configuredModelEntry && (
         <ModelSettingsModal
+          key={configuringModel}
           model={configuredModelEntry}
           kind={modelKindFor(configuringModel)}
           profile={modelProfiles[configuringModel]}
@@ -4223,6 +4458,7 @@ export function App(): React.JSX.Element {
           onConfigureModel={setConfiguringModel}
           profileCounts={profileCounts}
           onWorkspaceModesChange={setWorkspaceModes}
+          onMemoryPreferenceSaved={setMemoryPreference}
           onDreamRequest={() => void runDream()}
         />
       )}

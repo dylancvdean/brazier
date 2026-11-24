@@ -1,7 +1,10 @@
 import type { Message } from './types'
 
+/** Sentinel tip indicating the user rewound before the root message to branch from turn 1. */
+export const ROOT_TIP = '__brazier_root_tip__'
+
 export function messageChain(messages: Message[], tipId?: string | null): Message[] {
-  if (messages.length === 0) return []
+  if (messages.length === 0 || tipId === ROOT_TIP) return []
   const byId = new Map(messages.map((message) => [message.id, message]))
   let cursor = (tipId && byId.get(tipId)) || messages.at(-1)
   const result: Message[] = []
@@ -25,6 +28,11 @@ export function childCounts(messages: Message[]): Map<string, number> {
 /** The ordered alternatives to one message, including the message itself. */
 export function branchSiblings(messages: Message[], messageId: string): Message[] {
   const message = messages.find((candidate) => candidate.id === messageId)
-  if (!message || !message.parent_id) return []
+  if (!message) return []
+  if (message.parent_id === null) {
+    return messages.filter(
+      (candidate) => candidate.parent_id === null && candidate.role === message.role
+    )
+  }
   return messages.filter((candidate) => candidate.parent_id === message.parent_id)
 }

@@ -164,9 +164,10 @@ export const MANAGE_PALETTE_ENTRIES: readonly ManagePaletteDescriptor[] = [
   {
     section: 'remote',
     title: 'Manage · Remote servers',
-    subtitle: 'Connect Ollama, vLLM, llama-server, LM Studio, or OpenAI-compatible endpoints',
+    subtitle: 'Connect Strata, Ollama, vLLM, llama-server, LM Studio, or OpenAI-compatible endpoints',
     keywords: [
       'remote',
+      'strata',
       'ollama',
       'vllm',
       'lm studio',

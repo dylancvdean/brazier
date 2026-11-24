@@ -151,37 +151,53 @@ export class VoiceStream {
       const socket = new WebSocket(wsUrl, wsProtocol ? [wsProtocol] : undefined)
       socket.binaryType = 'arraybuffer'
       this.socket = socket
-      const failed = (message: string) => reject(new Error(message))
+      let opened = false
+      let settled = false
+      const succeed = () => {
+        if (settled) return
+        settled = true
+        resolve()
+      }
+      const failed = (message: string) => {
+        if (settled) return
+        settled = true
+        reject(new Error(message))
+      }
       socket.onopen = () => {
         if (this.stopped) {
           socket.close()
-          resolve()
+          succeed()
           return
         }
+        opened = true
         // Opus headers must lead the stream before any audio page.
         if (this.muxer) {
           socket.send(withTag(TAG_AUDIO, this.muxer.headerPages()))
         }
         this.handlers.onState?.('live')
-        resolve()
+        succeed()
       }
       socket.onerror = () => {
         if (this.stopped) {
-          resolve()
+          succeed()
           return
         }
-        if (socket.readyState === WebSocket.CONNECTING) failed('Could not reach the voice server.')
-        else {
+        if (!opened) {
+          failed('Could not reach the voice server.')
+        } else {
           this.handlers.onError?.('Voice connection error.')
           socket.close()
         }
       }
       socket.onclose = (event) => {
         if (this.stopped) {
-          resolve()
+          succeed()
           return
         }
-        if (socket.readyState === WebSocket.CONNECTING) failed('The voice server closed the connection.')
+        if (!opened) {
+          failed('The voice server closed the connection.')
+          return
+        }
         this.handlers.onState?.('closed')
         if (!this.stopped && !event.wasClean) {
           this.handlers.onError?.(

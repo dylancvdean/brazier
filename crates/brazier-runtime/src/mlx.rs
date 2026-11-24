@@ -256,6 +256,8 @@ impl MlxServer {
         let mut child = command
             .spawn()
             .with_context(|| format!("spawn {} {}", python.display(), kind.module()))?;
+        let stderr_pipe = child.stderr.take().context("capture MLX server stderr")?;
+        let (stderr_output, stderr_task) = crate::llama::spawn_stderr_drain(stderr_pipe);
 
         let base_url = format!("http://127.0.0.1:{port}");
         let client = reqwest::Client::builder()
@@ -265,13 +267,12 @@ impl MlxServer {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         loop {
             if let Some(status) = child.try_wait().context("poll MLX server")? {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    use tokio::io::AsyncReadExt;
-                    let mut buf = Vec::new();
-                    let _ = pipe.read_to_end(&mut buf).await;
-                    stderr = String::from_utf8_lossy(&buf).into_owned();
-                }
+                let _ = stderr_task.await;
+                let stderr = stderr_output
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                let stderr = String::from_utf8_lossy(&stderr).into_owned();
                 anyhow::bail!(crate::llama::describe_server_startup_failure(
                     "MLX server",
                     status,
@@ -283,6 +284,7 @@ impl MlxServer {
                 _ => {
                     if tokio::time::Instant::now() > deadline {
                         let _ = child.start_kill();
+                        let _ = child.wait().await;
                         anyhow::bail!("MLX server health check timed out at {base_url}");
                     }
                     tokio::time::sleep(Duration::from_millis(250)).await;

@@ -423,6 +423,9 @@ fn spawn_reader(
                 }
             }
         }
+        // Fail any in-flight RPC callers immediately when the DevTools pipe closes
+        // rather than letting them wait for the full 10s RPC timeout.
+        pending.lock().await.clear();
     });
 }
 
@@ -1127,6 +1130,13 @@ impl BrowserSessionRegistry {
         if let Some(session) = self.sessions.lock().await.remove(id) {
             session.lock().await.close().await;
         }
+    }
+    pub async fn is_alive(&self, id: &str) -> bool {
+        let Some(session) = self.sessions.lock().await.get(id).cloned() else {
+            return false;
+        };
+        let mut session = session.lock().await;
+        matches!(session.process.try_wait(), Ok(None))
     }
     async fn session(&self, id: &str) -> Result<Arc<Mutex<CdpBrowserSession>>> {
         self.sessions

@@ -141,12 +141,40 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 /// starting it again.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Await the response headers, failing with a clear message on a hung connect.
+fn parse_content_range_total(response: &reqwest::Response) -> Option<u64> {
+    let header = response.headers().get(reqwest::header::CONTENT_RANGE)?;
+    let value = header.to_str().ok()?.trim();
+    let (_, total) = value.rsplit_once('/')?;
+    total.trim().parse::<u64>().ok()
+}
+
+/// Await the response headers, failing with a clear message on a hung connect
+/// or returning immediately if the transfer is paused/cancelled.
 async fn send_with_connect_timeout(
     builder: reqwest::RequestBuilder,
     what: &str,
+    cancel: Option<&StopFlag>,
 ) -> anyhow::Result<reqwest::Response> {
-    match tokio::time::timeout(CONNECT_TIMEOUT, builder.send()).await {
+    if let Some(reason) = cancel.and_then(StopFlag::reason) {
+        anyhow::bail!(match reason {
+            StopReason::Cancel => "download cancelled",
+            StopReason::Pause => "download paused",
+        });
+    }
+    let send_fut = tokio::time::timeout(CONNECT_TIMEOUT, builder.send());
+    let outcome = match cancel {
+        Some(flag) => tokio::select! {
+            reason = flag.wait_stopped() => {
+                anyhow::bail!(match reason {
+                    StopReason::Cancel => "download cancelled",
+                    StopReason::Pause => "download paused",
+                });
+            }
+            result = send_fut => result,
+        },
+        None => send_fut.await,
+    };
+    match outcome {
         Ok(result) => result.with_context(|| what.to_owned()),
         Err(_) => anyhow::bail!(
             "{what}: no response after {}s. Check your network connection and retry.",
@@ -155,14 +183,38 @@ async fn send_with_connect_timeout(
     }
 }
 
-/// Pull the next chunk of a body, failing when the connection goes quiet.
+/// Pull the next chunk of a body, failing when the connection goes quiet or
+/// waking immediately when the transfer is paused/cancelled.
 ///
 /// Returning `Ok(None)` means the body ended normally.
-async fn next_chunk<S, B>(stream: &mut S, downloaded: u64) -> anyhow::Result<Option<B>>
+async fn next_chunk<S, B>(
+    stream: &mut S,
+    downloaded: u64,
+    cancel: Option<&StopFlag>,
+) -> anyhow::Result<Option<B>>
 where
     S: futures::Stream<Item = reqwest::Result<B>> + Unpin,
 {
-    match tokio::time::timeout(IDLE_TIMEOUT, stream.next()).await {
+    if let Some(reason) = cancel.and_then(StopFlag::reason) {
+        anyhow::bail!(match reason {
+            StopReason::Cancel => "download cancelled",
+            StopReason::Pause => "download paused",
+        });
+    }
+    let read_fut = tokio::time::timeout(IDLE_TIMEOUT, stream.next());
+    let outcome = match cancel {
+        Some(flag) => tokio::select! {
+            reason = flag.wait_stopped() => {
+                anyhow::bail!(match reason {
+                    StopReason::Cancel => "download cancelled",
+                    StopReason::Pause => "download paused",
+                });
+            }
+            result = read_fut => result,
+        },
+        None => read_fut.await,
+    };
+    match outcome {
         Ok(Some(chunk)) => Ok(Some(chunk.context("read download chunk")?)),
         Ok(None) => Ok(None),
         Err(_) => anyhow::bail!(
@@ -271,95 +323,148 @@ pub async fn download_gguf_with_progress(
         db.start_download_job(job_id).await?;
     }
     let url = resolve_url(&request.repo_id, &request.revision, &request.filename);
+    let make_gguf_request = |range_from: u64| {
+        let mut builder = hf_auth::apply_auth(
+            client.get(&url).header(
+                "user-agent",
+                format!("brazier/{}", env!("CARGO_PKG_VERSION")),
+            ),
+            data_dir,
+        );
+        if range_from > 0 {
+            builder = builder.header("range", format!("bytes={range_from}-"));
+        }
+        builder
+    };
 
-    let mut builder = hf_auth::apply_auth(
-        client.get(&url).header(
-            "user-agent",
-            format!("brazier/{}", env!("CARGO_PKG_VERSION")),
-        ),
-        data_dir,
-    );
-    if existing > 0 {
-        builder = builder.header("range", format!("bytes={existing}-"));
+    let mut existing = existing;
+    let mut already_complete = false;
+    let mut response = send_with_connect_timeout(
+        make_gguf_request(existing),
+        "start Hugging Face download",
+        cancel.as_deref(),
+    )
+    .await?;
+    if response.status().as_u16() == 416 && existing > 0 {
+        if parse_content_range_total(&response) == Some(existing)
+            && !looks_like_lfs_pointer(&partial).await
+        {
+            already_complete = true;
+        } else {
+            let _ = tokio::fs::remove_file(&partial).await;
+            existing = 0;
+            response = send_with_connect_timeout(
+                make_gguf_request(0),
+                "restart Hugging Face download",
+                cancel.as_deref(),
+            )
+            .await?;
+        }
     }
-
-    let response = send_with_connect_timeout(builder, "start Hugging Face download").await?;
-    let status = response.status();
-    if status.as_u16() == 416 {
-        anyhow::bail!("server rejected resume range; delete the partial and retry");
-    }
-    if !(status.is_success() || status.as_u16() == 206) {
-        let body = response.text().await.unwrap_or_default();
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            if hf_auth::load_token(data_dir).is_none() {
+    let written = if already_complete {
+        progress(ProgressEvent::download(existing, Some(existing)));
+        existing
+    } else {
+        let status = response.status();
+        if status.as_u16() == 416 {
+            anyhow::bail!("server rejected resume range; delete the partial and retry");
+        }
+        if !(status.is_success() || status.as_u16() == 206) {
+            let body = response.text().await.unwrap_or_default();
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                if hf_auth::load_token(data_dir).is_none() {
+                    anyhow::bail!(
+                        "Hugging Face rejected the download ({status}). This model may be gated — add a Hugging Face token in Manage → Download models, accept the model license on the Hub, and retry."
+                    );
+                }
                 anyhow::bail!(
-                    "Hugging Face rejected the download ({status}). This model may be gated — add a Hugging Face token in Manage → Download models, accept the model license on the Hub, and retry."
+                    "Hugging Face rejected the download ({status}). Confirm your token can access {} and that you accepted the model license on the Hub.",
+                    request.repo_id
                 );
             }
+            anyhow::bail!("Hugging Face download failed ({status}): {body}");
+        }
+
+        let total = content_length_total(&response, existing, status.as_u16() == 206);
+        let append = status.as_u16() == 206 && existing > 0;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(append)
+            .truncate(!append)
+            .open(&partial)
+            .await
+            .context("open partial download")?;
+        if append {
+            file.seek(std::io::SeekFrom::End(0)).await?;
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut written = if append { existing } else { 0 };
+        let mut last_emit = 0_u64;
+        progress(ProgressEvent::download(written, total));
+        loop {
+            let chunk = match next_chunk(&mut stream, written, cancel.as_deref()).await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = file.flush().await;
+                    drop(file);
+                    if cancel.as_deref().and_then(StopFlag::reason) == Some(StopReason::Cancel) {
+                        let _ = tokio::fs::remove_file(&partial).await;
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some(reason) = cancel.as_ref().and_then(|flag| flag.reason()) {
+                // Flush before letting go so a paused transfer resumes from every
+                // byte it actually received; only a cancel discards the partial.
+                let _ = file.flush().await;
+                drop(file);
+                if reason == StopReason::Cancel {
+                    let _ = tokio::fs::remove_file(&partial).await;
+                    anyhow::bail!("download cancelled");
+                }
+                anyhow::bail!("download paused");
+            }
+            file.write_all(&chunk)
+                .await
+                .context("write download chunk")?;
+            written += chunk.len() as u64;
+            if written.saturating_sub(last_emit) >= 256 * 1024 || total == Some(written) {
+                progress(ProgressEvent::download(written, total));
+                if let Some((db, job_id)) = &job {
+                    let _ = db
+                        .update_download_job_progress(job_id, written, total)
+                        .await;
+                }
+                last_emit = written;
+            }
+        }
+        progress(ProgressEvent::download(written, total.or(Some(written))));
+        file.flush().await?;
+        drop(file);
+
+        if looks_like_lfs_pointer(&partial).await {
+            let _ = tokio::fs::remove_file(&partial).await;
             anyhow::bail!(
-                "Hugging Face rejected the download ({status}). Confirm your token can access {} and that you accepted the model license on the Hub.",
+                "downloaded an LFS pointer for {} instead of the real file. Authenticate with a Hugging Face token that has access to {}.",
+                request.filename,
                 request.repo_id
             );
         }
-        anyhow::bail!("Hugging Face download failed ({status}): {body}");
-    }
-
-    let total = content_length_total(&response, existing, status.as_u16() == 206);
-    let append = status.as_u16() == 206 && existing > 0;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(append)
-        .truncate(!append)
-        .open(&partial)
-        .await
-        .context("open partial download")?;
-    if append {
-        file.seek(std::io::SeekFrom::End(0)).await?;
-    }
-
-    let mut stream = response.bytes_stream();
-    let mut written = existing;
-    let mut last_emit = 0_u64;
-    progress(ProgressEvent::download(written, total));
-    while let Some(chunk) = next_chunk(&mut stream, written).await? {
-        if let Some(reason) = cancel.as_ref().and_then(|flag| flag.reason()) {
-            // Flush before letting go so a paused transfer resumes from every
-            // byte it actually received; only a cancel discards the partial.
-            let _ = file.flush().await;
-            drop(file);
-            if reason == StopReason::Cancel {
-                let _ = tokio::fs::remove_file(&partial).await;
-                anyhow::bail!("download cancelled");
-            }
-            anyhow::bail!("download paused");
+        if let Some(expected) = total
+            && written != expected
+        {
+            anyhow::bail!(
+                "download of {} ended prematurely at {} of {} bytes — resume to finish",
+                request.filename,
+                written,
+                expected
+            );
         }
-        file.write_all(&chunk)
-            .await
-            .context("write download chunk")?;
-        written += chunk.len() as u64;
-        if written.saturating_sub(last_emit) >= 256 * 1024 || total == Some(written) {
-            progress(ProgressEvent::download(written, total));
-            if let Some((db, job_id)) = &job {
-                let _ = db
-                    .update_download_job_progress(job_id, written, total)
-                    .await;
-            }
-            last_emit = written;
-        }
-    }
-    progress(ProgressEvent::download(written, total.or(Some(written))));
-    file.flush().await?;
-    drop(file);
-
-    if looks_like_lfs_pointer(&partial).await {
-        let _ = tokio::fs::remove_file(&partial).await;
-        anyhow::bail!(
-            "downloaded an LFS pointer for {} instead of the real file. Authenticate with a Hugging Face token that has access to {}.",
-            request.filename,
-            request.repo_id
-        );
-    }
+        written
+    };
 
     progress(ProgressEvent::phase("hash", "Verifying SHA-256"));
     tokio::fs::rename(&partial, &destination)
@@ -668,82 +773,128 @@ async fn download_file_to_with_opts(
     let url = source_url
         .map(str::to_owned)
         .unwrap_or_else(|| resolve_url(repo_id, revision, filename));
-
-    let request = client.get(&url).header(
-        "user-agent",
-        format!("brazier/{}", env!("CARGO_PKG_VERSION")),
-    );
-    // Hugging Face credentials must never accompany an explicitly configured
-    // third-party source (such as an upstream GitHub release).
-    let mut builder = if source_url.is_some() {
-        request
-    } else {
-        hf_auth::apply_auth(request, data_dir)
+    let make_file_request = |range_from: u64| {
+        let request = client.get(&url).header(
+            "user-agent",
+            format!("brazier/{}", env!("CARGO_PKG_VERSION")),
+        );
+        // Hugging Face credentials must never accompany an explicitly configured
+        // third-party source (such as an upstream GitHub release).
+        let mut builder = if source_url.is_some() {
+            request
+        } else {
+            hf_auth::apply_auth(request, data_dir)
+        };
+        if range_from > 0 {
+            builder = builder.header("range", format!("bytes={range_from}-"));
+        }
+        builder
     };
-    if existing > 0 {
-        builder = builder.header("range", format!("bytes={existing}-"));
+
+    let cancel_flag = cancel.map(Arc::as_ref);
+    let mut existing = existing;
+    let mut already_complete = false;
+    let mut response = send_with_connect_timeout(
+        make_file_request(existing),
+        "start Hugging Face download",
+        cancel_flag,
+    )
+    .await?;
+    if response.status().as_u16() == 416 && existing > 0 {
+        if parse_content_range_total(&response) == Some(existing)
+            && !looks_like_lfs_pointer(&partial).await
+        {
+            already_complete = true;
+        } else {
+            let _ = tokio::fs::remove_file(&partial).await;
+            existing = 0;
+            response = send_with_connect_timeout(
+                make_file_request(0),
+                "restart Hugging Face download",
+                cancel_flag,
+            )
+            .await?;
+        }
     }
 
-    let response = send_with_connect_timeout(builder, "start Hugging Face download").await?;
-    let status = response.status();
-    if status.as_u16() == 416 {
-        anyhow::bail!("server rejected resume range; delete the partial and retry");
-    }
-    if !(status.is_success() || status.as_u16() == 206) {
-        let body = response.text().await.unwrap_or_default();
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            if hf_auth::load_token(data_dir).is_none() {
+    let (written, total) = if already_complete {
+        emit_file_download_progress(progress, snapshot, existing, Some(existing), job);
+        (existing, Some(existing))
+    } else {
+        let status = response.status();
+        if status.as_u16() == 416 {
+            anyhow::bail!("server rejected resume range; delete the partial and retry");
+        }
+        if !(status.is_success() || status.as_u16() == 206) {
+            let body = response.text().await.unwrap_or_default();
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                if hf_auth::load_token(data_dir).is_none() {
+                    anyhow::bail!(
+                        "Hugging Face rejected the download ({status}). This model may be gated — add a Hugging Face token in Manage → Download models, accept the model license on the Hub, and retry."
+                    );
+                }
                 anyhow::bail!(
-                    "Hugging Face rejected the download ({status}). This model may be gated — add a Hugging Face token in Manage → Download models, accept the model license on the Hub, and retry."
+                    "Hugging Face rejected the download ({status}). Confirm your token can access {repo_id} and that you accepted the model license on the Hub."
                 );
             }
-            anyhow::bail!(
-                "Hugging Face rejected the download ({status}). Confirm your token can access {repo_id} and that you accepted the model license on the Hub."
-            );
+            anyhow::bail!("Hugging Face download failed ({status}): {body}");
         }
-        anyhow::bail!("Hugging Face download failed ({status}): {body}");
-    }
 
-    let total = content_length_total(&response, existing, status.as_u16() == 206).or(expected_size);
-    let append = status.as_u16() == 206 && existing > 0;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(append)
-        .truncate(!append)
-        .open(&partial)
-        .await
-        .context("open partial download")?;
-    if append {
-        file.seek(std::io::SeekFrom::End(0)).await?;
-    }
-
-    let mut stream = response.bytes_stream();
-    let mut written = existing;
-    let mut last_emit = 0_u64;
-    emit_file_download_progress(progress, snapshot, written, total, job);
-    while let Some(chunk) = next_chunk(&mut stream, written).await? {
-        if let Some(reason) = cancel.and_then(|flag| flag.reason()) {
-            let _ = file.flush().await;
-            drop(file);
-            if reason == StopReason::Cancel {
-                let _ = tokio::fs::remove_file(&partial).await;
-                anyhow::bail!("download cancelled");
-            }
-            anyhow::bail!("download paused");
-        }
-        file.write_all(&chunk)
+        let total =
+            content_length_total(&response, existing, status.as_u16() == 206).or(expected_size);
+        let append = status.as_u16() == 206 && existing > 0;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(append)
+            .truncate(!append)
+            .open(&partial)
             .await
-            .context("write download chunk")?;
-        written += chunk.len() as u64;
-        if written.saturating_sub(last_emit) >= 256 * 1024 || total == Some(written) {
-            emit_file_download_progress(progress, snapshot, written, total, job);
-            last_emit = written;
+            .context("open partial download")?;
+        if append {
+            file.seek(std::io::SeekFrom::End(0)).await?;
         }
-    }
-    emit_file_download_progress(progress, snapshot, written, total.or(Some(written)), job);
-    file.flush().await?;
-    drop(file);
+
+        let mut stream = response.bytes_stream();
+        let mut written = if append { existing } else { 0 };
+        let mut last_emit = 0_u64;
+        emit_file_download_progress(progress, snapshot, written, total, job);
+        loop {
+            let chunk = match next_chunk(&mut stream, written, cancel_flag).await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = file.flush().await;
+                    drop(file);
+                    if cancel_flag.and_then(StopFlag::reason) == Some(StopReason::Cancel) {
+                        let _ = tokio::fs::remove_file(&partial).await;
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some(reason) = cancel.and_then(|flag| flag.reason()) {
+                let _ = file.flush().await;
+                drop(file);
+                if reason == StopReason::Cancel {
+                    let _ = tokio::fs::remove_file(&partial).await;
+                    anyhow::bail!("download cancelled");
+                }
+                anyhow::bail!("download paused");
+            }
+            file.write_all(&chunk)
+                .await
+                .context("write download chunk")?;
+            written += chunk.len() as u64;
+            if written.saturating_sub(last_emit) >= 256 * 1024 || total == Some(written) {
+                emit_file_download_progress(progress, snapshot, written, total, job);
+                last_emit = written;
+            }
+        }
+        emit_file_download_progress(progress, snapshot, written, total.or(Some(written)), job);
+        file.flush().await?;
+        drop(file);
+        (written, total)
+    };
 
     if looks_like_lfs_pointer(&partial).await {
         let _ = tokio::fs::remove_file(&partial).await;
@@ -752,12 +903,16 @@ async fn download_file_to_with_opts(
              Authenticate with a Hugging Face token that has access to {repo_id}."
         );
     }
-    if !size_matches_expected(written, expected_size.or(total)) {
-        let _ = tokio::fs::remove_file(&partial).await;
+    let expected = expected_size.or(total);
+    if !size_matches_expected(written, expected) {
+        if expected.is_some_and(|exp| written > exp) {
+            // Only discard oversized partials; keep truncated partials so resume continues.
+            let _ = tokio::fs::remove_file(&partial).await;
+        }
         anyhow::bail!(
-            "download of {filename} finished at {} bytes but ~{} were expected — retry after checking Hub access",
+            "download of {filename} finished at {} bytes but ~{} were expected — resume to finish",
             written,
-            expected_size.or(total).unwrap_or(0)
+            expected.unwrap_or(0)
         );
     }
     if let Some(expected) = expected_sha256 {

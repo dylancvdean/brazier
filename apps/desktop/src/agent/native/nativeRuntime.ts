@@ -528,8 +528,43 @@ export class NativeAgentSession implements AgentSession {
       if (messages[i]?.role === 'user') lastUserIndex = i
     }
 
+    // Tool results the preceding assistant message is still owed. A crash,
+    // hard kill, or lost persistence write mid-wave can leave an assistant
+    // message whose tool calls never got results; strict chat templates and
+    // OpenAI-compatible servers reject such a transcript on every later turn,
+    // so the gap is filled with an explicit "interrupted" result instead.
+    let owed = new Map<string, string>()
+    // Image follow-ups must come after the whole contiguous block of tool
+    // results, or the server sees a user message splitting the tool block.
+    let deferredImages: ChatCompletionMessage[] = []
+    const settleToolBlock = (): void => {
+      for (const [callId, tool] of owed) {
+        out.push({
+          role: 'tool',
+          tool_call_id: callId,
+          content: `[Interrupted: ${tool} did not finish before the previous run ended. Re-run it if it is still needed.]`
+        })
+      }
+      owed = new Map()
+      if (deferredImages.length > 0) {
+        out.push(...deferredImages)
+        deferredImages = []
+      }
+    }
+    const pushUserText = (text: string): void => {
+      // Strict templates require alternating roles; a failed turn can leave
+      // two user messages back to back, so fold them together.
+      const previous = out[out.length - 1]
+      if (previous && previous.role === 'user' && typeof previous.content === 'string') {
+        previous.content = `${previous.content}\n\n${text}`
+        return
+      }
+      out.push({ role: 'user', content: text })
+    }
+
     for (let i = 0; i < messages.length; i += 1) {
       const msg = messages[i]!
+      if (msg.role !== 'tool') settleToolBlock()
       switch (msg.role) {
         case 'user': {
           if (i === lastUserIndex && inputImages && inputImages.length > 0) {
@@ -539,12 +574,12 @@ export class NativeAgentSession implements AgentSession {
             ]
             out.push({ role: 'user', content: parts })
           } else {
-            out.push({ role: 'user', content: msg.text })
+            pushUserText(msg.text)
           }
           break
         }
         case 'system': {
-          out.push({ role: 'user', content: `[context] ${msg.text}` })
+          pushUserText(`[context] ${msg.text}`)
           break
         }
         case 'assistant': {
@@ -570,9 +605,18 @@ export class NativeAgentSession implements AgentSession {
             ...(keepReasoning && msg.reasoning ? { reasoning_content: msg.reasoning } : {}),
             ...(wireCalls ? { tool_calls: wireCalls } : {})
           })
+          for (const call of msg.toolCalls ?? []) owed.set(call.id, call.name)
           break
         }
         case 'tool': {
+          if (!owed.has(msg.toolCallId)) {
+            // Orphaned result (its assistant message was compacted away or
+            // never persisted). Keep the information without breaking pairing.
+            settleToolBlock()
+            pushUserText(`[context] Earlier ${msg.tool} result: ${msg.output}`)
+            break
+          }
+          owed.delete(msg.toolCallId)
           out.push({
             role: 'tool',
             tool_call_id: msg.toolCallId,
@@ -580,7 +624,7 @@ export class NativeAgentSession implements AgentSession {
           })
           const images = toolImagesByCallId.get(msg.toolCallId)
           if (images && images.length > 0) {
-            out.push({
+            deferredImages.push({
               role: 'user',
               content: [
                 { type: 'text', text: `[Tool image output from ${msg.tool}]` },
@@ -595,6 +639,7 @@ export class NativeAgentSession implements AgentSession {
         }
       }
     }
+    settleToolBlock()
     // Sent with this request only: a nudge is a harness instruction, not part
     // of the conversation, so it is never persisted.
     if (nudge) out.push({ role: 'user', content: nudge })
@@ -1341,7 +1386,7 @@ export class NativeAgentRuntime implements AgentRuntime {
   private readonly sessions = new Map<string, NativeAgentSession>()
   private readonly childrenByParent = new Map<string, Set<string>>()
   private readonly activeChildSlots = new Set<number>()
-  private readonly slotWaiters: Array<() => void> = []
+  private readonly slotWaiters = new Set<() => void>()
   private sharedSlotChain = Promise.resolve()
   private sandbox?: SandboxDescription
 
@@ -1390,10 +1435,11 @@ export class NativeAgentRuntime implements AgentRuntime {
       }
       await new Promise<void>((resolve) => {
         const wake = (): void => {
+          this.slotWaiters.delete(wake)
           signal?.removeEventListener('abort', wake)
           resolve()
         }
-        this.slotWaiters.push(wake)
+        this.slotWaiters.add(wake)
         signal?.addEventListener('abort', wake, { once: true })
       })
     }
@@ -1403,8 +1449,11 @@ export class NativeAgentRuntime implements AgentRuntime {
   private releaseChildLlamaSlot(slot: number): void {
     if (slot <= 0) return
     this.activeChildSlots.delete(slot)
-    const next = this.slotWaiters.shift()
-    next?.()
+    const next = this.slotWaiters.values().next().value
+    if (next) {
+      this.slotWaiters.delete(next)
+      next()
+    }
   }
 
   private runSerializedOnSlotZero<T>(task: () => Promise<T>): Promise<T> {
@@ -1664,7 +1713,7 @@ export class NativeAgentRuntime implements AgentRuntime {
         })
 
         const abortChild = (): void => {
-          void childSession?.cancel()
+          void childSession?.cancel().catch(() => undefined)
         }
         request.signal?.addEventListener('abort', abortChild, { once: true })
         try {
@@ -1680,6 +1729,7 @@ export class NativeAgentRuntime implements AgentRuntime {
             }
             const progress = subagentProgressFromChildEvent(
               event,
+              parent.id,
               request.toolCallId,
               childRecord.id,
               request.runId
@@ -1909,13 +1959,14 @@ export class NativeAgentRuntime implements AgentRuntime {
 
 function subagentProgressFromChildEvent(
   event: AgentEvent,
+  parentSessionId: string,
   parentToolCallId: string,
   childSessionId: string,
   runId: string
 ): Extract<AgentEvent, { type: 'subagent-progress' }> | null {
   const base = {
     type: 'subagent-progress' as const,
-    sessionId: event.sessionId,
+    sessionId: parentSessionId,
     runId,
     timestamp: event.timestamp,
     sequence: event.sequence,

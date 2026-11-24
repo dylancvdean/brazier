@@ -856,6 +856,16 @@ pub fn download_destination(
     Ok(modality.root(data_dir).join(repo_id).join(filename))
 }
 
+/// Total on-disk size of either a single checkpoint file or a multi-component
+/// bundle directory, used for pre-generation memory arbitration.
+pub fn path_disk_bytes(path: &Path) -> u64 {
+    if path.is_dir() {
+        directory_size_bytes(path)
+    } else {
+        std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+    }
+}
+
 fn directory_size_bytes(dir: &Path) -> u64 {
     let mut total = 0_u64;
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1850,6 +1860,18 @@ async fn run_sd_cli(
     }
 
     let status = loop {
+        // Register the cancellation future before checking `job.cancelled()`
+        // so a cancel arriving during spawn or between loop iterations cannot
+        // be missed by `Notify::notify_waiters()`.
+        let cancelled = job.notify.notified();
+        tokio::pin!(cancelled);
+        if job.cancelled() {
+            let _ = child.kill().await;
+            for reader in readers {
+                let _ = reader.await;
+            }
+            return Err(CancelledError.into());
+        }
         tokio::select! {
             finished = child.wait() => break finished.context("wait for sd-cli")?,
             _ = tokio::time::sleep_until((started + timeout).into()) => {
@@ -1866,7 +1888,7 @@ async fn run_sd_cli(
                     format_tail(&tail.text()),
                 );
             }
-            _ = job.notify.notified() => {
+            _ = &mut cancelled => {
                 if job.cancelled() {
                     let _ = child.kill().await;
                     for reader in readers {

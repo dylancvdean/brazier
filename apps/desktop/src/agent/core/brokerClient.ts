@@ -178,6 +178,7 @@ export type StreamedToolCall = {
 }
 
 export type StreamChatCompletionCallbacks = {
+  onLoad?: (load: { phase: string; message: string }) => void
   onContentDelta?: (delta: string) => void
   onReasoningDelta?: (delta: string) => void
   onPrefill?: (prefill: PrefillProgress) => void
@@ -295,12 +296,16 @@ export function isContextOverflowMessage(message: string, code?: string | null):
   return (
     lower.includes('maximum context length') ||
     lower.includes('exceeds the available context size') ||
+    lower.includes('context_length_exceeded') ||
+    lower.includes('context window') ||
+    lower.includes('context length') ||
+    lower.includes('context size') ||
     lower.includes('n_ctx') ||
     lower.includes('prompt is too long') ||
     lower.includes('input is too long') ||
     lower.includes('too many tokens') ||
     lower.includes('kv cache') ||
-    lower.includes('context')
+    /exceed(?:s|ed)?\b.*\bcontext\b/.test(lower)
   )
 }
 
@@ -340,6 +345,28 @@ export const MODEL_STALL_TIMEOUT_MS = 5 * 60_000
 
 export type BrokerClientOptions = {
   modelStallTimeoutMs?: number
+}
+
+/** Read one chunk, rejecting if nothing arrives within `idleMs`. */
+export async function readWithIdleTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleMs: number,
+  message: string,
+  signal?: AbortSignal
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      void reader.cancel().catch(() => undefined)
+      reject(new BrokerError(message, 504))
+    }, idleMs)
+  })
+  try {
+    if (signal?.aborted) throw new BrokerError('Request aborted.', 499)
+    return await Promise.race([reader.read(), timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 export class BrokerClient {
@@ -641,19 +668,28 @@ export class BrokerClient {
       }
     }
 
-    while (true) {
-      const { value, done } = await reader.read()
-      buffer += decoder.decode(value, { stream: !done })
-      let boundary = buffer.search(/\r?\n\r?\n/)
-      while (boundary >= 0) {
-        const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)?.[0] ?? '\n\n'
-        consume(buffer.slice(0, boundary))
-        buffer = buffer.slice(boundary + separator.length)
-        boundary = buffer.search(/\r?\n\r?\n/)
+    try {
+      while (true) {
+        const { value, done } = await readWithIdleTimeout(
+          reader,
+          EXEC_TIMEOUT_MS,
+          'Tool execution stream stalled with no output.',
+          signal
+        )
+        buffer += decoder.decode(value, { stream: !done })
+        let boundary = buffer.search(/\r?\n\r?\n/)
+        while (boundary >= 0) {
+          const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)?.[0] ?? '\n\n'
+          consume(buffer.slice(0, boundary))
+          buffer = buffer.slice(boundary + separator.length)
+          boundary = buffer.search(/\r?\n\r?\n/)
+        }
+        if (done) break
       }
-      if (done) break
+      if (buffer.trim()) consume(buffer)
+    } finally {
+      reader.releaseLock()
     }
-    if (buffer.trim()) consume(buffer)
     if (!result) throw new BrokerError('The tool output stream ended before its result.', 502)
     return result
   }
@@ -810,6 +846,7 @@ export class BrokerClient {
 
       const brazier = payload.brazier as
         | {
+            load?: { phase?: string; message?: string }
             prefill?: PrefillProgress
             generation?: { prompt_tokens?: number | null; completion_tokens?: number }
             client_tool_calls?: Array<Record<string, unknown>>
@@ -835,6 +872,16 @@ export class BrokerClient {
           throw new ContextOverflowError(errMsg, 400)
         }
         throw new BrokerError(errMsg, 500)
+      }
+
+      if (brazier?.load) {
+        callbacks?.onLoad?.({
+          phase: typeof brazier.load.phase === 'string' ? brazier.load.phase : 'load',
+          message:
+            typeof brazier.load.message === 'string'
+              ? brazier.load.message
+              : 'Loading model…'
+        })
       }
 
       if (brazier?.prefill) {
@@ -992,6 +1039,13 @@ export class BrokerClient {
               arguments: entry.arguments || '{}'
             }))
             .filter((tc) => tc.name.length > 0)
+
+    if (!doneFlag && finishReason === null && toolCalls.length === 0) {
+      throw new BrokerError(
+        'The model stream ended unexpectedly before finishing (the model may have crashed or been unloaded).',
+        502
+      )
+    }
 
     return {
       content,

@@ -165,6 +165,9 @@ export function useSessionCoordinator(
   const conversationId = options.conversationId
   useEffect(() => {
     if (!conversationId) return
+    const matchingMessages = latest.current.messages
+      .filter((message) => message.conversation_id === conversationId)
+      .map(toConversationMessage)
     if (options.incognito) {
       coordinator.setChatAdapter(
         new InMemoryChatAdapter(
@@ -178,7 +181,7 @@ export function useSessionCoordinator(
         )
       )
       void coordinator.attach(conversationId, {
-        messages: latest.current.messages.map(toConversationMessage)
+        messages: matchingMessages
       })
       return
     }
@@ -192,10 +195,22 @@ export function useSessionCoordinator(
     // than rebuilt; a live voice session survives switching conversations.
     coordinator.setChatAdapter(chat)
     void coordinator.attach(conversationId, {
-      messages: latest.current.messages.map(toConversationMessage),
+      messages: matchingMessages,
       summary: latest.current.summary ?? ''
     })
   }, [conversationId, options.incognito, coordinator])
+
+  // Keep the coordinator's message cache in sync once async message loads
+  // finish for the active conversation (e.g. startup or switching chats).
+  useEffect(() => {
+    if (!conversationId) return
+    const matching = options.messages
+      .filter((message) => message.conversation_id === conversationId)
+      .map(toConversationMessage)
+    if (matching.length > 0 || options.summary !== undefined) {
+      coordinator.syncMessages(conversationId, matching, options.summary ?? '')
+    }
+  }, [conversationId, options.messages, options.summary, coordinator])
 
   useEffect(() => {
     coordinator.setPersona(options.persona)
@@ -228,9 +243,10 @@ export function useSessionCoordinator(
       await coordinator.startVoiceSession()
     }, [coordinator]),
     endVoice: useCallback(async () => {
+      adapters.voice.setMuted(false)
       await coordinator.endVoiceSession()
       setConfigState((current) => ({ ...current, voiceEnabled: false }))
-    }, [coordinator]),
+    }, [adapters, coordinator]),
     setMuted: useCallback((muted: boolean) => adapters.voice.setMuted(muted), [adapters]),
     submitText: useCallback((text: string) => coordinator.submitText(text), [coordinator]),
     stopSpeaking: useCallback(() => coordinator.cancelVoiceOutput(), [coordinator]),
@@ -250,8 +266,9 @@ export function useSessionCoordinator(
       async (agentSessionId: string | null) => {
         // Bind only. attach() would cancel in-flight turns on this conversation.
         await adapters.agent.bindSession(agentSessionId)
+        coordinator.notifyAgentSessionChanged()
       },
-      [adapters]
+      [adapters, coordinator]
     )
   }
 }
