@@ -154,7 +154,7 @@ import {
   visionCapabilityTitle,
   withMergedCapabilities
 } from './model-utils'
-import { branchSiblings, messageChain, ROOT_TIP } from './graph'
+import { branchSiblings, messageChain, refreshedMessageTip, ROOT_TIP } from './graph'
 import { buildChatDisplayItems } from './chatDisplay'
 import {
   CHAT_SLASH_SUGGESTIONS,
@@ -1566,8 +1566,8 @@ export function App(): React.JSX.Element {
     if (background && (busyRef.current || incognitoRef.current || turn !== chatTurnRef.current)) return
     const previousLast = lastMessageIdRef.current
     setMessages(data)
-    setTipId((current) => background && current && current !== previousLast && data.some((message) => message.id === current)
-      ? current
+    setTipId((current) => background
+      ? refreshedMessageTip(data, current, previousLast)
       : preferredTip ?? data.at(-1)?.id ?? null)
   }
 
