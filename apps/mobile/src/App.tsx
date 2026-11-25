@@ -321,7 +321,7 @@ function Workspace({ credential, onUnauthorized, onForget }: {
     setDraft('');
     let stored = false;
     try {
-      const chat = selected ?? await api.createConversation(prompt.slice(0, 72));
+      const chat = selected ?? await api.createConversation(prompt);
       if (!selected) {
         setSelected(chat);
         setConversations((previous) => [chat, ...previous]);

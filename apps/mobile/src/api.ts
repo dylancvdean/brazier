@@ -152,7 +152,8 @@ export function daemonClient(fetch: Request, credential: Credential) {
     async conversations(): Promise<Conversation[]> {
       return (await json<{ data: Conversation[] }>('/api/v1/conversations')).data;
     },
-    createConversation: (title: string) => json<Conversation>('/api/v1/conversations', post({ title })),
+    createConversation: (title: string) => json<Conversation>(
+      '/api/v1/conversations', post({ title: Array.from(title).slice(0, 72).join('') })),
     async messages(id: string): Promise<Message[]> {
       return (await json<{ data: Message[] }>(messagesPath(id))).data;
     },

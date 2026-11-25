@@ -125,6 +125,14 @@ test('a turn keeps the viewed parent and context when the host has a newer branc
   assert.deepEqual(chatContext(history).map(({ content }) => content), ['question', 'shown answer', 'follow-up']);
 });
 
+test('conversation titles keep the full code point at the length limit', async () => {
+  const prefix = 'a'.repeat(71);
+  const client = daemonClient(async (_url, init) => Response.json({
+    id: 'chat', title: JSON.parse(init.body!).title,
+  }), credential);
+  assert.equal((await client.createConversation(prefix + '😀 followed by more text')).title, prefix + '😀');
+});
+
 test('streams POST chat with split SSE frames and UTF-8 bytes', async () => {
   const bytes = new TextEncoder().encode(
     'event: load\r\ndata: {"phase":"start"}\r\n\r\ndata: {"choices":[{"delta":{"content":"hé"}}]}\n\n' +
