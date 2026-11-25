@@ -477,6 +477,14 @@ pub async fn download_gguf_with_progress(
             request.filename
         );
     }
+    match cancel.as_deref().and_then(StopFlag::reason) {
+        Some(StopReason::Cancel) => {
+            let _ = tokio::fs::remove_file(&partial).await;
+            anyhow::bail!("download cancelled");
+        }
+        Some(StopReason::Pause) => anyhow::bail!("download paused"),
+        None => {}
+    }
     tokio::fs::rename(&partial, &destination)
         .await
         .context("promote partial download")?;
