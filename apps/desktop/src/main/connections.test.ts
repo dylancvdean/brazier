@@ -80,7 +80,7 @@ describe('connection profile URLs', () => {
     }
   })
 
-  it.each([404, 405])('verifies matching health identities when the probe returns %i', async (status) => {
+  it.each([400, 404, 405])('verifies matching health identities when the probe returns %i', async (status) => {
     const active = 'http://127.0.0.1:7614'
     const advertised = 'https://brazier.example'
     let remoteBootId = 'active-daemon'
@@ -99,7 +99,7 @@ describe('connection profile URLs', () => {
     await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
   })
 
-  it.each([400, 403, 500])('does not downgrade origin verification after probe status %i', async (status) => {
+  it.each([403, 500])('does not downgrade origin verification after probe status %i', async (status) => {
     const probe = vi.fn<typeof fetch>(async () => new Response(null, { status }))
     await expect(verifyPairingOrigin('http://127.0.0.1:7614', 'https://brazier.example', probe))
       .rejects.toThrow('pairing preview route is not reachable')

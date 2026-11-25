@@ -677,7 +677,7 @@ export async function verifyPairingOrigin(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ code: '' })
     })
-    const useHealth = response.status === 404 || response.status === 405
+    const useHealth = response.status === 400 || response.status === 404 || response.status === 405
     const identityResponse = useHealth ? await fetch_(`${address}/health`, options) : response
     if (!identityResponse.ok) {
       throw new Error(useHealth
