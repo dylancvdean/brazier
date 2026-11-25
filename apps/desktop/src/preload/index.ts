@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-import { AGENT_IPC, type WorkerCommandInput, type WorkerMessage } from '../agent/core/protocol'
+import {
+  AGENT_IPC,
+  type AgentWorkerStatus,
+  type WorkerCommandInput,
+  type WorkerMessage
+} from '../agent/core/protocol'
 import type { AgentModelReference, AgentPermissionMode, AgentUserInput } from '../agent/core/types'
 import type {
   ConnectionProfileSummary,
@@ -123,8 +128,16 @@ const agent = {
     invokeAgent({ type: 'set-permission-mode', sessionId, mode }),
   closeSession: (sessionId: string): Promise<unknown> =>
     ipcRenderer.invoke(AGENT_IPC.invoke, { type: 'close-session', sessionId }),
-  status: (): Promise<{ running: boolean; crashes: number }> =>
-    invoke('brazier:agent:status'),
+  status: (): Promise<AgentWorkerStatus> => invoke(AGENT_IPC.status),
+  restart: (): Promise<AgentWorkerStatus> => invoke(AGENT_IPC.restart),
+  onStatus: (listener: (status: AgentWorkerStatus) => void): (() => void) => {
+    const handler = (_event: unknown, status: AgentWorkerStatus): void =>
+      listener(status)
+    ipcRenderer.on(AGENT_IPC.statusChanged, handler)
+    return () => {
+      ipcRenderer.removeListener(AGENT_IPC.statusChanged, handler)
+    }
+  },
   onMessage: (listener: (message: WorkerMessage) => void): (() => void) => {
     agentMessageListeners.add(listener)
     ensureAgentMessageDispatcher()

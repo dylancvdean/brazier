@@ -74,6 +74,79 @@ pub struct ConversationExport {
     pub run_snapshots: Vec<RunSnapshot>,
 }
 
+/// Every legal status edge for a download job. Each status write in this
+/// module is guarded by one of these, so the download queue, the HTTP
+/// handlers and startup recovery cannot disagree about which moves exist; a
+/// write whose job is no longer in a source status affects no row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadJobTransition {
+    Start,
+    Pause,
+    Requeue,
+    Complete,
+    Cancel,
+    Fail,
+}
+
+impl DownloadJobTransition {
+    pub const ALL: [Self; 6] = [
+        Self::Start,
+        Self::Pause,
+        Self::Requeue,
+        Self::Complete,
+        Self::Cancel,
+        Self::Fail,
+    ];
+
+    pub const fn target(self) -> &'static str {
+        match self {
+            Self::Start => "downloading",
+            Self::Pause => "paused",
+            Self::Requeue => "pending",
+            Self::Complete => "completed",
+            Self::Cancel => "cancelled",
+            Self::Fail => "failed",
+        }
+    }
+
+    pub const fn sources(self) -> &'static [&'static str] {
+        match self {
+            Self::Start | Self::Pause | Self::Complete | Self::Fail => &["pending", "downloading"],
+            Self::Requeue => &["paused", "failed", "cancelled"],
+            Self::Cancel => &["pending", "downloading", "paused"],
+        }
+    }
+
+    pub fn allows(self, from: &str) -> bool {
+        self.sources().contains(&from)
+    }
+
+    /// `sources()` as a SQL list literal for the guarding `WHERE status IN`.
+    fn sql_sources(self) -> String {
+        let quoted: Vec<String> = self.sources().iter().map(|s| format!("'{s}'")).collect();
+        format!("({})", quoted.join(", "))
+    }
+
+    fn update_sql(self, extra_set: &str) -> String {
+        self.update_sql_where(extra_set, "id = ?")
+    }
+
+    /// The guarded UPDATE for this edge over the rows matching `predicate`.
+    fn update_sql_where(self, extra_set: &str, predicate: &str) -> String {
+        let extra = if extra_set.is_empty() {
+            String::new()
+        } else {
+            format!("{extra_set}, ")
+        };
+        format!(
+            "UPDATE download_jobs SET status = '{}', {extra}updated_at = datetime('now') \
+             WHERE {predicate} AND status IN {}",
+            self.target(),
+            self.sql_sources()
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadJob {
     pub id: String,
@@ -1639,14 +1712,10 @@ impl Database {
 
     /// Mark a job paused, keeping its partial file for a later resume.
     pub async fn pause_download_job(&self, job_id: &str) -> anyhow::Result<()> {
-        let result = sqlx::query(
-            r#"UPDATE download_jobs
-               SET status = 'paused', updated_at = datetime('now')
-               WHERE id = ? AND status IN ('pending', 'downloading')"#,
-        )
-        .bind(job_id)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query(&DownloadJobTransition::Pause.update_sql(""))
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
         anyhow::ensure!(
             result.rows_affected() == 1,
             "that download is no longer queued or running"
@@ -1656,14 +1725,10 @@ impl Database {
 
     /// Put a paused or failed job back in line.
     pub async fn requeue_download_job(&self, job_id: &str) -> anyhow::Result<()> {
-        let result = sqlx::query(
-            r#"UPDATE download_jobs
-               SET status = 'pending', error = NULL, updated_at = datetime('now')
-               WHERE id = ? AND status IN ('paused', 'failed', 'cancelled')"#,
-        )
-        .bind(job_id)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query(&DownloadJobTransition::Requeue.update_sql("error = NULL"))
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
         anyhow::ensure!(
             result.rows_affected() == 1,
             "that download is already queued or running"
@@ -1689,21 +1754,14 @@ impl Database {
         )
         .fetch_all(&mut *tx)
         .await?;
-        sqlx::query(
-            r#"UPDATE download_jobs
-               SET status = 'failed', error = 'Brazier restarted before this build completed',
-                   updated_at = datetime('now')
-               WHERE kind = 'runtime-build' AND status IN ('pending', 'downloading')"#,
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"UPDATE download_jobs
-               SET status = 'paused', updated_at = datetime('now')
-               WHERE kind != 'runtime-build' AND status IN ('pending', 'downloading')"#,
-        )
-        .execute(&mut *tx)
-        .await?;
+        // Recovery uses the same edges as the queue: builds fail, transfers pause.
+        let fail = DownloadJobTransition::Fail.update_sql_where(
+            "error = 'Brazier restarted before this build completed'",
+            "kind = 'runtime-build'",
+        );
+        sqlx::query(&fail).execute(&mut *tx).await?;
+        let pause = DownloadJobTransition::Pause.update_sql_where("", "kind != 'runtime-build'");
+        sqlx::query(&pause).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(interrupted)
     }
@@ -1772,10 +1830,8 @@ impl Database {
         bytes: u64,
     ) -> anyhow::Result<()> {
         let result = sqlx::query(
-            r#"UPDATE download_jobs
-               SET status = 'completed', sha256 = ?, bytes_downloaded = ?,
-                   total_bytes = ?, error = NULL, updated_at = datetime('now')
-               WHERE id = ? AND status IN ('pending', 'downloading')"#,
+            &DownloadJobTransition::Complete
+                .update_sql("sha256 = ?, bytes_downloaded = ?, total_bytes = ?, error = NULL"),
         )
         .bind(sha256)
         .bind(bytes as i64)
@@ -1791,14 +1847,10 @@ impl Database {
     }
 
     pub async fn start_download_job(&self, job_id: &str) -> anyhow::Result<()> {
-        let result = sqlx::query(
-            r#"UPDATE download_jobs
-               SET status = 'downloading', error = NULL, updated_at = datetime('now')
-               WHERE id = ? AND status IN ('pending', 'downloading')"#,
-        )
-        .bind(job_id)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query(&DownloadJobTransition::Start.update_sql("error = NULL"))
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
         anyhow::ensure!(
             result.rows_affected() == 1,
             "that download is no longer queued or running"
@@ -1807,14 +1859,11 @@ impl Database {
     }
 
     pub async fn cancel_download_job(&self, job_id: &str) -> anyhow::Result<()> {
-        let result = sqlx::query(
-            r#"UPDATE download_jobs
-               SET status = 'cancelled', error = 'cancelled by user', updated_at = datetime('now')
-               WHERE id = ? AND status IN ('pending', 'downloading', 'paused')"#,
-        )
-        .bind(job_id)
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query(&DownloadJobTransition::Cancel.update_sql("error = 'cancelled by user'"))
+                .bind(job_id)
+                .execute(&self.pool)
+                .await?;
         anyhow::ensure!(
             result.rows_affected() == 1,
             "that download is already settled or does not exist"
@@ -1823,15 +1872,11 @@ impl Database {
     }
 
     pub async fn fail_download_job(&self, job_id: &str, error: &str) -> anyhow::Result<()> {
-        let result = sqlx::query(
-            r#"UPDATE download_jobs
-               SET status = 'failed', error = ?, updated_at = datetime('now')
-               WHERE id = ? AND status IN ('pending', 'downloading')"#,
-        )
-        .bind(error)
-        .bind(job_id)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query(&DownloadJobTransition::Fail.update_sql("error = ?"))
+            .bind(error)
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
         anyhow::ensure!(
             result.rows_affected() == 1,
             "that download is no longer queued or running"
@@ -2399,6 +2444,40 @@ mod tests {
         let cleared: UpdateConversation =
             serde_json::from_value(json!({ "agent_session_id": null })).unwrap();
         assert_eq!(cleared.agent_session_id, Some(None));
+    }
+
+    #[test]
+    fn download_transitions_form_the_documented_lifecycle() {
+        use DownloadJobTransition as T;
+        let statuses = [
+            "pending",
+            "downloading",
+            "paused",
+            "completed",
+            "failed",
+            "cancelled",
+        ];
+        let edges: Vec<(&str, &str)> = statuses
+            .iter()
+            .flat_map(|from| {
+                T::ALL
+                    .iter()
+                    .filter(|t| t.allows(from))
+                    .map(move |t| (*from, t.target()))
+            })
+            .collect();
+        // Terminal states only leave through an explicit requeue; completed never does.
+        assert!(edges.iter().all(|(from, _)| *from != "completed"));
+        assert!(edges.contains(&("paused", "cancelled")));
+        assert!(!edges.contains(&("paused", "downloading")));
+        assert!(!edges.contains(&("cancelled", "completed")));
+        for t in T::ALL {
+            assert!(statuses.contains(&t.target()));
+            assert!(
+                t.update_sql("")
+                    .contains(&format!("status = '{}'", t.target()))
+            );
+        }
     }
 
     /// Dismissing is for tidying a list, so it must never reach a job that is

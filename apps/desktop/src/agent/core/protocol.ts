@@ -59,8 +59,27 @@ export type WorkerMessage =
   | { type: 'session-state'; sessionId: string; state: AgentSessionState }
   | { type: 'log'; level: 'info' | 'warn' | 'error'; message: string }
 
+/**
+ * Worker lifecycle as the UI sees it. `restarting` means it crashed and will be
+ * respawned after `retryAt`; `crash-loop` means it crashed too often in a short
+ * window and stays down until the user asks for a restart.
+ */
+export type AgentWorkerState = 'idle' | 'starting' | 'running' | 'restarting' | 'crash-loop'
+
+export type AgentWorkerStatus = {
+  state: AgentWorkerState
+  running: boolean
+  crashes: number
+  lastExitCode: number | null
+  /** Epoch milliseconds before which a respawn will not be attempted. */
+  retryAt: number | null
+}
+
 /** IPC channel names the renderer sees through the preload bridge. */
 export const AGENT_IPC = {
   invoke: 'brazier:agent:invoke',
-  event: 'brazier:agent:event'
+  event: 'brazier:agent:event',
+  status: 'brazier:agent:status',
+  statusChanged: 'brazier:agent:status-changed',
+  restart: 'brazier:agent:restart'
 } as const

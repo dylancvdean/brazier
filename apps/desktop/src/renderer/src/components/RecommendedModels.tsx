@@ -34,7 +34,6 @@ import {
   huggingFaceTokenStatus,
   recordRecommendationInstall,
   setHuggingFaceToken,
-  listRecommendationSetups,
   startRecommendationSetup,
   resolveBundleVariants,
   type BundleRecommendation,
@@ -45,6 +44,8 @@ import {
   type RepoRecommendation,
   type VoiceRecommendationModel
 } from '../api'
+import { useConnectionProfile } from '../connectionProfile'
+import { downloadJobsStore, useDownloadJobs } from '../downloadJobsStore'
 
 export const CATEGORY_LABELS: Record<RecommendationCategory, string> = {
   text: 'Chat',
@@ -144,7 +145,9 @@ function RequestAccessLink({ repoId }: { repoId: string }): React.JSX.Element {
       rel="noreferrer"
       title={`Request access to ${repoId}`}
       onClick={() => {
-        void addHfAccessRequest(repoId).catch(() => {})
+        // Only remembers that access was requested so the row can say so; the
+        // link still opens, and the request itself happens on Hugging Face.
+        void addHfAccessRequest(repoId).catch(() => undefined)
       }}
     >
       <ExternalLink size={13} /> Request access
@@ -201,7 +204,8 @@ export function RecommendedModels(props: Props): React.JSX.Element {
   const [states, setStates] = useState<Record<string, InstallState>>({})
   const [includeCompanions, setIncludeCompanions] = useState<Record<string, boolean>>({})
   const [includeDrafts, setIncludeDrafts] = useState<Record<string, boolean>>({})
-  const [setups, setSetups] = useState<RecommendationSetup[]>([])
+  const profile = useConnectionProfile()
+  const { setups } = useDownloadJobs(profile.id)
   const [hfTokenSource, setHfTokenSource] = useState('none')
   const [hfTokenDraft, setHfTokenDraft] = useState('')
   const [savingHfToken, setSavingHfToken] = useState(false)
@@ -218,15 +222,6 @@ export function RecommendedModels(props: Props): React.JSX.Element {
       recommendations.agent_options?.some((entry) => entry.gated === true) === true) ||
     (categories.includes('voice') &&
       recommendations.voice?.models.some((entry) => entry.gated === true) === true)
-
-  useEffect(() => {
-    const refresh = (): void => {
-      void listRecommendationSetups().then(setSetups).catch(() => {})
-    }
-    refresh()
-    const timer = window.setInterval(refresh, 1500)
-    return () => window.clearInterval(timer)
-  }, [])
 
   useEffect(() => {
     if (!hasGatedRecommendation) return
@@ -447,6 +442,7 @@ export function RecommendedModels(props: Props): React.JSX.Element {
                         engine: 'llama.cpp' as const
                       }))
                     })
+                    void downloadJobsStore.refresh()
                     // Activity owns the rest of the work; the card is no
                     // longer allowed to create a second local sequence.
                     setState(key, { busy: false })

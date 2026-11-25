@@ -1,3 +1,4 @@
+import { ErrorBoundary } from './ErrorBoundary'
 import 'katex/dist/katex.min.css'
 
 import katex from 'katex'
@@ -283,7 +284,26 @@ function renderBlocks(blocks: BlockNode[]): JSX.Element[] {
  * Uses the in-house CommonMark + GFM + KaTeX parser with strict URL allowlisting
  * and zero raw HTML injection.
  */
-export function Markdown({
+export function Markdown(props: { children: string; className?: string }): JSX.Element {
+  const rootClass = props.className
+    ? `markdown-body ${props.className}`.trim()
+    : 'markdown-body'
+  return (
+    <ErrorBoundary
+      label="formatted text"
+      resetKey={props.children}
+      fallback={() => (
+        <div className={rootClass}>
+          <p className="markdown-plain-fallback">{props.children}</p>
+        </div>
+      )}
+    >
+      <MarkdownContent {...props} />
+    </ErrorBoundary>
+  )
+}
+
+function MarkdownContent({
   children,
   className = ''
 }: {

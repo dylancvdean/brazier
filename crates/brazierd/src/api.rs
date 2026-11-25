@@ -887,8 +887,14 @@ fn daemon_boot_id() -> &'static str {
     DAEMON_BOOT_ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
-async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+/// Unauthenticated liveness probe. Loopback callers also get the build version,
+/// engine and boot id; a remote peer (`--allow-insecure-remote`) gets status only,
+/// so the network cannot fingerprint the exact build or watch restarts.
+async fn health(State(state): State<AppState>, client: ClientAddr) -> ApiResult<Json<Value>> {
     state.db.ping().await.map_err(ApiError::internal)?;
+    if !client_is_loopback(&client) {
+        return Ok(Json(json!({ "status": "healthy", "database": "ok" })));
+    }
     Ok(Json(json!({
         "status": "healthy",
         "engine": state.runtime.id(),
@@ -10621,6 +10627,39 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    }
+
+    #[tokio::test]
+    async fn remote_health_omits_version_and_boot_id() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let health_from = |peer: SocketAddr| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .uri("/health")
+                            .extension(ConnectInfo(peer))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                serde_json::from_slice::<Value>(&body).unwrap()
+            }
+        };
+        let local = health_from(SocketAddr::from(([127, 0, 0, 1], 42_010))).await;
+        assert_eq!(local["status"], "healthy");
+        assert!(local["version"].is_string());
+        assert!(local["boot_id"].is_string());
+        let remote = health_from(SocketAddr::from(([192, 168, 1, 20], 42_011))).await;
+        assert_eq!(remote["status"], "healthy");
+        assert!(remote.get("version").is_none());
+        assert!(remote.get("boot_id").is_none());
+        assert!(remote.get("engine").is_none());
     }
 
     #[tokio::test]

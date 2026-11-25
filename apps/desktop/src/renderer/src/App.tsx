@@ -44,6 +44,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState
 } from 'react'
@@ -114,6 +115,7 @@ import {
 } from './components/GenerateHistorySidebar'
 import { MessageMedia } from './components/MessageMedia'
 import { Markdown } from './components/Markdown'
+import { ErrorBoundary, RenderSlot } from './components/ErrorBoundary'
 import { ReasoningDisclosure, TurnTrace } from './components/ReasoningDisclosure'
 import { CommandPalette } from './components/CommandPalette'
 import { GenerateMode } from './components/GenerateMode'
@@ -173,7 +175,18 @@ import {
 } from './inventoryCache'
 import type { Attachment, ContentPart, Conversation, Message, Role } from './types'
 import { ConnectionProfileContext, LOCAL_CONNECTION_PROFILE } from './connectionProfile'
-import { setDaemonAvailability } from './daemonAvailability'
+import {
+  DaemonOfflineError,
+  daemonAvailability,
+  setDaemonAvailability
+} from './daemonAvailability'
+import {
+  INITIAL_DAEMON_CONNECTION,
+  availabilityForEvent,
+  daemonConnectionReducer,
+  daemonStatusOf,
+  type DaemonConnectionEvent
+} from './daemonConnection'
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 const GENERATE_HISTORY_KEY = 'brazier.generateHistory.v1'
@@ -657,9 +670,26 @@ export function App(): React.JSX.Element {
   const [availableTools, setAvailableTools] = useState<BundledTool[]>([])
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false)
   const toolsEnabled = enabledTools.length > 0
-  const [daemonStatus, setDaemonStatus] = useState<'checking' | 'healthy' | 'offline'>('checking')
-  const daemonWasOfflineRef = useRef(false)
-  const [daemonVersion, setDaemonVersion] = useState('')
+  const [daemonConnection, dispatchDaemonConnection] = useReducer(
+    daemonConnectionReducer,
+    INITIAL_DAEMON_CONNECTION
+  )
+  const daemonStatus = daemonStatusOf(daemonConnection)
+  const daemonVersion = daemonConnection.version
+  const updateDaemonConnection = useCallback((event: DaemonConnectionEvent): void => {
+    // The request gate changes synchronously so no mutation slips through
+    // between this event and the next render.
+    const availability = availabilityForEvent(event)
+    if (availability) setDaemonAvailability(availability)
+    dispatchDaemonConnection(event)
+  }, [])
+  // Background loads and saves report failures instead of leaving stale
+  // controls; while offline the connection banner already explains them.
+  const reportBackgroundFailure = useCallback((cause: unknown): void => {
+    if (daemonAvailability() === 'offline' || cause instanceof DaemonOfflineError) return
+    if (cause instanceof DOMException && cause.name === 'AbortError') return
+    setError(cause instanceof Error ? cause.message : String(cause))
+  }, [])
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
   const [runtime, setRuntime] = useState<RuntimeSettings | null>(null)
   const [daemonDataDir, setDaemonDataDir] = useState<string | null>(null)
@@ -685,8 +715,17 @@ export function App(): React.JSX.Element {
   const [showWelcome, setShowWelcome] = useState<boolean | null>(null)
   const [recommendationSwaps, setRecommendationSwaps] = useState<PendingSwap[]>([])
   const [appMode, setAppMode] = useState<AppMode>('chat')
-  const [workspaceModes, setWorkspaceModes] =
+  const [workspaceModePreference, setWorkspaceModes] =
     useState<WorkspaceModesPreference>(DEFAULT_WORKSPACE_MODES)
+  // Computer Use is unavailable on Windows in this beta, whatever the
+  // daemon-wide preference says (it may have been enabled from another host).
+  const workspaceModes = useMemo(
+    () =>
+      window.brazier.platform === 'win32'
+        ? { ...workspaceModePreference, computer: false }
+        : workspaceModePreference,
+    [workspaceModePreference]
+  )
   const [realtimeVoiceAvailable, setRealtimeVoiceAvailable] = useState(false)
   // Generate, Voice, and Computer pick from their own model families; the top
   // bar shows whichever belongs to the mode on screen.
@@ -795,8 +834,7 @@ export function App(): React.JSX.Element {
       setConnectionProfile(profile)
     }
     void fetchCurrentConnectionProfile().then(apply).catch(() => {
-      setDaemonAvailability('offline')
-      setDaemonStatus('offline')
+      updateDaemonConnection({ type: 'unreachable' })
     })
     const removeListener = window.brazier.onConnectionProfileChanged(apply)
     return () => {
@@ -1039,7 +1077,7 @@ export function App(): React.JSX.Element {
         setModelPrepareState('ready')
         setModelLoadStatus(null)
         void prefetchRuntimes()
-        void fetchModelBindings().then(setModelBindings).catch(() => {})
+        void fetchModelBindings().then(setModelBindings).catch(reportBackgroundFailure)
         void refreshCapabilities()
       })
       .catch((cause: unknown) => {
@@ -1565,22 +1603,24 @@ export function App(): React.JSX.Element {
   }
 
   async function reconnectDaemon(): Promise<void> {
-    setDaemonStatus('checking')
-    setDaemonAvailability('checking')
+    updateDaemonConnection({ type: 'retry' })
     try {
       const result = await health()
-      setDaemonStatus('healthy')
-      setDaemonAvailability('healthy')
-      setDaemonVersion(result.version)
-      daemonWasOfflineRef.current = false
-      setError(null)
-      await rehydrateDaemonState()
+      updateDaemonConnection({ type: 'reachable', version: result.version })
     } catch {
-      daemonWasOfflineRef.current = true
-      setDaemonStatus('offline')
-      setDaemonAvailability('offline')
+      updateDaemonConnection({ type: 'unreachable' })
     }
   }
+
+  useEffect(() => {
+    if (daemonConnection.phase !== 'rehydrating') return
+    setError(null)
+    void rehydrateDaemonState().finally(() =>
+      updateDaemonConnection({ type: 'rehydrated' })
+    )
+    // Runs once per entry into `rehydrating`; the loaders read current state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [daemonConnection.phase])
 
   useEffect(() => {
     let cancelled = false
@@ -1609,12 +1649,12 @@ export function App(): React.JSX.Element {
     )
     void prefetchRuntimes()
     void refreshTools()
-    void fetchModelBindings().then(setModelBindings).catch(() => {})
+    void fetchModelBindings().then(setModelBindings).catch(reportBackgroundFailure)
     // Advanced per-model settings, so the picker can say which models carry any
     // before one of them is opened.
     void fetchModelSettings()
       .then((response) => setModelProfiles(response.models))
-      .catch(() => {})
+      .catch(reportBackgroundFailure)
     void refreshRuntime().catch((cause: unknown) =>
       setError(cause instanceof Error ? cause.message : String(cause))
     )
@@ -1642,21 +1682,10 @@ export function App(): React.JSX.Element {
     const check = (): void => {
       void health()
         .then((result) => {
-          if (!active) return
-          setDaemonStatus('healthy')
-          setDaemonAvailability('healthy')
-          setDaemonVersion(result.version)
-          if (daemonWasOfflineRef.current) {
-            daemonWasOfflineRef.current = false
-            setError(null)
-            void rehydrateDaemonState()
-          }
+          if (active) updateDaemonConnection({ type: 'reachable', version: result.version })
         })
         .catch(() => {
-          if (!active) return
-          daemonWasOfflineRef.current = true
-          setDaemonStatus('offline')
-          setDaemonAvailability('offline')
+          if (active) updateDaemonConnection({ type: 'unreachable' })
         })
     }
     check()
@@ -1933,7 +1962,7 @@ export function App(): React.JSX.Element {
     if (latest) {
       const next = { ...latest, last_dream_at: now }
       memoryPreferenceRef.current = next
-      void saveMemoryPreference(next).catch(() => undefined)
+      void saveMemoryPreference(next).catch(reportBackgroundFailure)
     }
   }
 
@@ -2779,7 +2808,7 @@ export function App(): React.JSX.Element {
         .then((snapshots) => {
           if (turn === chatTurnRef.current) setRunSnapshots(snapshots)
         })
-        .catch(() => {})
+        .catch(reportBackgroundFailure)
     }
     scheduleDream()
   }
@@ -3033,7 +3062,7 @@ export function App(): React.JSX.Element {
             void markWelcomeCompleted()
             void fetchWorkspacePreference()
               .then((result) => setWorkspaceModes(result.modes))
-              .catch(() => undefined)
+              .catch(reportBackgroundFailure)
             setShowWelcome(false)
           }}
           onOpenRuntimes={() => {
@@ -3047,8 +3076,8 @@ export function App(): React.JSX.Element {
           onModelsChanged={() => {
             // Installs write their mode defaults daemon-side; pull the fresh
             // settings so the seeded selections pick them up.
-            void refreshRuntime().catch(() => {})
-            void refreshLocalModels().catch(() => {})
+            void refreshRuntime().catch(reportBackgroundFailure)
+            void refreshLocalModels().catch(reportBackgroundFailure)
           }}
         />
       </main>
@@ -3520,6 +3549,7 @@ export function App(): React.JSX.Element {
         )}
 
         <div hidden={appMode !== 'generate'}>
+          <ErrorBoundary label="Generate workspace" resetKey={profileId}>
           <GenerateMode
             models={generateModels}
             modality={generateModality}
@@ -3541,8 +3571,10 @@ export function App(): React.JSX.Element {
               setActiveGenerateHistoryId(entry.id)
             }}
           />
+          </ErrorBoundary>
         </div>
         {appMode === 'voice' ? (
+          <ErrorBoundary label="Voice workspace" resetKey={profileId}>
           <VoiceMode
             models={effectiveLocalModels}
             realtimeAvailable={realtimeVoiceAvailable}
@@ -3577,8 +3609,10 @@ export function App(): React.JSX.Element {
             session={session}
             onError={setError}
           />
+          </ErrorBoundary>
         ) : null}
         {appMode === 'agent' ? (
+          <ErrorBoundary label="Agent workspace" resetKey={profileId}>
           <AgentMode
             modelId={selectedModel}
             models={effectiveLocalModels}
@@ -3595,8 +3629,10 @@ export function App(): React.JSX.Element {
             onOpenModelMenu={() => setModelMenuOpen(true)}
             onError={setError}
           />
+          </ErrorBoundary>
         ) : null}
         {appMode === 'computer' ? (
+          <ErrorBoundary label="Computer Use workspace" resetKey={profileId}>
           <ComputerMode
             modelId={computerModel}
             models={computerModels}
@@ -3605,6 +3641,7 @@ export function App(): React.JSX.Element {
             onOpenManage={openManage}
             onError={setError}
           />
+          </ErrorBoundary>
         ) : null}
 
         <div
@@ -3689,7 +3726,13 @@ export function App(): React.JSX.Element {
             </div>
           ) : (
             <div className="messages">
-              {chatDisplayItems.map((item) => {
+              {chatDisplayItems.map((item) => (
+                <ErrorBoundary
+                  key={item.kind === 'message' ? item.message.id : item.id}
+                  label="message"
+                >
+                  <RenderSlot
+                    render={() => {
                 if (item.kind === 'assistant') {
                   const status =
                     item.status === 'cancelled' ||
@@ -3876,7 +3919,10 @@ export function App(): React.JSX.Element {
                     </div>
                   </article>
                 )
-              })}
+                    }}
+                  />
+                </ErrorBoundary>
+              ))}
               {(liveText || streamingReasoning || streamingTools.length > 0) && (
                 <article className="message assistant">
                   <div className="avatar">
@@ -3909,7 +3955,7 @@ export function App(): React.JSX.Element {
         <div className="composer-area">
           {/* Sits above the composer in every mode: a generation a model
               started is otherwise invisible until it finishes. */}
-          <GenerationActivity onStopped={() => void refreshLocalModels().catch(() => {})} />
+          <GenerationActivity onStopped={() => void refreshLocalModels().catch(reportBackgroundFailure)} />
           {error && (
             <div className="error-banner">
               <div className="error-banner-body">
@@ -4440,7 +4486,7 @@ export function App(): React.JSX.Element {
                 swaps.map((swap) =>
                   updateRecommendationState({ dismiss: swap.recommended_id })
                 )
-              ).catch(() => {})
+              ).catch(reportBackgroundFailure)
             }}
           >
             <X size={14} />
@@ -4452,11 +4498,11 @@ export function App(): React.JSX.Element {
         activeModelIds={[selectedModel, generateModel, voiceModel, computerModel].filter(Boolean)}
         onUseModel={selectModelFromAnySurface}
         onChanged={() => {
-          void refreshLocalModels().catch(() => {})
+          void refreshLocalModels().catch(reportBackgroundFailure)
           // A background install can settle after the welcome screen is left;
           // it writes its mode defaults daemon-side, so pull fresh settings for
           // the seeded selections to pick them up.
-          void refreshRuntime().catch(() => {})
+          void refreshRuntime().catch(reportBackgroundFailure)
         }}
       />
 
@@ -4485,7 +4531,7 @@ export function App(): React.JSX.Element {
           onSetModelBinding={(modelId, runtimeId) => void updateModelBinding(modelId, runtimeId)}
           onRuntimesChanged={() => {
             void prefetchRuntimes()
-            void fetchModelBindings().then(setModelBindings).catch(() => {})
+            void fetchModelBindings().then(setModelBindings).catch(reportBackgroundFailure)
           }}
           settings={runtime}
           onSettingsSaved={setRuntime}
