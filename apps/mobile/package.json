@@ -1,0 +1,25 @@
+{
+  "name": "@brazier/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "check": "tsc --noEmit",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/api.test.ts"
+  },
+  "dependencies": {
+    "expo": "54.0.38",
+    "expo-camera": "17.0.10",
+    "expo-secure-store": "15.0.8",
+    "react": "19.1.0",
+    "react-native": "0.81.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/react": "~19.1.10",
+    "typescript": "^5.9.3"
+  }
+}
