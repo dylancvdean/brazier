@@ -22,6 +22,10 @@ export function daemonAvailability(): DaemonAvailability {
   return availability
 }
 
+export function daemonVerificationPending(): boolean {
+  return availability === 'checking' || availability === 'blocked'
+}
+
 export function assertDaemonMutationAllowed(init?: RequestInit): void {
   const method = (init?.method ?? 'GET').toUpperCase()
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return
@@ -43,12 +47,11 @@ export async function daemonFetch(
     signal.throwIfAborted()
     const response = await fetch(input, { ...init, signal })
     signal.throwIfAborted()
-    // Any HTTP response proves the host is reachable, including auth and
-    // validation failures. Only transport failure means offline.
-    if (availability !== 'blocked') availability = 'healthy'
+    // Reachability cannot replace verification of the selected credentials.
+    if (!daemonVerificationPending()) availability = 'healthy'
     return response
   } catch (cause) {
-    if (availability !== 'blocked' && !signal.aborted && !(cause instanceof DOMException && cause.name === 'AbortError')) {
+    if (!daemonVerificationPending() && !signal.aborted && !(cause instanceof DOMException && cause.name === 'AbortError')) {
       availability = 'offline'
     }
     throw cause
