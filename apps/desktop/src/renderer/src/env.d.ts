@@ -1,4 +1,4 @@
-import type { ConnectionVerification, PairingPreview } from '../../main/connections'
+import type { ConnectionVerification, PairingPreview, VerifiedPairingOrigin } from '../../main/connections'
 
 /** Vite emits the asset and resolves the import to its URL. */
 declare module '*?url' {
@@ -105,7 +105,7 @@ declare global {
       }>
       verifyConnection(): Promise<ConnectionVerification>
       previewPairing(origin: string, id: string, code: string): Promise<PairingPreview>
-      verifyPairingOrigin(origin: string): Promise<string>
+      verifyPairingOrigin(origin: string): Promise<VerifiedPairingOrigin>
       selectConnectionProfile(id: string): Promise<BrazierConnectionProfileSummary>
       deleteConnectionProfile(id: string): Promise<boolean>
       onConnectionProfileChanged(

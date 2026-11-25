@@ -67,6 +67,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
   const [pairingClientName, setPairingClientName] = useState('Brazier desktop')
   const [pairingScopes, setPairingScopes] = useState<ClientScope[]>(['inference'])
   const [createdPairing, setCreatedPairing] = useState<PairingInvite | null>(null)
+  const [pairingPreviewReachable, setPairingPreviewReachable] = useState(true)
   const [inviteOrigin, setInviteOrigin] = useState<string | null>(null)
   const [pairingCopied, setPairingCopied] = useState(false)
   const [review, setReview] = useState<{
@@ -301,13 +302,14 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
     setCreatedPairing(null)
     try {
       const origin = normalizeShareableOrigin(originInput)
-      const hostName = await window.brazier.verifyPairingOrigin(origin)
+      const { hostName, previewReachable } = await window.brazier.verifyPairingOrigin(origin)
       const created = await createDaemonPairing({
         clientName: pairingClientName,
         scopes: pairingScopes,
         ttlSeconds: 300
       })
       setNow(Math.floor(Date.now() / 1_000))
+      setPairingPreviewReachable(previewReachable)
       setCreatedPairing({
         version: 1,
         origin,
@@ -650,7 +652,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
           </button>
         </div>
 
-        {trustError ? <div className="error-banner"><span>{trustError}</span></div> : null}
+        {trustError ? <div className="error-banner" role="alert"><span>{trustError}</span></div> : null}
 
         {grantableScopes?.length === 0 ? (
           <p className="model-help">This device does not have permission to manage pairing invitations.</p>
@@ -710,6 +712,13 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
               <strong>Pair with {createdPairing.hostName}</strong>
               <span>{createdPairing.origin} · {createdPairing.scopes.join(', ')}</span>
               <span>Expires in {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}</span>
+              {!pairingPreviewReachable && (
+                <p className="runtime-update-note" role="status">
+                  Brazier could not verify the pairing preview route at this address. The other
+                  device needs this route to confirm the invite. Before sharing, check that your
+                  proxy forwards the route and the host supports pairing preview.
+                </p>
+              )}
               <div style={{ padding: 12, background: '#fff', width: 'fit-content' }}>
                 <QRCode value={encodePairingInvite(createdPairing)} size={172} title="One-time Brazier pairing invite" />
               </div>
