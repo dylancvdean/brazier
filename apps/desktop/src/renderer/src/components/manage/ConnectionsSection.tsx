@@ -301,27 +301,17 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
     setCreatedPairing(null)
     try {
       const origin = normalizeShareableOrigin(originInput)
-      const connection = await window.brazier.getConnection()
+      const hostName = await window.brazier.verifyPairingOrigin(origin)
       const created = await createDaemonPairing({
         clientName: pairingClientName,
         scopes: pairingScopes,
         ttlSeconds: 300
       })
-      let verified
-      try {
-        verified = await window.brazier.previewPairing(origin, created.pairing.id, created.code)
-        if (verified.daemon.instance_id !== connection.daemon.daemon?.instance_id) {
-          throw new Error('The reachable address points to a different daemon. Check the address and try again.')
-        }
-      } catch (error) {
-        await cancelDaemonPairing(created.pairing.id).catch(() => undefined)
-        throw error
-      }
       setNow(Math.floor(Date.now() / 1_000))
       setCreatedPairing({
         version: 1,
         origin,
-        hostName: verified.daemon.display_name,
+        hostName,
         pairingId: created.pairing.id,
         code: created.code,
         scopes: created.pairing.scopes,

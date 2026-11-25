@@ -16,7 +16,8 @@ import {
   claimPairingCredential,
   fetchDaemonInfo,
   normalizeDaemonBaseUrl,
-  normalizePairingDaemonBaseUrl
+  normalizePairingDaemonBaseUrl,
+  verifyPairingOrigin
 } from './connections'
 
 const temporaryDirectories: string[] = []
@@ -57,6 +58,28 @@ afterEach(() => {
 })
 
 describe('connection profile URLs', () => {
+  it('checks the advertised origin against the active daemon without sending credentials', async () => {
+    const active = 'http://127.0.0.1:7614'
+    const advertised = 'https://brazier.example'
+    let remoteBootId = 'another-daemon'
+    const probe = vi.fn<typeof fetch>(async (address) => Response.json({
+      status: 'healthy',
+      boot_id: address === `${active}/health` ? 'active-daemon' : remoteBootId
+    }))
+
+    await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
+    remoteBootId = 'active-daemon'
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toBeUndefined()
+    expect(probe.mock.calls.map(([address]) => address)).toEqual([
+      `${active}/health`, `${advertised}/health`, `${active}/health`, `${advertised}/health`
+    ])
+    for (const [, init] of probe.mock.calls) {
+      expect(init).toMatchObject({ redirect: 'error', credentials: 'omit', cache: 'no-store' })
+      expect(init?.body).toBeUndefined()
+      expect(init?.headers).toBeUndefined()
+    }
+  })
+
   it('normalizes an HTTP(S) origin and rejects ambiguous or credential-bearing URLs', () => {
     expect(normalizeDaemonBaseUrl(' HTTPS://Example.COM:443/ ')).toBe('https://example.com')
     expect(normalizeDaemonBaseUrl('http://[::1]:7614')).toBe('http://[::1]:7614')

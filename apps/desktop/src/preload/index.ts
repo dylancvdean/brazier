@@ -145,6 +145,8 @@ contextBridge.exposeInMainWorld('brazier', {
     invoke('brazier:connection-profiles:verify'),
   previewPairing: (origin: string, id: string, code: string): Promise<PairingPreview> =>
     invoke('brazier:connection-profiles:preview-pairing', origin, id, code),
+  verifyPairingOrigin: (origin: string): Promise<string> =>
+    invoke('brazier:connection-profiles:verify-pairing-origin', origin),
   listConnectionProfiles: (): Promise<BrazierConnectionProfile[]> =>
     invoke('brazier:connection-profiles:list'),
   getCurrentConnectionProfile: (): Promise<BrazierConnectionProfileSummary> =>

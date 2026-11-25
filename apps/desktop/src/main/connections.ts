@@ -9,6 +9,7 @@ import {
 import { dirname } from 'node:path'
 import { isIP } from 'node:net'
 
+import { normalizeShareableOrigin } from '../../../../packages/pairing/src/invite'
 import { isRendererDevelopmentOrigin } from './rendererTrust'
 
 export const LOCAL_CONNECTION_PROFILE_ID = 'local'
@@ -653,6 +654,39 @@ export async function previewPairing(
     throw new Error('The daemon returned an invalid pairing preview.')
   }
   return { pairing, daemon }
+}
+
+export async function verifyPairingOrigin(
+  activeAddress: string,
+  advertisedAddress: string,
+  fetch_: typeof fetch = fetch
+): Promise<void> {
+  const origin = normalizeShareableOrigin(advertisedAddress)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), DEFAULT_HANDSHAKE_TIMEOUT_MS)
+  const bootId = async (address: string): Promise<string> => {
+    const response = await fetch_(`${address}/health`, {
+      redirect: 'error',
+      credentials: 'omit',
+      cache: 'no-store',
+      signal: controller.signal
+    })
+    if (!response.ok) throw new Error('Daemon health request failed.')
+    const health = await boundedJson(response)
+    if (health?.status !== 'healthy' || typeof health.boot_id !== 'string' || !health.boot_id) {
+      throw new Error('The address did not return a Brazier daemon identity.')
+    }
+    return health.boot_id
+  }
+  try {
+    const [active, advertised] = await Promise.all([bootId(normalizeDaemonBaseUrl(activeAddress)), bootId(origin)])
+    if (active !== advertised) {
+      throw new Error('The reachable address points to a different daemon. Check the address and try again.')
+    }
+  } finally {
+    clearTimeout(timeout)
+    controller.abort()
+  }
 }
 
 /** Perform the bounded, authenticated compatibility handshake. */

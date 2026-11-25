@@ -105,6 +105,7 @@ declare global {
       }>
       verifyConnection(): Promise<ConnectionVerification>
       previewPairing(origin: string, id: string, code: string): Promise<PairingPreview>
+      verifyPairingOrigin(origin: string): Promise<string>
       selectConnectionProfile(id: string): Promise<BrazierConnectionProfileSummary>
       deleteConnectionProfile(id: string): Promise<boolean>
       onConnectionProfileChanged(
