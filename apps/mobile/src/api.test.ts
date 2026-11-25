@@ -81,6 +81,9 @@ test('prepares a selected text model for chat without management access', async 
     if (url.endsWith('/v1/models')) return Response.json({ data: [
       { id: 'image', capabilities: { output_modalities: ['image'] } },
       { id: 'text', capabilities: { output_modalities: ['text'] } },
+      { id: 'transcription', engine: 'streaming-asr', capabilities: { output_modalities: ['text'] } },
+      { id: 'legacy-asr', owned_by: 'brazier:whisper.cpp', capabilities: { output_modalities: ['text'] } },
+      { id: 'personaplex:voice', capabilities: { output_modalities: ['text', 'audio'] } },
     ] });
     assert.equal(url, origin + '/api/v1/models/prepare');
     assert.deepEqual(JSON.parse(init.body!), { model_id: 'text', mode: 'chat' });

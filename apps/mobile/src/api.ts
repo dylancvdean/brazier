@@ -7,7 +7,7 @@ export type Preview = {
   pairing: { id: string; client_name: string; scopes: PairingScope[]; expires_at: number };
 };
 export type Host = { displayName: string; scopes: PairingScope[] };
-export type Model = { id: string; capabilities?: { output_modalities: string[] } };
+export type Model = { id: string; engine?: string; owned_by?: string; capabilities?: { output_modalities: string[] } };
 export type Conversation = { id: string; title: string };
 export type Message = { id: string; parent_id: string | null; role: string; content: unknown; status?: string };
 export type OpenAiMessage = { role: string; content: string };
@@ -102,6 +102,14 @@ export async function claimInvite(fetch: Request, input: InviteInput, preview: P
   return { origin: input.origin, instanceId: preview.daemon.instance_id, apiKey: data.api_key };
 }
 
+function isChatModel(model: Model): boolean {
+  const engine = model.engine || model.owned_by?.replace(/^brazier:/, '') || '';
+  return !['whisper.cpp', 'streaming-asr', 'stable-diffusion.cpp', 'personaplex'].includes(engine) &&
+    !['sdcpp-image:', 'sdcpp-video:', 'personaplex:', 'whisper:', 'streaming-asr:']
+      .some((prefix) => model.id.startsWith(prefix)) &&
+    (!model.capabilities || model.capabilities.output_modalities.includes('text'));
+}
+
 export function daemonClient(fetch: Request, credential: Credential) {
   const json = async <T>(path: string, init: MobileRequestInit = {}): Promise<T> => {
     return (await request(fetch, credential.origin, path, init, credential.apiKey)).json() as Promise<T>;
@@ -137,8 +145,7 @@ export function daemonClient(fetch: Request, credential: Credential) {
       return { displayName: info.daemon.display_name, scopes: info.client.scopes };
     },
     async models(): Promise<Model[]> {
-      return (await json<{ data: Model[] }>('/v1/models')).data.filter((model) =>
-        !model.capabilities || model.capabilities.output_modalities.includes('text'));
+      return (await json<{ data: Model[] }>('/v1/models')).data.filter(isChatModel);
     },
     prepare: (modelId: string, signal?: AbortSignal) =>
       json('/api/v1/models/prepare', post({ model_id: modelId, mode: 'chat' }, signal)),
