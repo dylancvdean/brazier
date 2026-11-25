@@ -61,6 +61,8 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
   let setupsInFlight: Promise<RecommendationSetup[]> | null = null
   const listeners = new Set<() => void>()
   const settledListeners = new Set<(job: DownloadJob) => void>()
+  const setupSettledListeners = new Set<(setup: RecommendationSetup) => void>()
+  let movingSetupIds = new Set<string>()
   let openIds = new Set<string>()
   // Every job id seen so far, so one that finished between polls still settles.
   let seenIds: Set<string> | null = null
@@ -98,6 +100,19 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
     for (const job of jobs) seenIds.add(job.id)
   }
 
+  // A setup writes its mode defaults when it finishes, which can be a poll
+  // after its last download settles, so consumers need this event too.
+  function announceSetupsSettled(setups: RecommendationSetup[]): void {
+    const nextMoving = new Set<string>()
+    for (const setup of setups) {
+      if (MOVING_SETUP_STATUSES.has(setup.status)) nextMoving.add(setup.id)
+      else if (movingSetupIds.has(setup.id)) {
+        for (const listener of [...setupSettledListeners]) listener(setup)
+      }
+    }
+    movingSetupIds = nextMoving
+  }
+
   function pollSetups(): void {
     if (setupsInFlight) return
     // Listing setups also lets the daemon advance them; it must not block jobs.
@@ -105,6 +120,7 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
     setupsInFlight = current
     void current.then((setups) => {
       if (setupsInFlight !== current) return
+      announceSetupsSettled(setups)
       emit({ ...snapshot, setups })
     }, () => undefined).finally(() => {
       if (setupsInFlight !== current) return
@@ -172,6 +188,13 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
         settledListeners.delete(listener)
       }
     },
+    /** Called when a recommendation setup leaves pending/running between two polls. */
+    onSetupSettled(listener: (setup: RecommendationSetup) => void): () => void {
+      setupSettledListeners.add(listener)
+      return () => {
+        setupSettledListeners.delete(listener)
+      }
+    },
     /** Poll now (coalesced with any poll already in flight). */
     refresh(): Promise<void> {
       if (inFlight) return inFlight.then(() => poll())
@@ -189,6 +212,7 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
       failures = 0
       openIds = new Set()
       seenIds = null
+      movingSetupIds = new Set()
       inFlight = null
       setupsInFlight = null
       emit(EMPTY)
@@ -219,6 +243,13 @@ export function useDownloadJobs(profileId: string, enabled = true): DownloadJobs
     enabled ? downloadJobsStore.subscribe : subscribeNowhere,
     downloadJobsStore.getSnapshot
   )
+}
+
+/** Run `listener` whenever a recommendation setup settles. */
+export function useRecommendationSetupSettled(
+  listener: (setup: RecommendationSetup) => void
+): void {
+  useEffect(() => downloadJobsStore.onSetupSettled(listener), [listener])
 }
 
 /** Run `listener` whenever a download job settles. */

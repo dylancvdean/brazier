@@ -22,7 +22,12 @@ import {
 } from '../api'
 import { useConnectionProfile } from '../connectionProfile'
 import { stripGgufShardSuffix } from '../model-utils'
-import { downloadJobsStore, useDownloadJobSettled, useDownloadJobs } from '../downloadJobsStore'
+import {
+  downloadJobsStore,
+  useDownloadJobSettled,
+  useDownloadJobs,
+  useRecommendationSetupSettled
+} from '../downloadJobsStore'
 
 /** Statuses that mean the job still wants to finish. */
 const OPEN_STATUSES = new Set(['pending', 'downloading', 'paused'])
@@ -206,7 +211,9 @@ export function DownloadTray({
   const rates = useTransferRates(jobs)
   const onChangedRef = useRef(onChanged)
   onChangedRef.current = onChanged
-  useDownloadJobSettled(useCallback(() => onChangedRef.current?.(), []))
+  const notifyChanged = useCallback(() => onChangedRef.current?.(), [])
+  useDownloadJobSettled(notifyChanged)
+  useRecommendationSetupSettled(notifyChanged)
 
   useEffect(() => {
     setActionError(null)

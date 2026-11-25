@@ -135,6 +135,29 @@ describe('downloadJobsStore', () => {
     stop()
   })
 
+  it('announces a recommendation setup that finishes', async () => {
+    const setup = (status: RecommendationSetup['status']): RecommendationSetup => ({
+      id: 's',
+      recommendation_id: 'r',
+      categories: ['chat'],
+      status,
+      steps: []
+    })
+    const loadSetups = vi
+      .fn<() => Promise<RecommendationSetup[]>>()
+      .mockResolvedValueOnce([setup('running')])
+      .mockResolvedValue([setup('completed')])
+    const store = createDownloadJobsStore({ loadJobs: async () => [], loadSetups })
+    const settled = vi.fn()
+    store.onSetupSettled(settled)
+    const stop = store.subscribe(() => undefined)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(settled).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(settled).toHaveBeenCalledWith(expect.objectContaining({ id: 's', status: 'completed' }))
+    stop()
+  })
+
   it('does not let an in-flight poll undo a local update', async () => {
     let resolve: (jobs: DownloadJob[]) => void = () => undefined
     const loadJobs = vi.fn(
