@@ -152,6 +152,31 @@ describe('connection profile URLs', () => {
     )
   })
 
+  it('compares health boot IDs when only the advertised preview is blocked', async () => {
+    const active = 'http://127.0.0.1:7614'
+    const advertised = 'https://brazier.example'
+    let advertisedBootId = 'active-boot'
+    const probe = vi.fn<typeof fetch>(async (address, init) => {
+      const url = new URL(String(address))
+      if (url.pathname === '/health') {
+        return Response.json({
+          status: 'healthy',
+          boot_id: url.origin === active ? 'active-boot' : advertisedBootId
+        })
+      }
+      if (url.pathname.endsWith('/preview') && init?.method === 'POST' && url.origin === active) {
+        return Response.json({ instance_id: 'active-instance' })
+      }
+      return new Response(null, { status: 404 })
+    })
+
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toEqual({ previewReachable: false })
+    expect(probe.mock.calls.map(([url]) => String(url)).filter((url) => url.endsWith('/health')))
+      .toEqual([advertised + '/health', active + '/health'])
+    advertisedBootId = 'other-boot'
+    await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
+  })
+
   it('normalizes an HTTP(S) origin and rejects ambiguous or credential-bearing URLs', () => {
     expect(normalizeDaemonBaseUrl(' HTTPS://Example.COM:443/ ')).toBe('https://example.com')
     expect(normalizeDaemonBaseUrl('http://[::1]:7614')).toBe('http://[::1]:7614')
