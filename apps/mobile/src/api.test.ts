@@ -40,12 +40,15 @@ test('previews both shared invite formats before claiming against the reviewed i
   assert.deepEqual(await claimInvite(fetch, input, preview), credential);
 });
 
-test('checks a saved host with authenticated daemon info and distinguishes revoked access from a changed identity', async () => {
+test('checks a saved host publicly before sending its bearer and distinguishes revoked access', async () => {
   let status = 200;
   let instance = credential.instanceId;
+  const calls: Array<[string, string | null]> = [];
+  const probe = origin + '/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview';
+  const info = origin + '/api/v1/daemon/info';
   const client = daemonClient(async (url, request) => {
-    assert.equal(url, origin + '/api/v1/daemon/info');
-    assert.equal(new Headers(request.headers).get('authorization'), 'Bearer paired-key');
+    calls.push([url, new Headers(request.headers).get('authorization')]);
+    if (url === probe) return Response.json({ instance_id: instance });
     return Response.json({
       product: 'brazier', management_api: { major: 1 },
       daemon: { instance_id: instance, display_name: 'Host' },
@@ -53,11 +56,14 @@ test('checks a saved host with authenticated daemon info and distinguishes revok
     }, { status });
   }, credential);
   assert.deepEqual(await client.verify(), { displayName: 'Host', scopes: ['inference'] });
+  assert.deepEqual(calls.splice(0), [[probe, null], [info, 'Bearer paired-key']]);
   status = 401;
   await assert.rejects(client.verify(), { status: 401, message: /Pair again/ });
   status = 200;
   instance = 'other-host';
+  calls.length = 0;
   await assert.rejects(client.verify(), { status: 409, message: /identity changed/ });
+  assert.deepEqual(calls, [[probe, null]]);
 });
 
 test('rejects plaintext in production and only allows the exact Android emulator alias in debug mode', () => {

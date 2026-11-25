@@ -108,8 +108,20 @@ export function daemonClient(fetch: Request, credential: Credential) {
   };
   const post = (body: object, signal?: AbortSignal) => ({ method: 'POST', body: JSON.stringify(body), signal });
   const messagesPath = (id: string) => `/api/v1/conversations/${encodeURIComponent(id)}/messages`;
+  const assertIdentity = (instanceId: unknown) => {
+    if (instanceId !== credential.instanceId) {
+      throw new DaemonError('The host identity changed. Verify its address and pair again.', 409);
+    }
+  };
   return {
     async verify(): Promise<Host> {
+      const probe = await request(fetch, credential.origin,
+        '/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview', post({ code: '' }));
+      const identity = await probe.json() as { instance_id?: unknown } | null;
+      if (typeof identity?.instance_id !== 'string' || !identity.instance_id) {
+        throw new DaemonError('The host does not support public identity verification. Update Brazier on the host.');
+      }
+      assertIdentity(identity.instance_id);
       const info = await json<{
         product: string; management_api: { major: number };
         daemon: { instance_id: string; display_name: string };
@@ -117,7 +129,7 @@ export function daemonClient(fetch: Request, credential: Credential) {
       }>('/api/v1/daemon/info');
       if (info?.product !== 'brazier' || info.management_api?.major !== 1 || !info.daemon?.display_name ||
           !scopesAreValid(info.client?.scopes)) throw new DaemonError('The address does not serve a compatible Brazier host.');
-      if (info.daemon.instance_id !== credential.instanceId) throw new DaemonError('The host identity changed. Verify its address and pair again.', 409);
+      assertIdentity(info.daemon.instance_id);
       if (!info.client.scopes.includes('inference')) throw new DaemonError('This device does not have inference access.', 403);
       return { displayName: info.daemon.display_name, scopes: info.client.scopes };
     },
