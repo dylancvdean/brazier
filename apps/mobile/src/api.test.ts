@@ -103,6 +103,25 @@ test('chat follows the current history branch and omits non-text content from co
   ]);
 });
 
+test('a turn keeps the viewed parent and context when the host has a newer branch', async () => {
+  const root = { id: 'root', parent_id: null, role: 'user', content: 'question' };
+  const shown = { id: 'shown', parent_id: 'root', role: 'assistant', content: 'shown answer' };
+  const newer = { ...shown, id: 'newer', content: 'unseen answer' };
+  let serverHistory = [root, shown];
+  const writes: unknown[] = [];
+  const client = daemonClient(async (_url, init) => {
+    if (init.method !== 'POST') return Response.json({ data: serverHistory });
+    const message = JSON.parse(init.body!);
+    writes.push(message);
+    return Response.json({ ...message, id: 'follow-up' });
+  }, credential);
+  const viewed = chatBranch(await client.messages('chat'));
+  serverHistory = [...serverHistory, newer];
+  const { history } = await client.appendUserMessage('chat', viewed, 'follow-up');
+  assert.deepEqual(writes, [{ parent_id: 'shown', role: 'user', content: 'follow-up' }]);
+  assert.deepEqual(chatContext(history).map(({ content }) => content), ['question', 'shown answer', 'follow-up']);
+});
+
 test('streams POST chat with split SSE frames and UTF-8 bytes', async () => {
   const bytes = new TextEncoder().encode(
     'event: load\r\ndata: {"phase":"start"}\r\n\r\ndata: {"choices":[{"delta":{"content":"hé"}}]}\n\n' +

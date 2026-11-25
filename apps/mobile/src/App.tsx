@@ -326,13 +326,9 @@ function Workspace({ credential, onUnauthorized, onForget }: {
         setSelected(chat);
         setConversations((previous) => [chat, ...previous]);
       }
-      const previous = selected ? chatBranch(await api.messages(chat.id)) : [];
       if (turn.signal.aborted) return;
-      const user = await api.createMessage(chat.id, {
-        parent_id: previous.at(-1)?.id ?? null, role: 'user', content: prompt,
-      });
+      const { user, history } = await api.appendUserMessage(chat.id, selected ? messages : [], prompt);
       stored = true;
-      const history = [...previous, user];
       setMessages(history);
       if (turn.signal.aborted) return;
       const answer = await api.chat(model, chatContext(history), turn.signal, (token) => setStreamed((text) => text + token));

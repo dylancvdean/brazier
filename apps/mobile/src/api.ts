@@ -108,6 +108,9 @@ export function daemonClient(fetch: Request, credential: Credential) {
   };
   const post = (body: object, signal?: AbortSignal) => ({ method: 'POST', body: JSON.stringify(body), signal });
   const messagesPath = (id: string) => `/api/v1/conversations/${encodeURIComponent(id)}/messages`;
+  const createMessage = (id: string, message: {
+    parent_id: string | null; role: 'user' | 'assistant'; content: string; model?: string;
+  }) => json<Message>(messagesPath(id), post(message));
   const assertIdentity = (instanceId: unknown) => {
     if (instanceId !== credential.instanceId) {
       throw new DaemonError('The host identity changed. Verify its address and pair again.', 409);
@@ -146,9 +149,11 @@ export function daemonClient(fetch: Request, credential: Credential) {
     async messages(id: string): Promise<Message[]> {
       return (await json<{ data: Message[] }>(messagesPath(id))).data;
     },
-    createMessage: (id: string, message: {
-      parent_id: string | null; role: 'user' | 'assistant'; content: string; model?: string;
-    }) => json<Message>(messagesPath(id), post(message)),
+    createMessage,
+    async appendUserMessage(id: string, viewedBranch: readonly Message[], content: string) {
+      const user = await createMessage(id, { parent_id: viewedBranch.at(-1)?.id ?? null, role: 'user', content });
+      return { user, history: [...viewedBranch, user] };
+    },
     async chat(model: string, messages: OpenAiMessage[], signal: AbortSignal, onToken: (token: string) => void): Promise<string> {
       const response = await request(fetch, credential.origin, '/v1/chat/completions', {
         ...post({ model, messages, stream: true }, signal),
