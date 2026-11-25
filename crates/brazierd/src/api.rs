@@ -1000,7 +1000,15 @@ async fn preview_pairing_request(
     Json(request): Json<ClaimPairingRequest>,
 ) -> ApiResult<impl IntoResponse> {
     if id == PAIRING_ORIGIN_PROBE_ID && request.code.is_empty() {
-        return Ok(pairing_response(json!({ "boot_id": daemon_boot_id() })));
+        let identity = state
+            .db
+            .daemon_identity(None)
+            .await
+            .map_err(ApiError::internal)?;
+        return Ok(pairing_response(json!({
+            "boot_id": daemon_boot_id(),
+            "instance_id": identity.instance_id,
+        })));
     }
     let pairing = state
         .db
@@ -10324,7 +10332,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(probe, json!({ "boot_id": daemon_boot_id() }));
+        assert_eq!(probe["boot_id"], daemon_boot_id());
 
         let (status, created) = request_with_api_key(
             &app,
@@ -10350,6 +10358,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(probe["instance_id"], preview["daemon"]["instance_id"]);
         assert_eq!(preview["pairing"]["scopes"], json!(["inference"]));
         assert!(preview.get("api_key").is_none());
         assert!(preview.get("code").is_none());

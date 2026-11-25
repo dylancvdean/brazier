@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Brazier",
+    "slug": "brazier-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "ios": {
+      "bundleIdentifier": "ai.brazier.mobile",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Connect to your own Brazier host on your local network."
+      }
+    },
+    "android": {
+      "package": "ai.brazier.mobile"
+    },
+    "plugins": [
+      ["expo-camera", {
+        "cameraPermission": "Allow Brazier to scan a pairing invite.",
+        "recordAudioAndroid": false,
+        "barcodeScannerEnabled": true
+      }],
+      "expo-secure-store"
+    ]
+  }
+}
