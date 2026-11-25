@@ -15,6 +15,9 @@ If the proxy filters paths, forward the pairing preview and claim routes for
 pairing. Desktop checks that the advertised origin reaches the same daemon by
 sending an empty-code preview to the reserved all-zero pairing UUID before
 issuing a real invite; it does not require public access to `/health`.
+If desktop can verify the origin only through `/health`, it warns that the
+preview route could not be verified. Check your proxy and daemon version before
+sharing. Confirmation is still required.
 
 A direct non-loopback HTTP listener is an explicit unsafe escape hatch:
 

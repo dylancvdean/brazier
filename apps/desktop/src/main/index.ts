@@ -1546,9 +1546,9 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   )
   handleTrusted('brazier:connection-profiles:verify-pairing-origin', async (_event, origin: string) => {
     const active = await readyConnection()
-    await verifyPairingOrigin(active.address, origin)
+    const { previewReachable } = await verifyPairingOrigin(active.address, origin)
     if (profiles.current().id !== active.profile.id) throw new Error('The selected connection changed. Try again.')
-    return active.daemon.daemon?.display_name ?? active.profile.name
+    return { hostName: active.daemon.daemon?.display_name ?? active.profile.name, previewReachable }
   })
   handleTrusted('brazier:connection-profiles:list', () => profiles.list())
   handleTrusted('brazier:connection-profiles:current', () => profiles.current())

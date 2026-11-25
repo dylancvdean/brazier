@@ -69,7 +69,7 @@ describe('connection profile URLs', () => {
 
     await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
     remoteBootId = 'active-daemon'
-    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toBeUndefined()
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toEqual({ previewReachable: true })
     expect(probe.mock.calls.map(([address]) => address)).toEqual([
       active + probePath, advertised + probePath, active + probePath, advertised + probePath
     ])
@@ -88,7 +88,7 @@ describe('connection profile URLs', () => {
       ? Response.json({ status: 'healthy', boot_id: address === active + '/health' ? 'active-daemon' : remoteBootId })
       : new Response(null, { status }))
 
-    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toBeUndefined()
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toEqual({ previewReachable: false })
     const healthCalls = probe.mock.calls.filter(([url]) => String(url).endsWith('/health'))
     expect(healthCalls.map(([url]) => url)).toEqual([active + '/health', advertised + '/health'])
     for (const [, init] of healthCalls) {
@@ -107,7 +107,7 @@ describe('connection profile URLs', () => {
       String(address).startsWith(active) ? { instance_id: 'daemon-a' } : remoteIdentity
     ))
 
-    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toBeUndefined()
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toEqual({ previewReachable: true })
     remoteIdentity = { instance_id: 'daemon-b' }
     await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
     remoteIdentity = { boot_id: 'daemon-a' }
@@ -119,6 +119,37 @@ describe('connection profile URLs', () => {
     await expect(verifyPairingOrigin('http://127.0.0.1:7614', 'https://brazier.example', probe))
       .rejects.toThrow('pairing preview route is not reachable')
     expect(probe.mock.calls.every(([url]) => String(url).endsWith('/preview'))).toBe(true)
+  })
+
+  it('reports reachability at the advertised origin rather than the active address', async () => {
+    const active = 'http://127.0.0.1:7614'
+    const advertised = 'https://brazier.example'
+    let blocked = active
+    const probe = vi.fn<typeof fetch>(async (address) => {
+      const url = new URL(String(address))
+      if (url.pathname === '/health') return Response.json({ status: 'healthy', boot_id: 'same' })
+      return url.origin === blocked ? new Response(null, { status: 404 }) : Response.json({ boot_id: 'same' })
+    })
+
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toEqual({ previewReachable: true })
+    blocked = advertised
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toEqual({ previewReachable: false })
+  })
+
+  it('names the blocked route when proxy health cannot verify the advertised origin', async () => {
+    const active = 'http://127.0.0.1:7614'
+    const advertised = 'https://brazier.example'
+    const probe = vi.fn<typeof fetch>(async (address) => {
+      const url = new URL(String(address))
+      if (url.origin === active) return Response.json({ instance_id: 'same' })
+      return url.pathname === '/health'
+        ? Response.json({ status: 'healthy', database: 'ok' })
+        : new Response(null, { status: 404 })
+    })
+
+    await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow(
+      'The pairing preview route is not reachable. Check the daemon version and proxy configuration.'
+    )
   })
 
   it('normalizes an HTTP(S) origin and rejects ambiguous or credential-bearing URLs', () => {
