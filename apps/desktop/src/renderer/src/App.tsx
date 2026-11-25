@@ -56,7 +56,7 @@ import {
   fetchModelBindings,
   fetchRecommendations,
   fetchModelSettings,
-  health,
+  verifyDaemonConnection,
   exportConversation,
   importConversation,
   listConversations,
@@ -174,6 +174,8 @@ import {
 import type { Attachment, ContentPart, Conversation, Message, Role } from './types'
 import { ConnectionProfileContext, LOCAL_CONNECTION_PROFILE } from './connectionProfile'
 import { setDaemonAvailability } from './daemonAvailability'
+import { cacheVerifiedConnection, connection } from './daemonClient'
+import { startConversationSync } from './conversationSync'
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 const GENERATE_HISTORY_KEY = 'brazier.generateHistory.v1'
@@ -658,6 +660,8 @@ export function App(): React.JSX.Element {
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false)
   const toolsEnabled = enabledTools.length > 0
   const [daemonStatus, setDaemonStatus] = useState<'checking' | 'healthy' | 'offline'>('checking')
+  const [connectionProblem, setConnectionProblem] = useState<string | null>(null)
+  const connectionCheckRef = useRef(0)
   const daemonWasOfflineRef = useRef(false)
   const [daemonVersion, setDaemonVersion] = useState('')
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
@@ -685,8 +689,22 @@ export function App(): React.JSX.Element {
   const [showWelcome, setShowWelcome] = useState<boolean | null>(null)
   const [recommendationSwaps, setRecommendationSwaps] = useState<PendingSwap[]>([])
   const [appMode, setAppMode] = useState<AppMode>('chat')
-  const [workspaceModes, setWorkspaceModes] =
+  const [preferredWorkspaceModes, setWorkspaceModes] =
     useState<WorkspaceModesPreference>(DEFAULT_WORKSPACE_MODES)
+  const [daemonClient, setDaemonClient] =
+    useState<Extract<Awaited<ReturnType<typeof verifyDaemonConnection>>, { status: 'healthy' }>['daemon']['client']>()
+  const workspaceModes = useMemo(() => {
+    if (!daemonClient || daemonClient.owner) return preferredWorkspaceModes
+    const inference = daemonClient.scopes.includes('inference')
+    const agent = daemonClient.scopes.includes('agent')
+    return {
+      chat: preferredWorkspaceModes.chat && inference,
+      generate: preferredWorkspaceModes.generate && inference,
+      voice: preferredWorkspaceModes.voice && inference,
+      agent: preferredWorkspaceModes.agent && agent,
+      computer: preferredWorkspaceModes.computer && agent
+    }
+  }, [daemonClient, preferredWorkspaceModes])
   const [realtimeVoiceAvailable, setRealtimeVoiceAvailable] = useState(false)
   // Generate, Voice, and Computer pick from their own model families; the top
   // bar shows whichever belongs to the mode on screen.
@@ -733,6 +751,8 @@ export function App(): React.JSX.Element {
   selectedModelRef.current = selectedModel
   const busyRef = useRef(busy)
   busyRef.current = busy
+  const lastMessageIdRef = useRef<string | undefined>(undefined)
+  lastMessageIdRef.current = messages.at(-1)?.id
   const memoryPreferenceRef = useRef(memoryPreference)
   memoryPreferenceRef.current = memoryPreference
   const skipNextConversationLoadRef = useRef<string | null>(null)
@@ -756,6 +776,9 @@ export function App(): React.JSX.Element {
     const apply = (profile: ConnectionProfileSummary): void => {
       if (!active) return
       if (profile.id !== profileIdRef.current) {
+        connectionCheckRef.current += 1
+        setConnectionProblem(null)
+        setDaemonClient(undefined)
         profileIdRef.current = profile.id
         userUnloadedRef.current = false
         prepareAbortRef.current?.abort()
@@ -1534,16 +1557,23 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function refreshMessages(id: string, preferredTip?: string): Promise<void> {
+  async function refreshMessages(id: string, preferredTip?: string, background = false): Promise<void> {
     if (id === INCOGNITO_ID) return
     const refreshId = ++messageRefreshRef.current
+    const turn = chatTurnRef.current
     const data = await listMessages(id)
     if (refreshId !== messageRefreshRef.current || id !== conversationIdRef.current) return
+    if (background && (busyRef.current || incognitoRef.current || turn !== chatTurnRef.current)) return
+    const previousLast = lastMessageIdRef.current
     setMessages(data)
-    setTipId(preferredTip ?? data.at(-1)?.id ?? null)
+    setTipId((current) => background && current && current !== previousLast && data.some((message) => message.id === current)
+      ? current
+      : preferredTip ?? data.at(-1)?.id ?? null)
   }
 
   async function refreshRuntime(): Promise<void> {
+    const { daemon } = await connection()
+    if (daemon.client && !daemon.client.owner && !daemon.client.scopes.includes('management')) return
     const status = await engineStatus()
     setRuntime(status.settings)
     setHardware(status.hardware)
@@ -1562,24 +1592,6 @@ export function App(): React.JSX.Element {
       refreshCapabilities(),
       fetchMemoryPreference().then(setMemoryPreference)
     ])
-  }
-
-  async function reconnectDaemon(): Promise<void> {
-    setDaemonStatus('checking')
-    setDaemonAvailability('checking')
-    try {
-      const result = await health()
-      setDaemonStatus('healthy')
-      setDaemonAvailability('healthy')
-      setDaemonVersion(result.version)
-      daemonWasOfflineRef.current = false
-      setError(null)
-      await rehydrateDaemonState()
-    } catch {
-      daemonWasOfflineRef.current = true
-      setDaemonStatus('offline')
-      setDaemonAvailability('offline')
-    }
   }
 
   useEffect(() => {
@@ -1636,36 +1648,55 @@ export function App(): React.JSX.Element {
     return () => window.clearTimeout(timer)
   }, [conversationSearch, connectionProfile?.id, daemonStatus])
 
+  async function reconnectDaemon(manual = true): Promise<void> {
+    const generation = ++connectionCheckRef.current
+    if (manual) {
+      setDaemonStatus('checking')
+      setDaemonAvailability('checking')
+    }
+    const result = await verifyDaemonConnection().catch(() => ({ status: 'offline' as const, message: 'Could not reach the selected daemon.' }))
+    if (generation !== connectionCheckRef.current) return
+    if (result.status !== 'healthy') {
+      daemonWasOfflineRef.current = true
+      setDaemonStatus('offline')
+      setDaemonAvailability(result.status === 'offline' ? 'offline' : 'blocked')
+      setConnectionProblem(result.status === 'offline' ? null : result.message)
+      return
+    }
+    cacheVerifiedConnection(result)
+    setDaemonStatus('healthy')
+    setDaemonAvailability('healthy')
+    setDaemonVersion(result.daemon.version)
+    setDaemonClient(result.daemon.client)
+    setConnectionProblem(null)
+    if (manual || daemonWasOfflineRef.current) {
+      daemonWasOfflineRef.current = false
+      setError(null)
+      await rehydrateDaemonState()
+    }
+  }
+
   useEffect(() => {
     if (!connectionProfile) return
-    let active = true
-    const check = (): void => {
-      void health()
-        .then((result) => {
-          if (!active) return
-          setDaemonStatus('healthy')
-          setDaemonAvailability('healthy')
-          setDaemonVersion(result.version)
-          if (daemonWasOfflineRef.current) {
-            daemonWasOfflineRef.current = false
-            setError(null)
-            void rehydrateDaemonState()
-          }
-        })
-        .catch(() => {
-          if (!active) return
-          daemonWasOfflineRef.current = true
-          setDaemonStatus('offline')
-          setDaemonAvailability('offline')
-        })
-    }
+    const check = (): void => { void reconnectDaemon(false) }
     check()
     const timer = window.setInterval(check, 10_000)
     return () => {
-      active = false
+      connectionCheckRef.current += 1
       window.clearInterval(timer)
     }
   }, [connectionProfile?.id])
+
+  useEffect(() => {
+    if (!connectionProfile || daemonStatus !== 'healthy') return
+    return startConversationSync(window, document, () => !busyRef.current && !incognitoRef.current, () => {
+      const id = conversationIdRef.current
+      return Promise.allSettled([
+        refreshConversations(),
+        id ? refreshMessages(id, undefined, true) : Promise.resolve()
+      ])
+    })
+  }, [connectionProfile?.id, daemonStatus])
 
   useEffect(() => {
     // A selected chat changed; any fetch started for the previous one is now
@@ -3286,7 +3317,7 @@ export function App(): React.JSX.Element {
                 ? ` · v${daemonVersion}`
                 : ''
               : daemonStatus === 'offline'
-                ? ' · offline'
+                ? connectionProblem ? ' · access unavailable' : ' · offline'
                 : ' · connecting…'}
           </span>
         </button>
@@ -3423,8 +3454,8 @@ export function App(): React.JSX.Element {
           <div className="runtime-notice connection-offline-notice" role="status">
             <CircleAlert size={15} />
             <span>
-              Can’t reach {connectionProfile?.kind === 'remote' ? connectionProfile.name : 'Brazier’s engine'}.
-              You can browse what’s cached, but changes are paused.
+              {connectionProblem ?? `Can’t reach ${connectionProfile?.kind === 'remote' ? connectionProfile.name : 'Brazier’s engine'}.`}
+              {' '}You can browse what’s cached, but changes are paused.
             </span>
             <button type="button" onClick={() => void reconnectDaemon()}>
               Retry

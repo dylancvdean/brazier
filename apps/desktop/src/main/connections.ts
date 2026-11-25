@@ -1,9 +1,9 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import {
-  chmodSync,
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync
 } from 'node:fs'
 import { dirname } from 'node:path'
@@ -31,6 +31,7 @@ export type RemoteConnectionProfile = {
   kind: 'remote'
   baseUrl: string
   apiKey: string | null
+  daemonInstanceId?: string
 }
 
 export type ConnectionProfile = LocalConnectionProfile | RemoteConnectionProfile
@@ -68,7 +69,22 @@ export type PairingClaimInput = {
   baseUrl: string
   pairingId: string
   code: string
+  expectedDaemonInstanceId?: string
 }
+
+export type PairingPreview = {
+  pairing: {
+    id: string
+    client_name: string
+    scopes: ClientScope[]
+    expires_at: number
+  }
+  daemon: { instance_id: string; display_name: string }
+}
+
+export type ConnectionVerification =
+  | ({ status: 'healthy' } & Omit<DaemonConnection, 'api_key'>)
+  | { status: 'offline' | 'unauthorized' | 'forbidden' | 'identity-changed'; message: string }
 
 export type PairedClient = {
   id: string
@@ -250,7 +266,7 @@ function normalizeApiKey(value: unknown): string | null {
 }
 
 function normalizeRemoteProfile(
-  input: RemoteConnectionProfileInput,
+  input: RemoteConnectionProfileInput & { daemonInstanceId?: string },
   makeId: () => string
 ): RemoteConnectionProfile {
   const id = input.id === undefined ? makeId() : input.id
@@ -268,7 +284,8 @@ function normalizeRemoteProfile(
       : input.name),
     kind: 'remote',
     baseUrl,
-    apiKey
+    apiKey,
+    ...(input.daemonInstanceId ? { daemonInstanceId: input.daemonInstanceId } : {})
   }
 }
 
@@ -306,7 +323,10 @@ function parseStoredRemote(
           id: candidate.id,
           name: typeof candidate.name === 'string' ? candidate.name : '',
           baseUrl: typeof candidate.baseUrl === 'string' ? candidate.baseUrl : '',
-          apiKey
+          apiKey,
+          daemonInstanceId: typeof candidate.daemonInstanceId === 'string'
+            ? candidate.daemonInstanceId
+            : undefined
         },
         randomUUID
       ),
@@ -367,6 +387,7 @@ function writeStoredProfiles(
       name: profile.name,
       kind: profile.kind,
       baseUrl: profile.baseUrl,
+      daemonInstanceId: profile.daemonInstanceId,
       ...(profile.apiKey
         ? credentialCodec
           ? { encryptedApiKey: credentialCodec.encrypt(profile.apiKey) }
@@ -374,11 +395,13 @@ function writeStoredProfiles(
         : { apiKey: null })
     }))
   }
-  writeFileSync(temporary, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 })
-  renameSync(temporary, path)
-  // rename(2) preserves the temporary file's mode. chmod also repairs a file
-  // created by an older build with broader permissions.
-  chmodSync(path, 0o600)
+  try {
+    writeFileSync(temporary, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+    renameSync(temporary, path)
+  } catch (error) {
+    try { rmSync(temporary, { force: true }) } catch { /* Preserve the original write error. */ }
+    throw error
+  }
 }
 
 export class ConnectionProfileStore {
@@ -425,15 +448,16 @@ export class ConnectionProfileStore {
     return profile ? { ...profile } : undefined
   }
 
-  upsert(input: RemoteConnectionProfileInput): RemoteConnectionProfile {
+  upsert(input: RemoteConnectionProfileInput & { daemonInstanceId?: string }): RemoteConnectionProfile {
     if (!this.remoteWritesAllowed) {
       throw new Error('Remote credentials cannot be saved while secure storage is unavailable.')
     }
     const profile = normalizeRemoteProfile(input, this.makeId)
     const existing = this.stored.profiles.findIndex((entry) => entry.id === profile.id)
-    if (existing === -1) this.stored.profiles.push(profile)
-    else this.stored.profiles[existing] = profile
-    this.persist()
+    const profiles = [...this.stored.profiles]
+    if (existing === -1) profiles.push(profile)
+    else profiles[existing] = profile
+    this.persist({ ...this.stored, profiles })
     return { ...profile }
   }
 
@@ -443,9 +467,8 @@ export class ConnectionProfileStore {
     }
     const profiles = this.stored.profiles.filter((profile) => profile.id !== id)
     if (profiles.length === this.stored.profiles.length) return false
-    this.stored.profiles = profiles
-    if (this.stored.activeId === id) this.stored.activeId = LOCAL_CONNECTION_PROFILE_ID
-    this.persist()
+    const activeId = this.stored.activeId === id ? LOCAL_CONNECTION_PROFILE_ID : this.stored.activeId
+    this.persist({ ...this.stored, profiles, activeId })
     return true
   }
 
@@ -453,21 +476,26 @@ export class ConnectionProfileStore {
     const profile = this.get(id)
     if (!profile) throw new Error('Connection profile does not exist.')
     if (this.stored.activeId !== id) {
-      this.stored.activeId = id
-      this.persist()
+      this.persist({ ...this.stored, activeId: id })
     }
     return profile
   }
 
-  private persist(): void {
-    writeStoredProfiles(this.path, this.stored, this.credentialCodec)
+  private persist(next = this.stored): void {
+    writeStoredProfiles(this.path, next, this.credentialCodec)
+    this.stored = next
+  }
+}
+
+class ConnectionVerificationError extends Error {
+  constructor(readonly status: 'unauthorized' | 'forbidden' | 'identity-changed', message: string) {
+    super(message)
   }
 }
 
 function errorForStatus(status: number): Error {
-  if (status === 401 || status === 403) {
-    return new Error('The daemon rejected this API key.')
-  }
+  if (status === 401) return new ConnectionVerificationError('unauthorized', 'The daemon rejected this API key. Pair again or replace the key.')
+  if (status === 403) return new ConnectionVerificationError('forbidden', 'The daemon denied access to this client.')
   return new Error(`The daemon handshake failed with status ${status}.`)
 }
 
@@ -543,12 +571,13 @@ function pairedClient(value: unknown): PairedClient | null {
 }
 
 /** Claim a one-time pairing without sending an owner bearer to the prospective host. */
-export async function claimPairingCredential(
+async function requestPairing(
   baseUrl: string,
   pairingId: string,
   code: string,
-  options: { fetch?: typeof fetch; timeoutMs?: number } = {}
-): Promise<{ client: PairedClient; apiKey: string }> {
+  action: 'preview' | 'claim',
+  options: { fetch?: typeof fetch; timeoutMs?: number; expectedDaemonInstanceId?: string } = {}
+): Promise<Record<string, unknown> | null> {
   const address = normalizePairingDaemonBaseUrl(baseUrl)
   const id = cleanPairingSecret(pairingId, 'Pairing id')
   const pairingCode = cleanPairingSecret(code, 'Pairing code')
@@ -558,35 +587,72 @@ export async function claimPairingCredential(
   try {
     let response: Response
     try {
-      response = await fetch_(`${address}/api/v1/auth/pairings/${encodeURIComponent(id)}/claim`, {
+      response = await fetch_(`${address}/api/v1/auth/pairings/${encodeURIComponent(id)}/${action}`, {
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
-        body: JSON.stringify({ code: pairingCode }),
+        body: JSON.stringify({ code: pairingCode, expected_daemon_instance_id: options.expectedDaemonInstanceId }),
         redirect: 'manual',
         signal: controller.signal
       })
     } catch (cause) {
       if (controller.signal.aborted) throw new Error('The pairing request timed out.')
+      const transportCode = (cause as { cause?: { code?: string } })?.cause?.code
+      if (transportCode && /CERT|TLS|SSL/.test(transportCode)) {
+        throw new Error('Could not verify the daemon’s HTTPS certificate. Use an HTTPS address with a certificate this device trusts.')
+      }
       throw new Error(
         `Could not reach the daemon for pairing: ${cause instanceof Error ? cause.message : String(cause)}`
       )
     }
     if (!response.ok) {
-      if (response.status === 400 || response.status === 404) {
-        throw new Error('The pairing request is invalid, expired, already used, or the code is incorrect.')
+      if (response.status === 400) {
+        throw new Error('This invite may have expired, been used or canceled, or have an incorrect code. Ask the host for a fresh invite.')
       }
+      if (response.status === 404 && action === 'preview') {
+        throw new Error('This daemon does not support reviewing pairing invitations. Update the host Brazier app and try again.')
+      }
+      if (response.status === 409) throw new Error('The daemon identity changed since review. Check the address and ask for a new invite.')
+      if (response.status >= 500) throw new Error('The daemon could not process the pairing request. Check the host and try again.')
       throw new Error(`The pairing request failed with status ${response.status}.`)
     }
-    const value = await boundedJson(response)
-    const client = pairedClient(value?.client)
-    const apiKey = typeof value?.api_key === 'string' ? value.api_key.trim() : ''
-    if (!client || !apiKey || apiKey.length > 4_096) {
-      throw new Error('The daemon returned an invalid pairing response.')
-    }
-    return { client, apiKey }
+    return await boundedJson(response)
   } finally {
     clearTimeout(timeout)
   }
+}
+
+export async function claimPairingCredential(
+  baseUrl: string,
+  pairingId: string,
+  code: string,
+  options: { fetch?: typeof fetch; timeoutMs?: number; expectedDaemonInstanceId?: string } = {}
+): Promise<{ client: PairedClient; apiKey: string }> {
+  const value = await requestPairing(baseUrl, pairingId, code, 'claim', options)
+  const client = pairedClient(value?.client)
+  const apiKey = typeof value?.api_key === 'string' ? value.api_key.trim() : ''
+  if (!client || !apiKey || apiKey.length > 4_096) {
+    throw new Error('The daemon returned an invalid pairing response. The invite may have been used; ask the host to check its paired devices.')
+  }
+  return { client, apiKey }
+}
+
+export async function previewPairing(
+  baseUrl: string,
+  pairingId: string,
+  code: string
+): Promise<PairingPreview> {
+  const value = await requestPairing(baseUrl, pairingId, code, 'preview')
+  const pairing = value?.pairing as PairingPreview['pairing'] | undefined
+  const daemon = value?.daemon as PairingPreview['daemon'] | undefined
+  if (pairing?.id !== pairingId.trim() || typeof pairing.client_name !== 'string' ||
+      !Array.isArray(pairing.scopes) || !pairing.scopes.length ||
+      !pairing.scopes.every((scope) => ['inference', 'management', 'agent'].includes(scope)) ||
+      !Number.isSafeInteger(pairing.expires_at) ||
+      typeof daemon?.instance_id !== 'string' || !daemon.instance_id ||
+      typeof daemon.display_name !== 'string') {
+    throw new Error('The daemon returned an invalid pairing preview.')
+  }
+  return { pairing, daemon }
 }
 
 /** Perform the bounded, authenticated compatibility handshake. */
@@ -711,18 +777,21 @@ export class ConnectionProfileManager {
     this.assertRunning()
     if (!this.activeConnection) {
       const generation = this.switchGeneration
-      const pending = this.resolve(this.store.current()).then(
+      const profile = this.store.current()
+      const pending = this.resolve(profile).then(
         (ready) => {
           if (generation !== this.switchGeneration && this.activeConnection !== pending) {
             return this.connection()
           }
+          if (this.activeConnection === pending && generation === this.switchGeneration) {
+            this.rememberDaemonIdentity(profile, ready.daemon)
+          }
           return ready
-        },
-        (error: unknown) => {
+        }
+      ).catch((error: unknown) => {
           if (this.activeConnection === pending) this.activeConnection = undefined
           throw error
-        }
-      )
+      })
       this.activeConnection = pending
     }
     return this.activeConnection
@@ -734,19 +803,36 @@ export class ConnectionProfileManager {
    */
   async reconnect(): Promise<DaemonConnection> {
     this.assertRunning()
-    const generation = ++this.switchGeneration
-    this.activeConnection = undefined
-    const pending = this.resolve(this.store.current()).catch((error: unknown) => {
-      if (this.activeConnection === pending) this.activeConnection = undefined
+    const generation = this.switchGeneration
+    const profile = this.store.current()
+    let ready: DaemonConnection
+    try {
+      ready = await this.resolve(profile)
+    } catch (error) {
+      if (generation === this.switchGeneration && this.store.current().id === profile.id) {
+        this.activeConnection = undefined
+      }
       throw error
-    })
-    this.activeConnection = pending
-    const ready = await pending
-    if (generation !== this.switchGeneration) {
-      return this.connection()
     }
+    if (generation !== this.switchGeneration || this.store.current().id !== profile.id) {
+      throw new Error('The selected connection changed. Try again.')
+    }
+    this.rememberDaemonIdentity(profile, ready.daemon)
     this.activeConnection = Promise.resolve(ready)
     return ready
+  }
+
+  async verify(onVerified?: (ready: DaemonConnection) => void): Promise<ConnectionVerification> {
+    try {
+      const ready = await this.reconnect()
+      onVerified?.(ready)
+      return { status: 'healthy', address: ready.address, profile: ready.profile, daemon: ready.daemon }
+    } catch (error) {
+      return {
+        status: error instanceof ConnectionVerificationError ? error.status : 'offline',
+        message: error instanceof Error ? error.message : String(error)
+      }
+    }
   }
 
   async activateProfile(id: string): Promise<DaemonConnection> {
@@ -773,7 +859,10 @@ export class ConnectionProfileManager {
       if (existing?.kind === 'remote') return existing
       throw new Error('The connection profile was deleted while it was being updated.')
     }
-    const profile = this.store.upsert(candidate)
+    const profile = this.store.upsert({
+      ...candidate,
+      daemonInstanceId: ready?.daemon.daemon?.instance_id ?? candidate.daemonInstanceId
+    })
     if (
       ready &&
       generation === this.switchGeneration &&
@@ -800,18 +889,25 @@ export class ConnectionProfileManager {
     )
     const issued = await claimPairingCredential(candidate.baseUrl, input.pairingId, input.code, {
       fetch: this.dependencies.fetch,
-      timeoutMs: this.dependencies.handshakeTimeoutMs
+      timeoutMs: this.dependencies.handshakeTimeoutMs,
+      expectedDaemonInstanceId: input.expectedDaemonInstanceId
     })
     // Persist before the authenticated handshake: the server returns this key
     // once, so a transient handshake failure must not discard the credential.
-    const profile = this.store.upsert({ ...candidate, apiKey: issued.apiKey })
+    let profile: RemoteConnectionProfile
+    try {
+      profile = this.store.upsert({
+        ...candidate,
+        apiKey: issued.apiKey,
+        daemonInstanceId: input.expectedDaemonInstanceId
+      })
+    } catch {
+      throw new Error('Invite claimed, but the credential was not saved. Check secure storage and available disk space. Ask the host to revoke the newly paired client and create a fresh invite.')
+    }
     const isCurrent = profile.id === this.store.current().id
     const generation = isCurrent ? ++this.switchGeneration : this.switchGeneration
     if (isCurrent) this.activeConnection = undefined
-    const daemon = await fetchDaemonInfo(profile.baseUrl, issued.apiKey, {
-      fetch: this.dependencies.fetch,
-      timeoutMs: this.dependencies.handshakeTimeoutMs
-    })
+    const daemon = (await this.resolve(profile)).daemon
     const ready: DaemonConnection = {
       address: profile.baseUrl,
       api_key: issued.apiKey,
@@ -862,6 +958,7 @@ export class ConnectionProfileManager {
     if (generation !== this.switchGeneration) {
       return this.connection()
     }
+    this.rememberDaemonIdentity(profile, ready.daemon)
     this.store.select(id)
     this.activeConnection = Promise.resolve(ready)
     return ready
@@ -996,6 +1093,9 @@ export class ConnectionProfileManager {
       fetch: this.dependencies.fetch,
       timeoutMs: this.dependencies.handshakeTimeoutMs
     })
+    if (profile.daemonInstanceId && daemon.daemon?.instance_id !== profile.daemonInstanceId) {
+      throw new ConnectionVerificationError('identity-changed', 'The daemon identity changed. Check the host before pairing it again.')
+    }
     return {
       address,
       api_key: profile.apiKey,
@@ -1012,11 +1112,21 @@ export class ConnectionProfileManager {
       throw new Error('Enter a key for the new daemon address, remove the saved key, or pair again.')
     }
     return normalizeRemoteProfile(
-      input.apiKey === undefined && existing?.kind === 'remote'
-        ? { ...input, apiKey: existing.apiKey }
-        : input,
+      {
+        ...input,
+        apiKey: input.apiKey === undefined && existing?.kind === 'remote' ? existing.apiKey : input.apiKey,
+        daemonInstanceId: existing?.kind === 'remote' && normalizeDaemonBaseUrl(input.baseUrl) === existing.baseUrl
+          ? existing.daemonInstanceId
+          : undefined
+      },
       randomUUID
     )
+  }
+
+  private rememberDaemonIdentity(profile: ConnectionProfile, daemon: DaemonInfo): void {
+    if (profile.kind === 'remote' && !profile.daemonInstanceId && daemon.daemon?.instance_id) {
+      this.store.upsert({ ...profile, daemonInstanceId: daemon.daemon.instance_id })
+    }
   }
 
   private async resolveLocal(): Promise<{

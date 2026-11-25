@@ -13,6 +13,17 @@ afterEach(() => {
 })
 
 describe('offline daemon mutation boundary', () => {
+  it('does not allow public reachability to clear a failed authenticated check', async () => {
+    const fetch_ = vi.fn(async () => new Response('{}'))
+    vi.stubGlobal('fetch', fetch_)
+    setDaemonAvailability('blocked')
+    await daemonFetch('https://daemon.example/health')
+    expect(daemonAvailability()).toBe('blocked')
+    await expect(daemonFetch('https://daemon.example/api/v1/conversations', { method: 'POST' }))
+      .rejects.toBeInstanceOf(DaemonOfflineError)
+    expect(fetch_).toHaveBeenCalledOnce()
+  })
+
   it('checks the method of a Request object and respects explicit overrides', async () => {
     const fetch_ = vi.fn(async () => new Response(null, { status: 204 }))
     vi.stubGlobal('fetch', fetch_)

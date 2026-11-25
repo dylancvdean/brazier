@@ -1,12 +1,22 @@
-import { daemonFetch, setDaemonAvailability } from './daemonAvailability'
+import { daemonAvailability, daemonFetch, setDaemonAvailability } from './daemonAvailability'
 
 type Connection = Awaited<ReturnType<typeof window.brazier.getConnection>>
 type ConnectionProfile = Connection['profile']
 const ACTIVE_CONNECTION_PROFILE_KEY = 'brazier.activeConnectionProfile.v1'
 let connectionPromise: Promise<Connection> | undefined
+let cachedAddress: string | undefined
 
 export function invalidateConnectionCache(): void {
   connectionPromise = undefined
+  cachedAddress = undefined
+}
+
+export function cacheVerifiedConnection(ready: Connection): void {
+  if (connectionPromise && !cachedAddress) return
+  if (cachedAddress === ready.address) return
+  if (cachedAddress && cachedAddress !== ready.address) setDaemonAvailability('checking')
+  cachedAddress = ready.address
+  connectionPromise = Promise.resolve(ready)
 }
 
 export function rememberConnectionProfile(profile: ConnectionProfile): void {
@@ -41,12 +51,13 @@ export async function connection(): Promise<Connection> {
     if (connectionPromise !== pending) {
       throw new DOMException('The selected connection changed.', 'AbortError')
     }
+    cachedAddress = ready.address
     rememberConnectionProfile(ready.profile)
     return ready
   } catch (error) {
     if (connectionPromise === pending) {
-      connectionPromise = undefined
-      setDaemonAvailability('offline')
+      invalidateConnectionCache()
+      if (daemonAvailability() !== 'blocked') setDaemonAvailability('offline')
     }
     throw error
   }

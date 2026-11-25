@@ -7,7 +7,9 @@ import type {
   ConnectionProfileView,
   ConnectionTestResult,
   ClaimedConnection,
+  ConnectionVerification,
   DaemonInfo,
+  PairingPreview,
   PairingClaimInput,
   RemoteConnectionProfileInput
 } from '../main/connections'
@@ -139,6 +141,10 @@ const agent = {
 
 contextBridge.exposeInMainWorld('brazier', {
   getConnection: (): Promise<BrazierConnection> => invoke('brazier:connection'),
+  verifyConnection: (): Promise<ConnectionVerification> =>
+    invoke('brazier:connection-profiles:verify'),
+  previewPairing: (origin: string, id: string, code: string): Promise<PairingPreview> =>
+    invoke('brazier:connection-profiles:preview-pairing', origin, id, code),
   listConnectionProfiles: (): Promise<BrazierConnectionProfile[]> =>
     invoke('brazier:connection-profiles:list'),
   getCurrentConnectionProfile: (): Promise<BrazierConnectionProfileSummary> =>

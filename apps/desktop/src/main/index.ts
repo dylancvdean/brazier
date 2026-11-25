@@ -12,6 +12,7 @@ import { DesktopLifecycle } from './desktopLifecycle'
 import {
   ConnectionProfileManager,
   ConnectionProfileStore,
+  previewPairing,
   viewConnectionProfile,
   type ConnectionCredentialCodec,
   type ConnectionTestResult,
@@ -1535,6 +1536,13 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     const { api_key: _secret, ...connection } = await readyConnection()
     return connection
   })
+  handleTrusted('brazier:connection-profiles:verify', async () => {
+    return profiles.verify((ready) => agent.setConnection({ address: ready.address, apiKey: ready.api_key }))
+  })
+  handleTrusted(
+    'brazier:connection-profiles:preview-pairing',
+    (_event, origin: string, id: string, code: string) => previewPairing(origin, id, code)
+  )
   handleTrusted('brazier:connection-profiles:list', () => profiles.list())
   handleTrusted('brazier:connection-profiles:current', () => profiles.current())
   const revokeComputerUseBeforeSwitch = async (): Promise<void> => {

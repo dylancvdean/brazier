@@ -183,6 +183,22 @@ describe('one-time remote pairing', () => {
     })
   })
 
+  it('reports an issued but unsaved invite without publishing or probing the profile', async () => {
+    const store = new ConnectionProfileStore(temporarySettingsPath(), undefined, {
+      encrypt: () => { throw new Error('keychain locked') },
+      decrypt: vi.fn()
+    })
+    const fetch_ = vi.fn(async () => new Response(JSON.stringify({ client, api_key: 'issued-client-key' })))
+    const manager = new ConnectionProfileManager(store, {
+      startLocal: vi.fn(), stopLocal: vi.fn(), fetch: fetch_
+    })
+    await expect(manager.claimAndSave({
+      name: 'Lab', baseUrl: 'https://lab.example', pairingId: 'pair-1', code: 'ONE-TIME'
+    })).rejects.toThrow('Invite claimed, but the credential was not saved')
+    expect(store.list().map((profile) => profile.id)).toEqual(['local'])
+    expect(fetch_).toHaveBeenCalledOnce()
+  })
+
   it('does not consume a one-time code when secure persistence is unavailable', async () => {
     const fetch_ = vi.fn() as unknown as typeof fetch
     const store = ConnectionProfileStore.localOnly(temporarySettingsPath())
@@ -412,6 +428,27 @@ describe('daemon compatibility handshake', () => {
 })
 
 describe('connection profile lifecycle and switching', () => {
+  it('revalidates a cached profile and distinguishes auth, scope, transport, and daemon replacement', async () => {
+    const path = temporarySettingsPath()
+    const store = new ConnectionProfileStore(path)
+    const remote = store.upsert({ name: 'Lab', baseUrl: 'https://lab.example', apiKey: 'client' })
+    store.select(remote.id)
+    const fetch_ = vi.fn()
+      .mockImplementationOnce(async () => new Response(JSON.stringify(daemonInfo({ daemon: { instance_id: 'one' } }))))
+      .mockImplementationOnce(async () => new Response(null, { status: 401 }))
+      .mockImplementationOnce(async () => new Response(null, { status: 403 }))
+      .mockRejectedValueOnce(new TypeError('network down'))
+      .mockImplementationOnce(async () => new Response(JSON.stringify(daemonInfo({ daemon: { instance_id: 'two' } }))))
+    const manager = new ConnectionProfileManager(store, { startLocal: vi.fn(), stopLocal: vi.fn(), fetch: fetch_ })
+    await manager.connection()
+    expect(new ConnectionProfileStore(path).get(remote.id)).toMatchObject({ daemonInstanceId: 'one' })
+    for (const status of ['unauthorized', 'forbidden', 'offline', 'identity-changed']) {
+      await expect(manager.verify()).resolves.toMatchObject({ status })
+    }
+    expect(fetch_).toHaveBeenCalledTimes(5)
+    expect(fetch_.mock.calls.every(([url]) => url.endsWith('/api/v1/daemon/info'))).toBe(true)
+  })
+
   it('keeps stored credentials out of profile views and preserves an omitted key on edit', async () => {
     const calls: Array<{ url: string; authorization: string | null }> = []
     const store = new ConnectionProfileStore(temporarySettingsPath())

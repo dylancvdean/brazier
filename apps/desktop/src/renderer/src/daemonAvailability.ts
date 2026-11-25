@@ -1,4 +1,4 @@
-export type DaemonAvailability = 'checking' | 'healthy' | 'offline'
+export type DaemonAvailability = 'checking' | 'healthy' | 'offline' | 'blocked'
 
 let availability: DaemonAvailability = 'checking'
 let connectionAbort = new AbortController()
@@ -11,7 +11,7 @@ export class DaemonOfflineError extends Error {
 }
 
 export function setDaemonAvailability(next: DaemonAvailability): void {
-  if (next === 'checking') {
+  if (next === 'checking' || next === 'blocked' && availability !== 'blocked') {
     connectionAbort.abort()
     connectionAbort = new AbortController()
   }
@@ -45,10 +45,10 @@ export async function daemonFetch(
     signal.throwIfAborted()
     // Any HTTP response proves the host is reachable, including auth and
     // validation failures. Only transport failure means offline.
-    availability = 'healthy'
+    if (availability !== 'blocked') availability = 'healthy'
     return response
   } catch (cause) {
-    if (!signal.aborted && !(cause instanceof DOMException && cause.name === 'AbortError')) {
+    if (availability !== 'blocked' && !signal.aborted && !(cause instanceof DOMException && cause.name === 'AbortError')) {
       availability = 'offline'
     }
     throw cause
