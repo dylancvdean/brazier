@@ -40,6 +40,7 @@ import {
   type ClipboardEvent,
   type DragEvent,
   type FormEvent,
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -189,6 +190,12 @@ const DEFAULT_WORKSPACE_MODES: WorkspaceModesPreference = {
   computer: false
 }
 
+function shortcutLabel(key: string, shift = false): string {
+  return window.brazier.platform === 'darwin'
+    ? `⌘${shift ? '⇧' : ''}${key}`
+    : `Ctrl+${shift ? 'Shift+' : ''}${key}`
+}
+
 function profileStorageKey(base: string, profileId: string): string {
   return `${base}.${encodeURIComponent(profileId)}`
 }
@@ -215,6 +222,20 @@ function writeGenerateHistory(profileId: string, entries: GenerateHistoryEntry[]
 }
 
 /** "14:05" today, "Yesterday", a weekday within the week, otherwise "Sep 3". */
+/** Sidebar bucket for a chat's last activity. */
+function historyGroup(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return 'Older'
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const days = Math.ceil((today.getTime() - date.getTime()) / 86_400_000)
+  if (days <= 0) return 'Today'
+  if (days === 1) return 'Yesterday'
+  if (days < 7) return 'Previous 7 days'
+  if (days < 30) return 'Previous 30 days'
+  return 'Older'
+}
+
 function shortDate(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return ''
@@ -3106,7 +3127,7 @@ export function App(): React.JSX.Element {
             />
             <div className="conversation-list">
               <div className="section-label conversation-list-head">
-                Recent
+                Chats
                 <button
                   type="button"
                   className="conversation-import"
@@ -3117,10 +3138,17 @@ export function App(): React.JSX.Element {
                   <Upload size={12} />
                 </button>
               </div>
-              {conversations.map((conversation) => (
+              {conversations.map((conversation, index) => (
+                <Fragment key={conversation.id}>
+                  {index === 0 ||
+                  historyGroup(conversations[index - 1].updated_at) !==
+                    historyGroup(conversation.updated_at) ? (
+                    <div className="conversation-group-label">
+                      {historyGroup(conversation.updated_at)}
+                    </div>
+                  ) : null}
                 <div
                   className={conversation.id === conversationId ? 'conversation active' : 'conversation'}
-                  key={conversation.id}
                 >
                   {renaming?.id === conversation.id ? (
                     <input
@@ -3227,6 +3255,7 @@ export function App(): React.JSX.Element {
                     </>
                   ) : null}
                 </div>
+                </Fragment>
               ))}
               {conversations.length === 0 && (
                 <p className="empty-sidebar">
@@ -3273,7 +3302,7 @@ export function App(): React.JSX.Element {
         <header className="topbar">
           <button
             className="icon-button"
-            title={sidebarOpen ? 'Hide sidebar (⌘B)' : 'Show sidebar (⌘B)'}
+            title={`${sidebarOpen ? 'Hide' : 'Show'} sidebar (${shortcutLabel('B')})`}
             aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
             aria-expanded={sidebarOpen}
             onClick={() => setSidebarOpen((open) => !open)}
@@ -3329,7 +3358,7 @@ export function App(): React.JSX.Element {
           <button
             className="model-picker"
             disabled={modelUnloading}
-            title="Choose model (⌘⇧M)"
+            title={`Choose model (${shortcutLabel('M', true)})`}
             onClick={() => setModelMenuOpen(true)}
           >
             <div className="model-icon">
@@ -3372,7 +3401,7 @@ export function App(): React.JSX.Element {
           {appMode === 'chat' && (
             <button
               className={`icon-button incognito-toggle${incognito ? ' active' : ''}`}
-              title={incognito ? 'Leave incognito (⌘⇧I)' : 'Incognito chat (⌘⇧I)'}
+              title={`${incognito ? 'Leave incognito' : 'Incognito chat'} (${shortcutLabel('I', true)})`}
               aria-label={incognito ? 'Leave incognito' : 'Incognito chat'}
               aria-pressed={incognito}
               onClick={toggleIncognito}
@@ -3382,7 +3411,7 @@ export function App(): React.JSX.Element {
           )}
           <button
             className="icon-button manage-button"
-            title="Manage (⌘,)"
+            title={`Manage (${shortcutLabel(',')})`}
             aria-label="Manage"
             onClick={() => openManage('library')}
           >
@@ -3602,7 +3631,9 @@ export function App(): React.JSX.Element {
               <h1>
                 {modelsLoading
                   ? 'Starting up…'
-                  : chatModels.length === 0
+                  : chatModels.length === 0 && daemonStatus === 'offline'
+                    ? 'Can’t reach the engine'
+                    : chatModels.length === 0
                     ? 'No chat models yet'
                     : !selectedModel && modelPrepareState !== 'error'
                       ? 'Choose a model'
@@ -3617,7 +3648,9 @@ export function App(): React.JSX.Element {
               <p>
                 {modelsLoading
                   ? 'Loading your model library.'
-                  : chatModels.length === 0
+                  : chatModels.length === 0 && daemonStatus === 'offline'
+                    ? 'Brazier reconnects on its own once the engine is back.'
+                    : chatModels.length === 0
                     ? 'Download one to start chatting.'
                     : !selectedModel && modelPrepareState !== 'error'
                       ? `You have ${chatModels.length} installed.`
@@ -3629,7 +3662,10 @@ export function App(): React.JSX.Element {
                             ? 'Nothing here is saved, and memory is off.'
                             : 'Ask a question, or attach a file.'}
               </p>
-              {!modelsLoading && !selectedModel && modelPrepareState !== 'loading' ? (
+              {!modelsLoading &&
+              !selectedModel &&
+              modelPrepareState !== 'loading' &&
+              !(chatModels.length === 0 && daemonStatus === 'offline') ? (
                 <div className="welcome-actions">
                   {chatModels.length === 0 ? (
                     <button
@@ -4111,7 +4147,7 @@ export function App(): React.JSX.Element {
                 <button
                   className="send-button stop"
                   type="button"
-                  title="Stop (⌘.)"
+                  title={`Stop (${shortcutLabel('.')})`}
                   aria-label="Stop"
                   onClick={() => {
                     if (shellComposerMode) void shellComposer?.stop()

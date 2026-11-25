@@ -89,6 +89,10 @@ impl BrowserSessionRegistry {
 
     pub async fn close(&self, _id: &str) {}
 
+    pub async fn is_alive(&self, _id: &str) -> bool {
+        false
+    }
+
     pub async fn snapshot(
         &self,
         _id: &str,

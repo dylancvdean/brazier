@@ -6372,30 +6372,17 @@ async fn resume_model_download(
             "this download is still stopping; wait a moment and try resuming again",
         ));
     }
-    let job = state
+    state
         .db
         .get_download_job_public(&request.job_id)
         .await
         .map_err(|_| ApiError::bad_request("no such download job"))?;
-    let payload = job.payload.as_deref().ok_or_else(|| {
-        ApiError::bad_request("this job predates the queue and cannot be resumed")
-    })?;
-    let work: crate::download_queue::QueuedWork = serde_json::from_str(payload)
-        .map_err(|_| ApiError::bad_request("unreadable job payload"))?;
-    state
-        .db
-        .requeue_download_job(&request.job_id)
-        .await
-        .map_err(ApiError::bad_request)?;
     state
         .download_queue
-        .enqueue(crate::download_queue::QueuedDownload {
-            job_id: job.id.clone(),
-            work,
-        })
+        .resume_job(&state.db, &request.job_id)
         .await
-        .map_err(ApiError::internal)?;
-    Ok(Json(json!({ "resumed": job.id })))
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "resumed": request.job_id })))
 }
 
 async fn list_models(State(state): State<AppState>) -> ApiResult<Json<Value>> {

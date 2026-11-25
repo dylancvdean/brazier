@@ -1678,8 +1678,17 @@ impl Database {
     /// Jobs that were mid-flight when the daemon stopped. Transfers can be
     /// paused and resumed from their partial files; source builds cannot, so
     /// their tray rows become failed rather than appearing stuck forever.
-    pub async fn interrupt_running_download_jobs(&self) -> anyhow::Result<()> {
+    /// Returns the transfers that were mid-flight so the caller can put them
+    /// back in line; jobs the person paused themselves stay paused.
+    pub async fn interrupt_running_download_jobs(&self) -> anyhow::Result<Vec<String>> {
         let mut tx = self.pool.begin().await?;
+        let interrupted: Vec<String> = sqlx::query_scalar(
+            r#"SELECT id FROM download_jobs
+               WHERE kind != 'runtime-build' AND status IN ('pending', 'downloading')
+               ORDER BY created_at"#,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
         sqlx::query(
             r#"UPDATE download_jobs
                SET status = 'failed', error = 'Brazier restarted before this build completed',
@@ -1696,7 +1705,7 @@ impl Database {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(interrupted)
     }
 
     pub async fn update_download_job_progress(
@@ -1784,7 +1793,7 @@ impl Database {
     pub async fn start_download_job(&self, job_id: &str) -> anyhow::Result<()> {
         let result = sqlx::query(
             r#"UPDATE download_jobs
-               SET status = 'downloading', updated_at = datetime('now')
+               SET status = 'downloading', error = NULL, updated_at = datetime('now')
                WHERE id = ? AND status IN ('pending', 'downloading')"#,
         )
         .bind(job_id)

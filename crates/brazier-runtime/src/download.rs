@@ -467,10 +467,27 @@ pub async fn download_gguf_with_progress(
     };
 
     progress(ProgressEvent::phase("hash", "Verifying SHA-256"));
+    let sha256 = hash_file(&partial).await?;
+    if let Some(expected) = expected_file_sha256(client, data_dir, &request).await
+        && expected != sha256
+    {
+        let _ = tokio::fs::remove_file(&partial).await;
+        anyhow::bail!(
+            "{} failed its checksum (expected SHA-256 {expected}, got {sha256}). The corrupt copy was removed; retry to download it again.",
+            request.filename
+        );
+    }
+    match cancel.as_deref().and_then(StopFlag::reason) {
+        Some(StopReason::Cancel) => {
+            let _ = tokio::fs::remove_file(&partial).await;
+            anyhow::bail!("download cancelled");
+        }
+        Some(StopReason::Pause) => anyhow::bail!("download paused"),
+        None => {}
+    }
     tokio::fs::rename(&partial, &destination)
         .await
         .context("promote partial download")?;
-    let sha256 = hash_file(&destination).await?;
     let model_id = installed_download_model_id(data_dir, &destination, &request)?;
     let result = DownloadResult {
         model_id,
@@ -487,6 +504,36 @@ pub async fn download_gguf_with_progress(
     }
     progress(ProgressEvent::done(serde_json::to_value(&result)?));
     Ok(result)
+}
+
+/// The Hub's LFS SHA-256 for a single file. `None` when the Hub has no LFS
+/// hash for it or cannot be reached, in which case only the size was checked.
+async fn expected_file_sha256(
+    client: &reqwest::Client,
+    data_dir: &Path,
+    request: &DownloadRequest,
+) -> Option<String> {
+    let paths = [request.filename.clone()];
+    let lookup = crate::hf::paths_info(
+        client,
+        data_dir,
+        &request.repo_id,
+        &request.revision,
+        &paths,
+    );
+    match tokio::time::timeout(Duration::from_secs(45), lookup)
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("checksum lookup timed out")))
+    {
+        Ok(files) => files
+            .into_iter()
+            .find(|file| file.path == request.filename)
+            .and_then(|file| file.sha256),
+        Err(error) => {
+            tracing::warn!(%error, repo = %request.repo_id, file = %request.filename, "could not fetch expected checksum");
+            None
+        }
+    }
 }
 
 fn content_length_total(

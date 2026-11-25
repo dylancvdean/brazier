@@ -176,10 +176,9 @@ async fn main() -> anyhow::Result<()> {
         settings.jit_loading = jit_loading;
         brazierd::runtime_settings::save(&data_dir, &settings).await?;
     }
-    // Downloads do not survive a restart, but their partial files do; mark any
-    // that were mid-flight as paused so they can be resumed rather than
-    // appearing to still be running.
-    db.interrupt_running_download_jobs().await?;
+    // Downloads do not survive a restart, but their partial files do; transfers
+    // that were mid-flight are put back in line once the queue is up.
+    let interrupted_downloads = db.interrupt_running_download_jobs().await?;
     db.interrupt_running_agent_sessions().await?;
     let api_keys = resolve_api_keys(&args, &data_dir)?;
     let local_control_key = (!args.service && args.host.is_loopback())
@@ -196,6 +195,11 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&active_downloads),
         Arc::clone(&runtime),
     );
+    for job_id in interrupted_downloads {
+        if let Err(error) = download_queue.resume_job(&db, &job_id).await {
+            tracing::warn!(%job_id, %error, "left interrupted download paused");
+        }
+    }
     let computer_broker = brazierd::computer_exec::ComputerBroker::open_at(
         data_dir.join("computer_sessions.json"),
         identity.execution_location(),

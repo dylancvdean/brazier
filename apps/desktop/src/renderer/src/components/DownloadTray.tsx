@@ -1,4 +1,14 @@
-import { Check, ChevronDown, ChevronRight, Download, Hammer, Pause, Play, X } from 'lucide-react'
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Download,
+  Hammer,
+  Pause,
+  Play,
+  RotateCcw,
+  X
+} from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   cancelDownloadJob,
@@ -124,6 +134,7 @@ function jobDetail(job: DownloadJob, rate: number | null): string {
   if (job.status === 'failed') return job.error ?? 'Failed'
   if (job.status === 'cancelled') return 'Cancelled'
   if (job.status === 'completed') return 'Done'
+  if (job.error) return job.error
   if (job.bytes_downloaded == null) return 'Starting…'
   const total = job.total_bytes ? ` / ${formatBytes(job.total_bytes)}` : ''
   const size = `${formatBytes(job.bytes_downloaded)}${total}`
@@ -362,11 +373,12 @@ export function DownloadTray({
                     {!runtimeBuild && (paused || job.status === 'failed') && (
                       <button
                         type="button"
-                        title="Resume"
+                        title={paused ? 'Resume' : 'Retry'}
+                        aria-label={paused ? 'Resume' : 'Retry'}
                         disabled={busy === job.id}
                         onClick={() => void act(job, resumeDownloadJob)}
                       >
-                        <Play size={12} />
+                        {paused ? <Play size={12} /> : <RotateCcw size={12} />}
                       </button>
                     )}
                     <button
