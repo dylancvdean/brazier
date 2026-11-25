@@ -309,4 +309,58 @@ describe('AgentSupervisor unresponsive worker handling', () => {
     expect(supervisor.status().running).toBe(true)
     expect(supervisor.status().crashes).toBe(0)
   })
+
+  it('restarts after a crash and reattaches open sessions', async () => {
+    const workers: FakeUtilityProcess[] = []
+    const supervisor = new AgentSupervisor({
+      forkWorker: () => {
+        const worker = new FakeUtilityProcess()
+        workers.push(worker)
+        queueMicrotask(() => worker.emit('spawn'))
+        return worker as unknown as UtilityProcess
+      },
+      fetch: (async () => new Response('{}')) as unknown as typeof fetch
+    })
+    supervisor.setConnection({ address: 'http://127.0.0.1:7614', apiKey: null })
+    await supervisor.invoke({ type: 'open-session', sessionId: 's1' })
+    expect(supervisor.status().state).toBe('running')
+
+    workers[0].emit('exit', 1)
+    expect(supervisor.status()).toMatchObject({ state: 'restarting', crashes: 1, lastExitCode: 1 })
+    await vi.waitFor(() => expect(supervisor.status().state).toBe('running'), { timeout: 3000 })
+    expect(workers).toHaveLength(2)
+    expect(
+      workers[1].sent.some(
+        (command) => command.type === 'open-session' && command.sessionId === 's1'
+      )
+    ).toBe(true)
+  })
+
+  it('stops restarting after a crash loop until asked to restart', async () => {
+    let now = 0
+    const workers: FakeUtilityProcess[] = []
+    const supervisor = new AgentSupervisor({
+      now: () => now,
+      forkWorker: () => {
+        const worker = new FakeUtilityProcess()
+        workers.push(worker)
+        queueMicrotask(() => worker.emit('spawn'))
+        return worker as unknown as UtilityProcess
+      },
+      fetch: (async () => new Response('{}')) as unknown as typeof fetch
+    })
+    supervisor.setConnection({ address: 'http://127.0.0.1:7614', apiKey: null })
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await supervisor.warmup()
+      workers[workers.length - 1].emit('exit', 139)
+      now += 10_000
+    }
+    expect(supervisor.status()).toMatchObject({ state: 'crash-loop', crashes: 4 })
+    await expect(supervisor.warmup()).rejects.toThrow('stopped restarting')
+    expect(workers).toHaveLength(4)
+
+    expect(supervisor.restart().state).toBe('idle')
+    await supervisor.warmup()
+    expect(supervisor.status().state).toBe('running')
+  })
 })

@@ -14,6 +14,7 @@ import {
   Wrench,
   X
 } from 'lucide-react'
+import { AgentWorkerBanner } from './AgentWorkerBanner'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import type {
@@ -1857,6 +1858,7 @@ export function AgentMode(props: Props): React.JSX.Element {
 
   return (
     <div className="agent-mode">
+      <AgentWorkerBanner onError={onError} />
       <header className="agent-header">
         <button
           className="agent-workspace"

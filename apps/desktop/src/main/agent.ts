@@ -20,6 +20,8 @@ import {
 
 import {
   AGENT_IPC,
+  type AgentWorkerState,
+  type AgentWorkerStatus,
   type WorkerCommand,
   type WorkerCommandInput,
   type WorkerConnection,
@@ -37,6 +39,12 @@ const SHORT_REQUEST_TIMEOUT_MS = 60_000
 /** A stop is a safety control, so a wedged runtime gets only a short grace period. */
 const CANCEL_GRACE_MS = 2_000
 const SHUTDOWN_GRACE_MS = 5_000
+/** First respawn delay after a crash; doubles per recent crash. */
+const RESTART_BASE_MS = 500
+const RESTART_MAX_MS = 8_000
+/** This many crashes inside the window stops automatic restarts. */
+const CRASH_LOOP_LIMIT = 4
+const CRASH_LOOP_WINDOW_MS = 120_000
 const SHUTDOWN_KILL_MS = 2_000
 const DAEMON_CANCEL_TIMEOUT_MS = 5_000
 const DAEMON_PATCH_TIMEOUT_MS = 5_000
@@ -65,6 +73,13 @@ export class AgentSupervisor {
   private nextId = 0
   private ready?: Promise<void>
   private crashes = 0
+  private recentCrashes: number[] = []
+  private lastExitCode: number | null = null
+  private retryAt: number | null = null
+  private workerState: AgentWorkerState = 'idle'
+  private respawnTimer?: ReturnType<typeof setTimeout>
+  /** Bumped by `shutdown` so a start still waiting out backoff is abandoned. */
+  private startEpoch = 0
   private readonly sessions = new Set<string>()
   private readonly activeSessions = new Map<string, ActiveSessionRun>()
   /** Runs that already ended, so a late event cannot make them look active again. */
@@ -77,8 +92,58 @@ export class AgentSupervisor {
       cancelGraceMs?: number
       forkWorker?: () => UtilityProcess
       fetch?: typeof fetch
+      now?: () => number
     } = {}
   ) {}
+
+  private now(): number {
+    return this.options.now ? this.options.now() : Date.now()
+  }
+
+  private setState(state: AgentWorkerState): void {
+    this.workerState = state
+    this.broadcast(AGENT_IPC.statusChanged, this.status())
+  }
+
+  /** Record an unexpected exit and decide between a delayed respawn and stopping. */
+  private recordCrash(code: number): void {
+    const now = this.now()
+    this.crashes += 1
+    this.lastExitCode = code
+    this.recentCrashes = [
+      ...this.recentCrashes.filter((at) => now - at < CRASH_LOOP_WINDOW_MS),
+      now
+    ]
+    if (this.recentCrashes.length >= CRASH_LOOP_LIMIT) {
+      this.retryAt = null
+      this.setState('crash-loop')
+      return
+    }
+    const delay = Math.min(RESTART_MAX_MS, RESTART_BASE_MS * 2 ** (this.recentCrashes.length - 1))
+    this.retryAt = now + delay
+    this.setState('restarting')
+    // Reattach the sessions the renderer still has open; with none, the next
+    // command respawns lazily.
+    if (this.sessions.size > 0) {
+      clearTimeout(this.respawnTimer)
+      this.respawnTimer = setTimeout(() => {
+        this.respawnTimer = undefined
+        void this.ensureWorker().catch((error: unknown) => {
+          console.error('[agent-worker] automatic restart failed', error)
+        })
+      }, delay)
+    }
+  }
+
+  /** Leave the crash-loop state and start again on the next command. */
+  restart(): AgentWorkerStatus {
+    this.recentCrashes = []
+    this.retryAt = null
+    if (this.workerState === 'crash-loop' || this.workerState === 'restarting') {
+      this.setState(this.worker ? 'running' : 'idle')
+    }
+    return this.status()
+  }
 
   /** Subscribe to worker events (including synthesized terminal `run-failed` events). */
   onEvent(listener: (message: WorkerMessage) => void): () => void {
@@ -249,12 +314,25 @@ export class AgentSupervisor {
   /** Start the worker and initialize it against the daemon connection. */
   private async ensureWorker(): Promise<void> {
     if (this.ready) return this.ready
+    if (this.workerState === 'crash-loop') {
+      throw new Error(
+        `The agent worker crashed ${this.recentCrashes.length} times in two minutes, so Brazier stopped restarting it. Restart it from Agent mode once the cause is fixed.`
+      )
+    }
     let spawnedWorker: UtilityProcess | undefined
+    const reattach = this.workerState === 'restarting'
+    const epoch = this.startEpoch
     const readyPromise = (async () => {
+      const wait = (this.retryAt ?? 0) - this.now()
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+      if (epoch !== this.startEpoch) {
+        throw new Error('The agent worker restart was cancelled because the connection changed.')
+      }
       const connection = this.connection
       if (!connection) {
         throw new Error('The Brazier daemon connection is not available yet.')
       }
+      this.setState(reattach ? 'restarting' : 'starting')
       // The worker inherits no daemon credentials: the bearer token travels in
       // the init message, and BRAZIER_* configuration stays in this process.
       const workerEnv: Record<string, string> = {}
@@ -284,7 +362,6 @@ export class AgentSupervisor {
           // must never clobber the replacement worker or its pending requests.
           return
         }
-        if (!expected) this.crashes += 1
         const exitError = `The agent worker exited (code ${code}).`
         for (const [, pending] of this.pending) {
           pending.reject(new Error(exitError))
@@ -300,6 +377,9 @@ export class AgentSupervisor {
         if (!expected) {
           this.synthesizeTerminalRunFailures(exitError)
           void this.markSessionsFailed(connection, activeIds, code)
+          this.recordCrash(code)
+        } else if (this.workerState === 'running' || this.workerState === 'starting') {
+          this.setState('idle')
         }
       })
       await new Promise<void>((resolve, reject) => {
@@ -327,12 +407,32 @@ export class AgentSupervisor {
         throw new Error('The agent worker was replaced before it finished starting.')
       }
       await this.send({ type: 'init', requestId: this.requestId(), connection })
+      if (reattach) {
+        // Sessions are durable on the daemon; reopening rehydrates them in the
+        // new worker so the renderer can keep using the same session ids.
+        for (const sessionId of [...this.sessions]) {
+          await this.send({ type: 'open-session', requestId: this.requestId(), sessionId }).catch(
+            (error: unknown) => {
+              // A worker that died mid-reattach was already recorded as a crash.
+              if (this.worker !== worker) throw error
+              console.error(`[agent-worker] could not reattach session ${sessionId}`, error)
+              this.sessions.delete(sessionId)
+            }
+          )
+        }
+      }
+      if (this.worker !== worker) {
+        throw new Error('The agent worker exited before it finished starting.')
+      }
+      this.retryAt = null
+      this.setState('running')
     })()
     this.ready = readyPromise
     try {
       await readyPromise
     } catch (error) {
       if (this.ready === readyPromise) this.ready = undefined
+      if (this.workerState === 'starting') this.setState('idle')
       if (spawnedWorker && this.worker === spawnedWorker) {
         this.terminatedWorkers.add(spawnedWorker)
         this.worker = undefined
@@ -538,8 +638,18 @@ export class AgentSupervisor {
   }
 
   async shutdown(): Promise<void> {
+    clearTimeout(this.respawnTimer)
+    this.respawnTimer = undefined
+    this.startEpoch += 1
     const worker = this.worker
-    if (!worker) return
+    if (!worker) {
+      // Sessions waiting for a respawn belong to the old connection.
+      this.sessions.clear()
+      this.activeSessions.clear()
+      this.retryAt = null
+      if (this.workerState === 'restarting') this.setState('idle')
+      return
+    }
     this.terminatedWorkers.add(worker)
     const exited = new Promise<void>((resolve) => {
       worker.once('exit', () => resolve())
@@ -583,9 +693,15 @@ export class AgentSupervisor {
     }
   }
 
-  /** Diagnostics for the UI: whether the worker is up and how often it died. */
-  status(): { running: boolean; crashes: number } {
-    return { running: Boolean(this.worker), crashes: this.crashes }
+  /** Lifecycle for the UI: whether the worker is up, restarting, or stopped after a crash loop. */
+  status(): AgentWorkerStatus {
+    return {
+      state: this.workerState,
+      running: Boolean(this.worker),
+      crashes: this.crashes,
+      lastExitCode: this.lastExitCode,
+      retryAt: this.retryAt
+    }
   }
 }
 
@@ -600,8 +716,12 @@ export function registerAgentIpc(
     }
     return supervisor.invoke(payload)
   })
-  ipcMain.handle('brazier:agent:status', (event) => {
+  ipcMain.handle(AGENT_IPC.status, (event) => {
     assertTrustedSender(event)
     return supervisor.status()
+  })
+  ipcMain.handle(AGENT_IPC.restart, (event) => {
+    assertTrustedSender(event)
+    return supervisor.restart()
   })
 }

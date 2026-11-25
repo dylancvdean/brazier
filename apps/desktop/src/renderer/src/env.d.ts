@@ -235,7 +235,12 @@ declare global {
           mode: import('../../agent/core/types').AgentPermissionMode
         ): Promise<unknown>
         closeSession(sessionId: string): Promise<unknown>
-        status(): Promise<{ running: boolean; crashes: number }>
+        status(): Promise<import('../../agent/core/protocol').AgentWorkerStatus>
+        /** Clear a crash loop so the next command starts the worker again. */
+        restart(): Promise<import('../../agent/core/protocol').AgentWorkerStatus>
+        onStatus(
+          listener: (status: import('../../agent/core/protocol').AgentWorkerStatus) => void
+        ): () => void
         onMessage(listener: (message: import('../../agent/core/protocol').WorkerMessage) => void): () => void
       }
     }

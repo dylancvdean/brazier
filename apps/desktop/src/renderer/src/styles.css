@@ -2604,7 +2604,13 @@ a.inline-link {
 }
 
 .library-card {
+  grid-template-columns: minmax(0, 1fr) fit-content(45%);
   align-items: start;
+}
+
+.library-list > h3,
+.library-card-info {
+  overflow-wrap: anywhere;
 }
 
 .runtime-card.active {
@@ -2617,8 +2623,15 @@ a.inline-link {
   display: flex;
   align-items: center;
   gap: 8px;
-  overflow: hidden;
   font-size: 13px;
+}
+
+.library-card-info strong {
+  flex-wrap: wrap;
+}
+
+.runtime-card-info strong {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2627,9 +2640,12 @@ a.inline-link {
 .runtime-card-info > span {
   display: block;
   margin-top: 3px;
-  overflow: hidden;
   color: var(--muted);
   font-size: 11px;
+}
+
+.runtime-card-info > span {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2850,6 +2866,7 @@ a.inline-link {
 
 .library-caps {
   display: flex;
+  flex-wrap: wrap;
   gap: 5px;
   margin-top: 6px;
 }
@@ -8732,4 +8749,60 @@ label.span-2 {
 .download-tray-use:hover:not(:disabled) {
   border-color: var(--accent) !important;
   background: #2a180c !important;
+}
+
+.render-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #5a3033;
+  border-radius: 8px;
+  color: #e79a9a;
+  font-size: 13px;
+}
+
+.render-error button {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.render-error.fatal {
+  margin: 48px auto;
+  max-width: 520px;
+}
+
+.markdown-plain-fallback {
+  white-space: pre-wrap;
+}
+
+.agent-worker-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 12px 0;
+  padding: 8px 12px;
+  border: 1px solid #4a4636;
+  border-radius: 8px;
+  color: #d8c68a;
+  font-size: 13px;
+}
+
+.agent-worker-banner.stopped {
+  border-color: #5a3033;
+  color: #e79a9a;
+}
+
+.agent-worker-banner button {
+  margin-left: auto;
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
 }

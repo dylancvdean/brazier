@@ -77,7 +77,6 @@ import {
   type HfAccessRequest,
   fetchToolchainStatus,
   type ToolchainTool,
-  listDownloadJobs,
   listRemoteConnections,
   saveRemoteConnection,
   testRemoteConnection,
@@ -182,6 +181,7 @@ import {
 } from './manage/quant'
 import { ConnectionsSection } from './manage/ConnectionsSection'
 import { LibraryProjectors } from './manage/LibraryProjectors'
+import { downloadJobsStore, useDownloadJobSettled, useDownloadJobs } from '../downloadJobsStore'
 import {
   isGgufLibraryModel,
   isRemoteLibraryModel,
@@ -1839,7 +1839,8 @@ function RecommendedSection(props: SectionProps): React.JSX.Element {
 }
 
 function ComputerUseSection(props: SectionProps): React.JSX.Element {
-  const [jobs, setJobs] = useState<DownloadJob[]>([])
+  const connectionProfile = useConnectionProfile()
+  const { jobs } = useDownloadJobs(connectionProfile.id)
   const [installing, setInstalling] = useState<string | null>(null)
   const [runtimePhase, setRuntimePhase] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -1847,7 +1848,6 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
   const [requestingComputerPermissions, setRequestingComputerPermissions] = useState(false)
   const [computerPreference, setComputerPreference] = useState<ComputerUsePreference | null>(null)
   const [savingComputerPreference, setSavingComputerPreference] = useState(false)
-  const settledSignature = useRef('')
 
   useEffect(() => {
     let cancelled = false
@@ -1932,35 +1932,17 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
     }
   }
 
-  useEffect(() => {
-    let cancelled = false
-    async function refresh(): Promise<void> {
-      try {
-        const next = await listDownloadJobs()
-        if (cancelled) return
-        setJobs(next)
-        const managed = next.filter((job) =>
-          MANAGED_FARA_BUNDLES.some((bundle) => bundle.quantRepo === job.repo_id)
-        )
-        const signature = managed
-          .filter((job) => ['completed', 'failed', 'cancelled'].includes(job.status))
-          .map((job) => `${job.id}:${job.status}:${job.updated_at}`)
-          .join('|')
-        if (signature && signature !== settledSignature.current) {
-          settledSignature.current = signature
-          await props.refreshModels()
+  const { refreshModels, onError } = props
+  useDownloadJobSettled(
+    useCallback(
+      (job: DownloadJob) => {
+        if (MANAGED_FARA_BUNDLES.some((bundle) => bundle.quantRepo === job.repo_id)) {
+          void refreshModels().catch((cause: unknown) => onError(errorText(cause)))
         }
-      } catch {
-        if (!cancelled) setJobs([])
-      }
-    }
-    void refresh()
-    const timer = window.setInterval(() => void refresh(), 2000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [props.refreshModels])
+      },
+      [refreshModels, onError]
+    )
+  )
 
   async function queueBundleFile(bundle: ManagedFaraBundle, filename: string): Promise<void> {
     // The daemon returns newest jobs first. Prefer the latest attempt so an
@@ -1995,7 +1977,7 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
         ensureLlamaEngine((event) => setRuntimePhase(progressLabel(event))),
         enableComputerMode()
       ])
-      setJobs(await listDownloadJobs())
+      await downloadJobsStore.refresh()
       setNotice(
         `${bundle.label} is in the download queue. Brazier has also prepared its vision projector, inference runtime, and Computer Use workspace mode.`
       )
@@ -2896,8 +2878,10 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
   const [savingHfToken, setSavingHfToken] = useState(false)
   const [accessRequests, setAccessRequests] = useState<HfAccessRequest[]>([])
   const [accessChecking, setAccessChecking] = useState(false)
-  const [downloadJobs, setDownloadJobs] = useState<DownloadJob[]>([])
-  const downloadJobsRefreshRef = useRef(0)
+  const connectionProfileForJobs = useConnectionProfile()
+  const { jobs: downloadJobs, stale: downloadJobsStale } = useDownloadJobs(
+    connectionProfileForJobs.id
+  )
   const [openDescription, setOpenDescription] = useState<string | null>(null)
   const [descriptions, setDescriptions] = useState<Record<string, string>>({})
   const [descriptionLoading, setDescriptionLoading] = useState<string | null>(null)
@@ -2960,22 +2944,6 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       setAccessChecking(false)
     }
   }
-
-  async function refreshDownloadJobs(): Promise<void> {
-    const refreshId = ++downloadJobsRefreshRef.current
-    try {
-      const jobs = await listDownloadJobs()
-      if (refreshId === downloadJobsRefreshRef.current) setDownloadJobs(jobs)
-    } catch {
-      if (refreshId === downloadJobsRefreshRef.current) setDownloadJobs([])
-    }
-  }
-
-  useEffect(() => {
-    void refreshDownloadJobs()
-    const timer = window.setInterval(() => void refreshDownloadJobs(), 2000)
-    return () => window.clearInterval(timer)
-  }, [])
 
   // The instant "Queued" flag is never cleared on its own, which permanently
   // disabled an in-place bundle (MiniMax-H3's FL2VA/Ref2VA and quant switches
@@ -3200,7 +3168,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         (component) => component.repo_id
       )
       setQueuedRepos((current) => ({ ...current, [resolved.id]: true }))
-      void refreshDownloadJobs()
+      void downloadJobsStore.refresh()
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -3397,7 +3365,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         await queueModelDownload(repoId, path, 'main', engine)
       }
       setQueuedRepos((current) => ({ ...current, [repoId]: true }))
-      setDownloadJobs(await listDownloadJobs())
+      await downloadJobsStore.refresh()
     } catch (cause) {
       props.onError(errorText(cause))
       return
@@ -3420,9 +3388,6 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
 
   async function cancelJob(job: DownloadJob): Promise<void> {
     props.onError(null)
-    // Prevent a poll begun before this click from restoring its old queued
-    // snapshot after the cancellation response arrives.
-    downloadJobsRefreshRef.current += 1
     try {
       if (job.kind === 'runtime-build') {
         await cancelBuildJob(job.id)
@@ -3431,7 +3396,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
       }
       // Reflect cancellation before the next polling round. The daemon still
       // owns the durable state and the regular refresh reconciles it.
-      setDownloadJobs((current) =>
+      downloadJobsStore.update((current) =>
         current.map((currentJob) =>
           currentJob.id === job.id
             ? {
@@ -3443,7 +3408,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
             : currentJob
         )
       )
-      void refreshDownloadJobs()
+      void downloadJobsStore.refresh()
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -3453,7 +3418,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     props.onError(null)
     try {
       await dismissDownloadJob(jobId)
-      setDownloadJobs(await listDownloadJobs())
+      await downloadJobsStore.refresh()
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -3463,7 +3428,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     props.onError(null)
     try {
       await dismissFinishedDownloadJobs()
-      setDownloadJobs(await listDownloadJobs())
+      await downloadJobsStore.refresh()
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -3473,7 +3438,7 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
     props.onError(null)
     try {
       await resumeDownloadJob(jobId)
-      setDownloadJobs(await listDownloadJobs())
+      await downloadJobsStore.refresh()
     } catch (cause) {
       props.onError(errorText(cause))
     }
@@ -3668,6 +3633,14 @@ function DiscoverSection(props: SectionProps): React.JSX.Element {
         <div className="download-jobs-panel">
           <div className="download-jobs-head">
             <div className="section-label">Download queue</div>
+            {downloadJobsStale && (
+              <span
+                className="turn-badge failed"
+                title="The last refresh failed; showing the most recent known state."
+              >
+                offline · last known
+              </span>
+            )}
             {finishedJobCount > 0 && (
               <button
                 type="button"

@@ -894,8 +894,22 @@ fn daemon_boot_id() -> &'static str {
     DAEMON_BOOT_ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
-async fn health(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+/// Unauthenticated liveness probe. Loopback callers also get the build version,
+/// engine and boot id; a remote peer (`--allow-insecure-remote`) gets status only,
+/// so the network cannot fingerprint the exact build or watch restarts.
+async fn health(
+    State(state): State<AppState>,
+    client: ClientAddr,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
     state.db.ping().await.map_err(ApiError::internal)?;
+    // A reverse proxy on the same host connects over loopback for remote peers.
+    let proxied = ["forwarded", "x-forwarded-for", "x-real-ip"]
+        .iter()
+        .any(|name| headers.contains_key(*name));
+    if proxied || !client_is_loopback(&client) {
+        return Ok(Json(json!({ "status": "healthy", "database": "ok" })));
+    }
     Ok(Json(json!({
         "status": "healthy",
         "engine": state.runtime.id(),
@@ -1006,7 +1020,6 @@ async fn preview_pairing_request(
             .await
             .map_err(ApiError::internal)?;
         return Ok(pairing_response(json!({
-            "boot_id": daemon_boot_id(),
             "instance_id": identity.instance_id,
         })));
     }
@@ -1108,6 +1121,7 @@ async fn daemon_info(
     Ok(Json(json!({
         "product": "brazier",
         "version": env!("CARGO_PKG_VERSION"),
+        "boot_id": daemon_boot_id(),
         "management_api": { "major": 1, "minor": 0 },
         "openai_api": { "chat_completions": "/v1/chat/completions", "responses": "/v1/responses" },
         "daemon": {
@@ -10332,7 +10346,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(probe["boot_id"], daemon_boot_id());
+        assert!(probe.get("boot_id").is_none());
 
         let (status, created) = request_with_api_key(
             &app,
@@ -10384,6 +10398,7 @@ mod tests {
         let (status, info) =
             request_with_api_key(&app, "GET", "/api/v1/daemon/info", Value::Null, client_key).await;
         assert_eq!(status, StatusCode::OK, "{info}");
+        assert_eq!(info["boot_id"], daemon_boot_id());
         assert_eq!(info["client"]["id"], client_id);
         assert_eq!(info["client"]["scopes"], json!(["inference"]));
         assert_eq!(info["client"]["owner"], false);
@@ -10902,6 +10917,55 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    }
+
+    #[tokio::test]
+    async fn remote_health_omits_version_and_boot_id() {
+        let dir = tempdir().unwrap();
+        let app = router(test_state(dir.path()).await);
+        let health_from = |peer: SocketAddr| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .uri("/health")
+                            .extension(ConnectInfo(peer))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                serde_json::from_slice::<Value>(&body).unwrap()
+            }
+        };
+        let local = health_from(SocketAddr::from(([127, 0, 0, 1], 42_010))).await;
+        assert_eq!(local["status"], "healthy");
+        assert!(local["version"].is_string());
+        assert!(local["boot_id"].is_string());
+        let remote = health_from(SocketAddr::from(([192, 168, 1, 20], 42_011))).await;
+        assert_eq!(remote["status"], "healthy");
+        assert!(remote.get("version").is_none());
+        assert!(remote.get("boot_id").is_none());
+        assert!(remote.get("engine").is_none());
+        let proxied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("x-forwarded-for", "203.0.113.7")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_012))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = proxied.into_body().collect().await.unwrap().to_bytes();
+        let proxied = serde_json::from_slice::<Value>(&body).unwrap();
+        assert!(proxied.get("version").is_none());
+        assert!(proxied.get("boot_id").is_none());
     }
 
     #[tokio::test]

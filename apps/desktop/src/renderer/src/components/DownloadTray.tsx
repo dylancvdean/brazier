@@ -15,8 +15,6 @@ import {
   cancelBuildJob,
   dismissDownloadJob,
   formatBytes,
-  listDownloadJobs,
-  listRecommendationSetups,
   pauseDownloadJob,
   resumeDownloadJob,
   type DownloadJob,
@@ -24,7 +22,12 @@ import {
 } from '../api'
 import { useConnectionProfile } from '../connectionProfile'
 import { stripGgufShardSuffix } from '../model-utils'
-import { startPolling } from '../polling'
+import {
+  downloadJobsStore,
+  useDownloadJobSettled,
+  useDownloadJobs,
+  useRecommendationSetupSettled
+} from '../downloadJobsStore'
 
 /** Statuses that mean the job still wants to finish. */
 const OPEN_STATUSES = new Set(['pending', 'downloading', 'paused'])
@@ -201,42 +204,20 @@ export function DownloadTray({
   onChanged?: () => void
 }): React.JSX.Element | null {
   const profile = useConnectionProfile()
-  const [jobs, setJobs] = useState<DownloadJob[]>([])
+  const { jobs, stale } = useDownloadJobs(profile.id)
   const [collapsed, setCollapsed] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<{ id: string; message: string } | null>(null)
   const rates = useTransferRates(jobs)
-  /** Job ids seen as open (pending/downloading/paused) on the last poll. */
-  const seenOpen = useRef<Set<string>>(new Set())
   const onChangedRef = useRef(onChanged)
   onChangedRef.current = onChanged
-
-  const applyJobs = useCallback((next: DownloadJob[]): void => {
-    setJobs(next)
-    for (const job of next) {
-      if (seenOpen.current.has(job.id) && !OPEN_STATUSES.has(job.status)) {
-        onChangedRef.current?.()
-        break
-      }
-    }
-    seenOpen.current = new Set(
-      next.filter((job) => OPEN_STATUSES.has(job.status)).map((job) => job.id)
-    )
-  }, [])
-
-  const fetchLatestJobs = useCallback(async (): Promise<DownloadJob[]> => {
-    // Reconcile recommendation setups best-effort without letting its failure
-    // drop download queue updates.
-    void listRecommendationSetups().catch(() => undefined)
-    return listDownloadJobs()
-  }, [])
+  const notifyChanged = useCallback(() => onChangedRef.current?.(), [])
+  useDownloadJobSettled(notifyChanged)
+  useRecommendationSetupSettled(notifyChanged)
 
   useEffect(() => {
-    setJobs([])
     setActionError(null)
-    seenOpen.current = new Set()
-    return startPolling(fetchLatestJobs, applyJobs, 1200)
-  }, [profile.id, fetchLatestJobs, applyJobs])
+  }, [profile.id])
 
   const open = jobs.filter((job) => OPEN_STATUSES.has(job.status))
   // Keep a finished job visible briefly so the outcome is not missed.
@@ -258,9 +239,9 @@ export function DownloadTray({
     try {
       await action(job.id)
       if (action === dismissDownloadJob) {
-        setJobs((current) => current.filter((currentJob) => currentJob.id !== job.id))
+        downloadJobsStore.update((current) => current.filter((currentJob) => currentJob.id !== job.id))
       } else if (action === cancelDownloadJob || action === cancelBuildJob) {
-        setJobs((current) =>
+        downloadJobsStore.update((current) =>
           current.map((currentJob) =>
             currentJob.id === job.id
               ? {
@@ -274,7 +255,7 @@ export function DownloadTray({
         )
       }
       onChangedRef.current?.()
-      void fetchLatestJobs().then(applyJobs).catch(() => undefined)
+      void downloadJobsStore.refresh()
     } catch (cause) {
       setActionError({
         id: job.id,
@@ -298,6 +279,14 @@ export function DownloadTray({
       >
         {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
         <Download size={13} />
+        {stale ? (
+          <span
+            className="turn-badge failed"
+            title="The last refresh failed; showing the most recent known state."
+          >
+            offline
+          </span>
+        ) : null}
         <strong>Activity</strong>
         <span className="download-tray-count">
           {active > 0 ? `${active} running` : 'idle'}

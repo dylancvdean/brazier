@@ -4,12 +4,13 @@ import {
   attachProjector,
   deleteProjector,
   formatBytes,
-  listDownloadJobs,
   listHubFiles,
   queueModelDownload,
   type HubFile,
   type LocalModel
 } from '../../api'
+import { useConnectionProfile } from '../../connectionProfile'
+import { downloadJobsStore, useDownloadJobs } from '../../downloadJobsStore'
 
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
@@ -32,6 +33,7 @@ export function LibraryProjectors(props: {
   const [loading, setLoading] = useState(false)
   const [options, setOptions] = useState<HubFile[] | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
+  const [queuedJobId, setQueuedJobId] = useState<string | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
   const [confirming, setConfirming] = useState<string | null>(null)
   const [attaching, setAttaching] = useState(false)
@@ -50,37 +52,28 @@ export function LibraryProjectors(props: {
   onErrorRef.current = props.onError
   onChangedRef.current = props.onChanged
 
+  const profile = useConnectionProfile()
+  const { jobs } = useDownloadJobs(profile.id, queued !== null)
+  const handledJobRef = useRef<string | null>(null)
+
   useEffect(() => {
-    if (!queued) return
-    let cancelled = false
-    const timer = window.setInterval(() => {
-      void (async () => {
-        try {
-          const jobs = await listDownloadJobs()
-          if (cancelled) return
-          const wanted = basename(queued)
-          const job = jobs.find(
-            (entry) => entry.filename === queued || basename(entry.filename) === wanted
-          )
-          if (!job) return
-          if (job.status === 'failed' || job.status === 'cancelled') {
-            setQueued(null)
-            onErrorRef.current(job.error || `Projector download ${job.status}.`)
-            return
-          }
-          if (job.status === 'completed') {
-            await onChangedRef.current()
-          }
-        } catch {
-          // The tray still shows the job if this poll misses.
-        }
-      })()
-    }, 3000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
+    if (!queued || !queuedJobId) return
+    // Match by id: an earlier failed job for the same file must not end this one.
+    const job = jobs.find((entry) => entry.id === queuedJobId)
+    if (!job) return
+    const key = `${job.id}:${job.status}`
+    if (handledJobRef.current === key) return
+    if (job.status === 'failed' || job.status === 'cancelled') {
+      handledJobRef.current = key
+      setQueued(null)
+      onErrorRef.current(job.error || `Projector download ${job.status}.`)
+      return
     }
-  }, [queued])
+    if (job.status === 'completed') {
+      handledJobRef.current = key
+      void onChangedRef.current().catch((cause: unknown) => onErrorRef.current(errorText(cause)))
+    }
+  }, [jobs, queued, queuedJobId])
 
   async function loadOptions(): Promise<void> {
     if (open) {
@@ -115,9 +108,18 @@ export function LibraryProjectors(props: {
   async function download(file: HubFile): Promise<void> {
     if (!props.model.repo_id) return
     setQueued(file.path)
+    setQueuedJobId(null)
     props.onError(null)
     try {
-      await queueModelDownload(props.model.repo_id, file.path, 'main', 'llama.cpp', props.model.id)
+      const { job_id } = await queueModelDownload(
+        props.model.repo_id,
+        file.path,
+        'main',
+        'llama.cpp',
+        props.model.id
+      )
+      setQueuedJobId(job_id)
+      void downloadJobsStore.refresh()
     } catch (cause) {
       setQueued(null)
       props.onError(errorText(cause))

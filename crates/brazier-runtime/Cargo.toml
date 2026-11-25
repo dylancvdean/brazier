@@ -8,7 +8,6 @@ description = "Local model discovery, installation, execution, and tool orchestr
 
 [dependencies]
 anyhow.workspace = true
-async-stream.workspace = true
 async-trait.workspace = true
 base64 = "0.22"
 brazier-formats = { path = "../brazier-formats" }

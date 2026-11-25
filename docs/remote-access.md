@@ -47,6 +47,15 @@ label with `--daemon-name` or `BRAZIER_DAEMON_NAME`; authenticated
 `/api/v1/daemon/info` responses include that identity plus platform and
 architecture so clients can name the machine on which work will execute.
 
+The unauthenticated `/health` probe returns only `status` and `database` to
+non-loopback peers and to requests carrying `Forwarded`, `X-Forwarded-For` or
+`X-Real-IP` (so a same-host reverse proxy does not count as local); the daemon
+version, engine and boot id are reported to direct loopback callers and in
+authenticated `/api/v1/daemon/info`.
+The pairing compatibility probe exposes the stable instance UUID, not the
+per-start boot ID, so desktop and mobile can verify an origin without exposing
+restart times.
+
 Each paired client has a stable ID and name plus explicit scopes:
 
 - `inference`: OpenAI-compatible inference, conversations, attachments,
