@@ -980,6 +980,8 @@ struct ClaimPairingRequest {
     expected_daemon_instance_id: Option<String>,
 }
 
+const PAIRING_ORIGIN_PROBE_ID: &str = "00000000-0000-0000-0000-000000000000";
+
 fn pairing_error(error: anyhow::Error) -> ApiError {
     if error.is::<crate::client_auth::PairingUnavailable>() {
         ApiError::bad_request(error)
@@ -997,6 +999,9 @@ async fn preview_pairing_request(
     Path(id): Path<String>,
     Json(request): Json<ClaimPairingRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    if id == PAIRING_ORIGIN_PROBE_ID && request.code.is_empty() {
+        return Ok(pairing_response(json!({ "boot_id": daemon_boot_id() })));
+    }
     let pairing = state
         .db
         .preview_pairing_request(&id, &request.code)
@@ -10310,6 +10315,16 @@ mod tests {
         let mut state = test_state(dir.path()).await;
         state.api_keys = vec!["owner-key".into()];
         let app = router(state);
+
+        let (status, probe) = json_request(
+            &app,
+            "POST",
+            "/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview",
+            json!({ "code": "" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(probe, json!({ "boot_id": daemon_boot_id() }));
 
         let (status, created) = request_with_api_key(
             &app,

@@ -665,18 +665,21 @@ export async function verifyPairingOrigin(
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), DEFAULT_HANDSHAKE_TIMEOUT_MS)
   const bootId = async (address: string): Promise<string> => {
-    const response = await fetch_(`${address}/health`, {
+    const response = await fetch_(`${address}/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: '' }),
       redirect: 'error',
       credentials: 'omit',
       cache: 'no-store',
       signal: controller.signal
     })
-    if (!response.ok) throw new Error('Daemon health request failed.')
-    const health = await boundedJson(response)
-    if (health?.status !== 'healthy' || typeof health.boot_id !== 'string' || !health.boot_id) {
+    if (!response.ok) throw new Error('The pairing preview route is not reachable. Check the daemon version and proxy configuration.')
+    const preview = await boundedJson(response)
+    if (typeof preview?.boot_id !== 'string' || !preview.boot_id) {
       throw new Error('The address did not return a Brazier daemon identity.')
     }
-    return health.boot_id
+    return preview.boot_id
   }
   try {
     const [active, advertised] = await Promise.all([bootId(normalizeDaemonBaseUrl(activeAddress)), bootId(origin)])
