@@ -1,4 +1,4 @@
-import { daemonAvailability, daemonFetch, setDaemonAvailability } from './daemonAvailability'
+import { daemonFetch, daemonVerificationPending, setDaemonAvailability } from './daemonAvailability'
 
 type Connection = Awaited<ReturnType<typeof window.brazier.getConnection>>
 type ConnectionProfile = Connection['profile']
@@ -57,7 +57,7 @@ export async function connection(): Promise<Connection> {
   } catch (error) {
     if (connectionPromise === pending) {
       invalidateConnectionCache()
-      if (daemonAvailability() !== 'blocked') setDaemonAvailability('offline')
+      if (!daemonVerificationPending()) setDaemonAvailability('offline')
     }
     throw error
   }

@@ -69,6 +69,12 @@ describe('offline daemon mutation boundary', () => {
       daemonFetch('https://daemon.example/api/v1/agent/sessions', { method: 'POST' })
     ).rejects.toBeInstanceOf(DaemonOfflineError)
     expect(fetch_).not.toHaveBeenCalled()
+    await daemonFetch('https://daemon.example/health')
+    expect(daemonAvailability()).toBe('checking')
+    await expect(
+      daemonFetch('https://daemon.example/api/v1/agent/sessions', { method: 'POST' })
+    ).rejects.toBeInstanceOf(DaemonOfflineError)
+    expect(fetch_).toHaveBeenCalledOnce()
   })
 
   it('preserves reads but blocks mutations before they reach the network while offline', async () => {
@@ -86,6 +92,7 @@ describe('offline daemon mutation boundary', () => {
   })
 
   it('marks transport failures offline and any HTTP response reachable', async () => {
+    setDaemonAvailability('healthy')
     const fetch_ = vi
       .fn()
       .mockRejectedValueOnce(new TypeError('network down'))
