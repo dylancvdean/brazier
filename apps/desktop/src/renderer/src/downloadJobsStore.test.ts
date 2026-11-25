@@ -90,6 +90,23 @@ describe('downloadJobsStore', () => {
     stopB()
   })
 
+  it('announces a job that finished between polls but not ones present at first load', async () => {
+    const loadJobs = vi
+      .fn<() => Promise<DownloadJob[]>>()
+      .mockResolvedValueOnce([job('old', 'completed')])
+      .mockResolvedValue([job('old', 'completed'), job('fast', 'completed')])
+    const store = createDownloadJobsStore({ loadJobs, loadSetups: async () => [] })
+    const settled = vi.fn()
+    store.onSettled(settled)
+    const stop = store.subscribe(() => undefined)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(settled).not.toHaveBeenCalled()
+    await store.refresh()
+    expect(settled).toHaveBeenCalledTimes(1)
+    expect(settled).toHaveBeenCalledWith(expect.objectContaining({ id: 'fast' }))
+    stop()
+  })
+
   it('does not let an in-flight poll undo a local update', async () => {
     let resolve: (jobs: DownloadJob[]) => void = () => undefined
     const loadJobs = vi.fn(

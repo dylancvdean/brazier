@@ -61,6 +61,8 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
   const listeners = new Set<() => void>()
   const settledListeners = new Set<(job: DownloadJob) => void>()
   let openIds = new Set<string>()
+  // Every job id seen so far, so one that finished between polls still settles.
+  let seenIds: Set<string> | null = null
 
   function emit(next: DownloadJobsSnapshot): void {
     snapshot = next
@@ -86,11 +88,13 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
     const nextOpen = new Set<string>()
     for (const job of jobs) {
       if (OPEN_DOWNLOAD_STATUSES.has(job.status)) nextOpen.add(job.id)
-      else if (openIds.has(job.id)) {
+      else if (openIds.has(job.id) || (seenIds !== null && !seenIds.has(job.id))) {
         for (const listener of [...settledListeners]) listener(job)
       }
     }
     openIds = nextOpen
+    seenIds ??= new Set()
+    for (const job of jobs) seenIds.add(job.id)
   }
 
   async function fetchOnce(): Promise<void> {
@@ -173,6 +177,7 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
       generation += 1
       failures = 0
       openIds = new Set()
+      seenIds = null
       inFlight = null
       emit(EMPTY)
       if (listeners.size > 0) void poll()
