@@ -7,6 +7,7 @@ import {
 } from './api.ts';
 
 const origin = 'https://brazier.example';
+const probeUrl = origin + '/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview';
 const until = Math.floor(Date.now() / 1000) + 300;
 const credential = { origin, instanceId: 'known-host', apiKey: 'paired-key' };
 
@@ -24,6 +25,10 @@ test('previews both shared invite formats before claiming against the reviewed i
     calls.push(url);
     assert.equal(new Headers(init.headers).has('authorization'), false);
     assert.equal(init.redirect, 'error');
+    if (url === probeUrl) {
+      assert.deepEqual(JSON.parse(init.body!), { code: '' });
+      return Response.json({ instance_id: credential.instanceId });
+    }
     if (url.endsWith('/preview')) {
       assert.deepEqual(JSON.parse(init.body!), { code: 'code' });
       return Response.json({
@@ -38,17 +43,30 @@ test('previews both shared invite formats before claiming against the reviewed i
   assert.equal(preview.daemon.display_name, 'Host');
   assert.deepEqual(calls, [origin + '/api/v1/auth/pairings/invite/preview']);
   assert.deepEqual(await claimInvite(fetch, input, preview), credential);
+  assert.deepEqual(calls.slice(1), [probeUrl, origin + '/api/v1/auth/pairings/invite/claim']);
+});
+
+test('does not spend the invite when the host only supports a boot ID probe', async () => {
+  const calls: string[] = [];
+  const fetch: Parameters<typeof claimInvite>[0] = async (url) => {
+    calls.push(url);
+    return Response.json(url.endsWith('/claim') ? { api_key: 'issued-key' } : { boot_id: 'boot' });
+  };
+  await assert.rejects(claimInvite(fetch, { origin, pairingId: 'invite', code: 'code' }, {
+    daemon: { instance_id: credential.instanceId, display_name: 'Host' },
+    pairing: { id: 'invite', client_name: 'Phone', scopes: ['inference'], expires_at: until },
+  }), /Update Brazier on the host/);
+  assert.deepEqual(calls, [probeUrl]);
 });
 
 test('checks a saved host publicly before sending its bearer and distinguishes revoked access', async () => {
   let status = 200;
   let instance = credential.instanceId;
   const calls: Array<[string, string | null]> = [];
-  const probe = origin + '/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview';
   const info = origin + '/api/v1/daemon/info';
   const client = daemonClient(async (url, request) => {
     calls.push([url, new Headers(request.headers).get('authorization')]);
-    if (url === probe) return Response.json({ instance_id: instance });
+    if (url === probeUrl) return Response.json({ instance_id: instance });
     return Response.json({
       product: 'brazier', management_api: { major: 1 },
       daemon: { instance_id: instance, display_name: 'Host' },
@@ -56,14 +74,14 @@ test('checks a saved host publicly before sending its bearer and distinguishes r
     }, { status });
   }, credential);
   assert.deepEqual(await client.verify(), { displayName: 'Host', scopes: ['inference'] });
-  assert.deepEqual(calls.splice(0), [[probe, null], [info, 'Bearer paired-key']]);
+  assert.deepEqual(calls.splice(0), [[probeUrl, null], [info, 'Bearer paired-key']]);
   status = 401;
   await assert.rejects(client.verify(), { status: 401, message: /Pair again/ });
   status = 200;
   instance = 'other-host';
   calls.length = 0;
   await assert.rejects(client.verify(), { status: 409, message: /identity changed/ });
-  assert.deepEqual(calls, [[probe, null]]);
+  assert.deepEqual(calls, [[probeUrl, null]]);
 });
 
 test('rejects plaintext in production and only allows the exact Android emulator alias in debug mode', () => {
