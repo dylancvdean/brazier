@@ -133,6 +133,22 @@ test('aborting releases a waiting response stream without yielding a finished an
   assert.equal(stream.locked, false);
 });
 
+test('releases a completed native stream without cancelling its pending close', async () => {
+  let cancelled = false;
+  let source!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      source = controller;
+      controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+    },
+    cancel() { cancelled = true; },
+  });
+  await consumeChatStream(stream, new AbortController().signal, () => {});
+  assert.equal(stream.locked, false);
+  assert.equal(cancelled, false);
+  source.close();
+});
+
 test('an SSE error is not silently treated as a completed answer', async () => {
   const stream = new Response('data: {"error":{"message":"runtime failed"}}\n\ndata: [DONE]\n\n').body!;
   await assert.rejects(consumeChatStream(stream, new AbortController().signal, () => {}),

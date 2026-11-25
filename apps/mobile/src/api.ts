@@ -184,6 +184,7 @@ export async function consumeChatStream(
   const decoder = new TextDecoder();
   let result = '';
   let buffer = '';
+  let completed = false;
   const cancel = () => { void reader.cancel().catch(() => undefined); };
   const checkAbort = () => {
     if (signal.aborted) throw new DaemonError('Chat stopped.');
@@ -203,7 +204,10 @@ export async function consumeChatStream(
         const data = frame.split(/\r?\n/).filter((line) => line.startsWith('data:'))
           .map((line) => line.slice(5).trimStart()).join('\n');
         if (!data) continue;
-        if (data === '[DONE]') return result;
+        if (data === '[DONE]') {
+          completed = true;
+          return result;
+        }
         const payload = JSON.parse(data) as {
           error?: { message?: string } | string;
           choices?: { delta?: { content?: string } }[];
@@ -220,7 +224,7 @@ export async function consumeChatStream(
     }
   } finally {
     signal.removeEventListener('abort', cancel);
-    cancel();
+    if (!completed && !signal.aborted) cancel();
     reader.releaseLock();
   }
 }
