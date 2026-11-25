@@ -182,7 +182,13 @@ const TRANSIENT_RETRIES: u32 = 3;
 fn is_transient(error: &anyhow::Error) -> bool {
     if error.chain().any(|cause| {
         cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
-            error.is_timeout() || error.is_connect() || error.is_body() || error.is_request()
+            error.is_timeout()
+                || error.is_connect()
+                || error.is_body()
+                || error.is_request()
+                || error.status().is_some_and(|status| {
+                    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+                })
         })
     }) {
         return true;
