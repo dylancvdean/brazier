@@ -78,6 +78,8 @@ export class AgentSupervisor {
   private retryAt: number | null = null
   private workerState: AgentWorkerState = 'idle'
   private respawnTimer?: ReturnType<typeof setTimeout>
+  /** Bumped by `shutdown` so a start still waiting out backoff is abandoned. */
+  private startEpoch = 0
   private readonly sessions = new Set<string>()
   private readonly activeSessions = new Map<string, ActiveSessionRun>()
   /** Runs that already ended, so a late event cannot make them look active again. */
@@ -319,13 +321,17 @@ export class AgentSupervisor {
     }
     let spawnedWorker: UtilityProcess | undefined
     const reattach = this.workerState === 'restarting'
+    const epoch = this.startEpoch
     const readyPromise = (async () => {
+      const wait = (this.retryAt ?? 0) - this.now()
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+      if (epoch !== this.startEpoch) {
+        throw new Error('The agent worker restart was cancelled because the connection changed.')
+      }
       const connection = this.connection
       if (!connection) {
         throw new Error('The Brazier daemon connection is not available yet.')
       }
-      const wait = (this.retryAt ?? 0) - this.now()
-      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
       this.setState(reattach ? 'restarting' : 'starting')
       // The worker inherits no daemon credentials: the bearer token travels in
       // the init message, and BRAZIER_* configuration stays in this process.
@@ -407,11 +413,16 @@ export class AgentSupervisor {
         for (const sessionId of [...this.sessions]) {
           await this.send({ type: 'open-session', requestId: this.requestId(), sessionId }).catch(
             (error: unknown) => {
+              // A worker that died mid-reattach was already recorded as a crash.
+              if (this.worker !== worker) throw error
               console.error(`[agent-worker] could not reattach session ${sessionId}`, error)
               this.sessions.delete(sessionId)
             }
           )
         }
+      }
+      if (this.worker !== worker) {
+        throw new Error('The agent worker exited before it finished starting.')
       }
       this.retryAt = null
       this.setState('running')
@@ -629,8 +640,16 @@ export class AgentSupervisor {
   async shutdown(): Promise<void> {
     clearTimeout(this.respawnTimer)
     this.respawnTimer = undefined
+    this.startEpoch += 1
     const worker = this.worker
-    if (!worker) return
+    if (!worker) {
+      // Sessions waiting for a respawn belong to the old connection.
+      this.sessions.clear()
+      this.activeSessions.clear()
+      this.retryAt = null
+      if (this.workerState === 'restarting') this.setState('idle')
+      return
+    }
     this.terminatedWorkers.add(worker)
     const exited = new Promise<void>((resolve) => {
       worker.once('exit', () => resolve())
