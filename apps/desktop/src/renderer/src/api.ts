@@ -51,6 +51,7 @@ export function claimConnectionProfile(input: {
   baseUrl: string
   pairingId: string
   code: string
+  expectedDaemonInstanceId?: string
 }): ReturnType<typeof window.brazier.claimConnectionProfile> {
   return window.brazier.claimConnectionProfile(input)
 }
@@ -740,9 +741,8 @@ export type EngineStatus = {
   hardware: HardwareInfo
 }
 
-/** Remote peers get only `status`; the build fields are sent to loopback callers. */
-export function health(): Promise<{ status: string; engine?: string; version?: string }> {
-  return request('/health')
+export function verifyDaemonConnection(): ReturnType<typeof window.brazier.verifyConnection> {
+  return window.brazier.verifyConnection()
 }
 
 export function hardwareInfo(): Promise<HardwareInfo> {

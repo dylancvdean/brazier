@@ -11,6 +11,11 @@ front of it:
 - an encrypted private-network tunnel such as Tailscale/WireGuard, with access
   controls limiting which peers can reach the daemon.
 
+If the proxy filters paths, forward the pairing preview and claim routes for
+pairing. Desktop checks that the advertised origin reaches the same daemon by
+sending an empty-code preview to the reserved all-zero pairing UUID before
+issuing a real invite; it does not require public access to `/health`.
+
 A direct non-loopback HTTP listener is an explicit unsafe escape hatch:
 
 ```sh
@@ -62,9 +67,9 @@ on the next request and does not require a daemon restart.
 
 ## Connect a desktop
 
-1. On a desktop connected to the host with management access, open **Manage → Connections**, choose the client scopes, create a pairing, and copy its details.
-2. On the receiving desktop, open **Manage → Connections** and paste the details into the pairing ID field. If the host created the pairing from its Local profile, enter its reachable daemon URL. A remote profile includes its configured URL in the copied details.
-3. Choose **Pair and save**, then **Use**. The model library groups files on the active host separately from models served by each configured inference server. Changing the active connection in the library switches the entire desktop.
+1. On a desktop connected to the host with management access, open **Manage → Connections**. Enter the daemon's reachable HTTPS origin and choose the device name and scopes. Create an invite to show a five-minute QR code and **Copy invite** fallback. Share either only with the intended device.
+2. On the receiving desktop, open **Manage → Connections** and paste the invite into the pairing ID field. Legacy copied text is also accepted; supply the reachable origin if the old text omits it. Choose **Review invite** to check the host, origin, and granted scopes before you send the claim.
+3. Choose **Confirm and save**, then **Connect now**. The model library groups files on the active host separately from models served by each configured inference server. Changing the active connection in the library switches the entire desktop.
 
 ## Pairing API
 
@@ -83,7 +88,12 @@ Content-Type: application/json
 ```
 
 The response shows the pairing code once. Transfer it through the intended
-client's pairing UI or another authenticated channel. The client claims it at:
+client's pairing UI or another authenticated channel. The client can check the
+daemon identity, scopes, and expiry without consuming the code by sending
+`POST /api/v1/auth/pairings/<pairing-id>/preview` with the same code body as the
+claim. Include the preview's `daemon.instance_id` as
+`expected_daemon_instance_id` in the claim to reject a changed host. The client
+claims it at:
 
 ```http
 POST /api/v1/auth/pairings/<pairing-id>/claim
@@ -112,6 +122,7 @@ lacks the required scope receives `403 Forbidden`.
 
 Voice stream tickets are bound to the paired client that created the session;
 another inference client cannot list that ticket or terminate the session.
+Revoking the client also invalidates its voice ticket and stops its live stream.
 Agent and Computer approval decisions include the expected daemon execution
 location, and the daemon rejects a stale or mismatched location before changing
 the approval or grant ledger.

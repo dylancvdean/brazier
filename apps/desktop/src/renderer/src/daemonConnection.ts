@@ -15,7 +15,8 @@ export type DaemonConnection =
 export type DaemonConnectionEvent =
   | { type: 'retry' }
   | { type: 'reachable'; version?: string }
-  | { type: 'unreachable' }
+  /** `blocked`: reachable but this client may not use it (e.g. revoked access). */
+  | { type: 'unreachable'; blocked?: boolean }
   | { type: 'rehydrated' }
 
 export const INITIAL_DAEMON_CONNECTION: DaemonConnection = {
@@ -51,14 +52,14 @@ export function daemonConnectionReducer(
 /** The request-layer gate for an event; `null` leaves it unchanged. */
 export function availabilityForEvent(
   event: DaemonConnectionEvent
-): 'checking' | 'healthy' | 'offline' | null {
+): 'checking' | 'healthy' | 'offline' | 'blocked' | null {
   switch (event.type) {
     case 'retry':
       return 'checking'
     case 'reachable':
       return 'healthy'
     case 'unreachable':
-      return 'offline'
+      return event.blocked ? 'blocked' : 'offline'
     case 'rehydrated':
       return null
   }

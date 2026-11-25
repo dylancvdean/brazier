@@ -1,5 +1,12 @@
 import { Check, Copy, KeyRound, LoaderCircle, RefreshCw, Trash2 } from 'lucide-react'
 import { type ClipboardEvent, type FormEvent, useCallback, useEffect, useState } from 'react'
+import QRCode from 'react-qr-code'
+import {
+  encodePairingInvite,
+  normalizeShareableOrigin,
+  parsePairingInvite,
+  type PairingInvite
+} from '../../../../../../../packages/pairing/src/invite'
 import {
   cancelDaemonPairing,
   claimConnectionProfile,
@@ -17,7 +24,6 @@ import {
   type ClientScope,
   type ConnectionProfile,
   type ConnectionProfileSummary,
-  type CreatedDaemonPairing,
   type DaemonApiClient,
   type DaemonPairingRequest
 } from '../../api'
@@ -35,6 +41,7 @@ type RemoteProfileDraft = {
   clearApiKey: boolean
   pairingId: string
   pairingCode: string
+  pairingExpiresAt?: number
 }
 
 const EMPTY_REMOTE_PROFILE: RemoteProfileDraft = {
@@ -59,11 +66,19 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
   const [clients, setClients] = useState<DaemonApiClient[]>([])
   const [pairingClientName, setPairingClientName] = useState('Brazier desktop')
   const [pairingScopes, setPairingScopes] = useState<ClientScope[]>(['inference'])
-  const [createdPairing, setCreatedPairing] = useState<CreatedDaemonPairing | null>(null)
+  const [createdPairing, setCreatedPairing] = useState<PairingInvite | null>(null)
+  const [inviteOrigin, setInviteOrigin] = useState<string | null>(null)
   const [pairingCopied, setPairingCopied] = useState(false)
+  const [review, setReview] = useState<{
+    draft: RemoteProfileDraft
+    result: Awaited<ReturnType<typeof window.brazier.previewPairing>>
+  } | null>(null)
+  const [connectNow, setConnectNow] = useState<string | null>(null)
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1_000))
   const [trustError, setTrustError] = useState<string | null>(null)
   const [trustLoading, setTrustLoading] = useState(true)
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null)
+  const [grantableScopes, setGrantableScopes] = useState<ClientScope[] | null>(null)
 
   const reload = useCallback(async (): Promise<void> => {
     setLoading(true)
@@ -94,6 +109,10 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
       ])
       setPairings(nextPairings)
       setClients(nextClients)
+      setCreatedPairing((invite) => invite &&
+        nextPairings.some((pairing) => pairing.id === invite.pairingId)
+        && !nextPairings.some((pairing) => pairing.id === invite.pairingId &&
+          isPendingDaemonPairing(pairing)) ? null : invite)
       setTrustError(null)
     } catch (cause) {
       setTrustError(errorText(cause))
@@ -104,7 +123,55 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
 
   useEffect(() => {
     void reloadTrust()
+    let active = true
+    void window.brazier.getConnection().then(({ daemon }) => {
+      if (!active || !daemon.client || daemon.client.owner) return
+      const scopes = daemon.client.scopes.includes('management') ? daemon.client.scopes : []
+      setGrantableScopes(scopes)
+      setPairingScopes((current) => {
+        const retained = current.filter((scope) => scopes.includes(scope))
+        return retained.length || !scopes.length ? retained : [scopes[0]]
+      })
+    }).catch(() => undefined)
+    return () => { active = false }
   }, [reloadTrust])
+
+  useEffect(() => {
+    const receivingExpiry = review?.draft === draft ? review.result.pairing.expires_at : draft.pairingExpiresAt
+    if (!createdPairing && !receivingExpiry) return
+    const tick = (): void => {
+      const seconds = Math.floor(Date.now() / 1_000)
+      setNow(seconds)
+      if (createdPairing && seconds >= createdPairing.expiresAt) setCreatedPairing(null)
+      if (receivingExpiry && seconds >= receivingExpiry) {
+        setReview(null)
+        setDraft((current) => current === draft ? { ...current, pairingId: '', pairingCode: '', pairingExpiresAt: undefined } : current)
+        props.onError('This invite expired. Ask the host for a fresh invite.')
+      }
+    }
+    tick()
+    const timer = window.setInterval(tick, 1_000)
+    return () => window.clearInterval(timer)
+  }, [createdPairing, review, draft, props.onError])
+
+  useEffect(() => {
+    if (!createdPairing) return
+    const id = createdPairing.pairingId
+    let active = true
+    const timer = window.setInterval(() => {
+      void listDaemonPairings().then((entries) => {
+        if (!active) return
+        setPairings(entries)
+        if (!entries.some((entry) => entry.id === id && isPendingDaemonPairing(entry))) {
+          setCreatedPairing((invite) => invite?.pairingId === id ? null : invite)
+        }
+      }).catch(() => undefined)
+    }, 2_000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [createdPairing])
 
   function edit(profile: Extract<ConnectionProfile, { kind: 'remote' }>): void {
     setDraft({
@@ -182,21 +249,31 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
     props.onError(null)
     setNotice(null)
     try {
+      if (!review || review.draft !== draft) {
+        const result = await window.brazier.previewPairing(draft.baseUrl, draft.pairingId, draft.pairingCode)
+        setReview({ draft, result })
+        return
+      }
       const claimed = await claimConnectionProfile({
         ...(draft.id ? { id: draft.id } : {}),
         name: draft.name,
         baseUrl: draft.baseUrl,
         pairingId: draft.pairingId,
-        code: draft.pairingCode
+        code: draft.pairingCode,
+        expectedDaemonInstanceId: review.result.daemon.instance_id
       })
+      setReview(null)
       setDraft(EMPTY_REMOTE_PROFILE)
+      setConnectNow(claimed.profile.id === current?.id ? null : claimed.profile.id)
       setNotice(
         `Paired ${claimed.profile.name} with ${claimed.client.scopes.join(', ')} access · Brazier ${claimed.daemon.version}.`
       )
       await reload()
     } catch (cause) {
-      // A claim is one-time. Main persists the issued key before compatibility
-      // probing, so refresh even when that probe reports an error.
+      if (review?.draft === draft) {
+        setReview(null)
+        setDraft((current) => current === draft ? { ...current, pairingId: '', pairingCode: '', pairingExpiresAt: undefined } : current)
+      }
       await reload().catch(() => undefined)
       props.onError(errorText(cause))
     } finally {
@@ -221,13 +298,25 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
     setWorking('pair:create')
     setTrustError(null)
     setPairingCopied(false)
+    setCreatedPairing(null)
     try {
+      const origin = normalizeShareableOrigin(originInput)
+      const hostName = await window.brazier.verifyPairingOrigin(origin)
       const created = await createDaemonPairing({
         clientName: pairingClientName,
         scopes: pairingScopes,
         ttlSeconds: 300
       })
-      setCreatedPairing(created)
+      setNow(Math.floor(Date.now() / 1_000))
+      setCreatedPairing({
+        version: 1,
+        origin,
+        hostName,
+        pairingId: created.pairing.id,
+        code: created.code,
+        scopes: created.pairing.scopes,
+        expiresAt: created.pairing.expires_at
+      })
       await reloadTrust()
     } catch (cause) {
       setTrustError(errorText(cause))
@@ -238,11 +327,8 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
 
   async function copyPairing(): Promise<void> {
     if (!createdPairing) return
-    const address = current?.kind === 'remote' ? `Daemon URL: ${current.baseUrl}\n` : ''
     try {
-      await window.brazier.copyText(
-        `${address}Pairing id: ${createdPairing.pairing.id}\nPairing code: ${createdPairing.code}`
-      )
+      await window.brazier.copyText(encodePairingInvite(createdPairing))
       setPairingCopied(true)
     } catch (cause) {
       setTrustError(errorText(cause))
@@ -250,12 +336,25 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
   }
 
   function pastePairing(event: ClipboardEvent<HTMLInputElement>): void {
-    const match = /^(?:Daemon URL: ([^\s]+)\r?\n)?Pairing id: (\S+)\r?\nPairing code: (\S+)$/i.exec(
-      event.clipboardData.getData('text/plain').trim()
-    )
-    if (!match) return
+    const text = event.clipboardData.getData('text/plain')
+    const invite = parsePairingInvite(text)
+    if (!invite) {
+      if (text.trim().startsWith('brazier-pairing:')) {
+        event.preventDefault()
+        props.onError('This pairing invite is invalid or unsupported. Ask the host for a fresh invite.')
+      }
+      return
+    }
     event.preventDefault()
-    setDraft({ ...draft, baseUrl: match[1] ?? draft.baseUrl, pairingId: match[2], pairingCode: match[3] })
+    if (invite.version === 1 && invite.expiresAt <= Math.floor(Date.now() / 1_000)) {
+      props.onError('This invite expired. Ask the host for a fresh invite.')
+      return
+    }
+    setReview(null)
+    setDraft({
+      ...draft, baseUrl: invite.origin ?? draft.baseUrl, pairingId: invite.pairingId, pairingCode: invite.code,
+      pairingExpiresAt: invite.version === 1 ? invite.expiresAt : undefined
+    })
   }
 
   async function cancelPairing(id: string): Promise<void> {
@@ -263,7 +362,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
     setTrustError(null)
     try {
       await cancelDaemonPairing(id)
-      if (createdPairing?.pairing.id === id) setCreatedPairing(null)
+      if (createdPairing?.pairingId === id) setCreatedPairing(null)
       await reloadTrust()
     } catch (cause) {
       setTrustError(errorText(cause))
@@ -314,8 +413,19 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
     }
   }
 
+  let suggestedOrigin = ''
+  try {
+    if (current?.kind === 'remote' && current.baseUrl) {
+      suggestedOrigin = normalizeShareableOrigin(current.baseUrl)
+    }
+  } catch {
+    // Leave non-shareable addresses out of the invitation form.
+  }
+  const originInput = inviteOrigin ?? suggestedOrigin
   const pendingPairings = pairings.filter((pairing) => isPendingDaemonPairing(pairing))
   const activeClients = clients.filter((client) => !client.revoked_at)
+  const reviewed = review?.draft === draft ? review.result : null
+  const remaining = createdPairing ? Math.max(0, createdPairing.expiresAt - now) : 0
 
   return (
     <section>
@@ -461,7 +571,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
               value={draft.pairingId}
               placeholder="Paste pairing details or ID"
               autoComplete="off"
-              onChange={(event) => setDraft({ ...draft, pairingId: event.target.value })}
+              onChange={(event) => setDraft({ ...draft, pairingId: event.target.value, pairingExpiresAt: undefined })}
             />
           </label>
           <label>
@@ -473,7 +583,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
               value={draft.pairingCode}
               placeholder="Paste the one-time pairing code"
               autoComplete="off"
-              onChange={(event) => setDraft({ ...draft, pairingCode: event.target.value })}
+              onChange={(event) => setDraft({ ...draft, pairingCode: event.target.value, pairingExpiresAt: undefined })}
             />
           </label>
         </div>
@@ -481,6 +591,17 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
           Plain HTTP exposes credentials and conversation data to the network. Prefer HTTPS outside
           a trusted private network. Pairing refuses public HTTP endpoints.
         </p>
+        {reviewed ? (
+          <div className="runtime-card" role="status">
+            <div className="runtime-card-info">
+              <strong>Review pairing with {reviewed.daemon.display_name}</strong>
+              <span>Daemon: {new URL(draft.baseUrl.trim()).origin}</span>
+              <span>Device name: {reviewed.pairing.client_name}</span>
+              <span>Access: {reviewed.pairing.scopes.join(', ')}</span>
+              <span>Expires in {Math.max(0, reviewed.pairing.expires_at - now)}s</span>
+            </div>
+          </div>
+        ) : null}
         <div className="runtime-actions">
           <button
             type="button"
@@ -493,7 +614,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
           </button>
           <button className="primary-action" type="submit" disabled={working != null}>
             {working === 'save' || working === 'claim:draft' ? <LoaderCircle className="spin" size={14} /> : null}
-            {draft.pairingId || draft.pairingCode ? 'Pair and save' : draft.id ? 'Save changes' : 'Add connection'}
+            {reviewed ? 'Confirm and save' : draft.pairingId || draft.pairingCode ? 'Review invite' : draft.id ? 'Save changes' : 'Add connection'}
           </button>
           {draft.id ? (
             <button type="button" className="chip-button subtle" onClick={() => setDraft(EMPTY_REMOTE_PROFILE)}>
@@ -502,6 +623,11 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
           ) : null}
         </div>
         {notice ? <p className="model-help">{notice}</p> : null}
+        {connectNow ? (
+          <button type="button" className="chip-button" disabled={working != null} onClick={() => void select(connectNow)}>
+            Connect now
+          </button>
+        ) : null}
       </form>
 
       <div className="settings-group">
@@ -509,8 +635,8 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
           <div>
             <div className="section-label">Pair clients with {current?.name ?? 'current daemon'}</div>
             <p className="model-help">
-              Create a five-minute, one-time code. The code is shown only here; send it to the
-              person adding this daemon through a separate trusted channel.
+              Create a five-minute, one-time invite. Scan its QR code with another device, or copy
+              the invite and share it through a trusted channel.
             </p>
           </div>
           <button
@@ -526,7 +652,21 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
 
         {trustError ? <div className="error-banner"><span>{trustError}</span></div> : null}
 
+        {grantableScopes?.length === 0 ? (
+          <p className="model-help">This device does not have permission to manage pairing invitations.</p>
+        ) : (
         <form className="settings-grid" onSubmit={(event) => void createPairing(event)}>
+          <label>
+            <span>Reachable daemon HTTPS address</span>
+            <input
+              required
+              type="url"
+              value={originInput}
+              placeholder="https://brazier.example"
+              onChange={(event) => setInviteOrigin(event.target.value)}
+            />
+            <small>Use the address the other device can reach through your HTTPS proxy or private network.</small>
+          </label>
           <label>
             <span>Client name</span>
             <input
@@ -540,7 +680,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
           <fieldset>
             <legend>Allowed scopes</legend>
             <small>Start with inference; management can create/revoke clients, and agent can approve machine actions.</small>
-            {(['inference', 'management', 'agent'] as ClientScope[]).map((scope) => (
+            {(grantableScopes ?? ['inference', 'management', 'agent'] as ClientScope[]).map((scope) => (
               <label key={scope}>
                 <input
                   type="checkbox"
@@ -555,26 +695,29 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
             <button
               className="primary-action"
               type="submit"
-              disabled={!pairingClientName.trim() || pairingScopes.length === 0 || working != null}
+              disabled={!originInput.trim() || !pairingClientName.trim() || pairingScopes.length === 0 || working != null}
             >
               {working === 'pair:create' ? <LoaderCircle className="spin" size={14} /> : <KeyRound size={14} />}
               Create pairing
             </button>
           </div>
         </form>
+        )}
 
-        {createdPairing ? (
+        {createdPairing && remaining > 0 ? (
           <article className="runtime-card active">
             <div className="runtime-card-info">
-              <strong>One-time pairing for {createdPairing.pairing.client_name}</strong>
-              <span>Pairing id: <code>{createdPairing.pairing.id}</code></span>
-              <span>Pairing code: <code>{createdPairing.code}</code></span>
-              <span>Expires {new Date(createdPairing.pairing.expires_at * 1_000).toLocaleString()}</span>
+              <strong>Pair with {createdPairing.hostName}</strong>
+              <span>{createdPairing.origin} · {createdPairing.scopes.join(', ')}</span>
+              <span>Expires in {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}</span>
+              <div style={{ padding: 12, background: '#fff', width: 'fit-content' }}>
+                <QRCode value={encodePairingInvite(createdPairing)} size={172} title="One-time Brazier pairing invite" />
+              </div>
             </div>
             <div className="library-card-actions">
               <button type="button" className="chip-button" onClick={() => void copyPairing()}>
                 {pairingCopied ? <Check size={13} /> : <Copy size={13} />}
-                {pairingCopied ? 'Copied' : 'Copy id and code'}
+                {pairingCopied ? 'Copied' : 'Copy invite'}
               </button>
               <button type="button" className="chip-button subtle" onClick={() => setCreatedPairing(null)}>
                 Hide code

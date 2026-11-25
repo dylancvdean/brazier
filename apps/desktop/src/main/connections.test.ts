@@ -16,7 +16,8 @@ import {
   claimPairingCredential,
   fetchDaemonInfo,
   normalizeDaemonBaseUrl,
-  normalizePairingDaemonBaseUrl
+  normalizePairingDaemonBaseUrl,
+  verifyPairingOrigin
 } from './connections'
 
 const temporaryDirectories: string[] = []
@@ -57,6 +58,54 @@ afterEach(() => {
 })
 
 describe('connection profile URLs', () => {
+  it('checks the advertised origin against the active daemon without sending credentials', async () => {
+    const active = 'http://127.0.0.1:7614'
+    const advertised = 'https://brazier.example'
+    const probePath = '/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview'
+    let remoteBootId = 'another-daemon'
+    const probe = vi.fn<typeof fetch>(async (address) => String(address).endsWith(probePath)
+      ? Response.json({ boot_id: address === active + probePath ? 'active-daemon' : remoteBootId })
+      : new Response(null, { status: 404 }))
+
+    await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
+    remoteBootId = 'active-daemon'
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toBeUndefined()
+    expect(probe.mock.calls.map(([address]) => address)).toEqual([
+      active + probePath, advertised + probePath, active + probePath, advertised + probePath
+    ])
+    for (const [, init] of probe.mock.calls) {
+      expect(init).toMatchObject({ method: 'POST', redirect: 'error', credentials: 'omit', cache: 'no-store' })
+      expect(init?.body).toBe('{"code":""}')
+      expect(new Headers(init?.headers).has('authorization')).toBe(false)
+    }
+  })
+
+  it.each([400, 404, 405])('verifies matching health identities when the probe returns %i', async (status) => {
+    const active = 'http://127.0.0.1:7614'
+    const advertised = 'https://brazier.example'
+    let remoteBootId = 'active-daemon'
+    const probe = vi.fn<typeof fetch>(async (address) => String(address).endsWith('/health')
+      ? Response.json({ status: 'healthy', boot_id: address === active + '/health' ? 'active-daemon' : remoteBootId })
+      : new Response(null, { status }))
+
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toBeUndefined()
+    const healthCalls = probe.mock.calls.filter(([url]) => String(url).endsWith('/health'))
+    expect(healthCalls.map(([url]) => url)).toEqual([active + '/health', advertised + '/health'])
+    for (const [, init] of healthCalls) {
+      expect(init).toMatchObject({ redirect: 'error', credentials: 'omit', cache: 'no-store' })
+      expect(new Headers(init?.headers).has('authorization')).toBe(false)
+    }
+    remoteBootId = 'another-daemon'
+    await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
+  })
+
+  it.each([403, 500])('does not downgrade origin verification after probe status %i', async (status) => {
+    const probe = vi.fn<typeof fetch>(async () => new Response(null, { status }))
+    await expect(verifyPairingOrigin('http://127.0.0.1:7614', 'https://brazier.example', probe))
+      .rejects.toThrow('pairing preview route is not reachable')
+    expect(probe.mock.calls.every(([url]) => String(url).endsWith('/preview'))).toBe(true)
+  })
+
   it('normalizes an HTTP(S) origin and rejects ambiguous or credential-bearing URLs', () => {
     expect(normalizeDaemonBaseUrl(' HTTPS://Example.COM:443/ ')).toBe('https://example.com')
     expect(normalizeDaemonBaseUrl('http://[::1]:7614')).toBe('http://[::1]:7614')
@@ -181,6 +230,22 @@ describe('one-time remote pairing', () => {
     expect(store.list().find((profile) => profile.kind === 'remote')).toMatchObject({
       apiKey: 'do-not-lose-me'
     })
+  })
+
+  it('reports an issued but unsaved invite without publishing or probing the profile', async () => {
+    const store = new ConnectionProfileStore(temporarySettingsPath(), undefined, {
+      encrypt: () => { throw new Error('keychain locked') },
+      decrypt: vi.fn()
+    })
+    const fetch_ = vi.fn(async () => new Response(JSON.stringify({ client, api_key: 'issued-client-key' })))
+    const manager = new ConnectionProfileManager(store, {
+      startLocal: vi.fn(), stopLocal: vi.fn(), fetch: fetch_
+    })
+    await expect(manager.claimAndSave({
+      name: 'Lab', baseUrl: 'https://lab.example', pairingId: 'pair-1', code: 'ONE-TIME'
+    })).rejects.toThrow('Invite claimed, but the credential was not saved')
+    expect(store.list().map((profile) => profile.id)).toEqual(['local'])
+    expect(fetch_).toHaveBeenCalledOnce()
   })
 
   it('does not consume a one-time code when secure persistence is unavailable', async () => {
@@ -412,6 +477,27 @@ describe('daemon compatibility handshake', () => {
 })
 
 describe('connection profile lifecycle and switching', () => {
+  it('revalidates a cached profile and distinguishes auth, scope, transport, and daemon replacement', async () => {
+    const path = temporarySettingsPath()
+    const store = new ConnectionProfileStore(path)
+    const remote = store.upsert({ name: 'Lab', baseUrl: 'https://lab.example', apiKey: 'client' })
+    store.select(remote.id)
+    const fetch_ = vi.fn()
+      .mockImplementationOnce(async () => new Response(JSON.stringify(daemonInfo({ daemon: { instance_id: 'one' } }))))
+      .mockImplementationOnce(async () => new Response(null, { status: 401 }))
+      .mockImplementationOnce(async () => new Response(null, { status: 403 }))
+      .mockRejectedValueOnce(new TypeError('network down'))
+      .mockImplementationOnce(async () => new Response(JSON.stringify(daemonInfo({ daemon: { instance_id: 'two' } }))))
+    const manager = new ConnectionProfileManager(store, { startLocal: vi.fn(), stopLocal: vi.fn(), fetch: fetch_ })
+    await manager.connection()
+    expect(new ConnectionProfileStore(path).get(remote.id)).toMatchObject({ daemonInstanceId: 'one' })
+    for (const status of ['unauthorized', 'forbidden', 'offline', 'identity-changed']) {
+      await expect(manager.verify()).resolves.toMatchObject({ status })
+    }
+    expect(fetch_).toHaveBeenCalledTimes(5)
+    expect(fetch_.mock.calls.every(([url]) => url.endsWith('/api/v1/daemon/info'))).toBe(true)
+  })
+
   it('keeps stored credentials out of profile views and preserves an omitted key on edit', async () => {
     const calls: Array<{ url: string; authorization: string | null }> = []
     const store = new ConnectionProfileStore(temporarySettingsPath())

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   INITIAL_DAEMON_CONNECTION,
+  availabilityForEvent,
   daemonConnectionReducer as reduce,
   daemonStatusOf,
   type DaemonConnectionEvent
@@ -34,6 +35,12 @@ describe('daemonConnectionReducer', () => {
     const healthy = run({ type: 'reachable', version: '1.0' })
     expect(reduce(healthy, { type: 'rehydrated' })).toBe(healthy)
     expect(reduce(healthy, { type: 'reachable', version: '1.0' })).toBe(healthy)
+  })
+
+  it('maps a blocked connection to the blocked request gate', () => {
+    expect(availabilityForEvent({ type: 'unreachable', blocked: true })).toBe('blocked')
+    expect(availabilityForEvent({ type: 'unreachable' })).toBe('offline')
+    expect(run({ type: 'unreachable', blocked: true }).phase).toBe('offline')
   })
 
   it('goes offline from any phase', () => {

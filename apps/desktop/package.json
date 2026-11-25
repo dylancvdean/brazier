@@ -117,5 +117,8 @@
       ],
       "artifactName": "Brazier-Setup.exe"
     }
+  },
+  "dependencies": {
+    "react-qr-code": "2.0.18"
   }
 }
