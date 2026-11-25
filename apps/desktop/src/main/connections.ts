@@ -670,7 +670,7 @@ export async function verifyPairingOrigin(
     cache: 'no-store',
     signal: controller.signal
   } as const
-  const bootId = async (address: string): Promise<string> => {
+  const daemonIdentity = async (address: string): Promise<{ kind: 'instance' | 'boot'; id: string }> => {
     const response = await fetch_(`${address}/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview`, {
       ...options,
       method: 'POST',
@@ -685,14 +685,20 @@ export async function verifyPairingOrigin(
         : 'The pairing preview route is not reachable. Check the daemon version and proxy configuration.')
     }
     const identity = await boundedJson(identityResponse)
+    if (!useHealth && typeof identity?.instance_id === 'string' && identity.instance_id) {
+      return { kind: 'instance', id: identity.instance_id }
+    }
     if ((useHealth && identity?.status !== 'healthy') || typeof identity?.boot_id !== 'string' || !identity.boot_id) {
       throw new Error('The address did not return a Brazier daemon identity.')
     }
-    return identity.boot_id
+    return { kind: 'boot', id: identity.boot_id }
   }
   try {
-    const [active, advertised] = await Promise.all([bootId(normalizeDaemonBaseUrl(activeAddress)), bootId(origin)])
-    if (active !== advertised) {
+    const [active, advertised] = await Promise.all([
+      daemonIdentity(normalizeDaemonBaseUrl(activeAddress)),
+      daemonIdentity(origin)
+    ])
+    if (active.kind !== advertised.kind || active.id !== advertised.id) {
       throw new Error('The reachable address points to a different daemon. Check the address and try again.')
     }
   } finally {

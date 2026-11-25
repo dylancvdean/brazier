@@ -1014,7 +1014,14 @@ async fn preview_pairing_request(
     Json(request): Json<ClaimPairingRequest>,
 ) -> ApiResult<impl IntoResponse> {
     if id == PAIRING_ORIGIN_PROBE_ID && request.code.is_empty() {
-        return Ok(pairing_response(json!({ "boot_id": daemon_boot_id() })));
+        let identity = state
+            .db
+            .daemon_identity(None)
+            .await
+            .map_err(ApiError::internal)?;
+        return Ok(pairing_response(json!({
+            "instance_id": identity.instance_id,
+        })));
     }
     let pairing = state
         .db
@@ -1114,6 +1121,7 @@ async fn daemon_info(
     Ok(Json(json!({
         "product": "brazier",
         "version": env!("CARGO_PKG_VERSION"),
+        "boot_id": daemon_boot_id(),
         "management_api": { "major": 1, "minor": 0 },
         "openai_api": { "chat_completions": "/v1/chat/completions", "responses": "/v1/responses" },
         "daemon": {
@@ -10338,7 +10346,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(probe, json!({ "boot_id": daemon_boot_id() }));
+        assert!(probe.get("boot_id").is_none());
 
         let (status, created) = request_with_api_key(
             &app,
@@ -10364,6 +10372,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(probe["instance_id"], preview["daemon"]["instance_id"]);
         assert_eq!(preview["pairing"]["scopes"], json!(["inference"]));
         assert!(preview.get("api_key").is_none());
         assert!(preview.get("code").is_none());
@@ -10389,6 +10398,7 @@ mod tests {
         let (status, info) =
             request_with_api_key(&app, "GET", "/api/v1/daemon/info", Value::Null, client_key).await;
         assert_eq!(status, StatusCode::OK, "{info}");
+        assert_eq!(info["boot_id"], daemon_boot_id());
         assert_eq!(info["client"]["id"], client_id);
         assert_eq!(info["client"]["scopes"], json!(["inference"]));
         assert_eq!(info["client"]["owner"], false);

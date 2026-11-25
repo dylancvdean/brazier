@@ -52,6 +52,9 @@ non-loopback peers and to requests carrying `Forwarded`, `X-Forwarded-For` or
 `X-Real-IP` (so a same-host reverse proxy does not count as local); the daemon
 version, engine and boot id are reported to direct loopback callers and in
 authenticated `/api/v1/daemon/info`.
+The pairing compatibility probe exposes the stable instance UUID, not the
+per-start boot ID, so desktop and mobile can verify an origin without exposing
+restart times.
 
 Each paired client has a stable ID and name plus explicit scopes:
 

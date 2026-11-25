@@ -82,6 +82,10 @@ jobs:
       # turning these steps into no-ops that still exit 0.
       - run: pnpm --filter @brazier/desktop --fail-if-no-match check
       - run: pnpm --filter @brazier/desktop --fail-if-no-match test
+      - if: runner.os == 'Linux'
+        run: pnpm --filter @brazier/mobile --fail-if-no-match check
+      - if: runner.os == 'Linux'
+        run: pnpm --filter @brazier/mobile --fail-if-no-match test
       - run: pnpm --filter @brazier/desktop --fail-if-no-match build
 
   qualification-contracts:

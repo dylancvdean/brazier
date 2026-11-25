@@ -99,6 +99,21 @@ describe('connection profile URLs', () => {
     await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
   })
 
+  it('verifies stable instance identities without requiring a public boot ID', async () => {
+    const active = 'http://127.0.0.1:7614'
+    const advertised = 'https://brazier.example'
+    let remoteIdentity = { instance_id: 'daemon-a' } as { instance_id: string } | { boot_id: string }
+    const probe = vi.fn<typeof fetch>(async (address) => Response.json(
+      String(address).startsWith(active) ? { instance_id: 'daemon-a' } : remoteIdentity
+    ))
+
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toBeUndefined()
+    remoteIdentity = { instance_id: 'daemon-b' }
+    await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
+    remoteIdentity = { boot_id: 'daemon-a' }
+    await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
+  })
+
   it.each([403, 500])('does not downgrade origin verification after probe status %i', async (status) => {
     const probe = vi.fn<typeof fetch>(async () => new Response(null, { status }))
     await expect(verifyPairingOrigin('http://127.0.0.1:7614', 'https://brazier.example', probe))

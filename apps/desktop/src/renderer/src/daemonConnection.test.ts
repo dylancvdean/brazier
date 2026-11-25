@@ -38,9 +38,14 @@ describe('daemonConnectionReducer', () => {
   })
 
   it('maps a blocked connection to the blocked request gate', () => {
-    expect(availabilityForEvent({ type: 'unreachable', blocked: true })).toBe('blocked')
+    const blocked = { type: 'unreachable', blocked: true } as const
+    expect(availabilityForEvent(blocked)).toBe('blocked')
     expect(availabilityForEvent({ type: 'unreachable' })).toBe('offline')
-    expect(run({ type: 'unreachable', blocked: true }).phase).toBe('offline')
+    expect(daemonStatusOf(run(blocked))).toBe('offline')
+    expect(run(blocked, { type: 'reachable', version: '2.0' })).toEqual({
+      phase: 'rehydrating',
+      version: '2.0'
+    })
   })
 
   it('goes offline from any phase', () => {
