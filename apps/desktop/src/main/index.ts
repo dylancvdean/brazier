@@ -12,6 +12,8 @@ import { DesktopLifecycle } from './desktopLifecycle'
 import {
   ConnectionProfileManager,
   ConnectionProfileStore,
+  previewPairing,
+  verifyPairingOrigin,
   viewConnectionProfile,
   type ConnectionCredentialCodec,
   type ConnectionTestResult,
@@ -1534,6 +1536,19 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   handleTrusted('brazier:connection', async () => {
     const { api_key: _secret, ...connection } = await readyConnection()
     return connection
+  })
+  handleTrusted('brazier:connection-profiles:verify', async () => {
+    return profiles.verify((ready) => agent.setConnection({ address: ready.address, apiKey: ready.api_key }))
+  })
+  handleTrusted(
+    'brazier:connection-profiles:preview-pairing',
+    (_event, origin: string, id: string, code: string) => previewPairing(origin, id, code)
+  )
+  handleTrusted('brazier:connection-profiles:verify-pairing-origin', async (_event, origin: string) => {
+    const active = await readyConnection()
+    await verifyPairingOrigin(active.address, origin)
+    if (profiles.current().id !== active.profile.id) throw new Error('The selected connection changed. Try again.')
+    return active.daemon.daemon?.display_name ?? active.profile.name
   })
   handleTrusted('brazier:connection-profiles:list', () => profiles.list())
   handleTrusted('brazier:connection-profiles:current', () => profiles.current())

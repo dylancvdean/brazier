@@ -683,6 +683,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/auth/pairings/{id}/claim",
             post(claim_pairing_request),
         )
+        .route(
+            "/api/v1/auth/pairings/{id}/preview",
+            post(preview_pairing_request),
+        )
         .merge(protected)
         .with_state(state)
         .layer(
@@ -757,11 +761,14 @@ fn auth_requirement(path: &str) -> Option<AuthRequirement> {
         .is_some_and(|session_id| !session_id.is_empty() && !session_id.contains('/'));
     if path == "/health"
         || ticketed_voice_stream
-        || (path.starts_with("/api/v1/auth/pairings/") && path.ends_with("/claim"))
+        || path
+            .strip_prefix("/api/v1/auth/pairings/")
+            .and_then(|tail| tail.split_once('/'))
+            .is_some_and(|(id, action)| !id.is_empty() && matches!(action, "claim" | "preview"))
     {
         return Some(AuthRequirement::Public);
     }
-    if path == "/api/v1/daemon/info" {
+    if matches!(path, "/api/v1/daemon/info" | "/api/v1/models/prepare") {
         return Some(AuthRequirement::Authenticated);
     }
     if path.starts_with("/v1/")
@@ -912,7 +919,7 @@ async fn create_pairing_request(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
     Json(request): Json<CreatePairingRequest>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<impl IntoResponse> {
     if !auth.owner
         && request
             .scopes
@@ -935,7 +942,7 @@ async fn create_pairing_request(
         )
         .await
         .map_err(ApiError::bad_request)?;
-    Ok(Json(json!({
+    Ok(pairing_response(json!({
         "pairing": created.request,
         "code": created.code,
     })))
@@ -970,6 +977,48 @@ async fn cancel_pairing_request(
 #[derive(Debug, Deserialize)]
 struct ClaimPairingRequest {
     code: String,
+    expected_daemon_instance_id: Option<String>,
+}
+
+const PAIRING_ORIGIN_PROBE_ID: &str = "00000000-0000-0000-0000-000000000000";
+
+fn pairing_error(error: anyhow::Error) -> ApiError {
+    if error.is::<crate::client_auth::PairingUnavailable>() {
+        ApiError::bad_request(error)
+    } else {
+        ApiError::internal(error)
+    }
+}
+
+fn pairing_response(value: Value) -> impl IntoResponse {
+    ([(header::CACHE_CONTROL, "no-store")], Json(value))
+}
+
+async fn preview_pairing_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ClaimPairingRequest>,
+) -> ApiResult<impl IntoResponse> {
+    if id == PAIRING_ORIGIN_PROBE_ID && request.code.is_empty() {
+        return Ok(pairing_response(json!({ "boot_id": daemon_boot_id() })));
+    }
+    let pairing = state
+        .db
+        .preview_pairing_request(&id, &request.code)
+        .await
+        .map_err(pairing_error)?;
+    let daemon = state
+        .db
+        .daemon_identity(None)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(pairing_response(json!({
+        "pairing": pairing,
+        "daemon": {
+            "instance_id": daemon.instance_id,
+            "display_name": daemon.display_name,
+        },
+    })))
 }
 
 /// The pairing code itself is the temporary authority for this public route.
@@ -978,13 +1027,25 @@ async fn claim_pairing_request(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<ClaimPairingRequest>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<impl IntoResponse> {
+    if let Some(expected) = request.expected_daemon_instance_id {
+        let daemon = state
+            .db
+            .daemon_identity(None)
+            .await
+            .map_err(ApiError::internal)?;
+        if daemon.instance_id != expected {
+            return Err(ApiError::conflict(
+                "daemon identity no longer matches the pairing preview",
+            ));
+        }
+    }
     let issued = state
         .db
         .claim_pairing_request(&id, &request.code)
         .await
-        .map_err(ApiError::bad_request)?;
-    Ok(Json(json!({
+        .map_err(pairing_error)?;
+    Ok(pairing_response(json!({
         "client": issued.client,
         "api_key": issued.api_key,
     })))
@@ -1012,6 +1073,13 @@ async fn revoke_api_client(
         return Err(ApiError::not_found(
             "client does not exist or is already revoked",
         ));
+    }
+    let voice = state.runtime.voice_state().await;
+    if let Some(session) = voice.sessions.active_session().await
+        && session.owner_client_id() == id
+        && let Err(error) = voice.sessions.end_session(&session.id).await
+    {
+        tracing::warn!(%error, "could not stop revoked client's voice session");
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -4668,10 +4736,24 @@ async fn unload_model(State(state): State<AppState>) -> ApiResult<Json<serde_jso
 
 async fn prepare_model(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     Query(query): Query<StreamQuery>,
     Json(request): Json<PrepareModelRequest>,
 ) -> ApiResult<Response> {
     let agent_mode = request.mode.as_deref() == Some("agent");
+    let required = if agent_mode {
+        crate::client_auth::ClientScope::Agent
+    } else {
+        crate::client_auth::ClientScope::Inference
+    };
+    if !(auth.has_scope(required)
+        || !agent_mode && auth.has_scope(crate::client_auth::ClientScope::Management))
+    {
+        return Err(ApiError::forbidden(format!(
+            "This client does not have the {} scope.",
+            required.as_str()
+        )));
+    }
     if !query.stream {
         match state
             .runtime
@@ -5556,6 +5638,9 @@ async fn create_voice_session(
                 .cloned()
         });
     let voice_state = state.runtime.voice_state().await;
+    if !voice_owner_is_active(&state.db, auth.decision_actor_id()).await {
+        return Err(voice_owner_revoked());
+    }
     let session = voice_state
         .sessions
         .create_session(brazier_runtime::voice::VoiceSessionRequest {
@@ -5569,6 +5654,10 @@ async fn create_voice_session(
         })
         .await
         .map_err(ApiError::internal)?;
+    if !voice_owner_is_active(&state.db, session.owner_client_id()).await {
+        let _ = voice_state.sessions.end_session(&session.id).await;
+        return Err(voice_owner_revoked());
+    }
     let ws_url = voice_stream_path(&session.id);
     let ws_protocol = voice_stream_protocol(session.ws_ticket());
     Ok(Json(json!({
@@ -5635,7 +5724,6 @@ async fn stream_voice_session(
             fork_hints: None,
         });
     }
-
     let mut upstream_url =
         reqwest::Url::parse(&session.proxy_url().await).map_err(ApiError::internal)?;
     {
@@ -5647,19 +5735,76 @@ async fn stream_voice_session(
             pairs.append_pair("voice_prompt", prompt);
         }
     }
-    let (upstream, _) = tokio_tungstenite::connect_async(upstream_url.as_str())
+    upgrade_voice_stream(
+        upgrade,
+        upstream_url.as_str(),
+        voice_stream_protocol(session.ws_ticket()),
+        state.db,
+        session.owner_client_id().to_owned(),
+    )
+    .await
+}
+
+async fn voice_owner_is_active(db: &crate::db::Database, owner: &str) -> bool {
+    owner == "owner" || db.api_client_is_active(owner).await.unwrap_or(false)
+}
+
+fn voice_owner_revoked() -> ApiError {
+    ApiError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "The voice session owner is no longer authorized.".to_owned(),
+        fork_hints: None,
+    }
+}
+
+async fn upgrade_voice_stream(
+    upgrade: axum::extract::WebSocketUpgrade,
+    upstream_url: &str,
+    protocol: String,
+    db: crate::db::Database,
+    owner: String,
+) -> ApiResult<Response> {
+    if !voice_owner_is_active(&db, &owner).await {
+        return Err(voice_owner_revoked());
+    }
+    let (upstream, _) = tokio_tungstenite::connect_async(upstream_url)
         .await
         .map_err(ApiError::internal)?;
-    let protocol = voice_stream_protocol(session.ws_ticket());
     Ok(upgrade
         .protocols([protocol])
-        .on_upgrade(move |downstream| proxy_voice_stream(downstream, upstream))
+        .on_upgrade(move |downstream| proxy_voice_stream(downstream, upstream, db, owner))
         .into_response())
+}
+
+async fn wait_for_voice_revocation(db: &crate::db::Database, owner: &str) {
+    let mut checks = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        checks.tick().await;
+        if !voice_owner_is_active(db, owner).await {
+            break;
+        }
+    }
 }
 
 async fn proxy_voice_stream(
     mut downstream: axum::extract::ws::WebSocket,
     mut upstream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    db: crate::db::Database,
+    owner: String,
+) {
+    tokio::select! {
+        _ = wait_for_voice_revocation(&db, &owner), if owner != "owner" => {}
+        _ = relay_voice_messages(&mut downstream, &mut upstream) => {}
+    }
+    let _ = upstream.close(None).await;
+    let _ = downstream.close().await;
+}
+
+async fn relay_voice_messages(
+    downstream: &mut axum::extract::ws::WebSocket,
+    upstream: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 ) {
@@ -5707,8 +5852,6 @@ async fn proxy_voice_stream(
             }
         }
     }
-    let _ = upstream.close(None).await;
-    let _ = downstream.close().await;
 }
 
 async fn end_voice_session(
@@ -10085,11 +10228,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paired_voice_owner_revocation_invalidates_new_and_open_stream_authority() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let pairing = state
+            .db
+            .create_pairing_request(
+                "Voice client",
+                &[crate::client_auth::ClientScope::Inference],
+                60,
+            )
+            .await
+            .unwrap();
+        let client = state
+            .db
+            .claim_pairing_request(&pairing.request.id, &pairing.code)
+            .await
+            .unwrap()
+            .client;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let db = state.db.clone();
+        let owner = client.id.clone();
+        const UPSTREAM_PATH: &str = "/upstream";
+        const STREAM_PATH: &str = "/stream";
+        let app = Router::new()
+            .route(
+                UPSTREAM_PATH,
+                get(|upgrade: axum::extract::WebSocketUpgrade| async move {
+                    upgrade.on_upgrade(|mut socket| async move {
+                        while let Some(Ok(message)) = socket.next().await {
+                            if socket.send(message).await.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                }),
+            )
+            .route(
+                STREAM_PATH,
+                get(move |upgrade: axum::extract::WebSocketUpgrade| async move {
+                    upgrade_voice_stream(
+                        upgrade,
+                        &format!("ws://{address}{UPSTREAM_PATH}"),
+                        voice_stream_protocol("test-ticket"),
+                        db,
+                        owner,
+                    )
+                    .await
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url = format!("ws://{address}{STREAM_PATH}");
+        let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let message = tokio_tungstenite::tungstenite::Message::Binary(vec![1].into());
+        socket.send(message.clone()).await.unwrap();
+        let timeout = std::time::Duration::from_secs(3);
+        assert_eq!(
+            tokio::time::timeout(timeout, socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            message
+        );
+
+        let result = revoke_api_client(State(state.clone()), Path(client.id.clone())).await;
+        assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+        assert!(matches!(
+            tokio::time::timeout(timeout, socket.next()).await.unwrap(),
+            Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+        ));
+        let reconnect = tokio_tungstenite::connect_async(&url).await.unwrap_err();
+        assert!(matches!(
+            reconnect,
+            tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status() == StatusCode::UNAUTHORIZED
+        ));
+        assert!(voice_owner_is_active(&state.db, "owner").await);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn pairing_scopes_and_live_revocation_are_enforced_over_http() {
         let dir = tempdir().unwrap();
         let mut state = test_state(dir.path()).await;
         state.api_keys = vec!["owner-key".into()];
         let app = router(state);
+
+        let (status, probe) = json_request(
+            &app,
+            "POST",
+            "/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview",
+            json!({ "code": "" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(probe, json!({ "boot_id": daemon_boot_id() }));
 
         let (status, created) = request_with_api_key(
             &app,
@@ -10107,11 +10342,30 @@ mod tests {
         let pairing_id = created["pairing"]["id"].as_str().unwrap();
         let code = created["code"].as_str().unwrap();
 
+        let (status, preview) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/auth/pairings/{pairing_id}/preview"),
+            json!({ "code": code }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["pairing"]["scopes"], json!(["inference"]));
+        assert!(preview.get("api_key").is_none());
+        assert!(preview.get("code").is_none());
+        let (status, _) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/auth/pairings/{pairing_id}/claim"),
+            json!({ "code": code, "expected_daemon_instance_id": "another-daemon" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
         let (status, claimed) = json_request(
             &app,
             "POST",
             &format!("/api/v1/auth/pairings/{pairing_id}/claim"),
-            json!({ "code": code }),
+            json!({ "code": code, "expected_daemon_instance_id": preview["daemon"]["instance_id"] }),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{claimed}");
@@ -10134,6 +10388,24 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        let (status, body) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/models/prepare",
+            json!({ "model_id": "missing-model", "mode": "chat" }),
+            client_key,
+        )
+        .await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+        let (status, body) = request_with_api_key(
+            &app,
+            "POST",
+            "/api/v1/models/prepare",
+            json!({ "model_id": "missing-model", "mode": "agent" }),
+            client_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         let (status, body) = request_with_api_key(
             &app,
             "GET",

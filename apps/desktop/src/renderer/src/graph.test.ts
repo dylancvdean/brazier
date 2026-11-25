@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { messageChain, childCounts, branchSiblings, ROOT_TIP } from './graph'
+import { messageChain, childCounts, branchSiblings, refreshedMessageTip, ROOT_TIP } from './graph'
 import type { Message } from './types'
 
 const base = {
@@ -23,6 +23,14 @@ describe('message graph', () => {
 
   it('returns an empty chain when rewound to ROOT_TIP so editing the first message branches cleanly', () => {
     expect(messageChain(messages, ROOT_TIP)).toEqual([])
+  })
+
+  it('keeps a first-message edit rooted when foreground refresh finds a newer message', () => {
+    const refreshed = [...messages, { ...base, id: 'remote', parent_id: 'fork' }]
+    const tip = refreshedMessageTip(refreshed, ROOT_TIP, 'fork')
+    expect(tip).toBe(ROOT_TIP)
+    expect(messageChain(refreshed, tip).at(-1)?.id ?? null).toBeNull()
+    expect(refreshedMessageTip(refreshed, 'fork', 'fork')).toBe('remote')
   })
 
   it('counts branch points', () => {

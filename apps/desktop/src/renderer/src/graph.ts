@@ -3,6 +3,17 @@ import type { Message } from './types'
 /** Sentinel tip indicating the user rewound before the root message to branch from turn 1. */
 export const ROOT_TIP = '__brazier_root_tip__'
 
+export function refreshedMessageTip(
+  messages: Message[],
+  current: string | null,
+  previousLast: string | undefined
+): string | null {
+  if (current === ROOT_TIP || (current && current !== previousLast && messages.some((message) => message.id === current))) {
+    return current
+  }
+  return messages.at(-1)?.id ?? null
+}
+
 export function messageChain(messages: Message[], tipId?: string | null): Message[] {
   if (messages.length === 0 || tipId === ROOT_TIP) return []
   const byId = new Map(messages.map((message) => [message.id, message]))

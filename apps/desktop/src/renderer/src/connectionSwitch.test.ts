@@ -11,6 +11,22 @@ afterEach(() => {
 })
 
 describe('renderer connection switch boundary', () => {
+  it('routes requests to the new Local endpoint after authenticated reconnect', async () => {
+    const ready = {
+      address: 'http://127.0.0.1:7614',
+      profile: { id: 'local', name: 'Local', kind: 'local' as const, baseUrl: null, hostLabel: 'Local' },
+      daemon: { product: 'brazier' as const, version: '1.0.0', management_api: { major: 1, minor: 0 } }
+    }
+    vi.stubGlobal('window', { brazier: { getConnection: vi.fn(async () => ready) } })
+    const fetch_ = vi.fn(async () => new Response('{}'))
+    vi.stubGlobal('fetch', fetch_)
+    const { cacheVerifiedConnection, connection, request } = await import('./daemonClient')
+    expect((await connection()).address).toBe(ready.address)
+    cacheVerifiedConnection({ ...ready, address: 'http://127.0.0.1:7615' })
+    await request('/api/v1/conversations')
+    expect(fetch_).toHaveBeenCalledWith('http://127.0.0.1:7615/api/v1/conversations', expect.any(Object))
+  })
+
   it('routes pairing and client management to the active daemon without exposing its bearer', async () => {
     const requests: Array<{ url: string; method: string; authorization: string | null; body: unknown }> = []
     vi.stubGlobal('window', {

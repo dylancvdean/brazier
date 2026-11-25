@@ -1,4 +1,4 @@
-export type DaemonAvailability = 'checking' | 'healthy' | 'offline'
+export type DaemonAvailability = 'checking' | 'healthy' | 'offline' | 'blocked'
 
 let availability: DaemonAvailability = 'checking'
 let connectionAbort = new AbortController()
@@ -11,7 +11,7 @@ export class DaemonOfflineError extends Error {
 }
 
 export function setDaemonAvailability(next: DaemonAvailability): void {
-  if (next === 'checking') {
+  if (next === 'checking' || next === 'blocked' && availability !== 'blocked') {
     connectionAbort.abort()
     connectionAbort = new AbortController()
   }
@@ -20,6 +20,10 @@ export function setDaemonAvailability(next: DaemonAvailability): void {
 
 export function daemonAvailability(): DaemonAvailability {
   return availability
+}
+
+export function daemonVerificationPending(): boolean {
+  return availability === 'checking' || availability === 'blocked'
 }
 
 export function assertDaemonMutationAllowed(init?: RequestInit): void {
@@ -43,12 +47,11 @@ export async function daemonFetch(
     signal.throwIfAborted()
     const response = await fetch(input, { ...init, signal })
     signal.throwIfAborted()
-    // Any HTTP response proves the host is reachable, including auth and
-    // validation failures. Only transport failure means offline.
-    availability = 'healthy'
+    // Reachability cannot replace verification of the selected credentials.
+    if (!daemonVerificationPending()) availability = 'healthy'
     return response
   } catch (cause) {
-    if (!signal.aborted && !(cause instanceof DOMException && cause.name === 'AbortError')) {
+    if (!daemonVerificationPending() && !signal.aborted && !(cause instanceof DOMException && cause.name === 'AbortError')) {
       availability = 'offline'
     }
     throw cause

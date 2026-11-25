@@ -26,6 +26,17 @@ pub const DEFAULT_PAIRING_TTL_SECONDS: u64 = 5 * 60;
 pub const MAX_PAIRING_TTL_SECONDS: u64 = 15 * 60;
 pub const MAX_PAIRING_ATTEMPTS: u32 = 8;
 
+#[derive(Debug)]
+pub struct PairingUnavailable;
+
+impl std::fmt::Display for PairingUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("pairing request is invalid or unavailable")
+    }
+}
+
+impl std::error::Error for PairingUnavailable {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientScope {
@@ -317,8 +328,27 @@ impl Database {
         id: &str,
         code: &str,
     ) -> anyhow::Result<IssuedClientCredential> {
-        const UNAVAILABLE: &str = "pairing request is invalid or unavailable";
-        let mut tx = self.pool.begin().await?;
+        self.exchange_pairing_request(id, code, true)
+            .await?
+            .1
+            .context("claim did not issue a credential")
+    }
+
+    pub async fn preview_pairing_request(
+        &self,
+        id: &str,
+        code: &str,
+    ) -> anyhow::Result<PairingRequest> {
+        Ok(self.exchange_pairing_request(id, code, false).await?.0)
+    }
+
+    async fn exchange_pairing_request(
+        &self,
+        id: &str,
+        code: &str,
+        claim: bool,
+    ) -> anyhow::Result<(PairingRequest, Option<IssuedClientCredential>)> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query_as::<_, PairingRow>(
             r#"SELECT id, client_name, code_hash, scopes_json, expires_at, attempts,
                       max_attempts, consumed_at, created_at
@@ -327,13 +357,13 @@ impl Database {
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?
-        .context(UNAVAILABLE)?;
+        .ok_or(PairingUnavailable)?;
         let now = now_epoch_seconds();
         anyhow::ensure!(
             row.consumed_at.is_none()
-                && row.expires_at >= now as i64
+                && row.expires_at > now as i64
                 && row.attempts < row.max_attempts,
-            UNAVAILABLE
+            PairingUnavailable
         );
 
         let supplied_hash = digest(code.trim());
@@ -343,40 +373,44 @@ impl Database {
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
-            anyhow::bail!(UNAVAILABLE);
+            anyhow::bail!(PairingUnavailable);
+        }
+
+        let request = pairing_from_row(&row)?;
+        if !claim {
+            tx.commit().await?;
+            return Ok((request, None));
         }
 
         let claimed = sqlx::query(
             r#"UPDATE api_pairing_requests
                SET consumed_at = datetime('now')
-               WHERE id = ? AND consumed_at IS NULL AND expires_at >= ?
+               WHERE id = ? AND consumed_at IS NULL AND expires_at > ?
                      AND attempts < max_attempts"#,
         )
         .bind(id)
         .bind(now as i64)
         .execute(&mut *tx)
         .await?;
-        anyhow::ensure!(claimed.rows_affected() == 1, UNAVAILABLE);
+        anyhow::ensure!(claimed.rows_affected() == 1, PairingUnavailable);
 
         let client_id = Uuid::new_v4().to_string();
         let api_key = client_token(&client_id);
-        sqlx::query(
+        let client = sqlx::query_as::<_, ApiClientRow>(
             r#"INSERT INTO api_clients(id, name, token_hash, scopes_json)
-               VALUES(?, ?, ?, ?)"#,
+               VALUES(?, ?, ?, ?)
+               RETURNING id, name, scopes_json, created_at, last_used_at, revoked_at"#,
         )
         .bind(&client_id)
         .bind(&row.client_name)
         .bind(digest(&api_key))
         .bind(&row.scopes_json)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
+        let client = client_from_row(client)?;
         tx.commit().await?;
 
-        let client = self
-            .api_client(&client_id)
-            .await?
-            .context("issued client credential disappeared")?;
-        Ok(IssuedClientCredential { client, api_key })
+        Ok((request, Some(IssuedClientCredential { client, api_key })))
     }
 
     pub async fn api_client(&self, id: &str) -> anyhow::Result<Option<ApiClient>> {
@@ -435,6 +469,15 @@ impl Database {
         .await?
         .rows_affected()
             == 1)
+    }
+
+    pub async fn api_client_is_active(&self, id: &str) -> anyhow::Result<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM api_clients WHERE id = ? AND revoked_at IS NULL)",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     #[cfg(test)]
@@ -558,6 +601,44 @@ mod tests {
             "exactly one concurrent claimant must receive a credential"
         );
         assert_eq!(db.list_api_clients().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_distinct_pairings_can_be_previewed_claimed_and_cancelled() {
+        let (_dir, db) = database().await;
+        let scopes = [ClientScope::Inference];
+        let first = db
+            .create_pairing_request("First", &scopes, 60)
+            .await
+            .unwrap();
+        let second = db
+            .create_pairing_request("Second", &scopes, 60)
+            .await
+            .unwrap();
+        let cancelled = db
+            .create_pairing_request("Third", &scopes, 60)
+            .await
+            .unwrap();
+        let (preview, claim, cancel) = tokio::join!(
+            db.preview_pairing_request(&first.request.id, &first.code),
+            db.claim_pairing_request(&second.request.id, &second.code),
+            db.cancel_pairing_request(&cancelled.request.id),
+        );
+        assert_eq!(preview.unwrap(), first.request);
+        assert!(claim.is_ok());
+        assert!(cancel.unwrap());
+        assert!(
+            db.claim_pairing_request(&first.request.id, &first.code)
+                .await
+                .is_ok()
+        );
+        assert!(
+            db.claim_pairing_request(&cancelled.request.id, &cancelled.code)
+                .await
+                .unwrap_err()
+                .is::<PairingUnavailable>()
+        );
+        assert_eq!(db.list_api_clients().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
