@@ -1,3 +1,13 @@
+export async function selectedConversationWasRemoved(
+  id: string,
+  visible: ReadonlyArray<{ id: string }>,
+  query: string,
+  loadAll: () => Promise<ReadonlyArray<{ id: string }>>
+): Promise<boolean> {
+  if (visible.some((conversation) => conversation.id === id)) return false
+  return !query.trim() || !(await loadAll()).some((conversation) => conversation.id === id)
+}
+
 export function startConversationSync(
   browser: Pick<Window, 'addEventListener' | 'removeEventListener' | 'setInterval' | 'clearInterval'>,
   page: Pick<Document, 'addEventListener' | 'removeEventListener' | 'visibilityState'>,

@@ -1,7 +1,18 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { startConversationSync } from './conversationSync'
+import { selectedConversationWasRemoved, startConversationSync } from './conversationSync'
 
 afterEach(() => vi.useRealTimers())
+
+it('confirms the selected chat was deleted without mistaking a search miss for deletion', async () => {
+  const selected = { id: 'selected' }
+  const loadAll = vi.fn(async () => [selected])
+  await expect(selectedConversationWasRemoved(selected.id, [selected], 'search', loadAll)).resolves.toBe(false)
+  await expect(selectedConversationWasRemoved(selected.id, [], '', loadAll)).resolves.toBe(true)
+  expect(loadAll).not.toHaveBeenCalled()
+  await expect(selectedConversationWasRemoved(selected.id, [], 'search', loadAll)).resolves.toBe(false)
+  loadAll.mockResolvedValueOnce([])
+  await expect(selectedConversationWasRemoved(selected.id, [], 'search', loadAll)).resolves.toBe(true)
+})
 
 it('refreshes on focus, resume, and the foreground interval without interrupting a turn', async () => {
   vi.useFakeTimers()

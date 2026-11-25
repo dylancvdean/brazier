@@ -175,7 +175,7 @@ import type { Attachment, ContentPart, Conversation, Message, Role } from './typ
 import { ConnectionProfileContext, LOCAL_CONNECTION_PROFILE } from './connectionProfile'
 import { setDaemonAvailability } from './daemonAvailability'
 import { cacheVerifiedConnection, connection } from './daemonClient'
-import { startConversationSync } from './conversationSync'
+import { selectedConversationWasRemoved, startConversationSync } from './conversationSync'
 
 const ENABLED_TOOLS_KEY = 'brazier.enabledTools'
 const GENERATE_HISTORY_KEY = 'brazier.generateHistory.v1'
@@ -1506,9 +1506,11 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function refreshConversations(query = conversationSearchRef.current): Promise<void> {
+  async function refreshConversations(query = conversationSearchRef.current, background = false): Promise<void> {
     const activeProfile = profileIdRef.current
     const refreshId = ++conversationRefreshRef.current
+    const selected = conversationIdRef.current
+    const turn = chatTurnRef.current
     const data = await listConversations(query)
     // Search requests can resolve out of order while the user types. Only the
     // newest query for the current profile is allowed to replace results.
@@ -1518,7 +1520,17 @@ export function App(): React.JSX.Element {
     setConversations(data)
     // Only an unfiltered list is worth caching for the next cold start.
     if (!query.trim()) writeCachedConversations(activeProfile, data)
-    if (!conversationIdRef.current && !incognitoRef.current && data[0]) {
+    if (background && selected && !incognitoRef.current &&
+        await selectedConversationWasRemoved(selected, data, query, () => listConversations(''))) {
+      if (refreshId !== conversationRefreshRef.current || profileIdRef.current !== activeProfile ||
+          conversationIdRef.current !== selected || turn !== chatTurnRef.current ||
+          busyRef.current || incognitoRef.current) return
+      messageRefreshRef.current += 1
+      conversationIdRef.current = null
+      setConversationId(null)
+      setMessages([])
+      setTipId(null)
+    } else if (!background && !conversationIdRef.current && !incognitoRef.current && data[0]) {
       conversationIdRef.current = data[0].id
       setConversationId(data[0].id)
     }
@@ -1692,7 +1704,7 @@ export function App(): React.JSX.Element {
     return startConversationSync(window, document, () => !busyRef.current && !incognitoRef.current, () => {
       const id = conversationIdRef.current
       return Promise.allSettled([
-        refreshConversations(),
+        refreshConversations(conversationSearchRef.current, true),
         id ? refreshMessages(id, undefined, true) : Promise.resolve()
       ])
     })
