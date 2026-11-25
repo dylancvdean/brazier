@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DownloadJob } from './api'
+import type { DownloadJob, RecommendationSetup } from './api'
 import { createDownloadJobsStore } from './downloadJobsStore'
 
 function job(id: string, status: string): DownloadJob {
@@ -88,6 +88,34 @@ describe('downloadJobsStore', () => {
     expect(settled).toHaveBeenCalledWith(expect.objectContaining({ id: 'a', status: 'completed' }))
     stopA()
     stopB()
+  })
+
+  it('keeps reporting job progress while a recommendation setup is still loading', async () => {
+    let resolveSetups!: (setups: RecommendationSetup[]) => void
+    const loadSetups = vi.fn(() => new Promise<RecommendationSetup[]>((resolve) => {
+      resolveSetups = resolve
+    }))
+    const loadJobs = vi.fn<() => Promise<DownloadJob[]>>()
+      .mockResolvedValueOnce([job('a', 'downloading')])
+      .mockResolvedValue([job('a', 'completed')])
+    const store = createDownloadJobsStore({ loadJobs, loadSetups })
+    const settled = vi.fn()
+    store.onSettled(settled)
+    const stop = store.subscribe(() => undefined)
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.getSnapshot().jobs).toEqual([job('a', 'downloading')])
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(settled).toHaveBeenCalledWith(job('a', 'completed'))
+    expect(loadSetups).toHaveBeenCalledOnce()
+
+    const setup: RecommendationSetup = {
+      id: 'setup-a', recommendation_id: 'recommended-a', categories: [], steps: [], status: 'completed'
+    }
+    resolveSetups([setup])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.getSnapshot()).toMatchObject({ setups: [setup], jobs: [job('a', 'completed')] })
+    stop()
   })
 
   it('announces a job that finished between polls but not ones present at first load', async () => {

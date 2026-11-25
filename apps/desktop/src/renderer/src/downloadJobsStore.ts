@@ -58,6 +58,7 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
   let failures = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   let inFlight: Promise<void> | null = null
+  let setupsInFlight: Promise<RecommendationSetup[]> | null = null
   const listeners = new Set<() => void>()
   const settledListeners = new Set<(job: DownloadJob) => void>()
   let openIds = new Set<string>()
@@ -97,22 +98,32 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
     for (const job of jobs) seenIds.add(job.id)
   }
 
+  function pollSetups(): void {
+    if (setupsInFlight) return
+    // Listing setups also lets the daemon advance them; it must not block jobs.
+    const current = loadSetups()
+    setupsInFlight = current
+    void current.then((setups) => {
+      if (setupsInFlight !== current) return
+      emit({ ...snapshot, setups })
+    }, () => undefined).finally(() => {
+      if (setupsInFlight !== current) return
+      setupsInFlight = null
+      if (!inFlight) schedule()
+    })
+  }
+
   async function fetchOnce(): Promise<void> {
     const startedIn = generation
-    // Listing setups also lets the daemon advance them; it must not block jobs.
-    const setupsResult = loadSetups().then(
-      (value) => ({ ok: true as const, value }),
-      () => ({ ok: false as const })
-    )
+    pollSetups()
     try {
       const jobs = await loadJobs()
-      const setups = await setupsResult
       if (startedIn !== generation) return
       failures = 0
       announceSettled(jobs)
       emit({
+        ...snapshot,
         jobs,
-        setups: setups.ok ? setups.value : snapshot.setups,
         loaded: true,
         stale: false,
         error: null
@@ -179,6 +190,7 @@ export function createDownloadJobsStore(options: DownloadJobsStoreOptions = {}) 
       openIds = new Set()
       seenIds = null
       inFlight = null
+      setupsInFlight = null
       emit(EMPTY)
       if (listeners.size > 0) void poll()
     }
