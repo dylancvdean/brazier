@@ -80,6 +80,32 @@ describe('connection profile URLs', () => {
     }
   })
 
+  it.each([404, 405])('verifies matching health identities when the probe returns %i', async (status) => {
+    const active = 'http://127.0.0.1:7614'
+    const advertised = 'https://brazier.example'
+    let remoteBootId = 'active-daemon'
+    const probe = vi.fn<typeof fetch>(async (address) => String(address).endsWith('/health')
+      ? Response.json({ status: 'healthy', boot_id: address === active + '/health' ? 'active-daemon' : remoteBootId })
+      : new Response(null, { status }))
+
+    await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toBeUndefined()
+    const healthCalls = probe.mock.calls.filter(([url]) => String(url).endsWith('/health'))
+    expect(healthCalls.map(([url]) => url)).toEqual([active + '/health', advertised + '/health'])
+    for (const [, init] of healthCalls) {
+      expect(init).toMatchObject({ redirect: 'error', credentials: 'omit', cache: 'no-store' })
+      expect(new Headers(init?.headers).has('authorization')).toBe(false)
+    }
+    remoteBootId = 'another-daemon'
+    await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
+  })
+
+  it.each([400, 403, 500])('does not downgrade origin verification after probe status %i', async (status) => {
+    const probe = vi.fn<typeof fetch>(async () => new Response(null, { status }))
+    await expect(verifyPairingOrigin('http://127.0.0.1:7614', 'https://brazier.example', probe))
+      .rejects.toThrow('pairing preview route is not reachable')
+    expect(probe.mock.calls.every(([url]) => String(url).endsWith('/preview'))).toBe(true)
+  })
+
   it('normalizes an HTTP(S) origin and rejects ambiguous or credential-bearing URLs', () => {
     expect(normalizeDaemonBaseUrl(' HTTPS://Example.COM:443/ ')).toBe('https://example.com')
     expect(normalizeDaemonBaseUrl('http://[::1]:7614')).toBe('http://[::1]:7614')
