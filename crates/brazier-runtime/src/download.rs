@@ -514,14 +514,16 @@ async fn expected_file_sha256(
     request: &DownloadRequest,
 ) -> Option<String> {
     let paths = [request.filename.clone()];
-    match crate::hf::paths_info(
+    let lookup = crate::hf::paths_info(
         client,
         data_dir,
         &request.repo_id,
         &request.revision,
         &paths,
-    )
-    .await
+    );
+    match tokio::time::timeout(Duration::from_secs(45), lookup)
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("checksum lookup timed out")))
     {
         Ok(files) => files
             .into_iter()
