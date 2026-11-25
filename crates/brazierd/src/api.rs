@@ -890,9 +890,17 @@ fn daemon_boot_id() -> &'static str {
 /// Unauthenticated liveness probe. Loopback callers also get the build version,
 /// engine and boot id; a remote peer (`--allow-insecure-remote`) gets status only,
 /// so the network cannot fingerprint the exact build or watch restarts.
-async fn health(State(state): State<AppState>, client: ClientAddr) -> ApiResult<Json<Value>> {
+async fn health(
+    State(state): State<AppState>,
+    client: ClientAddr,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
     state.db.ping().await.map_err(ApiError::internal)?;
-    if !client_is_loopback(&client) {
+    // A reverse proxy on the same host connects over loopback for remote peers.
+    let proxied = ["forwarded", "x-forwarded-for", "x-real-ip"]
+        .iter()
+        .any(|name| headers.contains_key(*name));
+    if proxied || !client_is_loopback(&client) {
         return Ok(Json(json!({ "status": "healthy", "database": "ok" })));
     }
     Ok(Json(json!({
@@ -10660,6 +10668,22 @@ mod tests {
         assert!(remote.get("version").is_none());
         assert!(remote.get("boot_id").is_none());
         assert!(remote.get("engine").is_none());
+        let proxied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header("x-forwarded-for", "203.0.113.7")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 42_012))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = proxied.into_body().collect().await.unwrap().to_bytes();
+        let proxied = serde_json::from_slice::<Value>(&body).unwrap();
+        assert!(proxied.get("version").is_none());
+        assert!(proxied.get("boot_id").is_none());
     }
 
     #[tokio::test]
