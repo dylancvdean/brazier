@@ -61,22 +61,22 @@ describe('connection profile URLs', () => {
   it('checks the advertised origin against the active daemon without sending credentials', async () => {
     const active = 'http://127.0.0.1:7614'
     const advertised = 'https://brazier.example'
+    const probePath = '/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview'
     let remoteBootId = 'another-daemon'
-    const probe = vi.fn<typeof fetch>(async (address) => Response.json({
-      status: 'healthy',
-      boot_id: address === `${active}/health` ? 'active-daemon' : remoteBootId
-    }))
+    const probe = vi.fn<typeof fetch>(async (address) => String(address).endsWith(probePath)
+      ? Response.json({ boot_id: address === active + probePath ? 'active-daemon' : remoteBootId })
+      : new Response(null, { status: 404 }))
 
     await expect(verifyPairingOrigin(active, advertised, probe)).rejects.toThrow('different daemon')
     remoteBootId = 'active-daemon'
     await expect(verifyPairingOrigin(active, advertised, probe)).resolves.toBeUndefined()
     expect(probe.mock.calls.map(([address]) => address)).toEqual([
-      `${active}/health`, `${advertised}/health`, `${active}/health`, `${advertised}/health`
+      active + probePath, advertised + probePath, active + probePath, advertised + probePath
     ])
     for (const [, init] of probe.mock.calls) {
-      expect(init).toMatchObject({ redirect: 'error', credentials: 'omit', cache: 'no-store' })
-      expect(init?.body).toBeUndefined()
-      expect(init?.headers).toBeUndefined()
+      expect(init).toMatchObject({ method: 'POST', redirect: 'error', credentials: 'omit', cache: 'no-store' })
+      expect(init?.body).toBe('{"code":""}')
+      expect(new Headers(init?.headers).has('authorization')).toBe(false)
     }
   })
 

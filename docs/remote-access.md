@@ -11,6 +11,11 @@ front of it:
 - an encrypted private-network tunnel such as Tailscale/WireGuard, with access
   controls limiting which peers can reach the daemon.
 
+If the proxy filters paths, forward the pairing preview and claim routes for
+pairing. Desktop checks that the advertised origin reaches the same daemon by
+sending an empty-code preview to the reserved all-zero pairing UUID before
+issuing a real invite; it does not require public access to `/health`.
+
 A direct non-loopback HTTP listener is an explicit unsafe escape hatch:
 
 ```sh
