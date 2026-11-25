@@ -3,6 +3,8 @@
   color: #ededef;
   background: #000000;
   font-synthesis: none;
+  color-scheme: dark;
+  accent-color: var(--accent);
   /* True black, so an OLED panel switches those pixels off. Surfaces lift
      from it in small steps instead of washing the window grey. */
   --bg: #000000;
@@ -182,6 +184,13 @@ code {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.conversation-group-label {
+  padding: 10px 10px 4px;
+  color: var(--muted);
+  font-size: var(--font-micro);
+  font-weight: 600;
 }
 
 .conversation-import {
@@ -2991,6 +3000,12 @@ a.inline-link {
   cursor: pointer;
 }
 
+.secondary-action,
+.primary-action {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .secondary-action:disabled,
 .primary-action:disabled {
   opacity: 0.5;
@@ -3832,6 +3847,73 @@ a.inline-link {
   gap: 10px;
 }
 
+.setting-row {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+div.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.setting-row > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.setting-row input,
+.setting-row select {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: 0;
+  color: #e3e3e3;
+  background: #0a0a0a;
+}
+
+.setting-row input:focus,
+.setting-row select:focus {
+  border-color: #964916;
+}
+
+.settings-grid fieldset {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 12px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.settings-grid legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.settings-grid fieldset small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.settings-grid fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-grid fieldset label > span {
+  margin: 0;
+  color: var(--soft);
+  font-size: 12px;
+}
+
 .settings-grid label > span {
   display: block;
   margin-bottom: 5px;
@@ -3839,7 +3921,7 @@ a.inline-link {
   font-size: 11px;
 }
 
-.settings-grid input,
+.settings-grid input:not([type='checkbox'], [type='radio']),
 .settings-grid select {
   width: 100%;
   padding: 9px 10px;
@@ -3850,7 +3932,7 @@ a.inline-link {
   background: #0a0a0a;
 }
 
-.settings-grid input:focus,
+.settings-grid input:not([type='checkbox'], [type='radio']):focus,
 .settings-grid select:focus {
   border-color: #964916;
 }
@@ -5557,12 +5639,28 @@ label.span-2 {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
+  row-gap: 8px;
   padding: 12px max(20px, calc((100% - 900px) / 2));
   border-bottom: 1px solid var(--line);
 }
 
 .agent-header-spacer {
   flex: 1;
+}
+
+.agent-header .chip-button,
+.agent-header .agent-sandbox-badge,
+.agent-workspace strong,
+.agent-workspace small {
+  white-space: nowrap;
+}
+
+.agent-workspace strong,
+.agent-workspace small {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .agent-worktree-notice {

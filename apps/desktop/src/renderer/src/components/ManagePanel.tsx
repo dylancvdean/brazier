@@ -761,7 +761,7 @@ function InputGuardSetup(props: { onError: (message: string | null) => void }): 
           <dd>{status?.detail ?? 'Checking the local safety fallback…'}</dd>
         </div>
       </dl>
-      <button
+      <button className="secondary-action"
         type="button"
         disabled={installing}
         onClick={() => void install()}
@@ -1644,7 +1644,7 @@ function CustomizationSection(props: SectionProps): React.JSX.Element {
           </label>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
-          <button
+          <button className="secondary-action"
             type="button"
             disabled={checkingUpdates || updateSettings?.supported === false}
             onClick={() => void checkUpdates()}
@@ -2117,7 +2117,7 @@ function ComputerUseSection(props: SectionProps): React.JSX.Element {
           </div>
         ) : null}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
-          <button
+          <button className="secondary-action"
             type="button"
             disabled={requestingComputerPermissions || permissions?.platform === 'windows'}
             onClick={() => void requestComputerAccess()}
@@ -6644,7 +6644,7 @@ function RemoteSection(props: SectionProps): React.JSX.Element {
               Requests leave this machine. A server reached over plain HTTP carries your
               conversation in the clear, which is fine on a network you trust and not otherwise.
             </p>
-            <button className="primary" type="submit" disabled={saving}>
+            <button className="primary-action" type="submit" disabled={saving}>
               {saving ? <LoaderCircle className="spin" size={14} /> : 'Add server'}
             </button>
           </form>

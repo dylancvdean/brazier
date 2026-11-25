@@ -1191,11 +1191,16 @@ export function AgentMode(props: Props): React.JSX.Element {
       .catch(() => undefined)
   }, [])
 
+  const stopBeforeLeavingRef = useRef<(action: string) => Promise<boolean>>(async () => false)
   const loadSession = useCallback(
     async (id: string): Promise<void> => {
       try {
-        if (runningRef.current && sessionIdRef.current && sessionIdRef.current !== id) {
-          onError('Stop the agent before switching tasks.')
+        if (
+          runningRef.current &&
+          sessionIdRef.current &&
+          sessionIdRef.current !== id &&
+          !(await stopBeforeLeavingRef.current('switch tasks'))
+        ) {
           return
         }
         const loadGen = ++loadGenRef.current
@@ -1559,8 +1564,8 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }
 
-  async function stop(): Promise<void> {
-    if (!session) return
+  async function stop(): Promise<boolean> {
+    if (!session) return false
     try {
       assertDaemonMutationAllowed({ method: 'POST' })
       if (props.onCancelTurn) {
@@ -1568,12 +1573,26 @@ export function AgentMode(props: Props): React.JSX.Element {
       } else {
         await window.brazier.agent.cancel(session.id)
       }
+      runningRef.current = false
       setRunning(false)
       setApprovals([])
+      return true
     } catch (cause) {
       onError(errorText(cause))
+      return false
     }
   }
+
+  /** Offer to stop a running task instead of refusing the action outright. */
+  async function stopBeforeLeaving(action: string): Promise<boolean> {
+    const proceed = await askConfirm({
+      title: 'Stop the running task?',
+      detail: `The agent is still working. Stop it to ${action}; you can continue the task later.`,
+      confirmLabel: 'Stop agent'
+    })
+    return proceed && (await stop())
+  }
+  stopBeforeLeavingRef.current = stopBeforeLeaving
 
   async function compact(): Promise<void> {
     if (!session) return
@@ -1676,10 +1695,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   }
 
   async function startNewTask(): Promise<void> {
-    if (runningRef.current) {
-      onError('Stop the agent before starting a new task.')
-      return
-    }
+    if (runningRef.current && !(await stopBeforeLeaving('start a new task'))) return
     loadGenRef.current += 1
     const previousWorktree = sessionWorktree(session)
     const nextWorkspace =
@@ -1724,8 +1740,11 @@ export function AgentMode(props: Props): React.JSX.Element {
   }
 
   async function removeSession(id: string): Promise<void> {
-    if (runningRef.current && sessionIdRef.current === id) {
-      onError('Stop the agent before deleting the running task.')
+    if (
+      runningRef.current &&
+      sessionIdRef.current === id &&
+      !(await stopBeforeLeaving('delete this task'))
+    ) {
       return
     }
     onError(null)
@@ -1806,7 +1825,9 @@ export function AgentMode(props: Props): React.JSX.Element {
   useEffect(() => {
     onComposerChange?.({
       send: (text) => composerActionsRef.current.send(text),
-      stop: () => composerActionsRef.current.stop(),
+      stop: async () => {
+        await composerActionsRef.current.stop()
+      },
       running,
       blockedReason,
       placeholder: blockedReason

@@ -155,6 +155,51 @@ impl DownloadQueue {
     pub async fn enqueue(&self, work: QueuedDownload) -> anyhow::Result<()> {
         self.tx.send(work).await.context("download queue is closed")
     }
+
+    /// Put a paused, failed, or cancelled job back in line from its stored request.
+    pub async fn resume_job(&self, db: &Database, job_id: &str) -> anyhow::Result<()> {
+        let job = db.get_download_job_public(job_id).await?;
+        let payload = job
+            .payload
+            .as_deref()
+            .context("this job predates the queue and cannot be resumed")?;
+        let work: QueuedWork = serde_json::from_str(payload).context("unreadable job payload")?;
+        db.requeue_download_job(job_id).await?;
+        self.enqueue(QueuedDownload {
+            job_id: job.id,
+            work,
+        })
+        .await
+    }
+}
+
+/// Automatic resume attempts after a dropped connection, before the job is
+/// marked failed. Each attempt continues from the partial file.
+const TRANSIENT_RETRIES: u32 = 3;
+
+/// Network hiccups worth retrying, as opposed to auth, missing files, or a
+/// checksum mismatch that would fail the same way again.
+fn is_transient(error: &anyhow::Error) -> bool {
+    if error.chain().any(|cause| {
+        cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+            error.is_timeout() || error.is_connect() || error.is_body() || error.is_request()
+        })
+    }) {
+        return true;
+    }
+    let message = format!("{error:#}");
+    [
+        "download stalled",
+        "no response after",
+        "resume to finish",
+        "failed (429",
+        "failed (500",
+        "failed (502",
+        "failed (503",
+        "failed (504",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
 }
 
 async fn run_one(
@@ -186,9 +231,66 @@ async fn run_one(
         }
     }
 
+    let mut attempt = 0;
+    let result = loop {
+        let result = run_work(http, data_dir, db, &work, &cancel).await;
+        let Err(error) = &result else { break result };
+        if attempt >= TRANSIENT_RETRIES || cancel.reason().is_some() || !is_transient(error) {
+            break result;
+        }
+        attempt += 1;
+        let delay = std::time::Duration::from_secs(5 * u64::from(attempt));
+        tracing::warn!(job_id = %work.job_id, %error, attempt, "retrying interrupted download");
+        let _ = db
+            .update_download_job_message(
+                &work.job_id,
+                &format!(
+                    "Connection dropped — retrying in {}s ({attempt}/{TRANSIENT_RETRIES})",
+                    delay.as_secs()
+                ),
+            )
+            .await;
+        tokio::select! {
+            _ = cancel.wait_stopped() => break result,
+            () = tokio::time::sleep(delay) => {}
+        }
+    };
+
+    // Read our own worker's flag and persist the terminal DB state BEFORE
+    // unregistering from `active`, so a concurrent `resume_model_download`
+    // cannot observe `is_running() == false`, requeue to `pending`, and then
+    // get overwritten back to `paused` by this exiting worker.
+    let stop = cancel.reason();
+    if let Err(error) = result {
+        match stop {
+            // A paused job keeps its partial file and its place in the list.
+            Some(StopReason::Pause) => {
+                let _ = db.pause_download_job(&work.job_id).await;
+            }
+            Some(StopReason::Cancel) => {
+                let _ = db.cancel_download_job(&work.job_id).await;
+            }
+            None => {
+                let _ = db.fail_download_job(&work.job_id, &error.to_string()).await;
+            }
+        }
+        active.finish_if_matches(&work.job_id, &cancel);
+        return false;
+    }
+    active.finish_if_matches(&work.job_id, &cancel);
+    true
+}
+
+async fn run_work(
+    http: &reqwest::Client,
+    data_dir: &Path,
+    db: &Database,
+    work: &QueuedDownload,
+    cancel: &Arc<crate::active_downloads::StopFlag>,
+) -> anyhow::Result<()> {
     let job_handle = Some((db.clone(), work.job_id.clone()));
     let progress = Box::new(|_| {});
-    let result = match work.work {
+    match work.work.clone() {
         QueuedWork::Gguf(request) => {
             let result = download::download_gguf_with_progress(
                 http,
@@ -247,31 +349,7 @@ async fn run_one(
         )
         .await
         .map(|_| ()),
-    };
-
-    // Read our own worker's flag and persist the terminal DB state BEFORE
-    // unregistering from `active`, so a concurrent `resume_model_download`
-    // cannot observe `is_running() == false`, requeue to `pending`, and then
-    // get overwritten back to `paused` by this exiting worker.
-    let stop = cancel.reason();
-    if let Err(error) = result {
-        match stop {
-            // A paused job keeps its partial file and its place in the list.
-            Some(StopReason::Pause) => {
-                let _ = db.pause_download_job(&work.job_id).await;
-            }
-            Some(StopReason::Cancel) => {
-                let _ = db.cancel_download_job(&work.job_id).await;
-            }
-            None => {
-                let _ = db.fail_download_job(&work.job_id, &error.to_string()).await;
-            }
-        }
-        active.finish_if_matches(&work.job_id, &cancel);
-        return false;
     }
-    active.finish_if_matches(&work.job_id, &cancel);
-    true
 }
 
 /// After a speculative-draft companion (`dspark`, `dflash`, `draft`) installs,
@@ -318,6 +396,31 @@ async fn apply_installed_draft_defaults(data_dir: &Path, repo_id: &str, filename
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_network_hiccups_are_retried() {
+        for message in [
+            "download stalled: nothing received for 120s after 1.2 GB. It can be resumed from here.",
+            "start Hugging Face download: no response after 30s. Check your network connection and retry.",
+            "download of model.gguf ended prematurely at 1 of 2 bytes — resume to finish",
+            "Hugging Face download failed (503 Service Unavailable): busy",
+        ] {
+            assert!(
+                is_transient(&anyhow::anyhow!(message.to_owned())),
+                "{message}"
+            );
+        }
+        for message in [
+            "Hugging Face rejected the download (401 Unauthorized). This model may be gated",
+            "Hugging Face download failed (404 Not Found): missing",
+            "model.gguf failed its checksum (expected SHA-256 aa, got bb).",
+        ] {
+            assert!(
+                !is_transient(&anyhow::anyhow!(message.to_owned())),
+                "{message}"
+            );
+        }
+    }
 
     /// Resuming reads the work back off the job row, so a payload that does not
     /// survive the round trip is a job that can only be started from scratch.
