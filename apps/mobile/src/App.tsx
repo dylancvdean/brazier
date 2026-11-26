@@ -172,7 +172,6 @@ function Shell({ preferences, onPreferences }: {
   const models = <Models onClose={() => setView(onDevice ? 'chat' : 'settings')}
     onChanged={() => setModelsRevision((value) => value + 1)} />;
 
-  if (view === 'models' && !onDevice) return models;
 
   // Chat stays mounted behind Settings and Models so a draft or a running reply survives the visit.
   if (onDevice || !credential || !hostBackend) {
@@ -188,6 +187,7 @@ function Shell({ preferences, onPreferences }: {
   }
 
   if (view === 'settings' && (access || !host)) return settings;
+  if (view === 'models' && (access || !host)) return models;
 
   if (access) {
     return <View style={styles.panel}>
@@ -212,7 +212,7 @@ function Shell({ preferences, onPreferences }: {
   // Chat stays mounted behind Settings and Agent so a draft or a running reply survives the visit.
   const main = view !== 'chat' ? null : agent === 'shown' ? 'agent' : 'chat';
   return <>
-    {view === 'settings' ? settings : null}
+    {view === 'settings' ? settings : view === 'models' ? models : null}
     {/* Stays mounted once opened so a running generation is not lost on returning to the chat. */}
     {generateOpened ? <View style={view === 'generate' ? styles.flex : { display: 'none' }}>
       <Generate key={hostId(credential)} credential={credential} hostName={name} visible={view === 'generate'}
