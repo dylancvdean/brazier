@@ -11,7 +11,7 @@ export type Block =
   | { type: 'code'; language: string; text: string }
   | { type: 'rule' };
 
-const inlinePattern = /(`+)([\s\S]+?)\1|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\s][^*]*?)\*|\b_([^_\s][^_]*?)_\b|\[([^\]]+)\]\(([^)\s]+)\)/;
+const inlinePattern = /(`+)([\s\S]+?)\1|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\s][^*]*?)\*|\b_([^_\s][^_]*?)_\b|\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/;
 
 export function parseInline(source: string): Inline[] {
   const out: Inline[] = [];
@@ -45,12 +45,14 @@ export function parseMarkdown(source: string): Block[] {
     const fence = /^\s*(`{3,}|~{3,})\s*([^\s`]*)/.exec(line);
     if (fence) {
       flush();
+      // Only a bare fence at least as long as the opener closes the block.
+      const closes = (text: string) => text.trim().startsWith(fence[1]) && /^(`+|~+)$/.test(text.trim());
       const body: string[] = [];
-      for (i += 1; i < lines.length && !lines[i].trimStart().startsWith(fence[1]); i += 1) body.push(lines[i]);
+      for (i += 1; i < lines.length && !closes(lines[i]); i += 1) body.push(lines[i]);
       blocks.push({ type: 'code', language: fence[2], text: body.join('\n') });
       continue;
     }
-    const heading = /^(#{1,6})\s+(.*?)\s*#*$/.exec(line);
+    const heading = /^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/.exec(line);
     const item = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line);
     const quote = /^\s*>\s?(.*)$/.exec(line);
     if (!line.trim()) flush();

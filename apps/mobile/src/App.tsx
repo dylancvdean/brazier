@@ -44,7 +44,9 @@ function Shell({ preferences, onPreferences }: {
   const [access, setAccess] = useState<Access | null>(null);
   const [storageError, setStorageError] = useState('');
   const [revision, setRevision] = useState(0);
-  const [host, setHost] = useState<Host | null>(null);
+  // Tagged with the credential it was verified for, so a host switch never renders Chat
+  // (and sends the new host's key) before that host's identity is checked.
+  const [verified, setVerified] = useState<{ credential: Credential; host: Host } | null>(null);
   const activeId = saved.index.active;
   const credential: Credential | null = activeId ? saved.credentials[activeId] ?? null : null;
 
@@ -65,11 +67,11 @@ function Shell({ preferences, onPreferences }: {
       message: errorText(error),
       pairAgain: error instanceof DaemonError && [401, 409].includes(error.status ?? 0),
     });
-    setHost(null);
+    setVerified(null);
   }
 
   useEffect(() => {
-    setHost(null);
+    setVerified(null);
     setAccess(null);
     if (!credential) return;
     let active = true;
@@ -80,7 +82,7 @@ function Shell({ preferences, onPreferences }: {
       try {
         const result = await daemonClient(fetch, credential).verify();
         if (!active) return;
-        setHost(result);
+        setVerified({ credential, host: result });
         // A host migrated from a single-host build has no name until it is first reached.
         setSaved((current) => {
           const id = hostId(credential);
@@ -139,15 +141,17 @@ function Shell({ preferences, onPreferences }: {
     </KeyboardAvoidingView>;
   }
 
+  const host = verified?.credential === credential ? verified.host : null;
   const name = hostLabel(saved.index, hostId(credential), credential.origin);
 
-  if (view === 'settings') {
-    return <Settings saved={saved} theme={preferences.theme} error={storageError}
+  const settings = <Settings saved={saved} theme={preferences.theme} error={storageError}
       onTheme={(theme) => onPreferences({ theme })}
       onSelect={(id) => { void applyIndex(selectHost(saved.index, id)); setView('chat'); }}
       onRename={(id, next) => void applyIndex(renameHost(saved.index, id, next))}
       onRemove={(id) => void remove(id)} onAdd={() => setView('pairing')} onClose={() => setView('chat')} />;
-  }
+
+
+  if (view === 'settings' && (access || !host)) return settings;
 
   if (access) {
     return <View style={styles.panel}>
@@ -169,7 +173,13 @@ function Shell({ preferences, onPreferences }: {
       <Action label="Hosts and settings" quiet onPress={() => setView('settings')} /></View>;
   }
 
-  return <Chat key={hostId(credential)} credential={credential} hostName={name}
-    disabledTools={preferences.disabledTools} onDisabledTools={(disabledTools) => onPreferences({ disabledTools })}
-    onUnauthorized={reportAccess} onOpenSettings={() => setView('settings')} />;
+  // Chat stays mounted behind Settings so a draft or a running reply survives the visit.
+  return <>
+    {view === 'settings' ? settings : null}
+    <View style={view === 'settings' ? { display: 'none' } : styles.flex}>
+      <Chat key={hostId(credential)} credential={credential} hostName={name}
+        disabledTools={preferences.disabledTools} onDisabledTools={(disabledTools) => onPreferences({ disabledTools })}
+        onUnauthorized={reportAccess} onOpenSettings={() => setView('settings')} />
+    </View>
+  </>;
 }

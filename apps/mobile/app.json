@@ -5,6 +5,7 @@
     "version": "0.1.0",
     "icon": "../desktop/build/icon.png",
     "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "ai.brazier.mobile",
       "appleTeamId": "4U2WZ7WJT4",
