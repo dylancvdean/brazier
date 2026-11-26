@@ -34,3 +34,14 @@ test('inline: code, emphasis and links; unsafe link schemes stay text', () => {
   ]);
   assert.deepEqual(parseInline('snake_case_name and 2 * 3 * 4'), [{ type: 'text', text: 'snake_case_name and 2 * 3 * 4' }]);
 });
+
+test('links keep balanced parentheses, fences ignore inner openers, and headings keep a trailing #', () => {
+  assert.deepEqual(parseInline('[w](https://e.com/a_(b))'), [
+    { type: 'link', href: 'https://e.com/a_(b)', children: [{ type: 'text', text: 'w' }] },
+  ]);
+  assert.deepEqual(parseMarkdown('````md\n```js\nx\n```\n````'), [{ type: 'code', language: 'md', text: '```js\nx\n```' }]);
+  assert.deepEqual(parseMarkdown('# C#\n## Closed ##'), [
+    { type: 'heading', level: 1, children: [{ type: 'text', text: 'C#' }] },
+    { type: 'heading', level: 2, children: [{ type: 'text', text: 'Closed' }] },
+  ]);
+});
