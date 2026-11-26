@@ -110,11 +110,11 @@ export function IconButton({ glyph, label, onPress, disabled }: {
 }
 
 /** Bottom sheet for pickers, the mobile stand-in for the desktop's popovers. */
-export function Sheet({ title, visible, onClose, children }: {
-  title: string; visible: boolean; onClose: () => void; children: ReactNode;
+export function Sheet({ title, visible, onClose, onDismiss, children }: {
+  title: string; visible: boolean; onClose: () => void; onDismiss?: () => void; children: ReactNode;
 }) {
   const styles = useStyles();
-  return <Modal transparent visible={visible} animationType="slide" onRequestClose={onClose}>
+  return <Modal transparent visible={visible} animationType="slide" onRequestClose={onClose} onDismiss={onDismiss}>
     <Pressable style={styles.sheetBackdrop} onPress={onClose} accessibilityLabel={`Close ${title}`}>
       <Pressable style={styles.sheet} onPress={() => undefined}>
         <View style={styles.sheetHead}>
