@@ -640,6 +640,8 @@ type StoredServerSettings = Omit<ServerSettings, 'hasApiKeys' | 'keys'> & {
 
 type PersistedServerSettings = Omit<StoredServerSettings, 'apiKeys'> & {
   apiKeys: Array<PersistedApiKey | StoredApiKey>
+  /** Written by builds whose non-loopback listener serves pinned HTTPS. */
+  remoteTransport?: 'https'
 }
 
 const DEFAULT_SERVER_SETTINGS: StoredServerSettings = {
@@ -705,7 +707,9 @@ function loadServerSettings(): StoredServerSettings {
       apiKeys: loadedKeys.keys,
       // Older builds defaulted this to every interface without a meaningful
       // acknowledgement. Migrate those settings back to loopback.
-      localhostOnly: allowInsecureRemote ? parsed.localhostOnly !== false : true,
+      localhostOnly: allowInsecureRemote || parsed.remoteTransport === 'https'
+        ? parsed.localhostOnly !== false
+        : true,
       allowInsecureRemote,
       jitLoading: parsed.jitLoading !== false
     }
@@ -742,6 +746,7 @@ function saveServerSettings(settings: StoredServerSettings): void {
   const temporary = `${path}.${randomBytes(6).toString('hex')}.tmp`
   const persisted: PersistedServerSettings = {
     ...settings,
+    remoteTransport: 'https',
     apiKeys: settings.apiKeys.map(({ value, ...key }) => ({
       ...key,
       encryptedValue: safeStorage.encryptString(value).toString('base64')
@@ -1684,9 +1689,20 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       }
       const previous = loadServerSettings()
       saveServerSettings(next)
-      const launchChanged = (['enabled', 'port', 'apiKeyEnabled', 'localhostOnly', 'allowInsecureRemote', 'jitLoading'] as const)
-        .some((key) => previous[key] !== next[key])
-      if (launchChanged && daemon && profiles.current().kind === 'local') await restartLocalDaemon()
+      // startDaemon ignores every other launch setting while the server is off.
+      const launchChanged = previous.enabled !== next.enabled || (next.enabled &&
+        (['port', 'apiKeyEnabled', 'localhostOnly', 'allowInsecureRemote', 'jitLoading'] as const)
+          .some((key) => previous[key] !== next[key]))
+      if (launchChanged && daemon && profiles.current().kind === 'local') {
+        try {
+          await restartLocalDaemon()
+        } catch (cause) {
+          // Keep Brazier usable, e.g. when the new port is already taken.
+          saveServerSettings({ ...previous, apiKeys: loadServerSettings().apiKeys })
+          await restartLocalDaemon()
+          throw new Error(`The daemon could not start with these settings, so the previous settings were restored: ${cause instanceof Error ? cause.message : String(cause)}`)
+        }
+      }
       return publicServerSettings(next)
     }
   )
