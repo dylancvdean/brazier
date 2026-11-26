@@ -14,6 +14,7 @@
 		97590E5CD8B7C59F0F94B76F /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EF1A9E5B04B3F37F6FC741B /* ExpoModulesProvider.swift */; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
 		B7A1C0DE2E00000000000001 /* BrazierTLSPinning.m in Sources */ = {isa = PBXBuildFile; fileRef = B7A1C0DE2E00000000000002 /* BrazierTLSPinning.m */; };
+		B7A1C0DE2E00000000000003 /* BrazierLocalNetwork.m in Sources */ = {isa = PBXBuildFile; fileRef = B7A1C0DE2E00000000000004 /* BrazierLocalNetwork.m */; };
 		F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11748412D0307B40044C1D9 /* AppDelegate.swift */; };
 /* End PBXBuildFile section */
 
@@ -29,6 +30,7 @@
 		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		B7A1C0DE2E00000000000002 /* BrazierTLSPinning.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = BrazierTLSPinning.m; path = Brazier/BrazierTLSPinning.m; sourceTree = "<group>"; };
+		B7A1C0DE2E00000000000004 /* BrazierLocalNetwork.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = BrazierLocalNetwork.m; path = Brazier/BrazierLocalNetwork.m; sourceTree = "<group>"; };
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = Brazier/AppDelegate.swift; sourceTree = "<group>"; };
 		F11748442D0722820044C1D9 /* Brazier-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "Brazier-Bridging-Header.h"; path = "Brazier/Brazier-Bridging-Header.h"; sourceTree = "<group>"; };
 		F510F0B83BEDA9F2F58938C0 /* Pods-Brazier.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Brazier.debug.xcconfig"; path = "Target Support Files/Pods-Brazier/Pods-Brazier.debug.xcconfig"; sourceTree = "<group>"; };
@@ -51,6 +53,7 @@
 			children = (
 				F11748412D0307B40044C1D9 /* AppDelegate.swift */,
 				B7A1C0DE2E00000000000002 /* BrazierTLSPinning.m */,
+				B7A1C0DE2E00000000000004 /* BrazierLocalNetwork.m */,
 				F11748442D0722820044C1D9 /* Brazier-Bridging-Header.h */,
 				BB2F792B24A3F905000567C9 /* Supporting */,
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
@@ -326,6 +329,7 @@
 			files = (
 				F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */,
 				B7A1C0DE2E00000000000001 /* BrazierTLSPinning.m in Sources */,
+				B7A1C0DE2E00000000000003 /* BrazierLocalNetwork.m in Sources */,
 				97590E5CD8B7C59F0F94B76F /* ExpoModulesProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -7,6 +7,7 @@ import {
   ScrollView, StatusBar, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { parsePairingInvite } from '../../../packages/pairing/src/invite.ts';
+import { checkLocalNetwork } from './localNetwork';
 import { pinCertificate } from './tlsPinning';
 import {
   chatBranch, chatContext, claimInvite, daemonClient, DaemonError, messageText, pairingOrigin,
@@ -59,7 +60,10 @@ export function App() {
         const result = await daemonClient(fetch, credential).verify();
         if (active) setHost(result);
       } catch (error) {
-        if (active) reportAccess(error);
+        const reason = error instanceof DaemonError && error.status === undefined
+          ? await checkLocalNetwork(credential.origin, 5_000).then(() => error, (cause: unknown) => cause)
+          : error;
+        if (active) reportAccess(reason);
       } finally {
         checking = false;
       }
@@ -140,6 +144,7 @@ function Pairing({ onPaired }: { onPaired: (credential: Credential) => void }) {
       const target = { ...candidate, origin: pairingOrigin(candidate.origin, androidEmulator),
         pairingId: candidate.pairingId.trim(), code: candidate.code.trim() };
       if (!target.pairingId || !target.code) throw new Error('Enter the invitation ID and code.');
+      await checkLocalNetwork(target.origin);
       await pinCertificate(target.origin, target.certificateSha256);
       const preview = await previewInvite(fetch, target);
       setReview({ input: target, preview });
