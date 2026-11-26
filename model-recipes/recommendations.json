@@ -25,8 +25,12 @@
     "`skip_drafts: true` on an entry stops Brazier from offering the repository's",
     "speculative-decoding drafter, even when the file list contains one. PrismML's",
     "Bonsai drafter embeds the legacy group-128 embedding that only their llama.cpp",
-    "fork can read, so it is not recommended alongside the mainline Q2_g64/Q1_0",
-    "packs.",
+    "fork can read, so it is not recommended alongside the mainline Q1_0 pack.",
+    "Bonsai 2.5 pins Q2_0, the one pack of that repository upstream llama.cpp",
+    "loads; PTQ1_0 and PQ2_0 need PrismML's fork.",
+    "",
+    "A pinned quant matches a whole filename token, so `Q2_0` never selects a",
+    "`PQ2_0` file.",
     "",
     "`computer_use` recommends a screenshot-driven agent model (Fara1.5). Its",
     "vision projector is discovered automatically at resolve time, so the entry",
@@ -69,10 +73,10 @@
     {
       "min_gb": 16,
       "text": {
-        "id": "bonsai-27b-ternary-q2-g64-mainline",
-        "label": "Bonsai 27B (ternary)",
-        "repo_id": "prism-ml/Ternary-Bonsai-27B-gguf",
-        "quant": "Q2_g64",
+        "id": "bonsai-2.5-27b-ternary-q2-0-mainline",
+        "label": "Bonsai 2.5 27B (ternary)",
+        "repo_id": "prism-ml/Ternary-Bonsai-2.5-27B-GGUF",
+        "quant": "Q2_0",
         "skip_drafts": true,
         "fallback": {
           "id": "qwen3.5-9b-mainline",
@@ -81,7 +85,7 @@
           "quant": "by_memory",
           "summary": "A capable 9B Qwen model that runs with mainline llama.cpp."
         },
-        "summary": "Qwen3.6-27B at 2-bit ternary weights: about 5.9 GB, with roughly 95% of full-precision quality. Runs on upstream llama.cpp."
+        "summary": "Qwen3.8-27B at ternary weights, tuned for agents and tool calling: about 7.7 GB. Runs on upstream llama.cpp."
       },
       "image": {
         "id": "sd35-medium-complete",
@@ -162,11 +166,11 @@
     {
       "min_gb": 32,
       "text": {
-        "id": "gemma-4-26b-a4b-it",
-        "label": "Gemma 4 26B A4B it",
-        "repo_id": "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "id": "inkling-2-mini",
+        "label": "Inkling 2 Mini",
+        "repo_id": "bartowski/Inkling-2-Mini-GGUF",
         "quant": "by_memory",
-        "summary": "A 26B mixture-of-experts model with 4B active — fast to answer, and at this tier it fits at a quant that costs almost nothing."
+        "summary": "A 26B looped mixture-of-experts model with 3.4B active that reads text and images. Fits here at 4-bit."
       },
       "agent": {
         "id": "qwen3.6-27b-mtp",
@@ -213,11 +217,11 @@
     {
       "min_gb": 48,
       "text": {
-        "id": "gemma-4-26b-a4b-it",
-        "label": "Gemma 4 26B A4B it",
-        "repo_id": "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "id": "inkling-2-mini",
+        "label": "Inkling 2 Mini",
+        "repo_id": "bartowski/Inkling-2-Mini-GGUF",
         "quant": "by_memory",
-        "summary": "A 26B mixture-of-experts model with 4B active. At this tier it runs at full 8-bit precision."
+        "summary": "A 26B looped mixture-of-experts model with 3.4B active that reads text and images. At this tier it runs at full 8-bit precision."
       },
       "agent": {
         "id": "qwen3.6-27b-mtp",
@@ -264,11 +268,11 @@
     {
       "min_gb": 64,
       "text": {
-        "id": "gemma-4-26b-a4b-it",
-        "label": "Gemma 4 26B A4B it",
-        "repo_id": "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "id": "inkling-2-mini",
+        "label": "Inkling 2 Mini",
+        "repo_id": "bartowski/Inkling-2-Mini-GGUF",
         "quant": "by_memory",
-        "summary": "A 26B mixture-of-experts model with 4B active, at full 8-bit precision."
+        "summary": "A 26B looped mixture-of-experts model with 3.4B active that reads text and images, at full 8-bit precision."
       },
       "agent": {
         "id": "qwen3.6-27b-mtp",
@@ -308,11 +312,11 @@
     {
       "min_gb": 96,
       "text": {
-        "id": "gemma-4-26b-a4b-it",
-        "label": "Gemma 4 26B A4B it",
-        "repo_id": "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "id": "inkling-2-mini",
+        "label": "Inkling 2 Mini",
+        "repo_id": "bartowski/Inkling-2-Mini-GGUF",
         "quant": "by_memory",
-        "summary": "A 26B mixture-of-experts model with 4B active, at full 8-bit precision."
+        "summary": "A 26B looped mixture-of-experts model with 3.4B active that reads text and images, at full 8-bit precision."
       },
       "agent": {
         "id": "laguna-s-2.1",

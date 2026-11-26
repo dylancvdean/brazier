@@ -338,6 +338,17 @@ fn matches_rung(candidate: &Candidate, aliases: &[&str]) -> bool {
     aliases.iter().any(|alias| lower.contains(alias))
 }
 
+/// Whether a file group names this quant as a whole token, so a pinned `Q2_0`
+/// does not select a `PQ2_0` build.
+fn names_quant(group: &str, quant: &str) -> bool {
+    let lower = group.to_ascii_lowercase();
+    let part_of_name = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    lower.match_indices(quant).any(|(start, _)| {
+        !lower[..start].ends_with(part_of_name)
+            && !lower[start + quant.len()..].starts_with(part_of_name)
+    })
+}
+
 /// Prefer Unsloth's dynamic build of a rung over the plain one.
 ///
 /// `UD-…_XL` quants spend their bits where the model is most sensitive, so at
@@ -428,11 +439,10 @@ pub fn choose_quant_with_fraction(
 
 /// Pin a named quantisation rather than choosing by memory.
 pub fn find_quant(files: &[(String, Option<u64>)], quant: &str) -> Option<QuantChoice> {
-    let aliases = [quant.to_ascii_lowercase()];
-    let aliases: Vec<&str> = aliases.iter().map(String::as_str).collect();
+    let wanted = quant.to_ascii_lowercase();
     let mut matching: Vec<Candidate> = candidates(files)
         .into_iter()
-        .filter(|candidate| matches_rung(candidate, &aliases))
+        .filter(|candidate| names_quant(&candidate.group, &wanted))
         .collect();
     matching.sort_by(dynamic_first);
     matching.into_iter().next().map(|choice| QuantChoice {
@@ -946,10 +956,31 @@ mod tests {
         assert_eq!(choice.files, vec!["Ternary-Bonsai-27B-Q2_g64.gguf"]);
     }
 
-    /// The Bonsai recommendations pin the mainline-compatible packs and skip
-    /// the PrismML drafter, whose legacy group-128 embedding mainline llama.cpp
-    /// cannot read. A recommendation that forgets the skip would offer an
-    /// optional download that can never load.
+    /// Bonsai 2.5 publishes fork-only `PQ2_0` and `PTQ1_0` packs beside the
+    /// `Q2_0` one upstream llama.cpp loads; a substring match would take the
+    /// smaller `PQ2_0`.
+    #[test]
+    fn a_pinned_quant_matches_a_whole_name_token() {
+        let files: Vec<(String, Option<u64>)> = [
+            ("Ternary-Bonsai-2.5-27B-PTQ1_0.gguf", 6_000_000_000),
+            ("Ternary-Bonsai-2.5-27B-PQ2_0.gguf", 7_300_000_000),
+            ("Ternary-Bonsai-2.5-27B-PQ2_0-mtp.gguf", 7_500_000_000),
+            ("Ternary-Bonsai-2.5-27B-Q2_0.gguf", 7_700_000_000),
+            ("Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf", 7_900_000_000),
+            ("Ternary-Bonsai-2.5-27B-mmproj-Q8_0.gguf", 600_000_000),
+        ]
+        .into_iter()
+        .map(|(name, size)| (name.to_owned(), Some(size)))
+        .collect();
+
+        let choice = find_quant(&files, "Q2_0").unwrap();
+        assert_eq!(choice.files, vec!["Ternary-Bonsai-2.5-27B-Q2_0.gguf"]);
+        assert!(find_quant(&files, "Q2").is_none());
+    }
+
+    /// The Bonsai recommendations pin the packs upstream llama.cpp loads. The
+    /// first-generation repository also ships a PrismML drafter whose legacy
+    /// group-128 embedding mainline cannot read, so it skips drafts.
     #[test]
     fn bonsai_recommendations_are_mainline_only() {
         let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
@@ -961,12 +992,40 @@ mod tests {
             one_bit.skip_drafts,
             "1-bit Bonsai must not offer the dspark drafter"
         );
-        assert_eq!(ternary.repo_id, "prism-ml/Ternary-Bonsai-27B-gguf");
-        assert_eq!(ternary.quant.as_deref(), Some("Q2_g64"));
-        assert!(
-            ternary.skip_drafts,
-            "ternary Bonsai must not offer the dspark drafter"
-        );
+        assert_eq!(ternary.repo_id, "prism-ml/Ternary-Bonsai-2.5-27B-GGUF");
+        assert_eq!(ternary.quant.as_deref(), Some("Q2_0"));
+    }
+
+    /// Inkling 2 Mini needs 32 GB to hold a 4-bit build, which is also what
+    /// its publisher recommends; below that Gemma stays the chat model.
+    #[test]
+    fn inkling_is_the_chat_model_where_a_four_bit_build_fits() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        let chat = |memory| {
+            let tier = catalog.tier_for(gb(memory)).unwrap();
+            tier.text.as_ref().unwrap().repo_id.clone()
+        };
+        assert_eq!(chat(24), "unsloth/gemma-4-26B-A4B-it-GGUF");
+        for memory in [32, 48, 64, 96] {
+            assert_eq!(chat(memory), "bartowski/Inkling-2-Mini-GGUF");
+        }
+
+        let files: Vec<(String, Option<u64>)> = [
+            ("mmproj-Inkling-2-Mini-f16.gguf", 600_000_000),
+            ("Inkling-2-Mini-Q2_K.gguf", 11_900_000_000),
+            ("Inkling-2-Mini-Q3_K_M.gguf", 14_600_000_000),
+            ("Inkling-2-Mini-Q4_K_M.gguf", 18_700_000_000),
+            ("Inkling-2-Mini-Q5_K_M.gguf", 21_200_000_000),
+            ("Inkling-2-Mini-Q6_K.gguf", 24_700_000_000),
+            ("Inkling-2-Mini-Q8_0.gguf", 27_800_000_000),
+        ]
+        .into_iter()
+        .map(|(name, size)| (name.to_owned(), Some(size)))
+        .collect();
+        let quant = |memory| choose_quant(&files, gb(memory)).unwrap().quant.unwrap();
+        assert_eq!(quant(24), "Q3_K_M");
+        assert_eq!(quant(32), "Q4_K_M");
+        assert_eq!(quant(48), "Q8_0");
     }
 
     /// Nothing fitting is a fact worth stating, not a reason to show no model.
