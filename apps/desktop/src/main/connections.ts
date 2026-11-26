@@ -6,8 +6,9 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs'
-import { dirname } from 'node:path'
 import { isIP } from 'node:net'
+import { networkInterfaces } from 'node:os'
+import { dirname } from 'node:path'
 
 import { normalizeShareableOrigin } from '../../../../packages/pairing/src/invite'
 import { isRendererDevelopmentOrigin } from './rendererTrust'
@@ -656,6 +657,36 @@ export async function previewPairing(
     throw new Error('The daemon returned an invalid pairing preview.')
   }
   return { pairing, daemon }
+}
+
+const VIRTUAL_INTERFACE = /^(docker|br-|veth|virbr|vmnet|vboxnet|vEthernet|cni|flannel|podman|lxc|lxd|tailscale|utun|zt)/i
+
+function isPrivateIpv4(address: string): boolean {
+  const [a, b] = address.split('.').map(Number)
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+}
+
+export function localNetworkAddress(
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()
+): string | null {
+  const candidates = Object.entries(interfaces)
+    .flatMap(([name, entries]) => (entries ?? []).map((entry) => ({ name, ...entry })))
+    .filter((entry) => entry.family === 'IPv4' && !entry.internal && !entry.address.startsWith('169.254.'))
+  const physical = candidates.filter((entry) => !VIRTUAL_INTERFACE.test(entry.name))
+  return [physical, candidates]
+    .map((group) => group.find((entry) => isPrivateIpv4(entry.address)) ?? group[0])
+    .find(Boolean)?.address ?? null
+}
+
+export function localPairingOrigin(
+  activeAddress: string,
+  interfaces?: ReturnType<typeof networkInterfaces>
+): string | null {
+  const address = localNetworkAddress(interfaces)
+  if (!address) return null
+  const url = new URL(normalizeDaemonBaseUrl(activeAddress))
+  const port = url.port || (url.protocol === 'http:' ? '80' : '')
+  return normalizeShareableOrigin(`https://${address}${port ? `:${port}` : ''}`)
 }
 
 export async function verifyPairingOrigin(

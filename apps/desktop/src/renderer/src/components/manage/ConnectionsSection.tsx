@@ -69,6 +69,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
   const [createdPairing, setCreatedPairing] = useState<PairingInvite | null>(null)
   const [pairingPreviewReachable, setPairingPreviewReachable] = useState(true)
   const [inviteOrigin, setInviteOrigin] = useState<string | null>(null)
+  const [localOrigin, setLocalOrigin] = useState<string | null>(null)
   const [pairingCopied, setPairingCopied] = useState(false)
   const [review, setReview] = useState<{
     draft: RemoteProfileDraft
@@ -100,6 +101,18 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
   useEffect(() => {
     void reload()
   }, [reload])
+
+  useEffect(() => {
+    if (current?.kind !== 'local') {
+      setLocalOrigin(null)
+      return
+    }
+    let cancelled = false
+    void window.brazier.localPairingOrigin()
+      .then((origin) => { if (!cancelled) setLocalOrigin(origin) })
+      .catch(() => { if (!cancelled) setLocalOrigin(null) })
+    return () => { cancelled = true }
+  }, [current?.id, current?.kind])
 
   const reloadTrust = useCallback(async (): Promise<void> => {
     setTrustLoading(true)
@@ -301,7 +314,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
     setPairingCopied(false)
     setCreatedPairing(null)
     try {
-      const origin = normalizeShareableOrigin(originInput)
+      const origin = normalizeShareableOrigin(originInput.trim() || localOrigin || '')
       const { hostName, previewReachable } = await window.brazier.verifyPairingOrigin(origin)
       const created = await createDaemonPairing({
         clientName: pairingClientName,
@@ -661,13 +674,16 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
           <label>
             <span>Reachable daemon HTTPS address</span>
             <input
-              required
+              required={!localOrigin}
               type="url"
               value={originInput}
-              placeholder="https://brazier.example"
+              placeholder={localOrigin ?? 'https://brazier.example'}
               onChange={(event) => setInviteOrigin(event.target.value)}
             />
-            <small>Use the address the other device can reach through your HTTPS proxy or private network.</small>
+            <small>
+              Use the address the other device can reach through your HTTPS proxy or private network.
+              {localOrigin ? ' Leave blank to use this computer’s local network address.' : null}
+            </small>
           </label>
           <label>
             <span>Client name</span>
@@ -697,7 +713,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
             <button
               className="primary-action"
               type="submit"
-              disabled={!originInput.trim() || !pairingClientName.trim() || pairingScopes.length === 0 || working != null}
+              disabled={!(originInput.trim() || localOrigin) || !pairingClientName.trim() || pairingScopes.length === 0 || working != null}
             >
               {working === 'pair:create' ? <LoaderCircle className="spin" size={14} /> : <KeyRound size={14} />}
               Create pairing

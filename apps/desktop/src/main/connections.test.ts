@@ -6,7 +6,7 @@ import {
   statSync,
   writeFileSync
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, type NetworkInterfaceInfo } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -15,6 +15,8 @@ import {
   ConnectionProfileStore,
   claimPairingCredential,
   fetchDaemonInfo,
+  localNetworkAddress,
+  localPairingOrigin,
   normalizeDaemonBaseUrl,
   normalizePairingDaemonBaseUrl,
   verifyPairingOrigin
@@ -949,5 +951,36 @@ describe('connection profile lifecycle and switching', () => {
     expect((await manager.connection()).address).toBe('https://fast.example')
     expect(manager.allowsRendererNetworkUrl('https://fast.example/health')).toBe(true)
     expect(manager.allowsRendererNetworkUrl('https://slow.example/health')).toBe(false)
+  })
+})
+
+describe('local pairing origin', () => {
+  const entry = (address: string, internal = false, family: 'IPv4' | 'IPv6' = 'IPv4') => ({
+    address, internal, family, netmask: '', mac: '', cidr: null
+  }) as NetworkInterfaceInfo
+
+  it('prefers a private IPv4 address over loopback, link-local, and IPv6', () => {
+    const interfaces = {
+      lo: [entry('127.0.0.1', true)],
+      tun0: [entry('100.64.1.2'), entry('fe80::1', false, 'IPv6')],
+      wlan0: [entry('169.254.3.4'), entry('192.168.1.23')]
+    }
+    expect(localNetworkAddress(interfaces)).toBe('192.168.1.23')
+    expect(localPairingOrigin('http://127.0.0.1:7614', interfaces)).toBe('https://192.168.1.23:7614')
+  })
+
+  it('skips virtual bridges and keeps an HTTP default port', () => {
+    const interfaces = {
+      docker0: [entry('172.17.0.1')],
+      'br-1a2b': [entry('172.18.0.1')],
+      wlan0: [entry('192.168.1.23')]
+    }
+    expect(localNetworkAddress(interfaces)).toBe('192.168.1.23')
+    expect(localNetworkAddress({ docker0: [entry('172.17.0.1')] })).toBe('172.17.0.1')
+    expect(localPairingOrigin('http://127.0.0.1', interfaces)).toBe('https://192.168.1.23:80')
+  })
+
+  it('returns null without a non-loopback IPv4 address', () => {
+    expect(localPairingOrigin('http://127.0.0.1:7614', { lo: [entry('127.0.0.1', true)] })).toBeNull()
   })
 })
