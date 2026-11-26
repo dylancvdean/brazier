@@ -7,6 +7,7 @@ import {
   ScrollView, StatusBar, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { parsePairingInvite } from '../../../packages/pairing/src/invite.ts';
+import { pinCertificate } from './tlsPinning';
 import {
   chatBranch, chatContext, claimInvite, daemonClient, DaemonError, messageText, pairingOrigin,
   parseCredential, previewInvite, type Conversation, type Credential, type Host, type InviteInput,
@@ -38,7 +39,9 @@ export function App() {
   useEffect(() => {
     let active = true;
     void SecureStore.getItemAsync(credentialKey, options).then((saved) => {
-      if (active && saved) setCredential(parseCredential(saved, androidEmulator));
+      if (!active || !saved) return;
+      const stored = parseCredential(saved, androidEmulator);
+      return pinCertificate(stored.origin, stored.certificateSha256).then(() => { if (active) setCredential(stored); });
     }).catch(() => {
       if (active) setAccess({ message: 'Could not read the saved host credential.', pairAgain: true });
     }).finally(() => { if (active) setStarting(false); });
@@ -106,6 +109,11 @@ export function App() {
   </SafeAreaView>;
 }
 
+function inviteCertificate(invite: object): { certificateSha256?: string } {
+  return 'certificateSha256' in invite && typeof invite.certificateSha256 === 'string'
+    ? { certificateSha256: invite.certificateSha256 } : {};
+}
+
 function Pairing({ onPaired }: { onPaired: (credential: Credential) => void }) {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanning, setScanning] = useState(false);
@@ -132,6 +140,7 @@ function Pairing({ onPaired }: { onPaired: (credential: Credential) => void }) {
       const target = { ...candidate, origin: pairingOrigin(candidate.origin, androidEmulator),
         pairingId: candidate.pairingId.trim(), code: candidate.code.trim() };
       if (!target.pairingId || !target.code) throw new Error('Enter the invitation ID and code.');
+      await pinCertificate(target.origin, target.certificateSha256);
       const preview = await previewInvite(fetch, target);
       setReview({ input: target, preview });
     } catch (cause) {
@@ -193,7 +202,8 @@ function Pairing({ onPaired }: { onPaired: (credential: Credential) => void }) {
           setScanning(false);
           try {
             const invite = parse(data);
-            const candidate = { origin: invite.origin ?? '', pairingId: invite.pairingId, code: invite.code };
+            const candidate = { origin: invite.origin ?? '', pairingId: invite.pairingId, code: invite.code,
+              ...inviteCertificate(invite) };
             setInput(candidate);
             if (candidate.origin) void inspect(candidate);
           } catch (cause) {
@@ -210,7 +220,8 @@ function Pairing({ onPaired }: { onPaired: (credential: Credential) => void }) {
       <Action label="Review invite" disabled={busy || !inviteText.trim()} onPress={() => {
         try {
           const invite = parse(inviteText);
-          const candidate = { origin: invite.origin ?? input.origin, pairingId: invite.pairingId, code: invite.code };
+          const candidate = { origin: invite.origin ?? input.origin, pairingId: invite.pairingId, code: invite.code,
+            ...inviteCertificate(invite) };
           setInput(candidate);
           if (candidate.origin) void inspect(candidate);
           else setError('Enter the host address below to review this invite.');

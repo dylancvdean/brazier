@@ -326,7 +326,7 @@ pub fn service_api_key(data_dir: &Path, configured: Option<String>) -> anyhow::R
     Ok(stored)
 }
 
-fn write_new_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_new_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     use std::io::Write as _;
     #[cfg(not(windows))]
     let mut options = fs::OpenOptions::new();

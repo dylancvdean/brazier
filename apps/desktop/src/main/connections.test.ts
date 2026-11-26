@@ -60,6 +60,27 @@ afterEach(() => {
 })
 
 describe('connection profile URLs', () => {
+  it('probes the advertised origin with the pinned certificate and reports the pin', async () => {
+    const active = 'http://127.0.0.1:7614'
+    const advertised = 'https://192.168.1.23:7614'
+    const pin = 'a'.repeat(64)
+    const probe = vi.fn<typeof fetch>(async () => Response.json({ boot_id: 'daemon' }))
+    const pinnedProbe = vi.fn<typeof fetch>(async () => Response.json({ boot_id: 'daemon' }))
+    let pinned = false
+    const pinnedFetch_ = vi.fn((sha256: string) => {
+      expect(sha256).toBe(pin)
+      return { fetch: pinnedProbe, pinned: () => pinned }
+    })
+
+    await expect(verifyPairingOrigin(active, advertised, probe, pin, pinnedFetch_))
+      .resolves.toEqual({ previewReachable: true })
+    pinned = true
+    await expect(verifyPairingOrigin(active, advertised, probe, pin, pinnedFetch_))
+      .resolves.toEqual({ previewReachable: true, certificateSha256: pin })
+    expect(probe.mock.calls.every(([address]) => String(address).startsWith(active))).toBe(true)
+    expect(pinnedProbe.mock.calls.every(([address]) => String(address).startsWith(advertised))).toBe(true)
+  })
+
   it('checks the advertised origin against the active daemon without sending credentials', async () => {
     const active = 'http://127.0.0.1:7614'
     const advertised = 'https://brazier.example'

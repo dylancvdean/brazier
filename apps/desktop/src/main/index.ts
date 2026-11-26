@@ -157,6 +157,7 @@ type Connection = {
   api_key: string | null
   local_control_key: string | null
   pid?: number
+  tls_certificate_sha256?: string | null
 }
 
 let computerSafetyOverlay: BrowserWindow | null = null
@@ -639,6 +640,8 @@ type StoredServerSettings = Omit<ServerSettings, 'hasApiKeys' | 'keys'> & {
 
 type PersistedServerSettings = Omit<StoredServerSettings, 'apiKeys'> & {
   apiKeys: Array<PersistedApiKey | StoredApiKey>
+  /** Written by builds whose non-loopback listener serves pinned HTTPS. */
+  remoteTransport?: 'https'
 }
 
 const DEFAULT_SERVER_SETTINGS: StoredServerSettings = {
@@ -704,7 +707,9 @@ function loadServerSettings(): StoredServerSettings {
       apiKeys: loadedKeys.keys,
       // Older builds defaulted this to every interface without a meaningful
       // acknowledgement. Migrate those settings back to loopback.
-      localhostOnly: allowInsecureRemote ? parsed.localhostOnly !== false : true,
+      localhostOnly: allowInsecureRemote || parsed.remoteTransport === 'https'
+        ? parsed.localhostOnly !== false
+        : true,
       allowInsecureRemote,
       jitLoading: parsed.jitLoading !== false
     }
@@ -741,6 +746,7 @@ function saveServerSettings(settings: StoredServerSettings): void {
   const temporary = `${path}.${randomBytes(6).toString('hex')}.tmp`
   const persisted: PersistedServerSettings = {
     ...settings,
+    remoteTransport: 'https',
     apiKeys: settings.apiKeys.map(({ value, ...key }) => ({
       ...key,
       encryptedValue: safeStorage.encryptString(value).toString('base64')
@@ -858,9 +864,6 @@ async function startDaemon(): Promise<Connection> {
     if (!serverSettings.localhostOnly && !serverSettings.apiKeyEnabled) {
       throw new Error('A non-loopback server must require API-key authentication.')
     }
-    if (!serverSettings.localhostOnly && !serverSettings.allowInsecureRemote) {
-      throw new Error('Non-loopback plaintext access has not been explicitly acknowledged.')
-    }
     args.push('--host', serverSettings.localhostOnly ? '127.0.0.1' : '0.0.0.0', '--port', String(serverSettings.port))
     if (serverSettings.apiKeyEnabled) {
       // The desktop's own connection needs a credential too. If the user has
@@ -878,9 +881,8 @@ async function startDaemon(): Promise<Connection> {
     } else {
       args.push('--no-auth')
     }
-    // Authentication prevents unauthorized use but does not encrypt bearer
-    // credentials. The daemon requires this explicit acknowledgement for any
-    // plaintext non-loopback listener, with or without auth.
+    // Other devices use the daemon's pinned HTTPS certificate. Plaintext from
+    // them is only accepted with this explicit acknowledgement.
     if (!serverSettings.localhostOnly && serverSettings.allowInsecureRemote) {
       args.push('--allow-insecure-remote')
     }
@@ -960,6 +962,11 @@ async function startDaemon(): Promise<Connection> {
           if (daemon === child && Number.isInteger(connection.pid) && Number(connection.pid) > 0) {
             daemonProcessId = Number(connection.pid)
           }
+          if (daemon === child) {
+            localTlsCertificateSha256 = typeof connection.tls_certificate_sha256 === 'string'
+              ? connection.tls_certificate_sha256
+              : undefined
+          }
           settled = true
           clearTimeout(timeout)
           resolveConnection(connection)
@@ -972,6 +979,7 @@ async function startDaemon(): Promise<Connection> {
 }
 
 let daemonCleanup: Promise<void> = Promise.resolve()
+let localTlsCertificateSha256: string | undefined
 
 function trackDaemonCleanup(cleanup: Promise<void>): Promise<void> {
   const next = daemonCleanup.then(() => cleanup, () => cleanup)
@@ -1214,6 +1222,18 @@ function broadcastConnectionChanged(summary: ConnectionProfileSummary): void {
     if (window === computerSafetyOverlay || window.isDestroyed()) continue
     window.webContents.send('brazier:connection-changed', summary)
   }
+}
+
+/** Relaunch the owned daemon so saved listener settings take effect now. */
+async function restartLocalDaemon(): Promise<void> {
+  const profiles = connectionProfiles
+  if (!profiles) return
+  await agent.shutdown()
+  profiles.invalidateLocalConnection()
+  await stopLocalDaemonAndWait()
+  const ready = await profiles.connection()
+  agent.setConnection({ address: ready.address, apiKey: ready.api_key })
+  broadcastConnectionChanged(ready.profile)
 }
 
 async function resetForConnectionSwitch(ready: DaemonConnection): Promise<void> {
@@ -1547,9 +1567,18 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   )
   handleTrusted('brazier:connection-profiles:verify-pairing-origin', async (_event, origin: string) => {
     const active = await readyConnection()
-    const { previewReachable } = await verifyPairingOrigin(active.address, origin)
+    const local = active.profile.kind === 'local'
+    const verified = await verifyPairingOrigin(
+      active.address, origin, fetch, local ? localTlsCertificateSha256 : undefined
+    ).catch((error: unknown) => {
+      const settings = loadServerSettings()
+      if (local && (!settings.enabled || settings.localhostOnly)) {
+        throw new Error('Other devices cannot reach this daemon yet. In Manage → Server, enable the network server and turn off "Listen on localhost only", then save.')
+      }
+      throw error
+    })
     if (profiles.current().id !== active.profile.id) throw new Error('The selected connection changed. Try again.')
-    return { hostName: active.daemon.daemon?.display_name ?? active.profile.name, previewReachable }
+    return { hostName: active.daemon.daemon?.display_name ?? active.profile.name, ...verified }
   })
   handleTrusted('brazier:connection-profiles:local-pairing-origin', async () => {
     if (profiles.current().kind !== 'local') return null
@@ -1637,7 +1666,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   handleTrusted('brazier:server-settings', (): ServerSettings => publicServerSettings(loadServerSettings()))
   handleTrusted(
     'brazier:save-server-settings',
-    (_event, requested: Omit<ServerSettings, 'hasApiKeys' | 'keys'>) => {
+    async (_event, requested: Omit<ServerSettings, 'hasApiKeys' | 'keys'>) => {
       const port = Number(requested.port)
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
         throw new Error('Server port must be between 1 and 65535.')
@@ -1649,9 +1678,6 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       if (enabled && !localhostOnly && !apiKeyEnabled) {
         throw new Error('A non-loopback server must require an API key.')
       }
-      if (enabled && !localhostOnly && !allowInsecureRemote) {
-        throw new Error('Acknowledge plaintext network exposure before listening beyond localhost.')
-      }
       const next: StoredServerSettings = {
         enabled,
         port,
@@ -1661,7 +1687,22 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
         jitLoading: requested.jitLoading !== false,
         apiKeys: loadServerSettings().apiKeys
       }
+      const previous = loadServerSettings()
       saveServerSettings(next)
+      // startDaemon ignores every other launch setting while the server is off.
+      const launchChanged = previous.enabled !== next.enabled || (next.enabled &&
+        (['port', 'apiKeyEnabled', 'localhostOnly', 'allowInsecureRemote', 'jitLoading'] as const)
+          .some((key) => previous[key] !== next[key]))
+      if (launchChanged && daemon && profiles.current().kind === 'local') {
+        try {
+          await restartLocalDaemon()
+        } catch (cause) {
+          // Keep Brazier usable, e.g. when the new port is already taken.
+          saveServerSettings({ ...previous, apiKeys: loadServerSettings().apiKeys })
+          await restartLocalDaemon()
+          throw new Error(`The daemon could not start with these settings, so the previous settings were restored: ${cause instanceof Error ? cause.message : String(cause)}`)
+        }
+      }
       return publicServerSettings(next)
     }
   )

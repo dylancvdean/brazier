@@ -35,7 +35,8 @@
         "barcodeScannerEnabled": true
       }],
       "expo-secure-store",
-      "./plugins/with-ios-scenes.cjs"
+      "./plugins/with-ios-scenes.cjs",
+      "./plugins/with-tls-pinning.cjs"
     ]
   }
 }

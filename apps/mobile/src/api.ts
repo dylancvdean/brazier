@@ -1,7 +1,7 @@
-import { normalizeShareableOrigin, PAIRING_SCOPES, type PairingScope } from '../../../packages/pairing/src/invite.ts';
+import { isCertificateSha256, normalizeShareableOrigin, PAIRING_SCOPES, type PairingScope } from '../../../packages/pairing/src/invite.ts';
 
-export type InviteInput = { origin: string; pairingId: string; code: string };
-export type Credential = { origin: string; instanceId: string; apiKey: string };
+export type InviteInput = { origin: string; pairingId: string; code: string; certificateSha256?: string };
+export type Credential = { origin: string; instanceId: string; apiKey: string; certificateSha256?: string };
 export type Preview = {
   daemon: { instance_id: string; display_name: string };
   pairing: { id: string; client_name: string; scopes: PairingScope[]; expires_at: number };
@@ -37,8 +37,14 @@ function scopesAreValid(scopes: unknown): scopes is PairingScope[] {
 export function parseCredential(raw: string, allowAndroidEmulator = false): Credential {
   const value = JSON.parse(raw) as Credential;
   if (typeof value?.origin !== 'string' || typeof value.instanceId !== 'string' || !value.instanceId ||
-      typeof value.apiKey !== 'string' || !value.apiKey) throw new Error('Invalid stored host credential.');
-  return { origin: pairingOrigin(value.origin, allowAndroidEmulator), instanceId: value.instanceId, apiKey: value.apiKey };
+      typeof value.apiKey !== 'string' || !value.apiKey ||
+      (value.certificateSha256 !== undefined && !isCertificateSha256(value.certificateSha256))) {
+    throw new Error('Invalid stored host credential.');
+  }
+  return {
+    origin: pairingOrigin(value.origin, allowAndroidEmulator), instanceId: value.instanceId, apiKey: value.apiKey,
+    ...(value.certificateSha256 ? { certificateSha256: value.certificateSha256 } : {}),
+  };
 }
 
 type MobileRequestInit = {
@@ -122,7 +128,10 @@ export async function claimInvite(fetch: Request, input: InviteInput, preview: P
   if (typeof data?.api_key !== 'string' || !data.api_key) {
     throw new DaemonError('The host did not return a credential. It may have used the invitation; ask for a fresh invite.');
   }
-  return { origin: input.origin, instanceId: preview.daemon.instance_id, apiKey: data.api_key };
+  return {
+    origin: input.origin, instanceId: preview.daemon.instance_id, apiKey: data.api_key,
+    ...(input.certificateSha256 ? { certificateSha256: input.certificateSha256 } : {}),
+  };
 }
 
 function isChatModel(model: Model): boolean {

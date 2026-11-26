@@ -208,3 +208,19 @@ test('an SSE error is not silently treated as a completed answer', async () => {
   await assert.rejects(consumeChatStream(stream, new AbortController().signal, () => {}),
     (error) => error instanceof DaemonError && error.message === 'runtime failed');
 });
+
+test('carries the daemon certificate pin from the invite into the stored credential', async () => {
+  const certificateSha256 = 'b'.repeat(64);
+  const invite = parsePairingInvite(encodePairingInvite({
+    version: 1, origin, pairingId: 'invite', code: 'code', hostName: 'Host',
+    expiresAt: until, scopes: ['inference'], certificateSha256,
+  }));
+  assert.equal(invite && 'certificateSha256' in invite ? invite.certificateSha256 : undefined, certificateSha256);
+  assert.equal(parsePairingInvite(encodePairingInvite({
+    version: 1, origin, pairingId: 'invite', code: 'code', hostName: 'Host',
+    expiresAt: until, scopes: ['inference'], certificateSha256: 'not-a-hash',
+  })), null);
+  const pinned = { ...credential, certificateSha256 };
+  assert.deepEqual(parseCredential(JSON.stringify(pinned)), pinned);
+  assert.throws(() => parseCredential(JSON.stringify({ ...credential, certificateSha256: 'B'.repeat(64) })));
+});

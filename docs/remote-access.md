@@ -1,7 +1,7 @@
 # Remote daemon trust
 
-`brazierd` speaks plaintext HTTP. Its safe default is therefore a loopback
-listener. Authentication prevents unauthorized calls, but it does not encrypt
+`brazierd` speaks plaintext HTTP to loopback callers and HTTPS to other
+devices. Its default is a loopback listener. Authentication prevents unauthorized calls, but it does not encrypt
 bearer credentials, conversations, attachments, or model output in transit.
 
 For remote access, keep Brazier on `127.0.0.1:7614` and put one of these in
@@ -19,15 +19,22 @@ If desktop can verify the origin only through `/health`, it warns that the
 preview route could not be verified. Check your proxy and daemon version before
 sharing. Confirmation is still required.
 
-A direct non-loopback HTTP listener is an explicit unsafe escape hatch:
+A direct non-loopback listener serves HTTPS with a self-signed certificate
+created once per data directory (`<data-dir>/tls/`). Its SHA-256 is printed in
+the ready line as `tls_certificate_sha256`, and pairing invites created by the
+desktop for its local daemon carry it as `certificateSha256`. Desktop and mobile
+accept exactly that certificate for the invite's host and port, so LAN pairing
+on `https://<lan-ip>:<port>` works without a proxy or a CA:
 
 ```sh
-brazierd --service --host 0.0.0.0 --allow-insecure-remote
+brazierd --service --host 0.0.0.0
 ```
 
-The flag is required even when authentication is enabled because a bearer sent
-over ordinary HTTP can be read and replayed by anyone able to observe the
-connection. Do not expose that listener to the public internet.
+Loopback callers can still use plaintext HTTP on the same port. Plaintext from
+other devices gets `426 Upgrade Required` unless `--allow-insecure-remote` is
+set. That flag is an unsafe escape hatch: a bearer sent over ordinary HTTP can
+be read and replayed by anyone able to observe the connection. Do not expose
+that listener to the public internet.
 
 ## Owner and paired clients
 
