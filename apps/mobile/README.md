@@ -62,8 +62,8 @@ No Expo account or EAS token is required.
 
 Open `apps/mobile/ios/Brazier.xcworkspace` after installing the workspace
 packages and running `pod install --deployment` in `apps/mobile/ios`.
-The shared scheme is `Brazier`. In Xcode, choose **Product → Xcode Cloud →
-Create Workflow**, select **Brazier Mobile**, and connect this GitHub repository.
+The shared scheme is `Brazier`. In Xcode, choose **Integrate → Create Workflow**,
+select **Brazier**, and connect this GitHub repository.
 Configure the workflow as follows:
 
 - Name: **Master → TestFlight**.
