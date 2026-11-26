@@ -6288,7 +6288,7 @@ function ServerSection(props: SectionProps): React.JSX.Element {
               const snippet = buildServerCurlSnippet({
                 port: settings.port,
                 modelId: props.selectedModel || props.models[0]?.id,
-                apiKeyEnabled: settings.apiKeyEnabled
+                apiKeyEnabled: settings.apiKeyEnabled || settings.pairedRemoteAccess
               })
               void window.brazier.copyText(snippet).then(() => {
                 setCopiedCurl(true)
