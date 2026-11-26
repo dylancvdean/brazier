@@ -138,29 +138,21 @@ impl RateGate {
 static SEARCH_GATE: Mutex<Option<RateGate>> = Mutex::const_new(None);
 static FETCH_GATE: Mutex<Option<RateGate>> = Mutex::const_new(None);
 
-static SEARCH_NEXT_SLOT: std::sync::Mutex<Option<tokio::time::Instant>> =
-    std::sync::Mutex::new(None);
+static SEARCH_LAST_SENT: Mutex<Option<tokio::time::Instant>> = Mutex::const_new(None);
 
-/// Reserve the next DuckDuckGo send time, `SEARCH_COOLDOWN` after the last one.
-fn reserve_search_slot(
-    next: &mut Option<tokio::time::Instant>,
-    now: tokio::time::Instant,
-) -> tokio::time::Instant {
-    let slot = next.map_or(now, |next| next.max(now));
-    *next = Some(slot + SEARCH_COOLDOWN);
-    slot
+/// How long to wait so a request goes out `SEARCH_COOLDOWN` after the last one.
+fn search_wait(last: Option<tokio::time::Instant>, now: tokio::time::Instant) -> Duration {
+    last.map_or(Duration::ZERO, |last| {
+        SEARCH_COOLDOWN.saturating_sub(now.saturating_duration_since(last))
+    })
 }
 
-/// Wait for a send slot, so concurrent and consecutive searches queue instead
-/// of failing.
+/// Queue DuckDuckGo requests instead of failing them. The lock is held across
+/// the wait and stamped on wake, so a late wakeup cannot shorten the next gap.
 async fn search_cooldown() {
-    let slot = reserve_search_slot(
-        &mut SEARCH_NEXT_SLOT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-        tokio::time::Instant::now(),
-    );
-    tokio::time::sleep_until(slot).await;
+    let mut last = SEARCH_LAST_SENT.lock().await;
+    tokio::time::sleep(search_wait(*last, tokio::time::Instant::now())).await;
+    *last = Some(tokio::time::Instant::now());
 }
 
 async fn gate(cell: &Mutex<Option<RateGate>>, max: usize, window: Duration) -> anyhow::Result<()> {
@@ -967,15 +959,16 @@ mod tests {
     #[test]
     fn consecutive_searches_are_spaced_by_the_cooldown() {
         let now = tokio::time::Instant::now();
-        let mut next = None;
-        assert_eq!(reserve_search_slot(&mut next, now), now);
-        assert_eq!(reserve_search_slot(&mut next, now), now + SEARCH_COOLDOWN);
+        assert_eq!(search_wait(None, now), Duration::ZERO);
+        assert_eq!(search_wait(Some(now), now), SEARCH_COOLDOWN);
         assert_eq!(
-            reserve_search_slot(&mut next, now),
-            now + SEARCH_COOLDOWN * 2
+            search_wait(Some(now), now + SEARCH_COOLDOWN / 3),
+            SEARCH_COOLDOWN - SEARCH_COOLDOWN / 3
         );
-        let later = now + SEARCH_COOLDOWN * 10;
-        assert_eq!(reserve_search_slot(&mut next, later), later);
+        assert_eq!(
+            search_wait(Some(now), now + SEARCH_COOLDOWN * 2),
+            Duration::ZERO
+        );
     }
 
     #[test]
