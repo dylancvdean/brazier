@@ -1576,6 +1576,40 @@ fn lora_tags(loras: &[crate::model_settings::ResolvedLora]) -> String {
         .collect()
 }
 
+/// The binary's own option list; empty when it cannot be run.
+async fn help_text(binary: &Path) -> String {
+    let mut command = Command::new(binary);
+    command.arg("-h").stdin(Stdio::null());
+    if let Some(dir) = binary.parent() {
+        prepend_library_path(command.as_std_mut(), dir);
+    }
+    command.output().await.map_or_else(
+        |_| String::new(),
+        |output| {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+                + &String::from_utf8_lossy(&output.stderr)
+        },
+    )
+}
+
+/// Newer sd-cli releases take `--auto-fit on|off` and default to on; earlier
+/// ones take a bare `--auto-fit` and default to off.
+fn auto_fit_takes_value(help: &str) -> bool {
+    help.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("--auto-fit") && line.contains("on|off")
+    })
+}
+
+fn auto_fit_args(enabled: Option<bool>, takes_value: bool) -> Vec<&'static str> {
+    match (enabled, takes_value) {
+        (Some(true), true) => vec!["--auto-fit", "on"],
+        (Some(false), true) => vec!["--auto-fit", "off"],
+        (Some(true), false) => vec!["--auto-fit"],
+        _ => Vec::new(),
+    }
+}
+
 /// Apply a model's diffusion settings to an sd-cli command line.
 ///
 /// Returns the prompt to use, which is the given one plus any LoRA tags. Every
@@ -1648,9 +1682,11 @@ async fn apply_diffusion_profile(
     if profile.diffusion_fa.unwrap_or(false) {
         command.arg("--diffusion-fa");
     }
-    if profile.auto_fit.unwrap_or(false) {
-        command.arg("--auto-fit");
-    }
+    let program = PathBuf::from(command.as_std().get_program());
+    command.args(auto_fit_args(
+        profile.auto_fit,
+        auto_fit_takes_value(&help_text(&program).await),
+    ));
     if let Some(value) = profile.max_vram {
         command.arg("--max-vram").arg(value.to_string());
     }
@@ -2404,6 +2440,20 @@ mod tests {
             effective_timeout(derived, Some(60)),
             Duration::from_secs(60)
         );
+    }
+
+    #[test]
+    fn auto_fit_follows_the_binary_syntax() {
+        let valued = "  --diffusion-fa   deprecated\n  --auto-fit       on|off (default: on). Preserve --backend\n";
+        let bare = "  --auto-fit       automatically choose devices\n";
+        assert!(auto_fit_takes_value(valued));
+        assert!(!auto_fit_takes_value(bare));
+        assert!(!auto_fit_takes_value(""));
+        assert_eq!(auto_fit_args(Some(true), true), ["--auto-fit", "on"]);
+        assert_eq!(auto_fit_args(Some(false), true), ["--auto-fit", "off"]);
+        assert_eq!(auto_fit_args(Some(true), false), ["--auto-fit"]);
+        assert!(auto_fit_args(Some(false), false).is_empty());
+        assert!(auto_fit_args(None, true).is_empty());
     }
 
     #[tokio::test]
