@@ -466,13 +466,39 @@ fn mtp_head_family(path: &Path) -> Option<String> {
     (!family.is_empty()).then(|| family.to_owned())
 }
 
-/// Where a model's launch-time companions live: its own folder, then the
-/// publisher's MTP folder beside it.
-fn draft_directories(model_path: &Path) -> Vec<PathBuf> {
+/// Folders a model's companions can sit in: its own, and the repository
+/// folder above when the model is in a per-quant folder named after its quant
+/// (`UD-Q6_K_XL/Model-UD-Q6_K_XL-00001-of-00004.gguf`), which is how sharded
+/// builds are published while the projector stays at the repository root.
+fn companion_directories(model_path: &Path) -> Vec<PathBuf> {
     let Some(directory) = model_path.parent() else {
         return Vec::new();
     };
-    vec![directory.to_path_buf(), directory.join(MTP_HEAD_DIRECTORY)]
+    let mut directories = vec![directory.to_path_buf()];
+    let in_quant_folder = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .zip(model_path.file_stem().and_then(|stem| stem.to_str()))
+        .is_some_and(|(folder, stem)| {
+            stem.to_ascii_lowercase()
+                .contains(&format!("-{}", folder.to_ascii_lowercase()))
+        });
+    if in_quant_folder && let Some(repository) = directory.parent() {
+        directories.push(repository.to_path_buf());
+    }
+    directories
+}
+
+/// Where a model's drafters live: each companion folder, then the
+/// publisher's MTP folder inside it.
+fn draft_directories(model_path: &Path) -> Vec<PathBuf> {
+    companion_directories(model_path)
+        .into_iter()
+        .flat_map(|directory| {
+            let heads = directory.join(MTP_HEAD_DIRECTORY);
+            [directory, heads]
+        })
+        .collect()
 }
 
 fn draft_family_prefix(path: &Path) -> Option<String> {
@@ -922,10 +948,10 @@ pub fn is_projector_file(path: &Path) -> bool {
 }
 
 pub fn projector_for_model(model_path: &Path) -> Option<PathBuf> {
-    let directory = model_path.parent()?;
-    std::fs::read_dir(directory)
-        .ok()?
-        .flatten()
+    companion_directories(model_path)
+        .into_iter()
+        .filter_map(|directory| std::fs::read_dir(directory).ok())
+        .flat_map(|entries| entries.flatten())
         .map(|entry| entry.path())
         .find(|path| {
             path.extension()
@@ -1917,9 +1943,11 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Ok(());
     };
-    let mut projectors = Vec::new();
+    let heads = directory.join(MTP_HEAD_DIRECTORY);
+    let head_entries = std::fs::read_dir(&heads).into_iter().flatten();
+    let mut companions = Vec::new();
     let mut has_weight = false;
-    for entry in entries.flatten() {
+    for entry in entries.chain(head_entries).flatten() {
         let path = entry.path();
         if !path
             .extension()
@@ -1927,8 +1955,10 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
         {
             continue;
         }
-        if is_projector(&path) {
-            projectors.push(path);
+        // Drafters are hidden from the library, so they go with the last
+        // weights too rather than staying behind where nothing can remove them.
+        if is_projector(&path) || is_speculative_draft_file(&path) {
+            companions.push(path);
         } else {
             has_weight = true;
         }
@@ -1936,10 +1966,11 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
     if has_weight {
         return Ok(());
     }
-    for path in projectors {
+    for path in companions {
         std::fs::remove_file(&path)
             .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
     }
+    let _ = std::fs::remove_dir(&heads);
     Ok(())
 }
 
@@ -2140,6 +2171,44 @@ mod tests {
         delete_model(dir.path(), "gguf:acme/vision/model-Q4_K_M.gguf", &[]).unwrap();
         assert!(!model.exists());
         assert!(!projector.exists());
+    }
+
+    #[test]
+    fn deleting_the_last_weights_removes_a_separate_mtp_head() {
+        let dir = tempdir().unwrap();
+        let repo = "unsloth/Qwen3.8-27B-GGUF";
+        let q4 = download_destination(dir.path(), repo, "Qwen3.8-27B-UD-Q4_K_XL.gguf").unwrap();
+        let q8 = download_destination(dir.path(), repo, "Qwen3.8-27B-Q8_0.gguf").unwrap();
+        let head = download_destination(dir.path(), repo, "MTP/mtp-Qwen3.8-27B-Q4_0.gguf").unwrap();
+        std::fs::create_dir_all(head.parent().unwrap()).unwrap();
+        for path in [&q4, &q8, &head] {
+            std::fs::write(path, b"gguf").unwrap();
+        }
+        let id = |name: &str| format!("gguf:{repo}/{name}");
+        delete_model(dir.path(), &id("Qwen3.8-27B-UD-Q4_K_XL.gguf"), &[]).unwrap();
+        assert!(head.exists(), "the other quant still uses the head");
+        delete_model(dir.path(), &id("Qwen3.8-27B-Q8_0.gguf"), &[]).unwrap();
+        assert!(!head.exists());
+        assert!(!q8.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn a_build_in_its_quant_folder_uses_the_repository_projector() {
+        let dir = tempdir().unwrap();
+        let folder = dir.path().join("UD-Q6_K_XL");
+        std::fs::create_dir(&folder).unwrap();
+        let model = folder.join("Ornith-1.5-122B-UD-Q6_K_XL-00001-of-00004.gguf");
+        let projector = dir.path().join("mmproj-F16.gguf");
+        std::fs::write(&model, b"weights").unwrap();
+        std::fs::write(&projector, b"proj").unwrap();
+        assert_eq!(projector_for_model(&model), Some(projector));
+
+        // A folder that is not the model's quant folder is not looked above.
+        let other = dir.path().join("models");
+        std::fs::create_dir(&other).unwrap();
+        let unrelated = other.join("gemma-Q4_K_M.gguf");
+        std::fs::write(&unrelated, b"weights").unwrap();
+        assert_eq!(projector_for_model(&unrelated), None);
     }
 
     #[test]
