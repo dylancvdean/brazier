@@ -33,15 +33,20 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
   const [error, setError] = useState('');
   const [showModels, setShowModels] = useState(false);
   const alive = useRef(true);
-  // The history as last loaded or stored. A generation that finishes after this
-  // screen is gone (the host was switched) still adds its result to the file.
-  const stored = useRef<HistoryEntry[]>([]);
   const set = (change: Partial<GenerateForm>) => setForm((previous) => ({ ...previous, ...change }));
 
-  function store(next: HistoryEntry[]) {
-    stored.current = next;
-    if (alive.current) setHistory(next);
-    try { saveHistory(credential, next); } catch { /* History is a convenience; the result is still shown. */ }
+  // Changes are applied to the saved file, not to what this screen loaded. A
+  // generation can outlive its screen (the host was switched) and save its result
+  // from there, and a later change here must not write an older list over it.
+  async function changeHistory(change: (saved: HistoryEntry[]) => HistoryEntry[]) {
+    try {
+      const next = change(await loadHistory(credential));
+      saveHistory(credential, next);
+      if (alive.current) setHistory(next);
+    } catch {
+      // History is a convenience; the change still shows for this session.
+      if (alive.current) setHistory(change);
+    }
   }
 
   function report(cause: unknown) {
@@ -63,10 +68,7 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
 
   useEffect(() => {
     alive.current = true;
-    loadHistory(credential).then((saved) => {
-      stored.current = saved;
-      if (alive.current) setHistory(saved);
-    }, () => undefined);
+    loadHistory(credential).then((saved) => { if (alive.current) setHistory(saved); }, () => undefined);
     return () => { alive.current = false; };
   }, [api]);
 
@@ -106,7 +108,7 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
       const result = await api.generate(form.modality, body);
       const entry = historyEntry(`${Date.now()}-${result.blob.sha256.slice(0, 8)}`, form.modality, body, result,
         new Date().toISOString());
-      store(addHistory(stored.current, entry));
+      await changeHistory((saved) => addHistory(saved, entry));
       if (alive.current) setShown(entry);
     } catch (cause) {
       if (!alive.current) return;
@@ -131,7 +133,7 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
   }
 
   function remove(entry: HistoryEntry) {
-    store(history.filter(({ id }) => id !== entry.id));
+    void changeHistory((saved) => saved.filter(({ id }) => id !== entry.id));
     if (shown?.id === entry.id) setShown(null);
   }
 
