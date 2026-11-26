@@ -91,7 +91,8 @@ test('the installed list keeps one entry per model and drops damaged ones', () =
   const installed = installedFrom('Owner/Repo', choice);
   assert.equal(installed.id, 'gguf--Owner--Repo--dir_m-Q4.gguf');
   assert.equal(modelId('o/n', { runtime: 'mlx', entry: '' }), 'mlx--o--n');
-  assert.equal(installed.name, 'Owner/Repo · m-Q4.gguf');
+  assert.equal(installed.name, 'm-Q4');
+  assert.equal(installedFrom('mlx-community/Tiny-4bit', { ...choice, runtime: 'mlx', entry: '' }).name, 'Tiny-4bit');
   const list = addInstalled(addInstalled([], installed), { ...installed, size: 10 });
   assert.deepEqual(list.map(({ size }) => size), [10]);
   assert.deepEqual(parseInstalled(JSON.stringify(list)), list);

@@ -16,7 +16,9 @@ export function modelId(slug: string, choice: Pick<ModelChoice, 'runtime' | 'ent
 export function installedFrom(slug: string, choice: ModelChoice): InstalledModel {
   return {
     id: modelId(slug, choice), slug, runtime: choice.runtime, entry: choice.entry, size: choice.size,
-    name: choice.runtime === 'mlx' ? slug : `${slug} · ${choice.name}`, files: choice.files.map(({ path }) => path),
+    // Short enough for the model chip; the Models screen shows the repository beside it.
+    name: choice.runtime === 'mlx' ? slug.slice(slug.indexOf('/') + 1) : choice.name.replace(/\.gguf$/i, ''),
+    files: choice.files.map(({ path }) => path),
   };
 }
 

@@ -19,7 +19,14 @@ corepack enable
 pnpm install --frozen-lockfile
 pnpm --filter @brazier/mobile check
 pnpm --filter @brazier/mobile test
+pnpm --filter @brazier/mobile llama:artifacts
 ```
+
+`llama:artifacts` downloads the prebuilt llama.cpp libraries for `llama.rn`
+(an iOS xcframework and Android `.so` files) and checks them against the
+SHA-256 values in the package. The package would do this in its install script,
+which this workspace does not run. Repeat it after `llama.rn` is reinstalled;
+native builds fail without it.
 
 The iOS project is committed for Xcode Cloud. Expo generates the Android
 project locally; it is not committed.
@@ -122,6 +129,23 @@ launch check locally after building a Release simulator app:
 ```sh
 bash apps/mobile/scripts/smoke-ios.sh <simulator-udid> <path-to-Brazier.app>
 ```
+
+## Models on this device
+
+**This device** sits next to the paired hosts in Settings and works with no
+host paired. Its chats are text only: tools, web access, Generate, Agent and
+voice need a host and are not shown. Conversations are saved in the app's
+documents on the phone, and so are the models.
+
+Open **Models** to add one: type a Hugging Face repository as `owner/name`,
+choose **List files**, and download a GGUF file. The screen shows each file's
+size and the free space, and lists what is stored with a **Delete** action.
+Only public repositories work; there is no search.
+
+GGUF models run through llama.cpp (`llama.rn`, pinned to the latest stable
+release, 0.12.9), using Metal on an iPhone and the CPU in the iOS Simulator.
+`src/local/engine.ts` is the interface Chat talks to; a paired host and this
+device both implement it, and each on-device runtime is a `Runtime` behind it.
 
 ## Pair and chat
 

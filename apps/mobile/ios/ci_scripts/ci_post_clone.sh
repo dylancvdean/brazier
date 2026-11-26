@@ -19,6 +19,8 @@ export PATH="$tools/node_modules/.bin:$PATH"
 pnpm install --frozen-lockfile --ignore-scripts
 pnpm --filter @brazier/mobile --fail-if-no-match check
 pnpm --filter @brazier/mobile --fail-if-no-match test
+# Installs skip package scripts; llama.rn's native libraries are fetched and checksum-verified here.
+pnpm --filter @brazier/mobile --fail-if-no-match llama:artifacts
 
 cd apps/mobile/ios
 # Xcode build phases run in a separate shell, so persist the Node location.

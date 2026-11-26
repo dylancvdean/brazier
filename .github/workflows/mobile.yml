@@ -33,6 +33,8 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm --filter @brazier/mobile --fail-if-no-match check
       - run: pnpm --filter @brazier/mobile --fail-if-no-match test
+      # Installs skip package scripts, so llama.rn's checksum-verified native libraries are fetched here.
+      - run: pnpm --filter @brazier/mobile --fail-if-no-match llama:artifacts
       - run: pod install --deployment
         working-directory: apps/mobile/ios
       - name: Build Release with embedded JavaScript

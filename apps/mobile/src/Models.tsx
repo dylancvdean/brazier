@@ -138,6 +138,7 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
         ? <Text style={styles.emptyText}>No models yet. Add one above to chat on this device.</Text> : null}
       {installed.map((model) => <View key={model.id} style={styles.card}>
         <Text style={styles.body}>{model.name}</Text>
+        <Text style={styles.listMeta}>{model.slug}</Text>
         <Text style={styles.listMeta}>{runtimeNames[model.runtime]}  ·  {formatBytes(model.size)}
           {usable.length && !usable.includes(model.runtime) ? '  ·  cannot run on this device' : ''}</Text>
         <View style={styles.row}><Action label="Delete" danger onPress={() => remove(model)} /></View>
