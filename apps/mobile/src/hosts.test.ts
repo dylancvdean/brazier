@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  emptyIndex, hostId, parseIndex, parsePreferences, removeHost, renameHost, selectHost, upsertHost,
+  DEVICE_ID, emptyIndex, hostId, parseIndex, parsePreferences, removeHost, renameHost, selectHost, upsertHost,
 } from './hosts.ts';
 
 test('pairing a host adds it and makes it active; pairing it again replaces it', () => {
@@ -39,4 +39,13 @@ test('host ids are safe storage keys and preferences fall back to the system the
   assert.deepEqual(parsePreferences('{"theme":"neon","disabledTools":["web_search",3]}'),
     { theme: 'system', disabledTools: ['web_search'] });
   assert.deepEqual(parsePreferences('not json'), { theme: 'system', disabledTools: [] });
+});
+
+test('"This device" can be the active entry with or without paired hosts', () => {
+  assert.deepEqual(parseIndex(JSON.stringify({ active: DEVICE_ID, hosts: [] })), { active: DEVICE_ID, hosts: [] });
+  assert.equal(selectHost(emptyIndex, DEVICE_ID).active, DEVICE_ID);
+  const paired = upsertHost(selectHost(emptyIndex, DEVICE_ID), { id: 'a', name: 'A' });
+  assert.equal(paired.active, 'a');
+  assert.equal(removeHost(selectHost(paired, DEVICE_ID), 'a').active, DEVICE_ID);
+  assert.equal(removeHost(paired, 'a').active, null);
 });

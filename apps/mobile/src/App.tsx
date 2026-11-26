@@ -5,7 +5,9 @@ import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Text, useC
 import { daemonClient, DaemonError, UnreachableError, type Credential, type Host } from './api.ts';
 import { Chat } from './Chat.tsx';
 import { Generate } from './Generate.tsx';
-import { defaultPreferences, hostId, renameHost, selectHost, type Preferences } from './hosts.ts';
+import { defaultPreferences, DEVICE_ID, hostId, renameHost, selectHost, type Preferences } from './hosts.ts';
+import { deviceBackend, deviceEngine } from './local/device.ts';
+import { Models } from './Models.tsx';
 import { checkLocalNetwork } from './localNetwork';
 import { Pairing } from './Pairing.tsx';
 import { hostLabel, Settings } from './Settings.tsx';
@@ -42,7 +44,7 @@ function Shell({ preferences, onPreferences }: {
   const palette = useTheme();
   const [saved, setSaved] = useState<SavedHosts>({ index: emptyIndex, credentials: {} });
   const [starting, setStarting] = useState(true);
-  const [view, setView] = useState<'chat' | 'settings' | 'pairing' | 'generate'>('chat');
+  const [view, setView] = useState<'chat' | 'settings' | 'pairing' | 'generate' | 'models'>('chat');
   const [generateOpened, setGenerateOpened] = useState(false);
   // Agent is mounted on first use and then kept, so a running task survives a visit to Chat.
   const [agent, setAgent] = useState<'unopened' | 'shown' | 'hidden'>('unopened');
@@ -53,7 +55,15 @@ function Shell({ preferences, onPreferences }: {
   // (and sends the new host's key) before that host's identity is checked.
   const [verified, setVerified] = useState<{ credential: Credential; host: Host } | null>(null);
   const activeId = saved.index.active;
+  const onDevice = activeId === DEVICE_ID;
   const credential: Credential | null = activeId ? saved.credentials[activeId] ?? null : null;
+  const hostBackend = useMemo(() => credential ? daemonClient(fetch, credential) : null, [credential]);
+  const [modelsRevision, setModelsRevision] = useState(0);
+
+  // A model loaded for "This device" is not kept in memory while a host is in use.
+  useEffect(() => {
+    if (!onDevice && !starting) void deviceEngine.unload().catch(() => undefined);
+  }, [onDevice, starting]);
 
   useEffect(() => {
     let active = true;
@@ -132,29 +142,50 @@ function Shell({ preferences, onPreferences }: {
 
   if (starting) return <View style={styles.empty}><ActivityIndicator color={palette.accent} /></View>;
 
-  if (view === 'pairing' || !credential) {
+  if (view === 'pairing' || (!credential && !onDevice)) {
     return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
       <View style={styles.header}><Text style={styles.brand}>Brazier</Text>
         <Text style={styles.subtitle}>Your own AI, on the go</Text></View>
       {storageError ? <Text accessibilityRole="alert" style={[styles.error, { marginHorizontal: 18 }]}>{storageError}</Text> : null}
-      <Pairing onCancel={credential ? () => setView('settings') : undefined} onPaired={async (issued, name) => {
+      <Pairing onCancel={credential || onDevice ? () => setView('settings') : undefined} onPaired={async (issued, name) => {
         const index = await saveHost(saved.index, issued, name);
         setSaved({ index, credentials: { ...saved.credentials, [hostId(issued)]: issued } });
         setStorageError('');
         setView('chat');
       }} />
+      {!credential && !onDevice ? <View style={{ paddingHorizontal: 18, paddingBottom: 12 }}>
+        <Action label="Use models on this device instead" quiet
+          onPress={() => { void applyIndex(selectHost(saved.index, DEVICE_ID)); setView('chat'); }} />
+      </View> : null}
     </KeyboardAvoidingView>;
   }
 
-  const host = verified?.credential === credential ? verified.host : null;
-  const name = hostLabel(saved.index, hostId(credential), credential.origin);
+  const host = credential && verified?.credential === credential ? verified.host : null;
+  const name = credential ? hostLabel(saved.index, hostId(credential), credential.origin) : 'This device';
 
   const settings = <Settings saved={saved} theme={preferences.theme} error={storageError}
       onTheme={(theme) => onPreferences({ theme })}
       onSelect={(id) => { void applyIndex(selectHost(saved.index, id)); setView('chat'); }}
       onRename={(id, next) => void applyIndex(renameHost(saved.index, id, next))}
-      onRemove={(id) => void remove(id)} onAdd={() => setView('pairing')} onClose={() => setView('chat')} />;
+      onRemove={(id) => void remove(id)} onAdd={() => setView('pairing')} onModels={() => setView('models')}
+      onClose={() => setView('chat')} />;
+  const models = <Models onClose={() => setView(onDevice ? 'chat' : 'settings')}
+    onChanged={() => setModelsRevision((value) => value + 1)} />;
 
+  if (view === 'models' && !onDevice) return models;
+
+  // Chat stays mounted behind Settings and Models so a draft or a running reply survives the visit.
+  if (onDevice || !credential || !hostBackend) {
+    return <>
+      {view === 'settings' ? settings : view === 'models' ? models : null}
+      <View style={view === 'chat' ? styles.flex : { display: 'none' }}>
+        <Chat key={DEVICE_ID} backend={deviceBackend} credential={null} hostName="this device" modelsRevision={modelsRevision}
+          disabledTools={[]} onDisabledTools={() => undefined} onUnauthorized={() => undefined}
+          onOpenSettings={() => setView('settings')} onOpenModels={() => setView('models')}
+          onOpenGenerate={() => undefined} onOpenAgent={() => undefined} />
+      </View>
+    </>;
+  }
 
   if (view === 'settings' && (access || !host)) return settings;
 
@@ -188,7 +219,7 @@ function Shell({ preferences, onPreferences }: {
         onUnauthorized={reportAccess} onClose={() => setView('chat')} />
     </View> : null}
     <View style={main === 'chat' ? styles.flex : { display: 'none' }}>
-      <Chat key={hostId(credential)} credential={credential} hostName={name}
+      <Chat key={hostId(credential)} backend={hostBackend} credential={credential} hostName={name}
         disabledTools={preferences.disabledTools} onDisabledTools={(disabledTools) => onPreferences({ disabledTools })}
         onUnauthorized={reportAccess} onOpenSettings={() => setView('settings')} onOpenAgent={() => setAgent('shown')}
         onOpenGenerate={() => { setGenerateOpened(true); setView('generate'); }} />
