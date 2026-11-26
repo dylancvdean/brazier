@@ -43,6 +43,11 @@ pub const FETCH_MAX_OUTPUT_CHARS: usize = 8_000;
 const SEARCH_RATE_LIMIT: usize = 30;
 const SEARCH_RATE_WINDOW: Duration = Duration::from_secs(60);
 
+/// Minimum spacing between outbound DuckDuckGo requests. A model that issues
+/// several searches in one turn otherwise sends them back to back, which
+/// DuckDuckGo answers with its bot-check page.
+const SEARCH_COOLDOWN: Duration = Duration::from_millis(1500);
+
 /// Page fetches share a gentler budget so doc-heavy workflows are not
 /// throttled.
 const FETCH_RATE_LIMIT: usize = 40;
@@ -132,6 +137,23 @@ impl RateGate {
 
 static SEARCH_GATE: Mutex<Option<RateGate>> = Mutex::const_new(None);
 static FETCH_GATE: Mutex<Option<RateGate>> = Mutex::const_new(None);
+
+static SEARCH_LAST_SENT: Mutex<Option<tokio::time::Instant>> = Mutex::const_new(None);
+
+/// How long to wait so a request goes out `SEARCH_COOLDOWN` after the last one.
+fn search_wait(last: Option<tokio::time::Instant>, now: tokio::time::Instant) -> Duration {
+    last.map_or(Duration::ZERO, |last| {
+        SEARCH_COOLDOWN.saturating_sub(now.saturating_duration_since(last))
+    })
+}
+
+/// Queue DuckDuckGo requests instead of failing them. The lock is held across
+/// the wait and stamped on wake, so a late wakeup cannot shorten the next gap.
+async fn search_cooldown() {
+    let mut last = SEARCH_LAST_SENT.lock().await;
+    tokio::time::sleep(search_wait(*last, tokio::time::Instant::now())).await;
+    *last = Some(tokio::time::Instant::now());
+}
 
 async fn gate(cell: &Mutex<Option<RateGate>>, max: usize, window: Duration) -> anyhow::Result<()> {
     let mut guard = cell.lock().await;
@@ -295,6 +317,7 @@ async fn ddg_get(
     safesearch: &str,
 ) -> anyhow::Result<(reqwest::StatusCode, String)> {
     gate(&SEARCH_GATE, SEARCH_RATE_LIMIT, SEARCH_RATE_WINDOW).await?;
+    search_cooldown().await;
     // The HTML endpoint accepts a form POST (q, b, kl, kp); the lite endpoint
     // takes the same shape. Only honest headers are sent: our identifying user
     // agent, a normal Accept, and no navigation-fetch hints.
@@ -932,6 +955,21 @@ pub fn fetch_content_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consecutive_searches_are_spaced_by_the_cooldown() {
+        let now = tokio::time::Instant::now();
+        assert_eq!(search_wait(None, now), Duration::ZERO);
+        assert_eq!(search_wait(Some(now), now), SEARCH_COOLDOWN);
+        assert_eq!(
+            search_wait(Some(now), now + SEARCH_COOLDOWN / 3),
+            SEARCH_COOLDOWN - SEARCH_COOLDOWN / 3
+        );
+        assert_eq!(
+            search_wait(Some(now), now + SEARCH_COOLDOWN * 2),
+            Duration::ZERO
+        );
+    }
 
     #[test]
     fn lite_results_are_parsed_and_unwrapped() {
