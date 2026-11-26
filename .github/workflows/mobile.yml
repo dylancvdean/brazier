@@ -1,0 +1,59 @@
+name: Mobile iOS
+
+on:
+  pull_request:
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/pairing/**'
+      - '.github/workflows/mobile.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/pairing/**'
+      - '.github/workflows/mobile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-launch:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm --filter @brazier/mobile --fail-if-no-match check
+      - run: pnpm --filter @brazier/mobile --fail-if-no-match test
+      - run: pod install --deployment
+        working-directory: apps/mobile/ios
+      - name: Build Release with embedded JavaScript
+        run: >-
+          xcodebuild -workspace apps/mobile/ios/Brazier.xcworkspace
+          -scheme Brazier -configuration Release -sdk iphonesimulator
+          -derivedDataPath "$RUNNER_TEMP/mobile-build"
+          CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- build
+      - name: Launch Release twice without Metro
+        run: |
+          device="$(xcrun simctl list devices available --json | node -e '
+            let input = "";
+            process.stdin.on("data", chunk => input += chunk);
+            process.stdin.on("end", () => {
+              const devices = Object.entries(JSON.parse(input).devices)
+                .filter(([runtime]) => runtime.includes("iOS"))
+                .sort(([a], [b]) => b.localeCompare(a, undefined, { numeric: true }))
+                .flatMap(([, devices]) => devices);
+              const device = devices.find(device => device.name.startsWith("iPhone"));
+              if (!device) process.exit(1);
+              console.log(device.udid);
+            });
+          ')"
+          xcrun simctl boot "$device"
+          bash apps/mobile/scripts/smoke-ios.sh "$device" \
+            "$RUNNER_TEMP/mobile-build/Build/Products/Release-iphonesimulator/Brazier.app"

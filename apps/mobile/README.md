@@ -68,6 +68,12 @@ Configure the workflow as follows:
 
 - Name: **Master → TestFlight**.
 - Start condition: **Branch Changes**, with the exact branch **master**.
+- Files and Folders: **Custom Rules → Start a build**, with **Any File**
+  under `/apps/mobile` or `/packages/pairing` (recursive). These are the mobile
+  app and its shared invite code; unrelated desktop, Rust, and documentation
+  changes do not start TestFlight builds. Use a manual start for root dependency
+  or workspace configuration changes that affect mobile without changing either
+  of these folders.
 - Action: **Archive**, iOS, scheme **Brazier**, configuration **Release**.
 - Distribution preparation: **TestFlight (Internal Testing Only)**.
 - Post-action: **TestFlight Internal Testing**, group **Brazier Internal**.
@@ -97,6 +103,22 @@ and the updated lockfile. Do not commit `Pods`, `.xcode.env.local`, signing
 credentials, or Xcode user data. TestFlight installs include the JavaScript
 bundle and do not need Metro. External testers may require Beta App Review;
 App Store publication requires a separate App Review submission.
+
+The local `plugins/with-ios-scenes.cjs` config plugin moves React Native startup
+to `SceneDelegate` and preserves that change during prebuild. Its Swift source
+is `plugins/SceneDelegate.swift`; the appended copy in `AppDelegate.swift` is
+generated. `app.json` supplies the scene manifest. This is required when building
+with the iOS 27 SDK: UIKit terminates apps using only the old app delegate
+lifecycle before they display a screen. Scene callbacks also forward lifecycle
+events and links to the Expo app delegate.
+
+The **Mobile iOS** GitHub workflow builds and launches a Release simulator app
+for mobile changes, checking that it stays alive without Metro. To repeat the
+launch check locally after building a Release simulator app:
+
+```sh
+bash apps/mobile/scripts/smoke-ios.sh <simulator-udid> <path-to-Brazier.app>
+```
 
 ## Pair and chat
 

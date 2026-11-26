@@ -13,7 +13,16 @@
         "usesNonExemptEncryption": false
       },
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "Connect to your own Brazier host on your local network."
+        "NSLocalNetworkUsageDescription": "Connect to your own Brazier host on your local network.",
+        "UIApplicationSceneManifest": {
+          "UIApplicationSupportsMultipleScenes": false,
+          "UISceneConfigurations": {
+            "UIWindowSceneSessionRoleApplication": [{
+              "UISceneConfigurationName": "Default Configuration",
+              "UISceneDelegateClassName": "$(PRODUCT_MODULE_NAME).SceneDelegate"
+            }]
+          }
+        }
       }
     },
     "android": {
@@ -25,7 +34,8 @@
         "recordAudioAndroid": false,
         "barcodeScannerEnabled": true
       }],
-      "expo-secure-store"
+      "expo-secure-store",
+      "./plugins/with-ios-scenes.cjs"
     ]
   }
 }
