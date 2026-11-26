@@ -1,6 +1,7 @@
 import { Check, Copy, KeyRound, LoaderCircle, RefreshCw, Trash2 } from 'lucide-react'
 import { type ClipboardEvent, type FormEvent, useCallback, useEffect, useState } from 'react'
 import QRCode from 'react-qr-code'
+import { ensureHealthyDaemon } from '../../daemonClient'
 import {
   encodePairingInvite,
   normalizeShareableOrigin,
@@ -316,6 +317,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
     try {
       const origin = normalizeShareableOrigin(originInput.trim() || localOrigin || '')
       const { hostName, previewReachable, certificateSha256 } = await window.brazier.verifyPairingOrigin(origin)
+      await ensureHealthyDaemon()
       const created = await createDaemonPairing({
         clientName: pairingClientName,
         scopes: pairingScopes,

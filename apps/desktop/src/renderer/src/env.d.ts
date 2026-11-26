@@ -120,6 +120,7 @@ declare global {
         localhostOnly: boolean
         allowInsecureRemote: boolean
         jitLoading: boolean
+        pairedRemoteAccess: boolean
         keys: Array<{ id: string; name: string; createdAt: number }>
       }>
       saveServerSettings(settings: {
@@ -137,6 +138,7 @@ declare global {
         localhostOnly: boolean
         allowInsecureRemote: boolean
         jitLoading: boolean
+        pairedRemoteAccess: boolean
         keys: Array<{ id: string; name: string; createdAt: number }>
       }>
       addServerApiKey(name: string): Promise<{
@@ -153,6 +155,7 @@ declare global {
         localhostOnly: boolean
         allowInsecureRemote: boolean
         jitLoading: boolean
+        pairedRemoteAccess: boolean
         keys: Array<{ id: string; name: string; createdAt: number }>
       }>
       copyText(text: string): Promise<void>

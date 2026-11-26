@@ -177,8 +177,10 @@ async fn main() -> anyhow::Result<()> {
     let interrupted_downloads = db.interrupt_running_download_jobs().await?;
     db.interrupt_running_agent_sessions().await?;
     let api_keys = resolve_api_keys(&args, &data_dir)?;
-    let local_control_key = (!args.service && args.host.is_loopback())
-        .then(|| format!("brazier_local_{}", Uuid::new_v4().simple()));
+    // Local-control routes also require a loopback peer, so a LAN listener can
+    // still hand this proof to the desktop that spawned it.
+    let local_control_key =
+        (!args.service).then(|| format!("brazier_local_{}", Uuid::new_v4().simple()));
     let http = reqwest::Client::builder()
         .user_agent(format!("brazier/{}", env!("CARGO_PKG_VERSION")))
         .build()?;

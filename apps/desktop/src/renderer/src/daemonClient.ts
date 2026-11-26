@@ -1,4 +1,4 @@
-import { daemonFetch, daemonVerificationPending, setDaemonAvailability } from './daemonAvailability'
+import { daemonAvailability, daemonFetch, daemonVerificationPending, setDaemonAvailability } from './daemonAvailability'
 
 type Connection = Awaited<ReturnType<typeof window.brazier.getConnection>>
 type ConnectionProfile = Connection['profile']
@@ -76,4 +76,12 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (response.status === 204 || response.status === 205) return undefined as T
   return response.json() as Promise<T>
+}
+
+/** Re-verify the daemon on demand, e.g. after main restarted it for pairing. */
+export async function ensureHealthyDaemon(): Promise<void> {
+  if (daemonAvailability() === 'healthy') return
+  const result = await window.brazier.verifyConnection()
+  if (result.status !== 'healthy') throw new Error(result.message)
+  setDaemonAvailability('healthy')
 }

@@ -2322,11 +2322,11 @@ export function App(): React.JSX.Element {
     try {
       const server = await window.brazier
         .getServerSettings()
-        .catch(() => ({ port: 11435, apiKeyEnabled: false }))
+        .catch(() => ({ port: 11435, apiKeyEnabled: false, pairedRemoteAccess: false }))
       const snippet = buildServerCurlSnippet({
         port: server.port,
         modelId: selectedModel || effectiveLocalModels[0]?.id,
-        apiKeyEnabled: server.apiKeyEnabled
+        apiKeyEnabled: server.apiKeyEnabled || server.pairedRemoteAccess
       })
       await window.brazier.copyText(snippet)
     } catch (cause) {

@@ -52,6 +52,7 @@ export type BrazierServerSettings = {
   localhostOnly: boolean
   allowInsecureRemote: boolean
   jitLoading: boolean
+  pairedRemoteAccess: boolean
   keys: BrazierServerKey[]
 }
 
@@ -193,7 +194,7 @@ contextBridge.exposeInMainWorld('brazier', {
   },
   getServerSettings: (): Promise<BrazierServerSettings> => invoke('brazier:server-settings'),
   saveServerSettings: (
-    settings: Omit<BrazierServerSettings, 'hasApiKeys' | 'keys'>
+    settings: Omit<BrazierServerSettings, 'hasApiKeys' | 'keys' | 'pairedRemoteAccess'>
   ): Promise<BrazierServerSettings> => invoke('brazier:save-server-settings', settings),
   addServerApiKey: (
     name: string
