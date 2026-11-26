@@ -69,12 +69,13 @@ Configure the workflow as follows:
 - Name: **Master → TestFlight**.
 - Start condition: **Branch Changes**, with the exact branch **master**.
 - Action: **Archive**, iOS, scheme **Brazier**, configuration **Release**.
-- Distribution: **TestFlight and App Store**.
-- Post-action: **TestFlight Internal Testing**, select your internal tester group.
+- Distribution preparation: **TestFlight (Internal Testing Only)**.
+- Post-action: **TestFlight Internal Testing**, group **Brazier Internal**.
 - Use the latest stable Xcode/macOS image compatible with the app.
 
-Apple stores the workflow settings in Xcode Cloud, not a GitHub Actions YAML
-file. Confirm the branch condition in App Store Connect before enabling it.
+The connected [Master → TestFlight workflow](https://appstoreconnect.apple.com/teams/e3cc8a33-1ac0-4665-98c9-31cd24d0f31c/xcode-cloud/products/5a1c8513-5003-4686-a295-5ac62e266e80/workflows/92686A25-B109-4793-B628-F736D591076B)
+uses `master` for both code-push and manual starts. Apple stores these settings
+in Xcode Cloud, not a GitHub Actions YAML file.
 The committed `ios/ci_scripts/ci_post_clone.sh` installs Node 24 and pinned
 pnpm, checks the mobile app, and installs locked CocoaPods dependencies.
 `ci_pre_xcodebuild.sh` uses Xcode Cloud's build number so each TestFlight
