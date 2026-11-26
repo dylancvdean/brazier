@@ -9,8 +9,24 @@ export type Preview = {
 export type Host = { displayName: string; scopes: PairingScope[] };
 export type Model = { id: string; engine?: string; owned_by?: string; capabilities?: { output_modalities: string[] } };
 export type Conversation = { id: string; title: string };
-export type Message = { id: string; parent_id: string | null; role: string; content: unknown; status?: string };
-export type OpenAiMessage = { role: string; content: string };
+export type Message = {
+  id: string; parent_id: string | null; role: string; content: unknown; status?: string;
+  tool_calls?: unknown[] | null; tool_call_id?: string | null;
+};
+export type OpenAiMessage = { role: string; content: string; tool_calls?: unknown[]; tool_call_id?: string };
+export type Tool = { name: string; title: string; description?: string; network: boolean; source?: string; server_name?: string };
+export type ToolCall = {
+  call_id: string; name: string; arguments: string; output: string; is_error: boolean;
+  /** Files the tool produced, such as a generated image. */
+  media?: { sha256: string; mime_type: string; name?: string | null }[];
+};
+/** A message the host produced while running tools; saved so later turns keep the tool results. */
+export type TranscriptMessage = { role: string; content: unknown; tool_calls?: unknown[] | null; tool_call_id?: string | null };
+export type ChatEvents = {
+  onToken: (token: string) => void;
+  onToolCall?: (call: ToolCall) => void;
+  onTranscript?: (message: TranscriptMessage) => void;
+};
 
 export class DaemonError extends Error {
   readonly status?: number;
@@ -20,6 +36,9 @@ export class DaemonError extends Error {
     this.status = status;
   }
 }
+
+/** The request never got an answer from the host. */
+export class UnreachableError extends DaemonError {}
 
 export function pairingOrigin(input: string, allowAndroidEmulator = false): string {
   if (allowAndroidEmulator) {
@@ -53,7 +72,7 @@ type MobileRequestInit = {
 };
 type Request = (url: string, init: MobileRequestInit) => Promise<Pick<Response, 'ok' | 'status' | 'json' | 'body'>>;
 
-async function request(fetch: Request, origin: string, path: string, init: MobileRequestInit, key?: string): ReturnType<Request> {
+export async function request(fetch: Request, origin: string, path: string, init: MobileRequestInit, key?: string): ReturnType<Request> {
   const headers = new Headers(init.headers);
   if (init.body) headers.set('content-type', 'application/json');
   if (key) headers.set('authorization', `Bearer ${key}`);
@@ -62,7 +81,7 @@ async function request(fetch: Request, origin: string, path: string, init: Mobil
     response = await fetch(origin + path, { ...init, headers, credentials: 'omit', redirect: 'error' });
   } catch (error) {
     if (init.signal?.aborted) throw error;
-    throw new DaemonError('Could not reach the host. Check the address, network, and HTTPS certificate.');
+    throw new UnreachableError('Could not reach the host. Check the address, network, and HTTPS certificate.');
   }
   if (response.ok) return response;
   const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
@@ -149,7 +168,8 @@ export function daemonClient(fetch: Request, credential: Credential) {
   const post = (body: object, signal?: AbortSignal) => ({ method: 'POST', body: JSON.stringify(body), signal });
   const messagesPath = (id: string) => `/api/v1/conversations/${encodeURIComponent(id)}/messages`;
   const createMessage = (id: string, message: {
-    parent_id: string | null; role: 'user' | 'assistant'; content: string; model?: string;
+    parent_id: string | null; role: string; content: unknown; model?: string;
+    tool_calls?: unknown[] | null; tool_call_id?: string | null; source?: string; metadata?: object;
   }) => json<Message>(messagesPath(id), post(message));
   return {
     async verify(): Promise<Host> {
@@ -183,13 +203,23 @@ export function daemonClient(fetch: Request, credential: Credential) {
       const user = await createMessage(id, { parent_id: viewedBranch.at(-1)?.id ?? null, role: 'user', content });
       return { user, history: [...viewedBranch, user] };
     },
-    async chat(model: string, messages: OpenAiMessage[], signal: AbortSignal, onToken: (token: string) => void): Promise<string> {
+    async tools(): Promise<Tool[]> {
+      return (await json<{ data: Tool[] }>('/api/v1/tools')).data;
+    },
+    /** `tools` are the names the host may run for the model; omit or pass none for a plain chat. */
+    async chat(
+      model: string, messages: OpenAiMessage[], signal: AbortSignal, events: ChatEvents | ChatEvents['onToken'],
+      tools: readonly string[] = [],
+    ): Promise<string> {
       const response = await request(fetch, credential.origin, '/v1/chat/completions', {
-        ...post({ model, messages, stream: true }, signal),
+        ...post({
+          model, messages, stream: true,
+          ...(tools.length ? { builtin_tools: true, builtin_tool_names: tools } : {}),
+        }, signal),
         headers: { accept: 'text/event-stream', 'x-brazier-mode': 'chat' },
       }, credential.apiKey);
       if (!response.body) throw new DaemonError('The host did not return a chat stream.');
-      return consumeChatStream(response.body, signal, onToken);
+      return consumeChatStream(response.body, signal, events);
     },
   };
 }
@@ -214,8 +244,17 @@ export function chatBranch(messages: Message[]): Message[] {
   return branch.reverse();
 }
 
+const wireContent = (content: unknown) => typeof content === 'string' ? content : JSON.stringify(content ?? '');
+
 export function chatContext(messages: Message[]): OpenAiMessage[] {
-  return messages.flatMap((message) => {
+  return messages.flatMap((message): OpenAiMessage[] => {
+    if (message.role === 'tool') {
+      return message.tool_call_id
+        ? [{ role: 'tool', tool_call_id: message.tool_call_id, content: wireContent(message.content) }] : [];
+    }
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      return [{ role: 'assistant', content: wireContent(message.content), tool_calls: message.tool_calls }];
+    }
     const content = messageText(message.content);
     return content.trim() && ['system', 'user', 'assistant'].includes(message.role)
       ? [{ role: message.role, content }]
@@ -223,9 +262,35 @@ export function chatContext(messages: Message[]): OpenAiMessage[] {
   });
 }
 
+/** Tool calls the model made in the saved messages, with each result filled in from its tool message. */
+export function toolCallsOf(messages: readonly Message[]): Map<string, ToolCall[]> {
+  const byMessage = new Map<string, ToolCall[]>();
+  const byCall = new Map<string, ToolCall>();
+  for (const message of messages) {
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      const calls = message.tool_calls.flatMap((value, index): ToolCall[] => {
+        const call = value as { id?: unknown; function?: { name?: unknown; arguments?: unknown } };
+        if (typeof call?.function?.name !== 'string') return [];
+        const args = call.function.arguments;
+        return [{
+          call_id: typeof call.id === 'string' ? call.id : `${message.id}-${index}`, name: call.function.name,
+          arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}), output: '', is_error: false,
+        }];
+      });
+      for (const call of calls) byCall.set(call.call_id, call);
+      byMessage.set(message.id, calls);
+    } else if (message.role === 'tool' && message.tool_call_id) {
+      const call = byCall.get(message.tool_call_id);
+      if (call) call.output = messageText(message.content) || wireContent(message.content);
+    }
+  }
+  return byMessage;
+}
+
 export async function consumeChatStream(
-  body: ReadableStream<Uint8Array>, signal: AbortSignal, onToken: (token: string) => void,
+  body: ReadableStream<Uint8Array>, signal: AbortSignal, events: ChatEvents | ChatEvents['onToken'],
 ): Promise<string> {
+  const { onToken, onToolCall, onTranscript } = typeof events === 'function' ? { onToken: events } as ChatEvents : events;
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let result = '';
@@ -256,11 +321,23 @@ export async function consumeChatStream(
         }
         const payload = JSON.parse(data) as {
           error?: { message?: string } | string;
-          choices?: { delta?: { content?: string } }[];
+          choices?: { delta?: { content?: string; tool_calls?: { function?: { name?: string } }[] }; finish_reason?: string | null }[];
+          brazier?: { tool_call?: ToolCall; transcript_message?: TranscriptMessage };
         };
         if (payload.error) throw new DaemonError(typeof payload.error === 'string' ? payload.error :
           payload.error.message ?? 'Chat generation failed.');
-        const token = payload.choices?.[0]?.delta?.content;
+        if (payload.brazier?.tool_call) onToolCall?.(payload.brazier.tool_call);
+        if (payload.brazier?.transcript_message) {
+          // Text the model wrote before calling tools is saved with that round, so the reply restarts after it.
+          if (payload.brazier.transcript_message.role === 'assistant') result = '';
+          onTranscript?.(payload.brazier.transcript_message);
+        }
+        const choice = payload.choices?.[0];
+        if (choice?.finish_reason === 'tool_calls' && choice.delta?.tool_calls?.length) {
+          const names = choice.delta.tool_calls.map((call) => call.function?.name ?? 'unknown').join(', ');
+          throw new DaemonError(`The model asked for tools this app cannot run: ${names}.`);
+        }
+        const token = choice?.delta?.content;
         if (token) {
           result += token;
           onToken(token);

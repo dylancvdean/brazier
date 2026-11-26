@@ -5,6 +5,7 @@
     "version": "0.1.0",
     "icon": "../desktop/build/icon.png",
     "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "ai.brazier.mobile",
       "appleTeamId": "4U2WZ7WJT4",
@@ -35,6 +36,11 @@
         "barcodeScannerEnabled": true
       }],
       "expo-secure-store",
+      ["expo-media-library", {
+        "photosPermission": false,
+        "savePhotosPermission": "Save images and videos you generate to your photo library.",
+        "granularPermissions": ["photo", "video"]
+      }],
       "./plugins/with-ios-scenes.cjs",
       "./plugins/with-tls-pinning.cjs",
       "./plugins/with-local-network.cjs"

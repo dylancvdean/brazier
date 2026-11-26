@@ -5,12 +5,14 @@ on:
     paths:
       - 'apps/mobile/**'
       - 'packages/pairing/**'
+      - 'apps/desktop/src/agent/**'
       - '.github/workflows/mobile.yml'
   push:
     branches: [master]
     paths:
       - 'apps/mobile/**'
       - 'packages/pairing/**'
+      - 'apps/desktop/src/agent/**'
       - '.github/workflows/mobile.yml'
   workflow_dispatch:
 

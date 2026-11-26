@@ -7,7 +7,7 @@
  * `session.runtime_id`.
  */
 
-import { BrokerClient } from './core/brokerClient'
+import { BrokerClient, BrokerError } from './core/brokerClient'
 import { inferModelCapabilities } from './core/modelCompat'
 import type { WorkerCommand, WorkerMessage } from './core/protocol'
 import type {
@@ -21,11 +21,20 @@ import { createRuntime, DEFAULT_RUNTIME_ID, normalizeRuntimeId } from './registr
 
 export type PostMessage = (message: WorkerMessage) => void
 
+/** Resolve to `fallback` when the client's scopes do not cover the request. */
+function unlessForbidden<T>(request: Promise<T>, fallback: T): Promise<T> {
+  return request.catch((cause: unknown) => {
+    if (cause instanceof BrokerError && cause.status === 403) return fallback
+    throw cause
+  })
+}
+
 /** Queue key for commands that are not about one session. */
 const GLOBAL_QUEUE = '*'
 
 export class AgentWorkerCore {
   private readonly post: PostMessage
+  private readonly fetchImpl?: typeof fetch
   private readonly runtimeFactory: (broker: BrokerClient, id: string) => AgentRuntime
   private broker?: BrokerClient
   private readonly runtimes = new Map<string, AgentRuntime>()
@@ -43,8 +52,11 @@ export class AgentWorkerCore {
   constructor(
     post: PostMessage,
     runtimeFactory: (broker: BrokerClient, id: string) => AgentRuntime = (broker, id) =>
-      createRuntime(id, broker)
+      createRuntime(id, broker),
+    /** HTTP client for daemon requests; see `BrokerConnection.fetch`. */
+    fetchImpl?: typeof fetch
   ) {
+    this.fetchImpl = fetchImpl
     this.post = post
     this.runtimeFactory = runtimeFactory
   }
@@ -157,7 +169,8 @@ export class AgentWorkerCore {
       case 'init': {
         this.broker = new BrokerClient({
           address: command.connection.address,
-          apiKey: command.connection.apiKey
+          apiKey: command.connection.apiKey,
+          fetch: this.fetchImpl
         })
         // Eagerly warm the default runtime so ready reports something useful;
         // sessions may still open a different adapter via runtime_id.
@@ -299,7 +312,7 @@ export class AgentWorkerCore {
           (tool) => tool.powerTool !== true || remote.session.runtime_id === 'powerful'
         )
     const [profile, defaults] = await Promise.all([
-      broker.textProfile(remote.session.model),
+      unlessForbidden(broker.textProfile(remote.session.model), null),
       broker.runtimeInferenceSettings()
     ])
     const messages = remote.messages.map((record) => record.payload)

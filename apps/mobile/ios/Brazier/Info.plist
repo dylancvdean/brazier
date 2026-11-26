@@ -54,6 +54,8 @@
     <string>Connect to your own Brazier host on your local network.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to access your microphone</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Save images and videos you generate to your photo library.</string>
     <key>RCTNewArchEnabled</key>
     <true/>
     <key>UIApplicationSceneManifest</key>
@@ -96,7 +98,7 @@
       <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>UIUserInterfaceStyle</key>
-    <string>Light</string>
+    <string>Automatic</string>
     <key>UIViewControllerBasedStatusBarAppearance</key>
     <false/>
   </dict>
