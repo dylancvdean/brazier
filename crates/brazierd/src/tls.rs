@@ -155,11 +155,6 @@ impl DaemonListener {
         let pending = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
         tokio::spawn(async move {
             loop {
-                // Bound unauthenticated connections that are still being
-                // classified so silent peers cannot exhaust tasks and sockets.
-                let Ok(permit) = pending.clone().acquire_owned().await else {
-                    return;
-                };
                 let (stream, peer) = match listener.accept().await {
                     Ok(connection) => connection,
                     Err(error) => {
@@ -178,10 +173,21 @@ impl DaemonListener {
                     }
                     continue;
                 };
+                // Bound unauthenticated remote connections that are still being
+                // classified so silent peers cannot exhaust tasks and sockets.
+                // Loopback callers (the desktop app) are never held back by them.
+                let loopback = peer.ip().to_canonical().is_loopback();
+                let permit = if loopback {
+                    None
+                } else {
+                    match pending.clone().try_acquire_owned() {
+                        Ok(permit) => Some(permit),
+                        Err(_) => continue,
+                    }
+                };
                 let sender = sender.clone();
                 tokio::spawn(async move {
-                    let plaintext_allowed =
-                        allow_remote_plaintext || peer.ip().to_canonical().is_loopback();
+                    let plaintext_allowed = allow_remote_plaintext || loopback;
                     let classified = classify(stream, acceptor, plaintext_allowed).await;
                     drop(permit);
                     if let Some(stream) = classified {
