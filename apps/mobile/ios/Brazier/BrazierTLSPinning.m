@@ -65,13 +65,6 @@ static void BrazierInstallChallengeHandler(NSString *className)
   class_addMethod(target, selector, (IMP)BrazierHandleChallenge, "v@:@@@?");
 }
 
-@interface BrazierTLSPinning : NSObject <RCTBridgeModule>
-@end
-
-@implementation BrazierTLSPinning
-
-RCT_EXPORT_MODULE()
-
 // expo/fetch and React Native's fetch each own one URLSession delegate. Both
 // only forward task-level challenges, so add the session-level server trust
 // handler that URLSession consults first.
@@ -81,11 +74,19 @@ static void BrazierInstallChallengeHandlers(void)
   BrazierInstallChallengeHandler(@"RCTHTTPRequestHandler");
 }
 
-+ (void)load
+// RCT_EXPORT_MODULE defines +load, so install from an image constructor.
+__attribute__((constructor)) static void BrazierTLSPinningInitialize(void)
 {
   BrazierPins = [NSMutableDictionary new];
   BrazierInstallChallengeHandlers();
 }
+
+@interface BrazierTLSPinning : NSObject <RCTBridgeModule>
+@end
+
+@implementation BrazierTLSPinning
+
+RCT_EXPORT_MODULE()
 
 + (BOOL)requiresMainQueueSetup
 {
