@@ -6,8 +6,9 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs'
-import { dirname } from 'node:path'
 import { isIP } from 'node:net'
+import { networkInterfaces } from 'node:os'
+import { dirname } from 'node:path'
 
 import { normalizeShareableOrigin } from '../../../../packages/pairing/src/invite'
 import { isRendererDevelopmentOrigin } from './rendererTrust'
@@ -656,6 +657,31 @@ export async function previewPairing(
     throw new Error('The daemon returned an invalid pairing preview.')
   }
   return { pairing, daemon }
+}
+
+function isPrivateIpv4(address: string): boolean {
+  const [a, b] = address.split('.').map(Number)
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+}
+
+export function localNetworkAddress(
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()
+): string | null {
+  const candidates = Object.values(interfaces)
+    .flatMap((entries) => entries ?? [])
+    .filter((entry) => entry.family === 'IPv4' && !entry.internal && !entry.address.startsWith('169.254.'))
+    .map((entry) => entry.address)
+  return candidates.find(isPrivateIpv4) ?? candidates[0] ?? null
+}
+
+export function localPairingOrigin(
+  activeAddress: string,
+  interfaces?: ReturnType<typeof networkInterfaces>
+): string | null {
+  const address = localNetworkAddress(interfaces)
+  if (!address) return null
+  const { port } = new URL(normalizeDaemonBaseUrl(activeAddress))
+  return normalizeShareableOrigin(`https://${address}${port ? `:${port}` : ''}`)
 }
 
 export async function verifyPairingOrigin(

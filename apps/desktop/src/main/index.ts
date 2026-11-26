@@ -14,6 +14,7 @@ import {
   ConnectionProfileStore,
   previewPairing,
   verifyPairingOrigin,
+  localPairingOrigin,
   viewConnectionProfile,
   type ConnectionCredentialCodec,
   type ConnectionTestResult,
@@ -1549,6 +1550,14 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     const { previewReachable } = await verifyPairingOrigin(active.address, origin)
     if (profiles.current().id !== active.profile.id) throw new Error('The selected connection changed. Try again.')
     return { hostName: active.daemon.daemon?.display_name ?? active.profile.name, previewReachable }
+  })
+  handleTrusted('brazier:connection-profiles:local-pairing-origin', async () => {
+    if (profiles.current().kind !== 'local') return null
+    try {
+      return localPairingOrigin((await readyConnection()).address)
+    } catch {
+      return null
+    }
   })
   handleTrusted('brazier:connection-profiles:list', () => profiles.list())
   handleTrusted('brazier:connection-profiles:current', () => profiles.current())
