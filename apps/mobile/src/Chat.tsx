@@ -25,9 +25,9 @@ function ToolCalls({ calls }: { calls: readonly ToolCall[] }) {
   </Pressable>)}</>;
 }
 
-export function Chat({ credential, hostName, disabledTools, onDisabledTools, onUnauthorized, onOpenSettings }: {
+export function Chat({ credential, hostName, disabledTools, onDisabledTools, onUnauthorized, onOpenSettings, onOpenAgent }: {
   credential: Credential; hostName: string; disabledTools: readonly string[];
-  onDisabledTools: (names: string[]) => void; onUnauthorized: (error: unknown) => void; onOpenSettings: () => void;
+  onDisabledTools: (names: string[]) => void; onUnauthorized: (error: unknown) => void; onOpenSettings: () => void; onOpenAgent: () => void;
 }) {
   const styles = useStyles();
   const palette = useTheme();
@@ -279,6 +279,11 @@ export function Chat({ credential, hostName, disabledTools, onDisabledTools, onU
               <Text numberOfLines={1} style={styles.listText}>{chat.title}</Text>
             </Pressable>)}
           </ScrollView>
+          <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => {
+            setShowDrawer(false); onOpenAgent();
+          }}>
+            <Text style={styles.iconText}>🛠</Text><Text style={styles.listText}>Agent</Text>
+          </Pressable>
           <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => {
             setShowDrawer(false); onOpenSettings();
           }}>

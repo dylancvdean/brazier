@@ -18,10 +18,17 @@ import type {
   ToolExecutionRecord,
   ToolRiskLevel
 } from './types'
+import { anySignal, timeoutSignal } from './abort'
 
 export type BrokerConnection = {
   address: string
   apiKey: string | null
+  /**
+   * HTTP client for every daemon request. Defaults to the global `fetch`; the
+   * mobile app passes one that streams response bodies and pins the host's
+   * certificate.
+   */
+  fetch?: typeof fetch
 }
 
 export type ToolExecStatus = 'completed' | 'failed' | 'denied' | 'approval_required'
@@ -243,10 +250,9 @@ export function isTransientModelError(cause: unknown): boolean {
   return cause instanceof TypeError && /fetch failed|network|socket/i.test(cause.message)
 }
 
-function anySignal(signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+function anyPresentSignal(signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const present = signals.filter((signal): signal is AbortSignal => Boolean(signal))
-  if (present.length <= 1) return present[0]
-  return AbortSignal.any(present)
+  return present.length ? anySignal(present) : undefined
 }
 
 /**
@@ -373,9 +379,12 @@ export async function readWithIdleTimeout(
 export class BrokerClient {
   private readonly connection: BrokerConnection
   private readonly modelStallTimeoutMs: number
+  /** The connection's HTTP client; see `BrokerConnection.fetch`. */
+  readonly http: typeof fetch
 
   constructor(connection: BrokerConnection, options: BrokerClientOptions = {}) {
     this.connection = connection
+    this.http = connection.fetch ?? ((input, init) => fetch(input, init))
     this.modelStallTimeoutMs = options.modelStallTimeoutMs ?? MODEL_STALL_TIMEOUT_MS
   }
 
@@ -389,9 +398,9 @@ export class BrokerClient {
       headers.set('authorization', `Bearer ${this.connection.apiKey}`)
     }
     const timeoutMs = init?.timeoutMs ?? REQUEST_TIMEOUT_MS
-    const signal = anySignal([init?.signal ?? undefined, AbortSignal.timeout(timeoutMs)])
+    const signal = anyPresentSignal([init?.signal ?? undefined, timeoutSignal(timeoutMs)])
     const { timeoutMs: _timeout, ...fetchInit } = init ?? {}
-    const response = await fetch(`${this.connection.address}${path}`, {
+    const response = await this.http(`${this.connection.address}${path}`, {
       ...fetchInit,
       headers,
       signal
@@ -617,7 +626,7 @@ export class BrokerClient {
     if (this.connection.apiKey) {
       headers.set('authorization', `Bearer ${this.connection.apiKey}`)
     }
-    const response = await fetch(`${this.connection.address}/api/v1/agent/exec/stream`, {
+    const response = await this.http(`${this.connection.address}/api/v1/agent/exec/stream`, {
       method: 'POST',
       headers,
       signal,
@@ -736,7 +745,7 @@ export class BrokerClient {
       return await this.readChatCompletion(
         body,
         headers,
-        anySignal([signal, stallAbort.signal])!,
+        anyPresentSignal([signal, stallAbort.signal])!,
         watchdog,
         callbacks
       )
@@ -753,7 +762,7 @@ export class BrokerClient {
     callbacks?: StreamChatCompletionCallbacks
   ): Promise<StreamChatCompletionResult> {
     const response = await Promise.race([
-      fetch(`${this.openAiBaseUrl()}/chat/completions`, {
+      this.http(`${this.openAiBaseUrl()}/chat/completions`, {
         method: 'POST',
         headers,
         signal,

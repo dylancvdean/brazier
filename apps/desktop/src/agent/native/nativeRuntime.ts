@@ -1208,7 +1208,8 @@ export class NativeAgentSession implements AgentSession {
             model: this.state.model.id,
             transcript: renderTranscript(dropped),
             facts,
-            signal: run?.abort.signal
+            signal: run?.abort.signal,
+            fetchImpl: this.broker.http
           })
         : null
     const summaryText = mergeSummary(prose, facts)
