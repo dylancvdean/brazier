@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Text, useColorScheme, View } from 'react-native';
 import { daemonClient, DaemonError, UnreachableError, type Credential, type Host } from './api.ts';
 import { Chat } from './Chat.tsx';
+import { Generate } from './Generate.tsx';
 import { defaultPreferences, hostId, renameHost, selectHost, type Preferences } from './hosts.ts';
 import { checkLocalNetwork } from './localNetwork';
 import { Pairing } from './Pairing.tsx';
@@ -40,7 +41,8 @@ function Shell({ preferences, onPreferences }: {
   const palette = useTheme();
   const [saved, setSaved] = useState<SavedHosts>({ index: emptyIndex, credentials: {} });
   const [starting, setStarting] = useState(true);
-  const [view, setView] = useState<'chat' | 'settings' | 'pairing'>('chat');
+  const [view, setView] = useState<'chat' | 'settings' | 'pairing' | 'generate'>('chat');
+  const [generateOpened, setGenerateOpened] = useState(false);
   const [access, setAccess] = useState<Access | null>(null);
   const [storageError, setStorageError] = useState('');
   const [revision, setRevision] = useState(0);
@@ -176,10 +178,16 @@ function Shell({ preferences, onPreferences }: {
   // Chat stays mounted behind Settings so a draft or a running reply survives the visit.
   return <>
     {view === 'settings' ? settings : null}
-    <View style={view === 'settings' ? { display: 'none' } : styles.flex}>
+    {/* Stays mounted once opened so a running generation is not lost on returning to the chat. */}
+    {generateOpened ? <View style={view === 'generate' ? styles.flex : { display: 'none' }}>
+      <Generate key={hostId(credential)} credential={credential} hostName={name}
+        onUnauthorized={reportAccess} onClose={() => setView('chat')} />
+    </View> : null}
+    <View style={view === 'chat' ? styles.flex : { display: 'none' }}>
       <Chat key={hostId(credential)} credential={credential} hostName={name}
         disabledTools={preferences.disabledTools} onDisabledTools={(disabledTools) => onPreferences({ disabledTools })}
-        onUnauthorized={reportAccess} onOpenSettings={() => setView('settings')} />
+        onUnauthorized={reportAccess} onOpenSettings={() => setView('settings')}
+        onOpenGenerate={() => { setGenerateOpened(true); setView('generate'); }} />
     </View>
   </>;
 }

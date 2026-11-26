@@ -15,7 +15,11 @@ export type Message = {
 };
 export type OpenAiMessage = { role: string; content: string; tool_calls?: unknown[]; tool_call_id?: string };
 export type Tool = { name: string; title: string; description?: string; network: boolean; source?: string; server_name?: string };
-export type ToolCall = { call_id: string; name: string; arguments: string; output: string; is_error: boolean };
+export type ToolCall = {
+  call_id: string; name: string; arguments: string; output: string; is_error: boolean;
+  /** Files the tool produced, such as a generated image. */
+  media?: { sha256: string; mime_type: string; name?: string | null }[];
+};
 /** A message the host produced while running tools; saved so later turns keep the tool results. */
 export type TranscriptMessage = { role: string; content: unknown; tool_calls?: unknown[] | null; tool_call_id?: string | null };
 export type ChatEvents = {
@@ -68,7 +72,7 @@ type MobileRequestInit = {
 };
 type Request = (url: string, init: MobileRequestInit) => Promise<Pick<Response, 'ok' | 'status' | 'json' | 'body'>>;
 
-async function request(fetch: Request, origin: string, path: string, init: MobileRequestInit, key?: string): ReturnType<Request> {
+export async function request(fetch: Request, origin: string, path: string, init: MobileRequestInit, key?: string): ReturnType<Request> {
   const headers = new Headers(init.headers);
   if (init.body) headers.set('content-type', 'application/json');
   if (key) headers.set('authorization', `Bearer ${key}`);
@@ -165,7 +169,7 @@ export function daemonClient(fetch: Request, credential: Credential) {
   const messagesPath = (id: string) => `/api/v1/conversations/${encodeURIComponent(id)}/messages`;
   const createMessage = (id: string, message: {
     parent_id: string | null; role: string; content: unknown; model?: string;
-    tool_calls?: unknown[] | null; tool_call_id?: string | null;
+    tool_calls?: unknown[] | null; tool_call_id?: string | null; source?: string; metadata?: object;
   }) => json<Message>(messagesPath(id), post(message));
   return {
     async verify(): Promise<Host> {

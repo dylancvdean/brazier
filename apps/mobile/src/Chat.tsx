@@ -8,6 +8,8 @@ import {
   type Conversation, type Credential, type Message, type Model, type Tool, type ToolCall, type TranscriptMessage,
 } from './api.ts';
 import { Markdown } from './Markdown.tsx';
+import { generatedMediaMessage, mediaByMessage, toolCallMedia } from './media.ts';
+import { MediaList } from './Media.tsx';
 import { useTheme } from './theme.ts';
 import { Action, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
 
@@ -25,9 +27,10 @@ function ToolCalls({ calls }: { calls: readonly ToolCall[] }) {
   </Pressable>)}</>;
 }
 
-export function Chat({ credential, hostName, disabledTools, onDisabledTools, onUnauthorized, onOpenSettings }: {
+export function Chat({ credential, hostName, disabledTools, onDisabledTools, onUnauthorized, onOpenSettings, onOpenGenerate }: {
   credential: Credential; hostName: string; disabledTools: readonly string[];
   onDisabledTools: (names: string[]) => void; onUnauthorized: (error: unknown) => void; onOpenSettings: () => void;
+  onOpenGenerate: () => void;
 }) {
   const styles = useStyles();
   const palette = useTheme();
@@ -140,9 +143,10 @@ export function Chat({ credential, hostName, disabledTools, onDisabledTools, onU
       setMessages(history);
       if (turn.signal.aborted) return;
       const transcript: TranscriptMessage[] = [];
+      const calls: ToolCall[] = [];
       const answer = await api.chat(model, chatContext(history), turn.signal, {
         onToken: (token) => setStreamed((text) => text + token),
-        onToolCall: (call) => setRunning((calls) => [...calls, call]),
+        onToolCall: (call) => { calls.push(call); setRunning([...calls]); },
         onTranscript: (message) => transcript.push(message),
       }, enabledTools.map(({ name }) => name));
       if (turn.signal.aborted) return;
@@ -160,6 +164,8 @@ export function Chat({ credential, hostName, disabledTools, onDisabledTools, onU
       if (answer.trim()) {
         saved.push(await api.createMessage(chat.id, { parent_id: parent, role: 'assistant', content: answer, model }));
       }
+      const generated = generatedMediaMessage(calls);
+      if (generated) saved.push(await api.createMessage(chat.id, { parent_id: saved.at(-1)!.id, ...generated, model }));
       setMessages(saved);
     } catch (cause) {
       if (!turn.signal.aborted) report(cause);
@@ -175,6 +181,7 @@ export function Chat({ credential, hostName, disabledTools, onDisabledTools, onU
 
   const visible = messages.filter(({ role }) => role === 'user' || role === 'assistant');
   const savedCalls = useMemo(() => toolCallsOf(messages), [messages]);
+  const savedMedia = useMemo(() => mediaByMessage(messages), [messages]);
   const toggleTool = (name: string) => onDisabledTools(disabledTools.includes(name)
     ? disabledTools.filter((other) => other !== name) : [...disabledTools, name]);
   const toolGroups = [...new Set(tools.map((tool) => tool.server_name ?? 'Built in'))];
@@ -198,16 +205,24 @@ export function Chat({ credential, hostName, disabledTools, onDisabledTools, onU
       onContentSizeChange={() => scroll.current?.scrollToEnd({ animated: false })} keyboardShouldPersistTaps="handled">
       {visible.map((message) => {
         const calls = savedCalls.get(message.id);
-        const text = messageText(message.content) || (calls ? '' : 'Non-text message');
+        const media = savedMedia.media.get(message.id);
+        if (!media && savedMedia.moved.has(message.id)) return null;
+        const text = messageText(message.content) || (calls || media ? '' : 'Non-text message');
         if (message.role === 'user') {
-          return <View key={message.id} style={styles.userBubble}><Text selectable style={styles.body}>{text}</Text></View>;
+          return <View key={message.id} style={{ gap: 6 }}>
+            {text ? <View style={styles.userBubble}><Text selectable style={styles.body}>{text}</Text></View> : null}
+            {media ? <MediaList credential={credential} blobs={media} /> : null}
+          </View>;
         }
         return <View key={message.id} style={styles.assistant}>
           {text ? <Markdown text={text} /> : null}
           {calls ? <ToolCalls calls={calls} /> : null}
+          {media ? <MediaList credential={credential} blobs={media} /> : null}
         </View>;
       })}
-      {running.length ? <View style={styles.assistant}><ToolCalls calls={running} /></View> : null}
+      {running.length ? <View style={styles.assistant}>
+        <ToolCalls calls={running} /><MediaList credential={credential} blobs={toolCallMedia(running)} />
+      </View> : null}
       {streamed ? <View style={styles.assistant}><Markdown text={streamed} /></View> : null}
     </ScrollView>}
     {busy ? <Text accessibilityRole="progressbar" style={styles.status}>{busy}</Text> : null}
@@ -279,6 +294,11 @@ export function Chat({ credential, hostName, disabledTools, onDisabledTools, onU
               <Text numberOfLines={1} style={styles.listText}>{chat.title}</Text>
             </Pressable>)}
           </ScrollView>
+          <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => {
+            setShowDrawer(false); onOpenGenerate();
+          }}>
+            <Text style={styles.iconText}>✦</Text><Text style={styles.listText}>Generate</Text>
+          </Pressable>
           <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => {
             setShowDrawer(false); onOpenSettings();
           }}>

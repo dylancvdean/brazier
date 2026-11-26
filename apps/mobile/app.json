@@ -36,6 +36,11 @@
         "barcodeScannerEnabled": true
       }],
       "expo-secure-store",
+      ["expo-media-library", {
+        "photosPermission": false,
+        "savePhotosPermission": "Save images and videos you generate to your photo library.",
+        "granularPermissions": ["photo", "video"]
+      }],
       "./plugins/with-ios-scenes.cjs",
       "./plugins/with-tls-pinning.cjs",
       "./plugins/with-local-network.cjs"

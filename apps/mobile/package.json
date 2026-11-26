@@ -8,12 +8,16 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "check": "tsc --noEmit",
-    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/api.test.ts src/reachability.test.ts src/hosts.test.ts src/markdown.test.ts"
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/api.test.ts src/reachability.test.ts src/hosts.test.ts src/markdown.test.ts src/media.test.ts"
   },
   "dependencies": {
     "expo": "54.0.38",
     "expo-camera": "17.0.10",
+    "expo-file-system": "19.0.24",
+    "expo-media-library": "18.2.1",
     "expo-secure-store": "15.0.8",
+    "expo-sharing": "14.0.8",
+    "expo-video": "3.0.16",
     "react": "19.1.0",
     "react-native": "0.81.5"
   },
