@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, ReadBuf},
     net::{TcpListener, TcpStream},
-    sync::mpsc,
+    sync::{Semaphore, mpsc},
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
@@ -31,6 +31,7 @@ const CERTIFICATE_FILE: &str = "daemon-certificate.der";
 const KEY_FILE: &str = "daemon-key.der";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const TLS_HANDSHAKE_RECORD: u8 = 0x16;
+const MAX_PENDING_HANDSHAKES: usize = 256;
 
 pub struct DaemonCertificate {
     pub sha256: String,
@@ -151,8 +152,14 @@ impl DaemonListener {
     ) -> io::Result<Self> {
         let local_addr = listener.local_addr()?;
         let (sender, accepted) = mpsc::channel(64);
+        let pending = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
         tokio::spawn(async move {
             loop {
+                // Bound unauthenticated connections that are still being
+                // classified so silent peers cannot exhaust tasks and sockets.
+                let Ok(permit) = pending.clone().acquire_owned().await else {
+                    return;
+                };
                 let (stream, peer) = match listener.accept().await {
                     Ok(connection) => connection,
                     Err(error) => {
@@ -175,7 +182,9 @@ impl DaemonListener {
                 tokio::spawn(async move {
                     let plaintext_allowed =
                         allow_remote_plaintext || peer.ip().to_canonical().is_loopback();
-                    if let Some(stream) = classify(stream, acceptor, plaintext_allowed).await {
+                    let classified = classify(stream, acceptor, plaintext_allowed).await;
+                    drop(permit);
+                    if let Some(stream) = classified {
                         let _ = sender.send((stream, peer)).await;
                     }
                 });
