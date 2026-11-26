@@ -405,6 +405,11 @@ impl SandboxBackend {
         let description = self.describe(request.profile, Some(request.workspace));
         match (self.kind, self.program.as_ref()) {
             (SandboxBackendKind::Seatbelt, Some(sandbox_exec)) => {
+                let mut env = env;
+                // Seatbelt denies `$HOME`, so git would fail with EPERM on
+                // `~/.gitconfig`. Bubblewrap hides it the same way, where git
+                // simply sees no global config.
+                env.insert("GIT_CONFIG_GLOBAL".to_owned(), "/dev/null".to_owned());
                 let mut wrapped: Vec<OsString> = vec![
                     OsString::from("-p"),
                     OsString::from(seatbelt_profile(request)),
@@ -573,6 +578,93 @@ pub fn secret_paths(data_dir: Option<&Path>) -> Vec<PathBuf> {
     paths
 }
 
+/// Git directories outside the workspace that a linked worktree checkout
+/// (`git worktree add`) needs to read: its private git dir and the source
+/// repository's common dir. Empty for ordinary checkouts.
+///
+/// The workspace's `.git` file is agent-writable, so it is only trusted when
+/// the private git dir it names lies outside the workspace and links back to
+/// this checkout. Directories overlapping a protected path are never granted.
+pub(crate) fn linked_git_directories(workspace: &Path, data_dir: Option<&Path>) -> Vec<PathBuf> {
+    let Some(directories) = resolve_linked_git_directories(workspace) else {
+        return Vec::new();
+    };
+    let protected = secret_paths(data_dir);
+    directories
+        .into_iter()
+        .filter(|directory| {
+            !protected
+                .iter()
+                .any(|secret| directory.starts_with(secret) || secret.starts_with(directory))
+        })
+        .collect()
+}
+
+fn resolve_linked_git_directories(workspace: &Path) -> Option<Vec<PathBuf>> {
+    let workspace = std::fs::canonicalize(workspace).ok()?;
+    let dot_git = workspace.join(".git");
+    if !std::fs::symlink_metadata(&dot_git).ok()?.is_file() {
+        return None;
+    }
+    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let git_dir = pointer.lines().next()?.strip_prefix("gitdir:")?.trim();
+    let git_dir = std::fs::canonicalize(workspace.join(git_dir)).ok()?;
+    if git_dir.starts_with(&workspace) {
+        return None;
+    }
+    let back_reference = std::fs::read_to_string(git_dir.join("gitdir")).ok()?;
+    if std::fs::canonicalize(git_dir.join(back_reference.trim())).ok()? != dot_git {
+        return None;
+    }
+    let common_dir = match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(common) => std::fs::canonicalize(git_dir.join(common.trim())).ok()?,
+        Err(_) => return Some(vec![git_dir]),
+    };
+    if common_dir.starts_with(&workspace) || workspace.starts_with(&common_dir) {
+        return Some(vec![git_dir]);
+    }
+    if git_dir.starts_with(&common_dir) {
+        Some(vec![common_dir])
+    } else {
+        Some(vec![common_dir, git_dir])
+    }
+}
+
+/// The literal and canonical spellings of a path (`/var` vs `/private/var`).
+#[cfg(target_os = "macos")]
+fn path_spellings(path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![path.to_path_buf()];
+    if let Some(parent) = path.parent()
+        && let Ok(canonical) = std::fs::canonicalize(parent)
+        && let Some(name) = path.file_name()
+        && canonical.join(name) != path
+    {
+        paths.push(canonical.join(name));
+    }
+    paths
+}
+
+/// `confstr(_CS_DARWIN_USER_CACHE_DIR)`: the per-user `/var/folders/.../C/`.
+#[cfg(target_os = "macos")]
+fn darwin_user_cache_dir() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: the buffer is valid for `buffer.len()` bytes.
+    let length = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_CACHE_DIR,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if length == 0 || length > buffer.len() {
+        return None;
+    }
+    buffer.truncate(length - 1);
+    Some(PathBuf::from(OsString::from_vec(buffer)))
+}
+
 /// Quote a path for a Seatbelt profile string literal.
 fn sbpl_quote(path: &Path) -> String {
     let raw = path.display().to_string();
@@ -655,11 +747,28 @@ pub fn seatbelt_profile(request: &SandboxRequest<'_>) -> String {
         "(allow file-read* (subpath {}))\n",
         sbpl_quote(request.workspace)
     ));
+    for directory in linked_git_directories(request.workspace, request.data_dir) {
+        profile.push_str(&format!(
+            "(allow file-read* (subpath {}))\n",
+            sbpl_quote(&directory)
+        ));
+    }
     if let Some(home) = home_directory() {
         for relative in HOME_TOOLCHAIN_PATHS {
             profile.push_str(&format!(
                 "(allow file-read* (subpath {}))\n",
                 sbpl_quote(&home.join(relative))
+            ));
+        }
+    }
+    // `/usr/bin/git` and other Xcode shims resolve through xcrun's per-user
+    // cache. Read-only: a writable cache could redirect host tool lookups.
+    #[cfg(target_os = "macos")]
+    if let Some(cache) = darwin_user_cache_dir() {
+        for path in path_spellings(&cache.join("xcrun_db")) {
+            profile.push_str(&format!(
+                "(allow file-read* (literal {}))\n",
+                sbpl_quote(&path)
             ));
         }
     }
@@ -850,6 +959,15 @@ pub fn bubblewrap_args(request: &SandboxRequest<'_>, unshare_net: bool) -> Vec<S
             args.push("--tmpfs".into());
             args.push(data_dir.display().to_string());
         }
+    }
+
+    // Bound at their real paths because the worktree's `.git` file names them
+    // absolutely. Read-only: hooks and config there run on the host.
+    for directory in linked_git_directories(request.workspace, request.data_dir) {
+        let directory = directory.display().to_string();
+        args.push("--ro-bind".into());
+        args.push(directory.clone());
+        args.push(directory);
     }
 
     args.extend([
@@ -1093,6 +1211,64 @@ mod tests {
             scratch_allow > last_deny,
             "the scratch grant must come after every denial"
         );
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn linked_worktrees_expose_only_their_source_git_directory() {
+        let root = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let source = root.join("source");
+        let worktree = root.join("worktree");
+        std::fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        git(&source, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(
+            &source,
+            &["worktree", "add", "-q", worktree.to_str().unwrap()],
+        );
+
+        assert_eq!(
+            linked_git_directories(&worktree, None),
+            vec![source.join(".git")]
+        );
+        assert!(linked_git_directories(&source, None).is_empty());
+        // Protected paths are never granted, even for a genuine worktree.
+        assert!(linked_git_directories(&worktree, Some(&root)).is_empty());
+
+        // An agent-rewritten `.git` cannot point the grant somewhere else.
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", elsewhere.display()),
+        )
+        .unwrap();
+        assert!(linked_git_directories(&worktree, None).is_empty());
+        std::fs::write(
+            elsewhere.join("gitdir"),
+            worktree.join(".git").display().to_string(),
+        )
+        .unwrap();
+        std::fs::write(elsewhere.join("commondir"), "/").unwrap();
+        // A common dir enclosing the workspace (here `/`) is never granted.
+        assert_eq!(
+            linked_git_directories(&worktree, None),
+            vec![elsewhere.clone()]
+        );
+        std::fs::create_dir(worktree.join("forged")).unwrap();
+        std::fs::write(worktree.join("forged/gitdir"), "../.git").unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: forged\n").unwrap();
+        assert!(linked_git_directories(&worktree, None).is_empty());
     }
 
     #[test]

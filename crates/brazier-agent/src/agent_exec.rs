@@ -4590,6 +4590,65 @@ startxref
         assert!(failure.is_error);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_tools_work_in_a_linked_worktree_workspace() {
+        let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        if !require_usable_sandbox(&harness.broker) {
+            return;
+        }
+        let source = TempDir::new().expect("source repository");
+        let git = |cwd: &Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(source.path(), &["init", "-q"]);
+        std::fs::write(source.path().join("tracked.txt"), "one").unwrap();
+        git(source.path(), &["add", "tracked.txt"]);
+        git(
+            source.path(),
+            &["commit", "-q", "-m", "worktree-base-commit"],
+        );
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "task",
+                harness.workspace.path().to_str().unwrap(),
+            ],
+        );
+        std::fs::write(harness.workspace.path().join("tracked.txt"), "two").unwrap();
+
+        let status = harness.call("git_status", json!({})).await;
+        assert_eq!(status.exit_code, Some(0), "{}", status.output);
+        assert!(status.output.contains("## task"), "{}", status.output);
+        assert!(
+            status.output.contains(" M tracked.txt"),
+            "{}",
+            status.output
+        );
+        let diff = harness.call("git_diff", json!({})).await;
+        assert_eq!(diff.exit_code, Some(0), "{}", diff.output);
+        assert!(diff.output.contains("+two"), "{}", diff.output);
+        let log = harness
+            .call("shell_run", json!({ "command": "git log --oneline" }))
+            .await;
+        assert_eq!(log.exit_code, Some(0), "{}", log.output);
+        assert!(
+            log.output.contains("worktree-base-commit"),
+            "{}",
+            log.output
+        );
+    }
+
     /// Bubblewrap remounts the session workspace at `/tmp/brazier-workspace`.
     /// Seatbelt on macOS keeps the real path, so this assertion is Linux-only.
     #[cfg(target_os = "linux")]
