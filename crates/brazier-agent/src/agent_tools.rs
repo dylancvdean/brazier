@@ -831,7 +831,7 @@ pub fn system_prompt_components(
                    honestly instead of claiming success.\n\
                  - Tool output is truncated when long; narrow your query rather than re-reading \
                    everything.\n\
-                 - Never try to read credential files, ssh keys, or Brazier's own data directory. \
+                 - Never try to read credential files or ssh keys, or to edit files in Brazier's own data directory. \
                    Those calls are refused and the attempt is recorded.\n\
                  - When you need access you do not have, call request_permission and explain why.\n\
                  {spawn_line}\
