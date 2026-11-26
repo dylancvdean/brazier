@@ -60,6 +60,13 @@ export function Chat({
   const [error, setError] = useState('');
   const currentTurn = useRef<AbortController | null>(null);
   const scroll = useRef<ScrollView>(null);
+  const afterDismiss = useRef<(() => void) | null>(null);
+  // On iOS a modal whose screen is hidden while it is still closing never finishes, and no modal opens after it.
+  const leave = (open: () => void) => {
+    setShowDrawer(false); setShowModels(false);
+    if (Platform.OS === 'ios') afterDismiss.current = open; else open();
+  };
+  const dismissed = () => { const open = afterDismiss.current; afterDismiss.current = null; open?.(); };
   const generating = busy === 'Generating…';
 
   function report(cause: unknown) {
@@ -265,7 +272,7 @@ export function Chat({
           <Text style={styles.sendText}>↑</Text></Pressable>}
     </View>
 
-    <Sheet title="Chat models" visible={showModels} onClose={() => setShowModels(false)}>
+    <Sheet title="Chat models" visible={showModels} onClose={() => setShowModels(false)} onDismiss={dismissed}>
       <ScrollView>
         {models.length === 0 ? <Text style={[styles.emptyText, { padding: 18 }]}>
           {local ? 'No models on this device yet.' : 'No chat models on this host. Add one on the host, then refresh.'}</Text> : null}
@@ -275,7 +282,7 @@ export function Chat({
           <Text style={styles.listText}>{modelName(id)}</Text>
         </Pressable>)}
         <View style={{ padding: 18 }}>{local
-          ? <Action label="Manage models" quiet onPress={() => { setShowModels(false); onOpenModels!(); }} />
+          ? <Action label="Manage models" quiet onPress={() => leave(onOpenModels!)} />
           : <Action label="Refresh" quiet disabled={!!busy} onPress={() => void refresh()} />}</View>
       </ScrollView>
     </Sheet>
@@ -303,7 +310,7 @@ export function Chat({
       </ScrollView>
     </Sheet>
 
-    <Modal transparent visible={showDrawer} animationType="fade" onRequestClose={() => setShowDrawer(false)}>
+    <Modal transparent visible={showDrawer} animationType="fade" onRequestClose={() => setShowDrawer(false)} onDismiss={dismissed}>
       <View style={styles.backdrop}>
         <SafeAreaView style={styles.drawer}>
           <View style={styles.header}>
@@ -322,25 +329,17 @@ export function Chat({
               <Text numberOfLines={1} style={styles.listText}>{chat.title}</Text>
             </Pressable>)}
           </ScrollView>
-          {local ? <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => {
-            setShowDrawer(false); onOpenModels!();
-          }}>
+          {local ? <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => leave(onOpenModels!)}>
             <Text style={styles.iconText}>▤</Text><Text style={styles.listText}>Models</Text>
           </Pressable> : <>
-            <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => {
-              setShowDrawer(false); onOpenGenerate();
-            }}>
+            <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => leave(onOpenGenerate)}>
               <Text style={styles.iconText}>✦</Text><Text style={styles.listText}>Generate</Text>
             </Pressable>
-            <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => {
-              setShowDrawer(false); onOpenAgent();
-            }}>
+            <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => leave(onOpenAgent)}>
               <Text style={styles.iconText}>🛠</Text><Text style={styles.listText}>Agent</Text>
             </Pressable>
           </>}
-          <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => {
-            setShowDrawer(false); onOpenSettings();
-          }}>
+          <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => leave(onOpenSettings)}>
             <Text style={styles.iconText}>⚙</Text><Text style={styles.listText}>Settings</Text>
           </Pressable>
         </SafeAreaView>
