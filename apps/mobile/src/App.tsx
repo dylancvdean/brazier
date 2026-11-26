@@ -1,4 +1,5 @@
 import { fetch } from 'expo/fetch';
+import { Agent, AgentUnavailable } from './Agent.tsx';
 import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Text, useColorScheme, View } from 'react-native';
 import { daemonClient, DaemonError, UnreachableError, type Credential, type Host } from './api.ts';
@@ -43,6 +44,8 @@ function Shell({ preferences, onPreferences }: {
   const [starting, setStarting] = useState(true);
   const [view, setView] = useState<'chat' | 'settings' | 'pairing' | 'generate'>('chat');
   const [generateOpened, setGenerateOpened] = useState(false);
+  // Agent is mounted on first use and then kept, so a running task survives a visit to Chat.
+  const [agent, setAgent] = useState<'unopened' | 'shown' | 'hidden'>('unopened');
   const [access, setAccess] = useState<Access | null>(null);
   const [storageError, setStorageError] = useState('');
   const [revision, setRevision] = useState(0);
@@ -175,7 +178,8 @@ function Shell({ preferences, onPreferences }: {
       <Action label="Hosts and settings" quiet onPress={() => setView('settings')} /></View>;
   }
 
-  // Chat stays mounted behind Settings so a draft or a running reply survives the visit.
+  // Chat stays mounted behind Settings and Agent so a draft or a running reply survives the visit.
+  const main = view !== 'chat' ? null : agent === 'shown' ? 'agent' : 'chat';
   return <>
     {view === 'settings' ? settings : null}
     {/* Stays mounted once opened so a running generation is not lost on returning to the chat. */}
@@ -183,11 +187,17 @@ function Shell({ preferences, onPreferences }: {
       <Generate key={hostId(credential)} credential={credential} hostName={name} visible={view === 'generate'}
         onUnauthorized={reportAccess} onClose={() => setView('chat')} />
     </View> : null}
-    <View style={view === 'chat' ? styles.flex : { display: 'none' }}>
+    <View style={main === 'chat' ? styles.flex : { display: 'none' }}>
       <Chat key={hostId(credential)} credential={credential} hostName={name}
         disabledTools={preferences.disabledTools} onDisabledTools={(disabledTools) => onPreferences({ disabledTools })}
-        onUnauthorized={reportAccess} onOpenSettings={() => setView('settings')}
+        onUnauthorized={reportAccess} onOpenSettings={() => setView('settings')} onOpenAgent={() => setAgent('shown')}
         onOpenGenerate={() => { setGenerateOpened(true); setView('generate'); }} />
     </View>
+    {agent === 'unopened' ? null : <View style={main === 'agent' ? styles.flex : { display: 'none' }}>
+      {host.scopes.includes('agent')
+        ? <Agent key={hostId(credential)} credential={credential} hostName={name} onUnauthorized={reportAccess}
+          onOpenChat={() => setAgent('hidden')} onOpenSettings={() => setView('settings')} />
+        : <AgentUnavailable hostName={name} onBack={() => setAgent('hidden')} />}
+    </View>}
   </>;
 }

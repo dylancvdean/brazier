@@ -15,6 +15,8 @@
  * session over.
  */
 
+import { anySignal } from './abort'
+
 /** How long the summary request may take before compaction gives up on it. */
 const SUMMARY_TIMEOUT_MS = 30_000
 
@@ -67,7 +69,7 @@ export async function requestModelSummary(request: SummaryRequest): Promise<stri
   const timeout = setTimeout(() => controller.abort(), request.timeoutMs ?? SUMMARY_TIMEOUT_MS)
   const signal =
     request.signal !== undefined
-      ? (AbortSignal.any([controller.signal, request.signal]) as AbortSignal)
+      ? anySignal([controller.signal, request.signal])
       : controller.signal
   try {
     const response = await fetchImpl(`${request.baseUrl}/chat/completions`, {

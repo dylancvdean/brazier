@@ -27,10 +27,10 @@ function ToolCalls({ calls }: { calls: readonly ToolCall[] }) {
   </Pressable>)}</>;
 }
 
-export function Chat({ credential, hostName, disabledTools, onDisabledTools, onUnauthorized, onOpenSettings, onOpenGenerate }: {
+export function Chat({ credential, hostName, disabledTools, onDisabledTools, onUnauthorized, onOpenSettings, onOpenGenerate, onOpenAgent }: {
   credential: Credential; hostName: string; disabledTools: readonly string[];
   onDisabledTools: (names: string[]) => void; onUnauthorized: (error: unknown) => void; onOpenSettings: () => void;
-  onOpenGenerate: () => void;
+  onOpenGenerate: () => void; onOpenAgent: () => void;
 }) {
   const styles = useStyles();
   const palette = useTheme();
@@ -301,6 +301,11 @@ export function Chat({ credential, hostName, disabledTools, onDisabledTools, onU
             setShowDrawer(false); onOpenGenerate();
           }}>
             <Text style={styles.iconText}>✦</Text><Text style={styles.listText}>Generate</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => {
+            setShowDrawer(false); onOpenAgent();
+          }}>
+            <Text style={styles.iconText}>🛠</Text><Text style={styles.listText}>Agent</Text>
           </Pressable>
           <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => {
             setShowDrawer(false); onOpenSettings();
