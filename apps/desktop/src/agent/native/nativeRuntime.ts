@@ -277,7 +277,8 @@ export class NativeAgentSession implements AgentSession {
   ) => Promise<ToolExecutionOutcome>
   private readonly cancelChildren: () => Promise<void>
   private readonly onDisposed: () => void
-  private reasoningEnabled: boolean
+  /** Unset leaves the choice to the daemon's own setting. */
+  private reasoningEnabled: boolean | undefined
   private dropReasoningBetweenTurns: boolean
   /** The newest run, from `run()` until its loop settles. */
   private currentRun?: ActiveRun
@@ -302,7 +303,7 @@ export class NativeAgentSession implements AgentSession {
     systemPrompt: string
     sandbox: SandboxDescription
     capabilities: CreateAgentSessionOptions['capabilities']
-    reasoningEnabled: boolean
+    reasoningEnabled: boolean | undefined
     dropReasoningBetweenTurns: boolean
     spawnSubagent: (
       parent: NativeAgentSession,
@@ -1875,7 +1876,7 @@ export class NativeAgentRuntime implements AgentRuntime {
       systemPrompt: options.systemPrompt,
       sandbox,
       capabilities: options.capabilities,
-      reasoningEnabled: defaults.enable_reasoning ?? true,
+      reasoningEnabled: defaults.enable_reasoning,
       dropReasoningBetweenTurns: defaults.drop_reasoning_between_turns ?? false,
       spawnSubagent: (parent, request) => this.spawnSubagent(parent, request),
       cancelChildren: () => this.cancelChildren(options.sessionId),

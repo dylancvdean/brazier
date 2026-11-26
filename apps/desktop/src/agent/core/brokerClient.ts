@@ -376,6 +376,8 @@ export async function readWithIdleTimeout(
   }
 }
 
+const FALLBACK_CONTEXT_SIZE = 8_192
+
 export class BrokerClient {
   private readonly connection: BrokerConnection
   private readonly modelStallTimeoutMs: number
@@ -536,7 +538,18 @@ export class BrokerClient {
     enable_reasoning?: boolean
     drop_reasoning_between_turns?: boolean
   }> {
-    return this.request('/api/v1/runtime/settings')
+    try {
+      return await this.request('/api/v1/runtime/settings')
+    } catch (cause) {
+      // Runtime settings need the `management` scope, which a paired client
+      // with only `inference` and `agent` does not hold. It gets a cautious
+      // context window, replaced by the live prompt size during a run, and
+      // leaves reasoning to the host's own setting.
+      if (cause instanceof BrokerError && cause.status === 403) {
+        return { context_size: FALLBACK_CONTEXT_SIZE }
+      }
+      throw cause
+    }
   }
 
   async systemPrompt(id: string): Promise<{ system_prompt: string; tools: string[] }> {

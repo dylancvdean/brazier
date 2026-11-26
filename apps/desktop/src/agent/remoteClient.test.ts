@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { anySignal, timeoutSignal } from './core/abort'
+import { BrokerClient } from './core/brokerClient'
 import type { WorkerMessage } from './core/protocol'
 import { AgentWorkerCore } from './workerCore'
 
@@ -78,6 +79,12 @@ describe('agent core on a paired remote client', () => {
     expect(paths).toContain('/api/v1/models/settings')
     expect(paths).toContain('/api/v1/runtime/settings')
     expect(globalFetch).not.toHaveBeenCalled()
+  })
+
+  it('gives sessions and subagents a fallback that leaves reasoning to the host', async () => {
+    const { http } = pairedDaemon()
+    const broker = new BrokerClient({ address: 'https://host.example', apiKey: 'paired-key', fetch: http })
+    await expect(broker.runtimeInferenceSettings()).resolves.toEqual({ context_size: 8192 })
   })
 
   it('still fails to open a session on errors other than a missing scope', async () => {

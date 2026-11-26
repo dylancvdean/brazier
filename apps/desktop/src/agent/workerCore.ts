@@ -21,14 +21,6 @@ import { createRuntime, DEFAULT_RUNTIME_ID, normalizeRuntimeId } from './registr
 
 export type PostMessage = (message: WorkerMessage) => void
 
-/**
- * Used when the daemon's settings are off limits. Model and runtime settings
- * need the `management` scope, which a paired client with only `inference` and
- * `agent` does not hold; the live prompt size reported during a run replaces
- * this context window.
- */
-const FALLBACK_INFERENCE_SETTINGS = { context_size: 8_192 }
-
 /** Resolve to `fallback` when the client's scopes do not cover the request. */
 function unlessForbidden<T>(request: Promise<T>, fallback: T): Promise<T> {
   return request.catch((cause: unknown) => {
@@ -321,10 +313,7 @@ export class AgentWorkerCore {
         )
     const [profile, defaults] = await Promise.all([
       unlessForbidden(broker.textProfile(remote.session.model), null),
-      unlessForbidden<Awaited<ReturnType<BrokerClient['runtimeInferenceSettings']>>>(
-        broker.runtimeInferenceSettings(),
-        FALLBACK_INFERENCE_SETTINGS
-      )
+      broker.runtimeInferenceSettings()
     ])
     const messages = remote.messages.map((record) => record.payload)
     if (existing) {
