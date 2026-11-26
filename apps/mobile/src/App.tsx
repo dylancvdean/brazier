@@ -180,7 +180,7 @@ function Shell({ preferences, onPreferences }: {
     {view === 'settings' ? settings : null}
     {/* Stays mounted once opened so a running generation is not lost on returning to the chat. */}
     {generateOpened ? <View style={view === 'generate' ? styles.flex : { display: 'none' }}>
-      <Generate key={hostId(credential)} credential={credential} hostName={name}
+      <Generate key={hostId(credential)} credential={credential} hostName={name} visible={view === 'generate'}
         onUnauthorized={reportAccess} onClose={() => setView('chat')} />
     </View> : null}
     <View style={view === 'chat' ? styles.flex : { display: 'none' }}>

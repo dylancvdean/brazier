@@ -17,8 +17,8 @@ const blank = (modality: Modality): GenerateForm => ({
 });
 
 /** Image and video generation on the host, the mobile form of the desktop's Generate mode. */
-export function Generate({ credential, hostName, onClose, onUnauthorized }: {
-  credential: Credential; hostName: string; onClose: () => void; onUnauthorized: (error: unknown) => void;
+export function Generate({ credential, hostName, visible, onClose, onUnauthorized }: {
+  credential: Credential; hostName: string; visible: boolean; onClose: () => void; onUnauthorized: (error: unknown) => void;
 }) {
   const styles = useStyles();
   const palette = useTheme();
@@ -57,19 +57,24 @@ export function Generate({ credential, hostName, onClose, onUnauthorized }: {
       setForm((previous) => previous.modelId ? previous
         : { ...previous, modelId: generationModels(found, previous.modality)[0]?.id ?? '' });
     } catch (cause) {
-      if (alive.current) { setModels([]); report(cause); }
+      if (alive.current) { setModels((previous) => previous ?? []); report(cause); }
     }
   }
 
   useEffect(() => {
     alive.current = true;
-    void loadModels();
     loadHistory(credential).then((saved) => {
       stored.current = saved;
       if (alive.current) setHistory(saved);
     }, () => undefined);
     return () => { alive.current = false; };
   }, [api]);
+
+  // The screen stays mounted behind the chat, so models installed on the host
+  // since it was last open are picked up when it is shown again.
+  useEffect(() => {
+    if (visible) void loadModels();
+  }, [api, visible]);
 
   // The host runs one generation at a time, so this also shows one started
   // from a chat or another device, and lets it be cancelled here.
