@@ -254,7 +254,7 @@ export function Chat({
     <View style={styles.composer}>
       {tools.length ? <IconButton glyph={enabledTools.length ? '⚙' : '⊘'}
         label={`Tools, ${enabledTools.length} of ${tools.length} on`} onPress={() => setShowTools(true)} /> : null}
-      <TextInput accessibilityLabel="Message" placeholder={`Message ${hostName}`} placeholderTextColor={palette.muted}
+      <TextInput accessibilityLabel="Message" placeholder={local ? 'Message a model on this device' : `Message ${hostName}`} placeholderTextColor={palette.muted}
         style={styles.composeInput} value={draft} onChangeText={setDraft} editable={!busy} multiline />
       {generating
         ? <Pressable accessibilityRole="button" accessibilityLabel="Stop" style={styles.send}
