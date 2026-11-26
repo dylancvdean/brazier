@@ -1,4 +1,4 @@
-import { daemonFetch, daemonVerificationPending, setDaemonAvailability } from './daemonAvailability'
+import { daemonAvailability, daemonFetch, daemonVerificationPending, setDaemonAvailability } from './daemonAvailability'
 
 type Connection = Awaited<ReturnType<typeof window.brazier.getConnection>>
 type ConnectionProfile = Connection['profile']
@@ -76,4 +76,13 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (response.status === 204 || response.status === 205) return undefined as T
   return response.json() as Promise<T>
+}
+
+/** Wait for the app to re-verify the daemon, e.g. after main restarted it. */
+export async function waitForHealthyDaemon(timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (daemonAvailability() !== 'healthy') {
+    if (Date.now() > deadline) throw new Error('The Brazier daemon did not come back after restarting. Try again.')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
 }
