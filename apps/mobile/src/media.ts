@@ -188,6 +188,12 @@ export function generatedMediaMessage(calls: readonly ToolCall[]) {
   };
 }
 
+/** The host opens the media it hands back with a notice; a person's own message does not. */
+function isHostNotice(content: unknown): boolean {
+  const first = Array.isArray(content) ? content[0] : null;
+  return first?.type === 'text' && typeof first.text === 'string' && first.text.startsWith('The requested ');
+}
+
 /**
  * Where each saved message's media is shown. Within an assistant turn a blob
  * appears once, under the message whose tool call produced it; `moved` holds
@@ -206,7 +212,7 @@ export function mediaByMessage(messages: readonly Message[]): { media: Map<strin
     const blobs = messageBlobs(message.content);
     // For a vision model the host follows a tool result with a user-role message
     // that hands the model the media it made. It is part of the turn, not an upload.
-    const hostContext = message.role === 'user' && afterTool && blobs.length > 0;
+    const hostContext = message.role === 'user' && afterTool && blobs.length > 0 && isHostNotice(message.content);
     afterTool = message.role === 'tool';
     if (hostContext) moved.add(message.id);
     else if (message.role === 'user') {

@@ -146,6 +146,17 @@ test('media the host hands back to a vision model is not shown as an upload', ()
   assert.deepEqual([...moved], ['c1', 'm1']);
 });
 
+test('an upload sent right after a tool result stays an upload', () => {
+  const { media, moved } = mediaByMessage([
+    message('u1', 'user', 'draw a fox'),
+    message('a1', 'assistant', '', { tool_calls: [{ id: 'call-1' }] }),
+    message('t1', 'tool', 'done', { tool_call_id: 'call-1' }),
+    message('u2', 'user', [{ type: 'text', text: 'What is this?' }, part(sha('b'))]),
+  ]);
+  assert.deepEqual([...media.keys()], ['u2']);
+  assert.equal(moved.size, 0);
+});
+
 test('a media-only message with no tool call shows its own media', () => {
   const { media, moved } = mediaByMessage([message('u', 'user', 'hi'), message('m', 'assistant', [part(sha('a'), 'gone')])]);
   assert.deepEqual([...media.keys()], ['m']);
