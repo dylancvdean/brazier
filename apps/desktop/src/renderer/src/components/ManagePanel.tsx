@@ -6245,6 +6245,12 @@ function ServerSection(props: SectionProps): React.JSX.Element {
           <input type="checkbox" checked={settings.localhostOnly} disabled={!settings.enabled} onChange={(event) => setSettings({ ...settings, localhostOnly: event.target.checked, allowInsecureRemote: false, apiKeyEnabled: event.target.checked ? settings.apiKeyEnabled : true })} />
           <span>Listen on localhost only<small>On accepts connections only from this machine (127.0.0.1) — nothing else on your network can reach the server. Off listens on every local network interface.</small></span>
         </label>
+        {settings.pairedRemoteAccess && (!settings.enabled || settings.localhostOnly) ? (
+          <p className="model-help">
+            Paired devices keep the daemon reachable from your network over HTTPS on port {settings.port}.
+            After you revoke the last one in Connections, Brazier returns to local-only at next launch.
+          </p>
+        ) : null}
         {settings.enabled && !settings.localhostOnly ? (
           <label className="settings-toggle warning">
             <input

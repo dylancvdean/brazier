@@ -30,6 +30,12 @@ on `https://<lan-ip>:<port>` works without a proxy or a CA:
 brazierd --service --host 0.0.0.0
 ```
 
+Desktop opens its own daemon to the network the first time you create an invite:
+it restarts the daemon on `0.0.0.0` at the configured server port with API keys
+required, even if the server settings say localhost only. It stays reachable while
+any paired client is active or an invite is pending, and returns to loopback at the
+next launch after the last client is revoked.
+
 Loopback callers can still use plaintext HTTP on the same port. Plaintext from
 other devices gets `426 Upgrade Required` unless `--allow-insecure-remote` is
 set. That flag is an unsafe escape hatch: a bearer sent over ordinary HTTP can

@@ -628,6 +628,8 @@ export type ServerSettings = {
   localhostOnly: boolean
   allowInsecureRemote: boolean
   jitLoading: boolean
+  /** Paired devices or a pending invite keep the network listener open. */
+  pairedRemoteAccess: boolean
   keys: ServerKey[]
 }
 
@@ -651,7 +653,8 @@ const DEFAULT_SERVER_SETTINGS: StoredServerSettings = {
   apiKeys: [],
   localhostOnly: true,
   allowInsecureRemote: false,
-  jitLoading: true
+  jitLoading: true,
+  pairedRemoteAccess: false
 }
 
 function serverSettingsPath(): string {
@@ -711,7 +714,8 @@ function loadServerSettings(): StoredServerSettings {
         ? parsed.localhostOnly !== false
         : true,
       allowInsecureRemote,
-      jitLoading: parsed.jitLoading !== false
+      jitLoading: parsed.jitLoading !== false,
+      pairedRemoteAccess: parsed.pairedRemoteAccess === true
     }
     if (loadedKeys.hadPlaintext) saveServerSettings(settings)
     return settings
@@ -754,6 +758,31 @@ function saveServerSettings(settings: StoredServerSettings): void {
   }
   writeFileSync(temporary, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 })
   renameSync(temporary, path)
+}
+
+/** The daemon launch that `startDaemon` derives from saved settings. */
+function daemonLaunch(settings: StoredServerSettings): {
+  listening: boolean
+  remote: boolean
+  port?: number
+  requireKey?: boolean
+  insecureRemote?: boolean
+  jitLoading?: boolean
+} {
+  const remote = (settings.enabled && !settings.localhostOnly) || settings.pairedRemoteAccess
+  if (!settings.enabled && !remote) return { listening: false, remote }
+  return {
+    listening: true,
+    remote,
+    port: settings.port,
+    requireKey: remote || settings.apiKeyEnabled,
+    insecureRemote: settings.enabled && !settings.localhostOnly && settings.allowInsecureRemote,
+    ...(settings.enabled ? { jitLoading: settings.jitLoading } : {})
+  }
+}
+
+function sameDaemonLaunch(a: StoredServerSettings, b: StoredServerSettings): boolean {
+  return JSON.stringify(daemonLaunch(a)) === JSON.stringify(daemonLaunch(b))
 }
 
 function generatedApiKey(): string {
@@ -860,12 +889,10 @@ async function startDaemon(): Promise<Connection> {
     : ['run', '-q', '-p', 'brazierd', '--', '--data-dir', directory]
   const serverSettings = loadServerSettings()
   let daemonKeysForStdin: string[] = []
-  if (serverSettings.enabled) {
-    if (!serverSettings.localhostOnly && !serverSettings.apiKeyEnabled) {
-      throw new Error('A non-loopback server must require API-key authentication.')
-    }
-    args.push('--host', serverSettings.localhostOnly ? '127.0.0.1' : '0.0.0.0', '--port', String(serverSettings.port))
-    if (serverSettings.apiKeyEnabled) {
+  const launch = daemonLaunch(serverSettings)
+  if (launch.listening) {
+    args.push('--host', launch.remote ? '0.0.0.0' : '127.0.0.1', '--port', String(launch.port))
+    if (launch.requireKey) {
       // The desktop's own connection needs a credential too. If the user has
       // not named any keys yet, mint one and keep it stable across restarts so
       // a configured OpenAI client is not silently revoked.
@@ -883,10 +910,8 @@ async function startDaemon(): Promise<Connection> {
     }
     // Other devices use the daemon's pinned HTTPS certificate. Plaintext from
     // them is only accepted with this explicit acknowledgement.
-    if (!serverSettings.localhostOnly && serverSettings.allowInsecureRemote) {
-      args.push('--allow-insecure-remote')
-    }
-    args.push('--jit-loading', String(serverSettings.jitLoading))
+    if (launch.insecureRemote) args.push('--allow-insecure-remote')
+    if (launch.jitLoading !== undefined) args.push('--jit-loading', String(launch.jitLoading))
   }
   const child = spawn(command, args, {
     cwd: installedApp || useInstalledDaemon ? undefined : repositoryRoot(),
@@ -1565,25 +1590,42 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     'brazier:connection-profiles:preview-pairing',
     (_event, origin: string, id: string, code: string) => previewPairing(origin, id, code)
   )
+  // Inviting a device opens the local daemon to the network; paired devices
+  // keep it open until none remain (checked at launch).
+  const openLocalDaemonForPairing = async (): Promise<void> => {
+    if (profiles.current().kind !== 'local') return
+    const previous = loadServerSettings()
+    if (previous.pairedRemoteAccess) return
+    saveServerSettings({ ...previous, pairedRemoteAccess: true })
+    if (sameDaemonLaunch(previous, loadServerSettings())) return
+    try {
+      await restartLocalDaemon()
+    } catch (cause) {
+      saveServerSettings({ ...loadServerSettings(), pairedRemoteAccess: false })
+      await restartLocalDaemon()
+      throw new Error(`Brazier could not listen for other devices on port ${previous.port}: ${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }
   handleTrusted('brazier:connection-profiles:verify-pairing-origin', async (_event, origin: string) => {
+    await openLocalDaemonForPairing()
     const active = await readyConnection()
     const local = active.profile.kind === 'local'
     const verified = await verifyPairingOrigin(
       active.address, origin, fetch, local ? localTlsCertificateSha256 : undefined
-    ).catch((error: unknown) => {
-      const settings = loadServerSettings()
-      if (local && (!settings.enabled || settings.localhostOnly)) {
-        throw new Error('Other devices cannot reach this daemon yet. In Manage → Server, enable the network server and turn off "Listen on localhost only", then save.')
-      }
-      throw error
-    })
+    )
     if (profiles.current().id !== active.profile.id) throw new Error('The selected connection changed. Try again.')
     return { hostName: active.daemon.daemon?.display_name ?? active.profile.name, ...verified }
   })
   handleTrusted('brazier:connection-profiles:local-pairing-origin', async () => {
     if (profiles.current().kind !== 'local') return null
     try {
-      return localPairingOrigin((await readyConnection()).address)
+      const ready = await readyConnection()
+      const settings = loadServerSettings()
+      // Before the first invite the daemon may be on an ephemeral loopback
+      // port; pairing reopens it on the configured one.
+      return localPairingOrigin(
+        daemonLaunch(settings).remote ? ready.address : `http://127.0.0.1:${settings.port}`
+      )
     } catch {
       return null
     }
@@ -1666,7 +1708,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   handleTrusted('brazier:server-settings', (): ServerSettings => publicServerSettings(loadServerSettings()))
   handleTrusted(
     'brazier:save-server-settings',
-    async (_event, requested: Omit<ServerSettings, 'hasApiKeys' | 'keys'>) => {
+    async (_event, requested: Omit<ServerSettings, 'hasApiKeys' | 'keys' | 'pairedRemoteAccess'>) => {
       const port = Number(requested.port)
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
         throw new Error('Server port must be between 1 and 65535.')
@@ -1678,6 +1720,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       if (enabled && !localhostOnly && !apiKeyEnabled) {
         throw new Error('A non-loopback server must require an API key.')
       }
+      const previous = loadServerSettings()
       const next: StoredServerSettings = {
         enabled,
         port,
@@ -1685,15 +1728,11 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
         localhostOnly,
         allowInsecureRemote,
         jitLoading: requested.jitLoading !== false,
-        apiKeys: loadServerSettings().apiKeys
+        pairedRemoteAccess: previous.pairedRemoteAccess,
+        apiKeys: previous.apiKeys
       }
-      const previous = loadServerSettings()
       saveServerSettings(next)
-      // startDaemon ignores every other launch setting while the server is off.
-      const launchChanged = previous.enabled !== next.enabled || (next.enabled &&
-        (['port', 'apiKeyEnabled', 'localhostOnly', 'allowInsecureRemote', 'jitLoading'] as const)
-          .some((key) => previous[key] !== next[key]))
-      if (launchChanged && daemon && profiles.current().kind === 'local') {
+      if (!sameDaemonLaunch(previous, next) && daemon && profiles.current().kind === 'local') {
         try {
           await restartLocalDaemon()
         } catch (cause) {
@@ -1821,6 +1860,9 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     return result.filePaths[0] ?? null
   })
   await createWindow()
+  void closeUnpairedLocalListener(readyConnection).catch((cause) => {
+    report(`[server] could not check paired devices: ${cause instanceof Error ? cause.message : String(cause)}`, 'warn')
+  })
   checkForUpdates = startUpdates(report).checkForUpdates
   app.on('activate', () => {
     if (desktopLifecycle.requestActivation() === 'show-window') {
@@ -1828,6 +1870,33 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     }
   })
 })
+
+/** Return the daemon to loopback once no paired device or open invite remains. */
+async function closeUnpairedLocalListener(readyConnection: () => Promise<DaemonConnection>): Promise<void> {
+  if (!loadServerSettings().pairedRemoteAccess || connectionProfiles?.current().kind !== 'local') return
+  const ready = await readyConnection()
+  if (ready.profile.kind !== 'local') return
+  const list = async <T,>(path: string): Promise<T[]> => {
+    const response = await fetch(`${ready.address}${path}`, {
+      headers: ready.api_key ? { authorization: `Bearer ${ready.api_key}` } : {}
+    })
+    if (!response.ok) throw new Error(`${path} returned ${response.status}`)
+    return ((await response.json()) as { data: T[] }).data
+  }
+  const [clients, pairings] = await Promise.all([
+    list<{ revoked_at?: string | null }>('/api/v1/auth/clients'),
+    list<{ consumed_at?: string | null; expires_at: number }>('/api/v1/auth/pairings')
+  ])
+  const now = Math.floor(Date.now() / 1_000)
+  if (clients.some((client) => !client.revoked_at)) return
+  if (pairings.some((pairing) => !pairing.consumed_at && pairing.expires_at > now)) return
+  const previous = loadServerSettings()
+  const next = { ...previous, pairedRemoteAccess: false }
+  saveServerSettings(next)
+  if (!sameDaemonLaunch(previous, next) && connectionProfiles?.current().kind === 'local') {
+    await restartLocalDaemon()
+  }
+}
 
 async function shutdownApplication(): Promise<void> {
   report('[brazier] application shutdown started')
