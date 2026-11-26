@@ -202,15 +202,13 @@ pub async fn hints_for_repo(
         }
     };
     hints.extend(known_hints_for_repo(repo_id));
-    // The recommended Bonsai artifacts run in upstream llama.cpp: Q1_0 for the
-    // 1-bit model, Q2_g64 for ternary and Q2_0 for Bonsai 2.5. Their model
-    // cards still link the Prism fork for the other packs, so do not turn that
-    // into a misleading build requirement.
+    // The current recommended Bonsai artifacts run in upstream llama.cpp:
+    // Q1_0 for the 1-bit model and Q2_g64 for ternary. Their model cards still
+    // link the Prism fork for legacy group-128 files, so do not turn that into
+    // a misleading build requirement.
     if matches!(
         repo_id.to_ascii_lowercase().as_str(),
-        "prism-ml/bonsai-27b-gguf"
-            | "prism-ml/ternary-bonsai-27b-gguf"
-            | "prism-ml/ternary-bonsai-2.5-27b-gguf"
+        "prism-ml/bonsai-27b-gguf" | "prism-ml/ternary-bonsai-27b-gguf"
     ) {
         hints.retain(|hint| hint.repository != "https://github.com/PrismML-Eng/llama.cpp");
     }
