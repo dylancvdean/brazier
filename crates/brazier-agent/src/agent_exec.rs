@@ -32,7 +32,8 @@ use uuid::Uuid;
 use crate::{
     agent_policy::{self, PolicyDecision, PolicyRequest, is_inside, tool_spec},
     agent_sandbox::{
-        SandboxBackend, SandboxBackendCapabilities, SandboxProfile, SandboxRequest, secret_paths,
+        SandboxBackend, SandboxBackendCapabilities, SandboxBackendKind, SandboxProfile,
+        SandboxRequest, secret_paths,
     },
 };
 use brazier_protocol::agent_types::{
@@ -2313,7 +2314,11 @@ async fn build_command(
         }
         pinned_directories
     };
-    let launch_cwd = if plan.environment == AgentEnvironment::Sandbox {
+    // Bubblewrap and the Windows launcher set the jailed working directory
+    // themselves; Seatbelt keeps real paths and inherits it from the spawn.
+    let launch_cwd = if plan.environment == AgentEnvironment::Sandbox
+        && context.broker.backend().kind() != SandboxBackendKind::Seatbelt
+    {
         Path::new("/")
     } else {
         &cwd
