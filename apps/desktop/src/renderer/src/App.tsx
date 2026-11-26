@@ -855,9 +855,6 @@ export function App(): React.JSX.Element {
         setConversationId(null)
         setMessages([])
         setTipId(null)
-      } else {
-        // Same profile, new daemon process (e.g. a listener restart).
-        void reconnectDaemon(false)
       }
       setConnectionProfile(profile)
     }

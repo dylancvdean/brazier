@@ -78,11 +78,10 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-/** Wait for the app to re-verify the daemon, e.g. after main restarted it. */
-export async function waitForHealthyDaemon(timeoutMs = 15_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (daemonAvailability() !== 'healthy') {
-    if (Date.now() > deadline) throw new Error('The Brazier daemon did not come back after restarting. Try again.')
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
+/** Re-verify the daemon on demand, e.g. after main restarted it for pairing. */
+export async function ensureHealthyDaemon(): Promise<void> {
+  if (daemonAvailability() === 'healthy') return
+  const result = await window.brazier.verifyConnection()
+  if (result.status !== 'healthy') throw new Error(result.message)
+  setDaemonAvailability('healthy')
 }
