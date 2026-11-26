@@ -875,6 +875,20 @@ process.on('unhandledRejection', (reason) => {
 })
 
 async function startDaemon(): Promise<Connection> {
+  const settings = loadServerSettings()
+  try {
+    return await launchDaemon(settings)
+  } catch (cause) {
+    const unpaired = { ...settings, pairedRemoteAccess: false }
+    if (sameDaemonLaunch(settings, unpaired)) throw cause
+    // Keep Brazier usable when the pairing port is taken; paired devices
+    // reconnect after the next successful launch.
+    report(`[server] could not open the paired-device listener; staying private: ${cause instanceof Error ? cause.message : String(cause)}`, 'warn')
+    return launchDaemon(unpaired)
+  }
+}
+
+async function launchDaemon(serverSettings: StoredServerSettings): Promise<Connection> {
   await daemonCleanup
   const directory = dataDirectory()
   const installedDaemon = join(__dirname, '../..', process.platform === 'win32' ? 'brazierd.exe' : 'brazierd')
@@ -887,7 +901,6 @@ async function startDaemon(): Promise<Connection> {
   const args = (installedApp || useInstalledDaemon)
     ? ['--data-dir', directory]
     : ['run', '-q', '-p', 'brazierd', '--', '--data-dir', directory]
-  const serverSettings = loadServerSettings()
   let daemonKeysForStdin: string[] = []
   const launch = daemonLaunch(serverSettings)
   if (launch.listening) {
@@ -901,7 +914,7 @@ async function startDaemon(): Promise<Connection> {
         const value = generatedApiKey()
         apiKeys = [{ id: randomUUID(), name: 'Auto-generated', value, createdAt: Date.now() }]
         serverSettings.apiKeys = apiKeys
-        saveServerSettings(serverSettings)
+        saveServerSettings({ ...loadServerSettings(), apiKeys })
       }
       daemonKeysForStdin = apiKeys.map((key) => key.value)
       args.push('--api-keys-stdin')
@@ -988,6 +1001,7 @@ async function startDaemon(): Promise<Connection> {
             daemonProcessId = Number(connection.pid)
           }
           if (daemon === child) {
+            localDaemonRemote = launch.remote
             localTlsCertificateSha256 = typeof connection.tls_certificate_sha256 === 'string'
               ? connection.tls_certificate_sha256
               : undefined
@@ -1005,6 +1019,7 @@ async function startDaemon(): Promise<Connection> {
 
 let daemonCleanup: Promise<void> = Promise.resolve()
 let localTlsCertificateSha256: string | undefined
+let localDaemonRemote = false
 
 function trackDaemonCleanup(cleanup: Promise<void>): Promise<void> {
   const next = daemonCleanup.then(() => cleanup, () => cleanup)
@@ -1605,6 +1620,10 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       await restartLocalDaemon()
       throw new Error(`Brazier could not listen for other devices on port ${previous.port}: ${cause instanceof Error ? cause.message : String(cause)}`)
     }
+    if (!localDaemonRemote) {
+      saveServerSettings({ ...loadServerSettings(), pairedRemoteAccess: false })
+      throw new Error(`Brazier could not listen for other devices on port ${previous.port}. Free the port or choose another in Manage → Server.`)
+    }
   }
   handleTrusted('brazier:connection-profiles:verify-pairing-origin', async (_event, origin: string) => {
     await openLocalDaemonForPairing()
@@ -1735,6 +1754,9 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       if (!sameDaemonLaunch(previous, next) && daemon && profiles.current().kind === 'local') {
         try {
           await restartLocalDaemon()
+          if (daemonLaunch(next).remote && !localDaemonRemote) {
+            throw new Error(`port ${next.port} is unavailable for other devices`)
+          }
         } catch (cause) {
           // Keep Brazier usable, e.g. when the new port is already taken.
           saveServerSettings({ ...previous, apiKeys: loadServerSettings().apiKeys })
