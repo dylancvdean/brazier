@@ -144,9 +144,13 @@ function Pairing({ onPaired }: { onPaired: (credential: Credential) => void }) {
       const target = { ...candidate, origin: pairingOrigin(candidate.origin, androidEmulator),
         pairingId: candidate.pairingId.trim(), code: candidate.code.trim() };
       if (!target.pairingId || !target.code) throw new Error('Enter the invitation ID and code.');
-      await checkLocalNetwork(target.origin);
+      // The check connects directly, so a host behind the phone's proxy can
+      // fail it and still be reachable: only report it if the request fails too.
+      const unreachable = await checkLocalNetwork(target.origin).then(() => null, (cause: unknown) => cause);
       await pinCertificate(target.origin, target.certificateSha256);
-      const preview = await previewInvite(fetch, target);
+      const preview = await previewInvite(fetch, target).catch((cause: unknown) => {
+        throw unreachable && cause instanceof DaemonError && cause.status === undefined ? unreachable : cause;
+      });
       setReview({ input: target, preview });
     } catch (cause) {
       setError(errorText(cause));
