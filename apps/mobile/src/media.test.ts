@@ -47,6 +47,9 @@ test('a history entry records the settings the host reports using', () => {
   const entry = historyEntry('1', 'image', body, result(sha('a'), { seed: 42, steps: 8, width: 'x' }), '2026-01-01T00:00:00Z');
   assert.deepEqual([entry.seed, entry.steps, entry.width, entry.height], [42, 8, 512, 768]);
   assert.equal(entryDetails(entry), '512×768 · 8 steps · seed 42 · 2 KB');
+  assert.equal(entry.frames, undefined);
+  const video = generateBody({ ...form, modality: 'video', frames: '33' }) as typeof body;
+  assert.equal(historyEntry('2', 'video', video, result(sha('b')), '').frames, 33);
 });
 
 test('history is newest first, capped, and survives a round trip but not corrupt data', () => {

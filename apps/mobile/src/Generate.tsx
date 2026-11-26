@@ -138,7 +138,8 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
       modality: entry.modality, prompt: entry.prompt, negative: entry.negativePrompt, width: entry.width, height: entry.height,
       modelId: generationModels(models ?? [], entry.modality).some(({ id }) => id === entry.modelId)
         ? entry.modelId : generationModels(models ?? [], entry.modality)[0]?.id ?? '',
-      steps: entry.steps != null ? String(entry.steps) : '', seed: entry.seed != null ? String(entry.seed) : '', frames: '',
+      steps: entry.steps != null ? String(entry.steps) : '', seed: entry.seed != null ? String(entry.seed) : '',
+      frames: entry.frames != null ? String(entry.frames) : '',
     });
   }
 

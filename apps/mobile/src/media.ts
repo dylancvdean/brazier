@@ -21,7 +21,7 @@ export type GenerateBody = {
 };
 export type HistoryEntry = {
   id: string; prompt: string; negativePrompt: string; modality: Modality; modelId: string;
-  width: number; height: number; steps?: number; seed?: number; createdAt: string;
+  width: number; height: number; steps?: number; seed?: number; frames?: number; createdAt: string;
   blob: { sha256: string; mime_type: string; size_bytes: number };
 };
 
@@ -80,6 +80,7 @@ export function historyEntry(
     id, modality, prompt: body.prompt, negativePrompt: body.negative_prompt ?? '', modelId: body.model_id,
     width: number('width', body.width)!, height: number('height', body.height)!,
     steps: number('steps', body.steps), seed: number('seed', body.seed), createdAt,
+    ...(body.video_frames !== undefined ? { frames: body.video_frames } : {}),
     blob: { sha256: result.blob.sha256, mime_type: result.blob.mime_type, size_bytes: result.blob.size_bytes },
   };
 }
