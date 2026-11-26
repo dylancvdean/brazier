@@ -47,9 +47,9 @@ test('unwraps lists and sends no body on reads and deletes', async () => {
 
 test('says what to do when the host refuses a folder, and keeps other refusals verbatim', async () => {
   const refused = agentApi(host(403, { error: { message: 'the owner must authorize this workspace before a paired client can use it' } }), credential);
-  await assert.rejects(refused.validateWorkspace('/w'), (error: DaemonError) =>
+  await assert.rejects(refused.setWorkspace('s', '/w'), (error: DaemonError) =>
     error.status === 403 && /Open it once in Agent mode in Brazier on the host/.test(error.message));
-  await assert.rejects(agentApi(host(400, { error: { message: 'workspace does not exist' } }), credential).validateWorkspace('/w'),
+  await assert.rejects(agentApi(host(400, { error: { message: 'workspace does not exist' } }), credential).setWorkspace('s', '/w'),
     /workspace does not exist/);
   await assert.rejects(agentApi(host(401, {}), credential).sessions(), (error: DaemonError) => error.status === 401);
   await assert.rejects(agentApi(async () => { throw new Error('offline'); }, credential).sessions(), UnreachableError);

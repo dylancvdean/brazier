@@ -231,13 +231,17 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
     });
   }
 
+  // The host checks the folder when a session takes it: only the owner may probe paths, so a
+  // paired device learns whether a folder is allowed by using it.
   async function chooseWorkspace(path: string) {
     const wanted = path.trim();
     if (!wanted) return;
+    if (!active) {
+      setDraft((current) => ({ ...current, workspace: wanted }));
+      return setSheet(null);
+    }
     const applied = await attempt('Checking folder…', async () => {
-      const checked = await api.validateWorkspace(wanted);
-      if (!active) return setDraft((current) => ({ ...current, workspace: checked.path }));
-      replace(await api.setWorkspace(active.id, checked.path));
+      replace(await api.setWorkspace(active.id, wanted));
       await controller.open(active.id);
     });
     if (applied) setSheet(null);

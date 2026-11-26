@@ -49,8 +49,6 @@ export function agentApi(fetch: AgentFetch, credential: Credential) {
       call<AgentSessionSummary>(`/api/v1/agent/sessions/${encodeURIComponent(id)}`, 'PATCH', { workspace_path }),
     deleteSession: (id: string) => call<void>(`/api/v1/agent/sessions/${encodeURIComponent(id)}`, 'DELETE'),
     /** Checks the folder exists on the host and that its owner has opened it to paired devices. */
-    validateWorkspace: (path: string) =>
-      call<{ path: string; git_repository: boolean }>('/api/v1/agent/workspace', 'POST', { path }),
     decide: (approval: AgentApproval, decision: 'approve' | 'deny', scope?: 'once' | 'session') =>
       call<AgentApproval>(`/api/v1/agent/approvals/${encodeURIComponent(approval.id)}`, 'POST', {
         decision, scope, expected_execution_location: approval.execution_location,
