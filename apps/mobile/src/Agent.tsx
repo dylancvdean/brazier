@@ -242,7 +242,9 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
     }
     const applied = await attempt('Checking folder…', async () => {
       replace(await api.setWorkspace(active.id, wanted));
-      await controller.open(active.id);
+      // A loaded session keeps the folder it was opened with and would start delegated tasks
+      // there; drop it so the next run loads the session with its new folder.
+      await controller.close(active.id);
     });
     if (applied) setSheet(null);
   }
