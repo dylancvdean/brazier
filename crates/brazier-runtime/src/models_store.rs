@@ -419,7 +419,9 @@ pub fn speculative_draft_type(path: &Path) -> Option<&'static str> {
     if !name.ends_with(".gguf") {
         return None;
     }
-    if name.contains("dspark") {
+    if is_mtp_head_name(&name) {
+        Some("draft-mtp")
+    } else if name.contains("dspark") {
         Some("draft-dspark")
     } else if name.contains("dflash") {
         Some("draft-dflash")
@@ -432,6 +434,45 @@ pub fn speculative_draft_type(path: &Path) -> Option<&'static str> {
 
 pub fn is_speculative_draft_file(path: &Path) -> bool {
     speculative_draft_type(path).is_some()
+}
+
+/// Folder some publishers keep separate MTP heads in, beside the weights.
+const MTP_HEAD_DIRECTORY: &str = "MTP";
+
+/// A multi-token-prediction head published as its own file, such as
+/// `mtp-Qwen3.8-27B-Q4_0.gguf`. Weights that embed the head only mention MTP
+/// later in the name and are ordinary models.
+fn is_mtp_head_name(lowercase_name: &str) -> bool {
+    lowercase_name.starts_with("mtp-")
+}
+
+/// The model name an MTP head belongs to: its stem without the `mtp-` marker
+/// and without a trailing precision such as `-Q4_0` or `-BF16`.
+fn mtp_head_family(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?.to_ascii_lowercase();
+    let family = stem.strip_prefix("mtp-")?;
+    let is_precision = |part: &str| {
+        part.trim_start_matches(|c: char| c.is_ascii_alphabetic())
+            .starts_with(|c: char| c.is_ascii_digit())
+            && ["q", "f", "bf"].iter().any(|kind| {
+                part.strip_prefix(kind)
+                    .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+            })
+    };
+    let family = match family.rsplit_once('-') {
+        Some((model, last)) if is_precision(last) => model,
+        _ => family,
+    };
+    (!family.is_empty()).then(|| family.to_owned())
+}
+
+/// Where a model's launch-time companions live: its own folder, then the
+/// publisher's MTP folder beside it.
+fn draft_directories(model_path: &Path) -> Vec<PathBuf> {
+    let Some(directory) = model_path.parent() else {
+        return Vec::new();
+    };
+    vec![directory.to_path_buf(), directory.join(MTP_HEAD_DIRECTORY)]
 }
 
 fn draft_family_prefix(path: &Path) -> Option<String> {
@@ -448,10 +489,19 @@ fn draft_family_prefix(path: &Path) -> Option<String> {
 }
 
 fn same_draft_family(model: &Path, draft: &Path) -> bool {
-    let Some(prefix) = draft_family_prefix(draft) else {
+    let Some(model_stem) = model.file_stem().and_then(|stem| stem.to_str()) else {
         return false;
     };
-    let Some(model_stem) = model.file_stem().and_then(|stem| stem.to_str()) else {
+    let is_mtp_head = draft
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| is_mtp_head_name(&name.to_ascii_lowercase()));
+    let prefix = if is_mtp_head {
+        mtp_head_family(draft)
+    } else {
+        draft_family_prefix(draft)
+    };
+    let Some(prefix) = prefix else {
         return false;
     };
     model_stem.to_ascii_lowercase().starts_with(&prefix)
@@ -629,9 +679,15 @@ pub fn draft_options_for_model(
     let model_path = path_for_model_id(data_dir, model_id, extra_paths).ok();
 
     // Drafter companions published beside the model.
-    let directory = model_path.as_ref().and_then(|path| path.parent());
-    let entries = directory.and_then(|directory| std::fs::read_dir(directory).ok());
-    if let Some(entries) = entries {
+    let model_directory = model_path.as_ref().and_then(|path| path.parent());
+    let directories = model_path
+        .as_deref()
+        .map(draft_directories)
+        .unwrap_or_default();
+    for directory in directories {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if !is_speculative_draft_file(&path) {
@@ -640,9 +696,15 @@ pub fn draft_options_for_model(
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
+            // The stored value is relative to the model's folder, which is how
+            // the engine resolves it.
+            let value = model_directory
+                .and_then(|root| path.strip_prefix(root).ok())
+                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|| name.to_owned());
             let loadable = !is_mainline_incompatible_draft(&path);
             options.push(DraftOption {
-                value: name.to_owned(),
+                value,
                 label: name.to_owned(),
                 kind: "companion".into(),
                 loadable,
@@ -879,10 +941,10 @@ pub fn projector_for_model(model_path: &Path) -> Option<PathBuf> {
 /// memory; a model profile can override it when a repository publishes more
 /// than one incompatible draft family.
 pub fn draft_model_for_model(model_path: &Path) -> Option<PathBuf> {
-    let directory = model_path.parent()?;
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(directory)
-        .ok()?
-        .flatten()
+    let mut candidates: Vec<PathBuf> = draft_directories(model_path)
+        .into_iter()
+        .filter_map(|directory| std::fs::read_dir(directory).ok())
+        .flat_map(|entries| entries.flatten())
         .map(|entry| entry.path())
         .filter(|path| {
             path.extension()
@@ -2206,6 +2268,36 @@ mod tests {
         assert_eq!(draft_model_for_model(&model), Some(dspark_q4));
         assert!(is_speculative_draft_file(&dspark_bf16));
         assert!(!is_speculative_draft_file(&model));
+    }
+
+    #[test]
+    fn a_separate_mtp_head_is_found_beside_its_model_like_a_projector() {
+        let dir = tempdir().unwrap();
+        let model = dir.path().join("Qwen3.8-27B-UD-Q4_K_XL.gguf");
+        let embedded = dir.path().join("Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf");
+        let other = dir.path().join("gemma-4-26B-A4B-it-Q4_K_M.gguf");
+        let heads = dir.path().join("MTP");
+        std::fs::create_dir(&heads).unwrap();
+        let head = heads.join("mtp-Qwen3.8-27B-Q4_0.gguf");
+        let reference = heads.join("mtp-Qwen3.8-27B-BF16.gguf");
+        let unsuffixed = dir.path().join("mtp-gemma-4-12b-it.gguf");
+        for path in [&model, &embedded, &other] {
+            std::fs::write(path, b"model").unwrap();
+        }
+        std::fs::write(&head, vec![0_u8; 4]).unwrap();
+        std::fs::write(&reference, vec![0_u8; 16]).unwrap();
+        std::fs::write(&unsuffixed, vec![0_u8; 1]).unwrap();
+
+        assert_eq!(speculative_draft_type(&head), Some("draft-mtp"));
+        assert!(!is_speculative_draft_file(&embedded));
+        assert_eq!(draft_model_for_model(&model), Some(head));
+        assert_eq!(draft_model_for_model(&embedded), None);
+        assert_eq!(draft_model_for_model(&other), None);
+        assert_eq!(
+            mtp_head_family(&unsuffixed).as_deref(),
+            Some("gemma-4-12b-it")
+        );
+        assert_eq!(mtp_head_family(&reference).as_deref(), Some("qwen3.8-27b"));
     }
 
     /// PrismML's Bonsai dspark drafter embeds the target's legacy group-128

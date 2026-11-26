@@ -32,6 +32,10 @@
     "A pinned quant matches a whole filename token, so `Q2_0` never selects a",
     "`PQ2_0` file.",
     "",
+    "A separate multi-token-prediction head (`mtp-<model>-<quant>.gguf`, at the",
+    "repository root or in its `MTP/` folder) is offered as the entry's drafter,",
+    "the way a projector is offered for image input, and attached at launch.",
+    "",
     "`computer_use` recommends a screenshot-driven agent model (Fara1.5). Its",
     "vision projector is discovered automatically at resolve time, so the entry",
     "only names the repository. Fara1.5 natively supports up to 262k context;",
@@ -124,11 +128,11 @@
         "summary": "A 26B mixture-of-experts model with 4B active: the speed of a small model, the knowledge of a large one."
       },
       "agent": {
-        "id": "qwen3.6-27b-mtp",
-        "label": "Qwen 3.6 27B MTP",
-        "repo_id": "unsloth/Qwen3.6-27B-MTP-GGUF",
+        "id": "qwen3.8-27b",
+        "label": "Qwen 3.8 27B",
+        "repo_id": "unsloth/Qwen3.8-27B-GGUF",
         "quant": "by_memory",
-        "summary": "The smarter agent choice: a dense 27B Qwen 3.6 with multi-token prediction enabled for faster tool-work turns."
+        "summary": "The smarter agent choice: a dense 27B Qwen 3.8 that reads images, with a separate multi-token prediction head for faster tool-work turns."
       },
       "agent_options": [{
         "id": "qwen3.6-35b-a3b-mtp",
@@ -173,18 +177,18 @@
         "summary": "A 26B looped mixture-of-experts model with 3.4B active that reads text and images. Fits here at 4-bit."
       },
       "agent": {
-        "id": "qwen3.6-27b-mtp",
-        "label": "Qwen 3.6 27B MTP",
-        "repo_id": "unsloth/Qwen3.6-27B-MTP-GGUF",
+        "id": "qwen3.8-27b",
+        "label": "Qwen 3.8 27B",
+        "repo_id": "unsloth/Qwen3.8-27B-GGUF",
         "quant": "by_memory",
-        "summary": "The smarter agent choice: dense 27B Qwen 3.6 with multi-token prediction."
+        "summary": "The smarter agent choice: a dense 27B Qwen 3.8 that reads images, with a separate multi-token prediction head for faster tool-work turns."
       },
       "agent_options": [{
-        "id": "qwen3.6-35b-a3b-mtp",
-        "label": "Qwen 3.6 35B A3B MTP",
-        "repo_id": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+        "id": "flint",
+        "label": "Flint",
+        "repo_id": "unsloth/flint-GGUF",
         "quant": "by_memory",
-        "summary": "The faster agent choice: 35B MoE, 3B active, with MTP decoding."
+        "summary": "The faster agent choice: a text-only 40B mixture-of-experts coding model with 2.5B active."
       }],
       "image": {
         "id": "flux1-dev-q8",
@@ -224,18 +228,18 @@
         "summary": "A 26B looped mixture-of-experts model with 3.4B active that reads text and images. At this tier it runs at full 8-bit precision."
       },
       "agent": {
-        "id": "qwen3.6-27b-mtp",
-        "label": "Qwen 3.6 27B MTP",
-        "repo_id": "unsloth/Qwen3.6-27B-MTP-GGUF",
+        "id": "qwen3.8-27b",
+        "label": "Qwen 3.8 27B",
+        "repo_id": "unsloth/Qwen3.8-27B-GGUF",
         "quant": "by_memory",
-        "summary": "The smarter agent choice: dense 27B Qwen 3.6 with multi-token prediction."
+        "summary": "The smarter agent choice: a dense 27B Qwen 3.8 that reads images, with a separate multi-token prediction head for faster tool-work turns."
       },
       "agent_options": [{
-        "id": "qwen3.6-35b-a3b-mtp",
-        "label": "Qwen 3.6 35B A3B MTP",
-        "repo_id": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+        "id": "flint",
+        "label": "Flint",
+        "repo_id": "unsloth/flint-GGUF",
         "quant": "by_memory",
-        "summary": "The faster agent choice: 35B MoE, 3B active, with MTP decoding."
+        "summary": "The faster agent choice: a text-only 40B mixture-of-experts coding model with 2.5B active."
       }],
       "image": {
         "id": "flux1-dev-q8-48gb",
@@ -275,18 +279,18 @@
         "summary": "A 26B looped mixture-of-experts model with 3.4B active that reads text and images, at full 8-bit precision."
       },
       "agent": {
-        "id": "qwen3.6-27b-mtp",
-        "label": "Qwen 3.6 27B MTP",
-        "repo_id": "unsloth/Qwen3.6-27B-MTP-GGUF",
+        "id": "qwen3.8-27b",
+        "label": "Qwen 3.8 27B",
+        "repo_id": "unsloth/Qwen3.8-27B-GGUF",
         "quant": "by_memory",
-        "summary": "The smarter agent choice: dense 27B Qwen 3.6 with multi-token prediction."
+        "summary": "The smarter agent choice: a dense 27B Qwen 3.8 that reads images, with a separate multi-token prediction head for faster tool-work turns."
       },
       "agent_options": [{
-        "id": "qwen3.6-35b-a3b-mtp",
-        "label": "Qwen 3.6 35B A3B MTP",
-        "repo_id": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+        "id": "flint",
+        "label": "Flint",
+        "repo_id": "unsloth/flint-GGUF",
         "quant": "by_memory",
-        "summary": "The faster agent choice: 35B MoE, 3B active, with MTP decoding."
+        "summary": "The faster agent choice: a text-only 40B mixture-of-experts coding model with 2.5B active."
       }],
       "image": {
         "id": "qwen-image-q8",
@@ -355,11 +359,11 @@
     {
       "min_gb": 192,
       "text": {
-        "id": "laguna-s-2.1",
-        "label": "Laguna S 2.1",
-        "repo_id": "unsloth/Laguna-S-2.1-GGUF",
+        "id": "ornith-1.5-122b",
+        "label": "Ornith 1.5 122B",
+        "repo_id": "unsloth/Ornith-1.5-122B-GGUF",
         "quant": "by_memory",
-        "summary": "A 117B model at a high quant, a better trade than a far larger model squeezed to two bits."
+        "summary": "A 122B mixture-of-experts model that reads images, at a high quant: a better trade than a far larger model squeezed to two bits."
       },
       "image": {
         "id": "flux1-dev-bf16",

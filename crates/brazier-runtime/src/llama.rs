@@ -3630,6 +3630,53 @@ mod tests {
     }
 
     #[test]
+    fn a_separate_mtp_head_is_attached_as_the_draft_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("Qwen3.8-27B-UD-Q4_K_XL.gguf");
+        let head = dir.path().join("MTP").join("mtp-Qwen3.8-27B-Q4_0.gguf");
+        std::fs::create_dir(head.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"model").unwrap();
+        std::fs::write(&head, b"head").unwrap();
+
+        let draft = speculative_draft_for_model(None, Some(&model));
+        assert_eq!(draft, Some((head.clone(), "draft-mtp".to_owned())));
+        let plan = LaunchPlan::resolve(
+            &RuntimeSettings::default(),
+            None,
+            Vec::new(),
+            RuntimeTarget::Cpu,
+            false,
+            draft,
+            Some(&model),
+        );
+        let mut command = Command::new("llama-server");
+        plan.apply(&mut command, false);
+        let args: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--spec-draft-model" && pair[1] == head.display().to_string()
+        }));
+        assert_eq!(
+            args.iter().filter(|arg| *arg == "--spec-type").count(),
+            1,
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--spec-type" && pair[1] == "draft-mtp")
+        );
+
+        let off = TextProfile {
+            speculative_draft_model: Some("none".to_owned()),
+            ..TextProfile::default()
+        };
+        assert_eq!(speculative_draft_for_model(Some(&off), Some(&model)), None);
+    }
+
+    #[test]
     fn laguna_s_2_1_uses_documented_yarn_settings_above_256k() {
         let settings = RuntimeSettings {
             context_size: 1_048_576,

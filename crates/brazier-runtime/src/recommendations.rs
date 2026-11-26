@@ -1028,6 +1028,148 @@ mod tests {
         assert_eq!(quant(48), "Q8_0");
     }
 
+    fn sized(files: &[(&str, u64)]) -> Vec<(String, Option<u64>)> {
+        files
+            .iter()
+            .map(|(name, size)| ((*name).to_owned(), Some(*size)))
+            .collect()
+    }
+
+    #[test]
+    fn qwen_3_8_is_the_agent_and_its_separate_mtp_head_is_never_the_model() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        for memory in [24, 32, 48, 64] {
+            let tier = catalog.tier_for(gb(memory)).unwrap();
+            let agent = tier.agent.as_ref().unwrap();
+            assert_eq!(agent.repo_id, "unsloth/Qwen3.8-27B-GGUF");
+            assert!(!agent.skip_drafts, "the MTP head is offered as the drafter");
+        }
+
+        let files = sized(&[
+            ("BF16/Qwen3.8-27B-BF16-00001-of-00002.gguf", 49_986_159_616),
+            ("BF16/Qwen3.8-27B-BF16-00002-of-00002.gguf", 4_671_576_000),
+            ("MTP/mtp-Qwen3.8-27B-Q4_0.gguf", 1_369_590_656),
+            ("Qwen3.8-27B-Q4_0.gguf", 16_056_478_688),
+            ("Qwen3.8-27B-Q8_0.gguf", 29_047_086_048),
+            ("Qwen3.8-27B-UD-Q2_K_XL.gguf", 9_948_666_784),
+            ("Qwen3.8-27B-UD-Q3_K_XL.gguf", 13_146_393_504),
+            ("Qwen3.8-27B-UD-Q4_K_M.gguf", 16_564_259_744),
+            ("Qwen3.8-27B-UD-Q4_K_XL.gguf", 17_659_407_264),
+            ("Qwen3.8-27B-UD-Q5_K_XL.gguf", 20_976_962_464),
+            ("Qwen3.8-27B-UD-Q6_K_XL.gguf", 25_299_061_664),
+            ("imatrix_unsloth.gguf", 13_642_656),
+            ("mmproj-F16.gguf", 927_607_488),
+        ]);
+        let file = |memory| choose_quant(&files, gb(memory)).unwrap().files;
+        assert_eq!(file(24), ["Qwen3.8-27B-UD-Q3_K_XL.gguf"]);
+        assert_eq!(file(32), ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]);
+        assert_eq!(file(48), ["Qwen3.8-27B-Q8_0.gguf"]);
+        assert_eq!(file(64), ["Qwen3.8-27B-Q8_0.gguf"]);
+    }
+
+    #[test]
+    fn flint_is_the_agent_option_where_more_than_a_two_bit_build_fits() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        let option = |memory| {
+            let tier = catalog.tier_for(gb(memory)).unwrap();
+            tier.agent_options[0].repo_id.clone()
+        };
+        assert_eq!(option(24), "unsloth/Qwen3.6-35B-A3B-MTP-GGUF");
+        for memory in [32, 48, 64] {
+            assert_eq!(option(memory), "unsloth/flint-GGUF");
+        }
+
+        let files = sized(&[
+            ("BF16/flint-BF16-00001-of-00003.gguf", 5_421_216),
+            ("BF16/flint-BF16-00002-of-00003.gguf", 49_945_779_296),
+            ("BF16/flint-BF16-00003-of-00003.gguf", 29_625_278_688),
+            ("flint-Q8_0.gguf", 42_301_076_928),
+            ("flint-UD-Q2_K_XL.gguf", 13_562_207_680),
+            ("flint-UD-Q3_K_XL.gguf", 18_494_977_472),
+            ("flint-UD-Q4_K_XL.gguf", 25_054_688_704),
+            ("flint-UD-Q5_K_XL.gguf", 29_919_491_520),
+            ("flint-UD-Q6_K_XL.gguf", 36_319_999_424),
+        ]);
+        let file = |memory| choose_quant(&files, gb(memory)).unwrap().files;
+        assert_eq!(file(24), ["flint-UD-Q2_K_XL.gguf"]);
+        assert_eq!(file(32), ["flint-UD-Q3_K_XL.gguf"]);
+        assert_eq!(file(48), ["flint-UD-Q5_K_XL.gguf"]);
+        assert_eq!(file(64), ["flint-UD-Q6_K_XL.gguf"]);
+    }
+
+    #[test]
+    fn ornith_is_the_largest_tier_model_and_resolves_its_sharded_builds() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        let chat = |memory| {
+            let tier = catalog.tier_for(gb(memory)).unwrap();
+            tier.text.as_ref().unwrap().repo_id.clone()
+        };
+        assert_eq!(chat(192), "unsloth/Ornith-1.5-122B-GGUF");
+        assert_eq!(chat(96), "bartowski/Inkling-2-Mini-GGUF");
+
+        let files = sized(&[
+            ("Ornith-1.5-122B-UD-Q2_K_XL.gguf", 44_533_952_768),
+            ("Q8_0/Ornith-1.5-122B-Q8_0-00001-of-00004.gguf", 10_942_929),
+            (
+                "Q8_0/Ornith-1.5-122B-Q8_0-00002-of-00004.gguf",
+                49_855_668_288,
+            ),
+            (
+                "Q8_0/Ornith-1.5-122B-Q8_0-00003-of-00004.gguf",
+                49_903_347_168,
+            ),
+            (
+                "Q8_0/Ornith-1.5-122B-Q8_0-00004-of-00004.gguf",
+                32_785_752_352,
+            ),
+            (
+                "UD-Q4_K_XL/Ornith-1.5-122B-UD-Q4_K_XL-00001-of-00003.gguf",
+                10_942_929,
+            ),
+            (
+                "UD-Q4_K_XL/Ornith-1.5-122B-UD-Q4_K_XL-00002-of-00003.gguf",
+                49_971_099_680,
+            ),
+            (
+                "UD-Q4_K_XL/Ornith-1.5-122B-UD-Q4_K_XL-00003-of-00003.gguf",
+                29_731_729_056,
+            ),
+            (
+                "UD-Q5_K_XL/Ornith-1.5-122B-UD-Q5_K_XL-00001-of-00003.gguf",
+                10_942_929,
+            ),
+            (
+                "UD-Q5_K_XL/Ornith-1.5-122B-UD-Q5_K_XL-00002-of-00003.gguf",
+                49_598_966_816,
+            ),
+            (
+                "UD-Q5_K_XL/Ornith-1.5-122B-UD-Q5_K_XL-00003-of-00003.gguf",
+                45_002_029_760,
+            ),
+            (
+                "UD-Q6_K_XL/Ornith-1.5-122B-UD-Q6_K_XL-00001-of-00004.gguf",
+                10_942_929,
+            ),
+            (
+                "UD-Q6_K_XL/Ornith-1.5-122B-UD-Q6_K_XL-00002-of-00004.gguf",
+                49_676_529_056,
+            ),
+            (
+                "UD-Q6_K_XL/Ornith-1.5-122B-UD-Q6_K_XL-00003-of-00004.gguf",
+                49_911_179_808,
+            ),
+            (
+                "UD-Q6_K_XL/Ornith-1.5-122B-UD-Q6_K_XL-00004-of-00004.gguf",
+                14_623_756_160,
+            ),
+            ("mmproj-F16.gguf", 908_724_544),
+        ]);
+        let choice = choose_quant(&files, gb(192)).unwrap();
+        assert!(!choice.tight);
+        assert_eq!(choice.files.len(), 4);
+        assert!(choice.files[0].starts_with("UD-Q6_K_XL/"));
+    }
+
     /// Nothing fitting is a fact worth stating, not a reason to show no model.
     #[test]
     fn a_model_that_cannot_fit_is_offered_with_a_warning() {
