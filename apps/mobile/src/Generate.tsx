@@ -119,12 +119,14 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
 
   async function cancel() {
     setCancelling(true);
+    // False when the host has not registered the job yet: Cancel must stay usable.
+    let stopping = false;
     try {
-      await api.cancel();
+      stopping = await api.cancel();
     } catch (cause) {
       report(cause);
     } finally {
-      if (!running) setCancelling(false);
+      if (!running || !stopping) setCancelling(false);
     }
   }
 
