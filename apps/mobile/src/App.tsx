@@ -12,7 +12,7 @@ import { pinCertificate } from './tlsPinning';
 import {
   chatBranch, chatContext, claimInvite, daemonClient, DaemonError, messageText, pairingOrigin,
   parseCredential, previewInvite, type Conversation, type Credential, type Host, type InviteInput,
-  type Message, type Model, type Preview,
+  type Message, type Model, type Preview, UnreachableError,
 } from './api.ts';
 
 const credentialKey = 'brazier.host.v1';
@@ -60,7 +60,7 @@ export function App() {
         const result = await daemonClient(fetch, credential).verify();
         if (active) setHost(result);
       } catch (error) {
-        const reason = error instanceof DaemonError && error.status === undefined
+        const reason = error instanceof UnreachableError
           ? await checkLocalNetwork(credential.origin, 5_000).then(() => error, (cause: unknown) => cause)
           : error;
         if (active) reportAccess(reason);
@@ -149,7 +149,7 @@ function Pairing({ onPaired }: { onPaired: (credential: Credential) => void }) {
       const unreachable = await checkLocalNetwork(target.origin).then(() => null, (cause: unknown) => cause);
       await pinCertificate(target.origin, target.certificateSha256);
       const preview = await previewInvite(fetch, target).catch((cause: unknown) => {
-        throw unreachable && cause instanceof DaemonError && cause.status === undefined ? unreachable : cause;
+        throw unreachable && cause instanceof UnreachableError ? unreachable : cause;
       });
       setReview({ input: target, preview });
     } catch (cause) {

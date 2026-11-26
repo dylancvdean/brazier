@@ -21,6 +21,9 @@ export class DaemonError extends Error {
   }
 }
 
+/** The request never got an answer from the host. */
+export class UnreachableError extends DaemonError {}
+
 export function pairingOrigin(input: string, allowAndroidEmulator = false): string {
   if (allowAndroidEmulator) {
     const url = new URL(input.trim());
@@ -62,7 +65,7 @@ async function request(fetch: Request, origin: string, path: string, init: Mobil
     response = await fetch(origin + path, { ...init, headers, credentials: 'omit', redirect: 'error' });
   } catch (error) {
     if (init.signal?.aborted) throw error;
-    throw new DaemonError('Could not reach the host. Check the address, network, and HTTPS certificate.');
+    throw new UnreachableError('Could not reach the host. Check the address, network, and HTTPS certificate.');
   }
   if (response.ok) return response;
   const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
