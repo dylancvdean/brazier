@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, ScrollView, Text, TextInput, View } from 'react-native';
 import type { Model } from './api.ts';
 import {
-  builtInModels, deleteModel, downloadModel, freeSpace, installedModels, repositoryChoices, usableRuntimes, type Download,
+  activeDownload, builtInModels, cancelDownload, deleteModel, DownloadCancelled, downloadModel, freeSpace, installedModels,
+  repositoryChoices, usableRuntimes, watchDownload,
 } from './local/device.ts';
 import { formatBytes, type ModelChoice, type RuntimeId } from './local/huggingface.ts';
 import { modelId, type InstalledModel } from './local/models.ts';
@@ -23,9 +24,8 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
   const [slug, setSlug] = useState('');
   const [repository, setRepository] = useState<{ slug: string; choices: ModelChoice[] } | null>(null);
   const [listing, setListing] = useState(false);
-  const [active, setActive] = useState<{ id: string; name: string; size: number; bytes: number } | null>(null);
+  const [active, setActive] = useState(activeDownload);
   const [error, setError] = useState('');
-  const download = useRef<Download | null>(null);
 
   async function refresh() {
     try {
@@ -40,7 +40,12 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
     void refresh();
     void usableRuntimes().then(setUsable);
     void builtInModels().then(setBuiltIn);
-    // Leaving the screen does not cancel: the download finishes and the model shows up in the chat's list.
+    // Leaving the screen does not cancel a download; it is picked up again here when the screen reopens.
+    return watchDownload(() => {
+      const current = activeDownload();
+      setActive(current);
+      if (!current) { onChanged(); void refresh(); }
+    });
   }, []);
 
   async function list() {
@@ -57,26 +62,11 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
   }
 
   async function start(repo: string, choice: ModelChoice) {
-    const id = modelId(repo, choice);
     setError('');
-    setActive({ id, name: choice.name, size: choice.size, bytes: 0 });
-    let last = 0;
-    const running = downloadModel(repo, choice, (bytes) => {
-      // Progress arrives far more often than the screen needs to redraw.
-      if (Date.now() - last < 250 && bytes < choice.size) return;
-      last = Date.now();
-      setActive((current) => current?.id === id ? { ...current, bytes } : current);
-    });
-    download.current = running;
     try {
-      await running.done;
-      onChanged();
+      await downloadModel(repo, choice);
     } catch (cause) {
-      if (errorText(cause) !== 'Download cancelled.') setError(errorText(cause));
-    } finally {
-      download.current = null;
-      setActive(null);
-      await refresh();
+      if (!(cause instanceof DownloadCancelled)) setError(errorText(cause));
     }
   }
 
@@ -122,7 +112,7 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
             </View>
             <Text style={styles.listMeta}>
               {progress.size ? Math.min(100, Math.floor(progress.bytes / progress.size * 100)) : 0}%  ·  {formatBytes(progress.bytes)} of {formatBytes(progress.size)}</Text>
-            <View style={styles.row}><Action label="Cancel download" quiet onPress={() => download.current?.cancel()} /></View>
+            <View style={styles.row}><Action label="Cancel download" quiet onPress={cancelDownload} /></View>
           </> : have ? <Text style={styles.listMeta}>On this device</Text>
             : tooBig ? <Text style={styles.listMeta}>Not enough free space</Text>
             : <View style={styles.row}><Action label="Download" disabled={!!active} onPress={() => void start(repository.slug, choice)} /></View>}
