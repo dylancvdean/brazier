@@ -61,7 +61,9 @@ export type SessionCoordinatorHandle = {
   startVoice: () => Promise<void>
   endVoice: () => Promise<void>
   setMuted: (muted: boolean) => void
-  submitText: (text: string) => Promise<string | null>
+  submitText: (text: string, options?: { interrupt?: boolean }) => Promise<string | null>
+  /** Drop queued turns; the running one is unaffected. */
+  clearQueuedTurns: () => Promise<void>
   stopSpeaking: () => Promise<void>
   cancelResponse: () => Promise<void>
   cancelAgentTask: () => Promise<void>
@@ -248,7 +250,11 @@ export function useSessionCoordinator(
       setConfigState((current) => ({ ...current, voiceEnabled: false }))
     }, [adapters, coordinator]),
     setMuted: useCallback((muted: boolean) => adapters.voice.setMuted(muted), [adapters]),
-    submitText: useCallback((text: string) => coordinator.submitText(text), [coordinator]),
+    submitText: useCallback(
+      (text: string, options?: { interrupt?: boolean }) => coordinator.submitText(text, options),
+      [coordinator]
+    ),
+    clearQueuedTurns: useCallback(() => coordinator.clearQueuedTurns(), [coordinator]),
     stopSpeaking: useCallback(() => coordinator.cancelVoiceOutput(), [coordinator]),
     cancelResponse: useCallback(async () => {
       await coordinator.cancelCurrentResponse()

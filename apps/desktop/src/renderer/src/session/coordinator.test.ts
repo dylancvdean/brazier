@@ -538,6 +538,47 @@ describe('queueing', () => {
     expect(agent.submitted).toHaveLength(2)
     expect(coordinator.snapshot().queue).toHaveLength(0)
   })
+  it('lets typed follow-ups queue in order or interrupt ahead of the queue', async () => {
+    const { coordinator, agent } = await live()
+    await coordinator.submitText('First.')
+    await coordinator.submitText('Second.')
+    await coordinator.submitText('Urgent.', { interrupt: true })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // The interruption cancelled the running turn and started before "Second."
+    expect(agent.cancelled).toEqual([agent.submitted[0].correlationId])
+    expect(agent.submitted.map((turn) => turn.text)).toEqual(['First.', 'Urgent.'])
+    expect(coordinator.snapshot().queue.map((turn) => turn.text)).toEqual(['Second.'])
+  })
+
+  it('drops queued follow-ups on request without touching the running turn', async () => {
+    const { coordinator, agent } = await live()
+    await coordinator.submitText('First.')
+    await coordinator.submitText('Second.')
+    await coordinator.clearQueuedTurns()
+    agent.completeRun(agent.submitted[0].correlationId, 'Done.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(agent.cancelled).toEqual([])
+    expect(agent.submitted).toHaveLength(1)
+    expect(coordinator.snapshot().queue).toHaveLength(0)
+  })
+
+  it('still starts the next turn when saving an answer fails', async () => {
+    const { coordinator, agent, chat } = await live()
+    await coordinator.submitText('First.')
+    await coordinator.submitText('Second.')
+    const append = chat.appendMessage.bind(chat)
+    chat.appendMessage = async (message) => {
+      if (message.role === 'assistant') throw new Error('daemon unavailable')
+      return append(message)
+    }
+    agent.completeRun(agent.submitted[0].correlationId, 'Answer one.')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // Before, the failed write kept the first turn active and "Second." never ran.
+    expect(agent.submitted.map((turn) => turn.text)).toEqual(['First.', 'Second.'])
+  })
 })
 
 describe('session flows', () => {

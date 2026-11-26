@@ -69,7 +69,7 @@ export class AgentWorkerCore {
       const started = this.enqueue(key, () => this.startRun(command.sessionId, command.input))
       await this.respond(command.requestId, async () => {
         const { session, events } = await started
-        return this.pumpRun(session, events)
+        return this.pumpRun(session, events, command.input.runId)
       })
       return
     }
@@ -123,7 +123,8 @@ export class AgentWorkerCore {
 
   private async pumpRun(
     session: AgentSession,
-    events: AsyncIterable<AgentEvent> | null
+    events: AsyncIterable<AgentEvent> | null,
+    runId?: string
   ): Promise<AgentSessionState> {
     if (!events) {
       // Report the stop so the supervisor and UI see this run end.
@@ -133,7 +134,7 @@ export class AgentWorkerCore {
         event: {
           type: 'run-cancelled',
           sessionId: session.id,
-          runId: `run-cancelled-before-start-${Date.now().toString(36)}`,
+          runId: runId ?? `run-cancelled-before-start-${Date.now().toString(36)}`,
           timestamp: new Date().toISOString(),
           sequence: 0
         }

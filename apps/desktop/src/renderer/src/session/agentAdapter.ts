@@ -118,8 +118,12 @@ export class WorkerAgentAdapter implements AgentAdapter {
     if (!sessionId) throw new Error('No agent session is bound to this conversation.')
     const attachGen = this.attachGeneration
     if (this.activeRunId) this.staleRunIds.add(this.activeRunId)
+    // The run id is chosen here and handed to the worker, so only this run's
+    // events can reach this turn. Binding to whichever event arrived first let
+    // a late event from an earlier run claim the turn and hide the real one.
+    const runId = `turn-run-${request.correlationId}-${Math.random().toString(36).slice(2, 8)}`
     this.activeCorrelationId = request.correlationId
-    this.activeRunId = null
+    this.activeRunId = runId
     this.ignoreUnboundRuns = false
     this.streamed = ''
     this.lastAssistantText = ''
@@ -147,7 +151,7 @@ export class WorkerAgentAdapter implements AgentAdapter {
     // The worker resolves this when the run ends; the coordinator does not wait
     // on it, because the response arrives as events.
     void window.brazier.agent
-      .run(sessionId, { text: request.text })
+      .run(sessionId, { text: request.text, runId })
       .then(() => {
         // The worker posts every event before this promise resolves. Reaching
         // here with the turn still open means the terminal event never arrived,
@@ -156,6 +160,8 @@ export class WorkerAgentAdapter implements AgentAdapter {
         const status = this.statuses.get(request.correlationId)?.status
         if (status === 'completed' || status === 'cancelled' || status === 'failed') return
         const text = this.streamed.trim()
+        this.lastRunId = runId
+        this.staleRunIds.add(runId)
         this.activeRunId = null
         this.activeCorrelationId = null
         this.streamed = ''
@@ -174,6 +180,8 @@ export class WorkerAgentAdapter implements AgentAdapter {
       .catch((cause: unknown) => {
         if (this.activeCorrelationId !== request.correlationId) return
         this.setStatus(request.correlationId, 'failed')
+        this.lastRunId = runId
+        this.staleRunIds.add(runId)
         this.activeRunId = null
         this.activeCorrelationId = null
         this.streamed = ''

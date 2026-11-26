@@ -33,7 +33,9 @@ import {
   Upload,
   Video,
   Wrench,
-  X
+  X,
+  Zap,
+  ListPlus
 } from 'lucide-react'
 import {
   type ChangeEvent,
@@ -771,6 +773,9 @@ export function App(): React.JSX.Element {
   // Agent / Computer modes have no composer of their own; they publish these
   // so the one at the bottom of the window can drive them.
   const [agentComposer, setAgentComposer] = useState<AgentComposerControls | null>(null)
+  /** Set by Ctrl/Cmd+Enter or the Interrupt button for the next agent submit. */
+  const interruptNextSubmitRef = useRef(false)
+  const composerFormRef = useRef<HTMLFormElement>(null)
   const [computerComposer, setComputerComposer] = useState<AgentComposerControls | null>(null)
   const [agentSidebar, setAgentSidebar] = useState<AgentSidebarControls | null>(null)
   const [computerSidebar, setComputerSidebar] = useState<ComputerSidebarControls | null>(null)
@@ -2939,13 +2944,18 @@ export function App(): React.JSX.Element {
     // approval cards render above; only the input is shared.
     if (appMode === 'agent' || appMode === 'computer') {
       const composer = appMode === 'agent' ? agentComposer : computerComposer
-      if (!text || !composer || composer.running) return
+      if (!text || !composer) return
+      // Agent mode takes follow-ups mid-run: queued by default, or sent as an
+      // interruption. Computer mode still waits for its run to stop.
+      const interrupt = interruptNextSubmitRef.current
+      interruptNextSubmitRef.current = false
+      if (composer.running && appMode !== 'agent') return
       const isAllowedSlash =
         Boolean(composer.suggestions) && isExactSlashCommand(draft, composer.suggestions!)
       if (composer.blockedReason !== '' && !isAllowedSlash) return
       setDraft('')
       setError(null)
-      await composer.send(text)
+      await composer.send(text, interrupt ? 'interrupt' : 'queue')
       return
     }
     if ((!text && attachments.length === 0) || busy || coordinatorWorking) return
@@ -3678,6 +3688,7 @@ export function App(): React.JSX.Element {
                 ? session.cancelResponse
                 : undefined
             }
+            onClearQueue={session.clearQueuedTurns}
             onOpenModelMenu={() => setModelMenuOpen(true)}
             onError={setError}
           />
@@ -4065,6 +4076,7 @@ export function App(): React.JSX.Element {
               prompt form: in both cases a second input would be a second,
               unlabelled one. */}
           <form
+            ref={composerFormRef}
             className={composerDragOver ? 'composer drag-over' : 'composer'}
             hidden={appMode === 'voice' || appMode === 'generate'}
             onSubmit={(event) => void submit(event)}
@@ -4123,6 +4135,8 @@ export function App(): React.JSX.Element {
                 if (event.nativeEvent.isComposing || event.keyCode === 229) return
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault()
+                  interruptNextSubmitRef.current =
+                    agentMode && Boolean(agentComposer?.running) && (event.ctrlKey || event.metaKey)
                   event.currentTarget.form?.requestSubmit()
                 }
               }}
@@ -4241,7 +4255,30 @@ export function App(): React.JSX.Element {
               >
                 <Paperclip size={18} />
               </button>
-              {(shellComposerMode ? shellComposer?.running : busy || coordinatorWorking) ? (
+              {agentMode && agentComposer?.running && draft.trim() ? (
+                <>
+                  <button
+                    className="send-button"
+                    type="button"
+                    title="Stop the current turn and send this now (Ctrl+Enter)"
+                    aria-label="Interrupt"
+                    onClick={() => {
+                      interruptNextSubmitRef.current = true
+                      composerFormRef.current?.requestSubmit()
+                    }}
+                  >
+                    <Zap size={16} />
+                  </button>
+                  <button
+                    className="send-button"
+                    type="submit"
+                    title="Queue: send after the current turn (Enter)"
+                    aria-label="Queue"
+                  >
+                    <ListPlus size={17} />
+                  </button>
+                </>
+              ) : (shellComposerMode ? shellComposer?.running : busy || coordinatorWorking) ? (
                 <button
                   className="send-button stop"
                   type="button"

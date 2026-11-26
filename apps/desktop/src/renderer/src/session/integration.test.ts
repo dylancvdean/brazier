@@ -63,6 +63,9 @@ function installAgentBridge() {
   const listeners = new Set<(message: WorkerMessage) => void>()
   const calls: Array<{ method: string; args: unknown[] }> = []
   let settleRun: (error?: Error) => void = () => {}
+  // The worker runs under the id the adapter picked; `run-1` in a test event
+  // stands for "the current run".
+  let currentRunId: string | null = null
   const record = (method: string) =>
     vi.fn(async (...args: unknown[]) => {
       calls.push({ method, args })
@@ -74,6 +77,7 @@ function installAgentBridge() {
       (...args: unknown[]) =>
         new Promise<void>((resolve, reject) => {
           calls.push({ method: 'run', args })
+          currentRunId = (args[1] as { runId?: string } | undefined)?.runId ?? null
           settleRun = (error?: Error) => {
             if (error) reject(error)
             else resolve()
@@ -105,7 +109,9 @@ function installAgentBridge() {
       settleRun(new Error(message))
     },
     emit(sessionId: string, event: AgentEvent) {
-      for (const listener of [...listeners]) listener({ type: 'event', sessionId, event })
+      const routed =
+        event.runId === 'run-1' && currentRunId ? { ...event, runId: currentRunId } : event
+      for (const listener of [...listeners]) listener({ type: 'event', sessionId, event: routed })
     }
   }
 }
@@ -201,6 +207,22 @@ describe('WorkerAgentAdapter', () => {
       'toolCompleted:turn-7'
     ])
     expect(adapter.getStatus('turn-7')?.status).toBe('running')
+  })
+
+  it('never lets a late event from another run claim the turn', async () => {
+    daemon.conversations.set('conv-1', { id: 'conv-1', agent_session_id: 'agent-1' })
+    const adapter = new WorkerAgentAdapter()
+    await adapter.attachSession('conv-1')
+    const seen: string[] = []
+    adapter.subscribe((event) => seen.push(`${event.type}:${event.correlationId}`))
+
+    await adapter.submitTurn({ correlationId: 'turn-2', text: 'second', source: 'user_text' })
+    // An earlier run's completion arrives after the new turn was submitted.
+    bridge.emit('agent-1', agentEvent('run-completed', { runId: 'run-previous' }))
+    bridge.emit('agent-1', agentEvent('run-started'))
+
+    expect(seen).toEqual(['runStarted:turn-2'])
+    expect(adapter.getStatus('turn-2')?.status).toBe('running')
   })
 
   it('summarizes a tool result to something short enough to say', async () => {

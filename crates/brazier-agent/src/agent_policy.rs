@@ -7,7 +7,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::agent_sandbox::{SandboxBackend, SandboxProfile, secret_paths};
+use crate::agent_sandbox::{SandboxBackend, SandboxProfile, credential_paths, data_dir_paths};
 use brazier_protocol::agent_types::{
     AgentElevationRequest, AgentEnvironment, AgentPermissionMode, AgentPermissionSettings,
     RequestedPathAccess, ToolRiskLevel, arguments_hash,
@@ -149,7 +149,10 @@ pub struct RequestedPath {
     pub real: PathBuf,
     pub write: bool,
     pub inside_workspace: bool,
+    /// A credential path: never read or written.
     pub secret: bool,
+    /// Would modify, or run a program inside, Brazier's own data directory.
+    pub data_dir_write: bool,
 }
 
 /// What the policy broker decided.
@@ -224,12 +227,22 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
         request.data_dir,
     );
 
-    // Credential and daemon-owned paths are never reachable, in any mode.
+    // Credential paths are never reachable, in any mode.
     if let Some(secret) = paths.iter().find(|path| path.secret) {
         return PolicyDecision::Deny {
             reason: format!(
-                "`{}` is a credential or Brazier-owned path. Agent tools never read or write it.",
+                "`{}` is a credential path. Agent tools never read or write it.",
                 secret.raw
+            ),
+        };
+    }
+    // Brazier's own data directory may be read, never edited.
+    if let Some(owned) = paths.iter().find(|path| path.data_dir_write) {
+        return PolicyDecision::Deny {
+            reason: format!(
+                "`{}` is in Brazier's own data directory. Agent tools may read it but never \
+                 edit it or run commands there.",
+                owned.raw
             ),
         };
     }
@@ -347,7 +360,9 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
     }
 
     match request.permission_mode {
-        AgentPermissionMode::Ask => {
+        // Approve-for-me reviews the same approvals Ask would show; the review
+        // happens in the runtime before the user is asked.
+        AgentPermissionMode::Ask | AgentPermissionMode::ApproveForMe => {
             if !needs_prompt_by_risk && !host_action {
                 return PolicyDecision::Allow {
                     environment,
@@ -620,8 +635,40 @@ pub fn requested_paths(
         | "project_typecheck" | "project_format" | "env_info" => &[("cwd", false)],
         _ => &[],
     };
-    let secrets = secret_paths(Some(data_dir));
+    let secrets = credential_paths(Some(data_dir));
+    let owned = data_dir_paths(data_dir);
     let workspace_real = workspace.map(canonical_ancestor);
+    let overlaps = |protected: &[PathBuf], resolved: &Path, real: &Path| {
+        protected.iter().any(|path| {
+            is_inside(real, path)
+                || is_inside(resolved, path)
+                || is_inside(path, real)
+                || is_inside(path, resolved)
+        })
+    };
+    // `mutating` covers writes and working directories: a command started
+    // inside the data directory could edit it.
+    let classify = |raw: &str, write: bool, mutating: bool| {
+        let resolved = resolve_path(workspace, raw);
+        let real = canonical_ancestor(&resolved);
+        // Containment is judged on the canonical path: a symlink inside the
+        // workspace that points out of it counts as outside.
+        let inside_workspace = workspace_real
+            .as_deref()
+            .map(|root| is_inside(&real, root))
+            .unwrap_or(false);
+        let secret = overlaps(&secrets, &resolved, &real);
+        let data_dir_write = mutating && overlaps(&owned, &resolved, &real);
+        RequestedPath {
+            raw: raw.to_owned(),
+            resolved,
+            real,
+            write,
+            inside_workspace,
+            secret,
+            data_dir_write,
+        }
+    };
 
     // `request_permission` carries its paths in an array rather than in named
     // fields, so the same checks apply to what it asks for.
@@ -642,26 +689,7 @@ pub fn requested_paths(
                     .get("write")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
-                let resolved = resolve_path(workspace, raw);
-                let real = canonical_ancestor(&resolved);
-                let inside_workspace = workspace_real
-                    .as_deref()
-                    .map(|root| is_inside(&real, root))
-                    .unwrap_or(false);
-                let secret = secrets.iter().any(|secret| {
-                    is_inside(&real, secret)
-                        || is_inside(&resolved, secret)
-                        || is_inside(secret, &real)
-                        || is_inside(secret, &resolved)
-                });
-                Some(RequestedPath {
-                    raw: raw.to_owned(),
-                    resolved,
-                    real,
-                    write,
-                    inside_workspace,
-                    secret,
-                })
+                Some(classify(raw, write, write))
             })
             .collect();
     }
@@ -674,28 +702,7 @@ pub fn requested_paths(
             .flatten()
             .filter_map(serde_json::Value::as_str)
             .filter(|raw| !raw.trim().is_empty())
-            .map(|raw| {
-                let resolved = resolve_path(workspace, raw);
-                let real = canonical_ancestor(&resolved);
-                let inside_workspace = workspace_real
-                    .as_deref()
-                    .map(|root| is_inside(&real, root))
-                    .unwrap_or(false);
-                let secret = secrets.iter().any(|secret| {
-                    is_inside(&real, secret)
-                        || is_inside(&resolved, secret)
-                        || is_inside(secret, &real)
-                        || is_inside(secret, &resolved)
-                });
-                RequestedPath {
-                    raw: raw.to_owned(),
-                    resolved,
-                    real,
-                    write: false,
-                    inside_workspace,
-                    secret,
-                }
-            })
+            .map(|raw| classify(raw, false, false))
             .collect();
     }
 
@@ -706,28 +713,7 @@ pub fn requested_paths(
             if raw.is_empty() {
                 return None;
             }
-            let resolved = resolve_path(workspace, raw);
-            let real = canonical_ancestor(&resolved);
-            // Containment is judged on the canonical path: a symlink inside the
-            // workspace that points out of it counts as outside.
-            let inside_workspace = workspace_real
-                .as_deref()
-                .map(|root| is_inside(&real, root))
-                .unwrap_or(false);
-            let secret = secrets.iter().any(|secret| {
-                is_inside(&real, secret)
-                    || is_inside(&resolved, secret)
-                    || is_inside(secret, &real)
-                    || is_inside(secret, &resolved)
-            });
-            Some(RequestedPath {
-                raw: raw.to_owned(),
-                resolved,
-                real,
-                write: *write,
-                inside_workspace,
-                secret,
-            })
+            Some(classify(raw, *write, *write || *field == "cwd"))
         })
         .collect()
 }
@@ -1232,9 +1218,14 @@ mod tests {
     }
 
     #[test]
-    fn the_daemon_data_directory_is_always_refused() {
+    fn daemon_credentials_are_always_refused() {
         let backend = backend();
-        for path in ["/data/brazier.sqlite", "/"] {
+        for path in [
+            "/data/brazier.sqlite",
+            "/data/huggingface/token",
+            "/data",
+            "/",
+        ] {
             let arguments = json!({ "path": path });
             let request = base(
                 "fs_read",
@@ -1245,8 +1236,53 @@ mod tests {
                 &[],
             );
             match decide(&request) {
-                PolicyDecision::Deny { reason } => assert!(reason.contains("Brazier-owned")),
+                PolicyDecision::Deny { reason } => assert!(reason.contains("credential")),
                 other => panic!("expected denial for {path}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_daemon_data_directory_is_readable_but_never_edited() {
+        let backend = backend();
+        let read_arguments = json!({ "path": "/data/logs/brazierd.log" });
+        let read = base(
+            "fs_read",
+            &read_arguments,
+            Path::new("/ws"),
+            &backend,
+            Path::new("/data"),
+            &[],
+        );
+        assert!(
+            matches!(decide(&read), PolicyDecision::RequireApproval { .. }),
+            "a data-directory read is an ordinary host read"
+        );
+
+        for (tool, arguments) in [
+            (
+                "fs_write",
+                json!({ "path": "/data/settings.json", "content": "{}" }),
+            ),
+            ("fs_delete", json!({ "path": "/data/logs" })),
+            ("fs_copy", json!({ "from": "/ws/a", "to": "/data/a" })),
+            ("shell_run", json!({ "command": "ls", "cwd": "/data/logs" })),
+        ] {
+            let mut request = base(
+                tool,
+                &arguments,
+                Path::new("/ws"),
+                &backend,
+                Path::new("/data"),
+                &[],
+            );
+            request.permission_mode = AgentPermissionMode::SkipPermissions;
+            request.permission_settings.auto_approve_host_actions = true;
+            match decide(&request) {
+                PolicyDecision::Deny { reason } => {
+                    assert!(reason.contains("data directory"), "{tool}: {reason}")
+                }
+                other => panic!("expected denial for {tool}, got {other:?}"),
             }
         }
     }

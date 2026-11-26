@@ -617,7 +617,7 @@ export class AgentSupervisor {
         throw new Error('That session is already running. Cancel it first.')
       }
       active = {
-        runId: `run-${command.sessionId}-${this.nextId + 1}`,
+        runId: command.input.runId ?? `run-${command.sessionId}-${this.nextId + 1}`,
         sequence: 0
       }
       this.activeSessions.set(command.sessionId, active)

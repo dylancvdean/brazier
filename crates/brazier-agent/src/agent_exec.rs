@@ -33,7 +33,7 @@ use crate::{
     agent_policy::{self, PolicyDecision, PolicyRequest, is_inside, tool_spec},
     agent_sandbox::{
         SandboxBackend, SandboxBackendCapabilities, SandboxBackendKind, SandboxProfile,
-        SandboxRequest, secret_paths,
+        SandboxRequest, credential_paths, data_dir_paths,
     },
 };
 use brazier_protocol::agent_types::{
@@ -759,19 +759,27 @@ fn checked_path(
     // workspace must not point outside it. Every containment check below is on
     // this canonical form, never on the path the caller typed.
     let real = agent_policy::canonical_ancestor(&resolved);
-    for secret in secret_paths(Some(context.data_dir)) {
-        let secret_real = agent_policy::canonical_ancestor(&secret);
-        anyhow::ensure!(
-            !is_inside(&real, &secret)
-                && !is_inside(&real, &secret_real)
-                && !is_inside(&resolved, &secret)
-                && !is_inside(&resolved, &secret_real)
-                && !is_inside(&secret, &real)
-                && !is_inside(&secret_real, &real)
-                && !is_inside(&secret, &resolved)
-                && !is_inside(&secret_real, &resolved),
-            "`{raw}` overlaps a credential or Brazier-owned path"
-        );
+    let overlaps = |protected: &Path| {
+        let protected_real = agent_policy::canonical_ancestor(protected);
+        is_inside(&real, protected)
+            || is_inside(&real, &protected_real)
+            || is_inside(&resolved, protected)
+            || is_inside(&resolved, &protected_real)
+            || is_inside(protected, &real)
+            || is_inside(&protected_real, &real)
+            || is_inside(protected, &resolved)
+            || is_inside(&protected_real, &resolved)
+    };
+    for secret in credential_paths(Some(context.data_dir)) {
+        anyhow::ensure!(!overlaps(&secret), "`{raw}` overlaps a credential path");
+    }
+    if write {
+        for owned in data_dir_paths(context.data_dir) {
+            anyhow::ensure!(
+                !overlaps(&owned),
+                "`{raw}` is in Brazier's own data directory, which agent tools never edit"
+            );
+        }
     }
     if plan.environment == AgentEnvironment::Sandbox {
         let root = workspace.context("this session has no workspace")?;
@@ -2241,7 +2249,16 @@ fn command_cwd(
     arguments: &Value,
 ) -> anyhow::Result<PathBuf> {
     if arguments.get("cwd").and_then(Value::as_str).is_some() {
-        return checked_path(context, plan, workspace, arguments, "cwd", false);
+        let cwd = checked_path(context, plan, workspace, arguments, "cwd", false)?;
+        // A command run from inside the data directory could edit it.
+        let cwd_real = agent_policy::canonical_ancestor(&cwd);
+        for owned in data_dir_paths(context.data_dir) {
+            anyhow::ensure!(
+                !is_inside(&cwd, &owned) && !is_inside(&cwd_real, &owned),
+                "commands never run inside Brazier's own data directory"
+            );
+        }
+        return Ok(cwd);
     }
     Ok(workspace
         .context("this session has no workspace")?

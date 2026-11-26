@@ -782,6 +782,12 @@ pub fn system_prompt_components(
              the workspace. Expect some calls to come back refused; adapt instead of retrying \
              the same call."
         }
+        AgentPermissionMode::ApproveForMe => {
+            "Writes, command execution, network access, and anything outside the workspace need \
+             approval. A reviewer checks each request against the user's instructions and may \
+             approve sandboxed, non-destructive actions; the user decides the rest. Expect some \
+             calls to come back refused; adapt instead of retrying the same call."
+        }
         AgentPermissionMode::SandboxOnly => {
             "Sandboxed work runs without prompts. Anything that would leave the workspace or the \
              sandbox is refused outright, so do not plan around host access."

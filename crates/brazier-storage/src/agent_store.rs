@@ -12,9 +12,9 @@ use uuid::Uuid;
 use crate::db::Database;
 use brazier_protocol::agent_types::{
     AgentApproval, AgentElevationRequest, AgentEnvironment, AgentMessageRecord,
-    AgentPermissionMode, AgentSessionRecord, AppendAgentMessage, ApprovalScope, ApprovalStatus,
-    CreateAgentSession, SandboxDescription, ToolExecutionRecord, ToolRiskLevel, UpdateAgentSession,
-    grant_key,
+    AgentPermissionMode, AgentPermissionSettings, AgentSessionRecord, AppendAgentMessage,
+    ApprovalScope, ApprovalStatus, CreateAgentSession, SandboxDescription, ToolExecutionRecord,
+    ToolRiskLevel, UpdateAgentSession, grant_key,
 };
 
 /// How long a pending approval stays answerable.
@@ -58,8 +58,9 @@ impl TryFrom<SessionRow> for AgentSessionRecord {
     type Error = anyhow::Error;
 
     fn try_from(row: SessionRow) -> anyhow::Result<Self> {
-        let permission_settings = serde_json::from_str(&row.permission_settings_json)
-            .context("decode agent permission settings")?;
+        let permission_settings: AgentPermissionSettings =
+            serde_json::from_str(&row.permission_settings_json)
+                .context("decode agent permission settings")?;
         let enabled_tools = row
             .enabled_tools_json
             .as_deref()
@@ -85,7 +86,10 @@ impl TryFrom<SessionRow> for AgentSessionRecord {
             workspace_path: row.workspace_path,
             model: row.model,
             runtime_id: row.runtime_id,
-            permission_mode: parse_permission_mode(&row.permission_mode),
+            permission_mode: parse_permission_mode(
+                &row.permission_mode,
+                permission_settings.approve_for_me,
+            ),
             permission_settings,
             enabled_tools,
             last_run_status: row.last_run_status,
@@ -97,11 +101,21 @@ impl TryFrom<SessionRow> for AgentSessionRecord {
     }
 }
 
-fn parse_permission_mode(value: &str) -> AgentPermissionMode {
+/// Approve-for-me is stored as `ask` plus the settings flag, so the column's
+/// CHECK constraint and older rows need no migration.
+fn parse_permission_mode(value: &str, approve_for_me: bool) -> AgentPermissionMode {
     match value {
         "sandbox-only" => AgentPermissionMode::SandboxOnly,
         "skip-permissions" => AgentPermissionMode::SkipPermissions,
+        _ if approve_for_me => AgentPermissionMode::ApproveForMe,
         _ => AgentPermissionMode::Ask,
+    }
+}
+
+fn stored_permission_mode(mode: AgentPermissionMode) -> &'static str {
+    match mode {
+        AgentPermissionMode::ApproveForMe => AgentPermissionMode::Ask.as_str(),
+        other => other.as_str(),
     }
 }
 
@@ -236,8 +250,9 @@ impl Database {
             "agent session owner is required"
         );
         let id = Uuid::new_v4().to_string();
-        let settings = request.permission_settings.unwrap_or_default();
+        let mut settings = request.permission_settings.unwrap_or_default();
         let mode = request.permission_mode.unwrap_or(AgentPermissionMode::Ask);
+        settings.approve_for_me = mode == AgentPermissionMode::ApproveForMe;
         let runtime_id = request
             .runtime_id
             .filter(|value| !value.trim().is_empty())
@@ -257,7 +272,7 @@ impl Database {
         .bind(&request.workspace_path)
         .bind(&request.model)
         .bind(&runtime_id)
-        .bind(mode.as_str())
+        .bind(stored_permission_mode(mode))
         .bind(serde_json::to_string(&settings)?)
         .bind(
             request
@@ -319,11 +334,6 @@ impl Database {
 
         // Serialize before opening the transaction. A malformed value must not
         // leave earlier fields committed while a later field fails to encode.
-        let permission_settings = update
-            .permission_settings
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
         let enabled_tools = update
             .enabled_tools
             .as_ref()
@@ -381,19 +391,34 @@ impl Database {
                 .execute(&mut *tx)
                 .await?;
         }
-        if let Some(mode) = update.permission_mode {
-            sqlx::query("UPDATE agent_sessions SET permission_mode = ? WHERE id = ?")
-                .bind(mode.as_str())
+        if update.permission_mode.is_some() || update.permission_settings.is_some() {
+            // The mode owns the approve-for-me flag: a settings patch keeps the
+            // current mode, and a mode patch rewrites the flag.
+            let current: Option<(String, String)> = sqlx::query_as(
+                "SELECT permission_mode, permission_settings_json FROM agent_sessions WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some((stored_mode, stored_settings)) = current {
+                let current_settings: AgentPermissionSettings =
+                    serde_json::from_str(&stored_settings)
+                        .context("decode agent permission settings")?;
+                let mode = update.permission_mode.unwrap_or_else(|| {
+                    parse_permission_mode(&stored_mode, current_settings.approve_for_me)
+                });
+                let mut settings = update.permission_settings.unwrap_or(current_settings);
+                settings.approve_for_me = mode == AgentPermissionMode::ApproveForMe;
+                sqlx::query(
+                    "UPDATE agent_sessions SET permission_mode = ?, permission_settings_json = ? \
+                     WHERE id = ?",
+                )
+                .bind(stored_permission_mode(mode))
+                .bind(serde_json::to_string(&settings)?)
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
-        }
-        if let Some(settings) = permission_settings {
-            sqlx::query("UPDATE agent_sessions SET permission_settings_json = ? WHERE id = ?")
-                .bind(settings)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            }
         }
         if let Some(tools) = enabled_tools {
             sqlx::query("UPDATE agent_sessions SET enabled_tools_json = ? WHERE id = ?")
@@ -1090,6 +1115,50 @@ mod tests {
         // Untouched fields survive a partial update.
         assert_eq!(updated.model, "gguf:test");
         assert_eq!(updated.workspace_path.as_deref(), Some("/ws"));
+    }
+
+    #[tokio::test]
+    async fn approve_for_me_is_a_permission_mode_that_round_trips() {
+        let (_dir, db) = database().await;
+        let session = db
+            .create_agent_session(CreateAgentSession {
+                permission_mode: Some(AgentPermissionMode::ApproveForMe),
+                ..session_request(Some("/ws"))
+            })
+            .await
+            .expect("create session");
+        assert_eq!(session.permission_mode, AgentPermissionMode::ApproveForMe);
+        let loaded = db.agent_session(&session.id).await.expect("get");
+        assert_eq!(loaded.permission_mode, AgentPermissionMode::ApproveForMe);
+
+        // Changing settings alone keeps the mode.
+        let kept = db
+            .update_agent_session(
+                &session.id,
+                UpdateAgentSession {
+                    permission_settings: Some(AgentPermissionSettings {
+                        approve_for_me: false,
+                        ..loaded.permission_settings
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update settings");
+        assert_eq!(kept.permission_mode, AgentPermissionMode::ApproveForMe);
+
+        let switched = db
+            .update_agent_session(
+                &session.id,
+                UpdateAgentSession {
+                    permission_mode: Some(AgentPermissionMode::Ask),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("switch mode");
+        assert_eq!(switched.permission_mode, AgentPermissionMode::Ask);
+        assert!(!switched.permission_settings.approve_for_me);
     }
 
     #[tokio::test]

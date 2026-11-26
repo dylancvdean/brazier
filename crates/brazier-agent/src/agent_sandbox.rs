@@ -559,23 +559,69 @@ fn home_directory() -> Option<PathBuf> {
 /// second form would leave a hole.
 pub fn secret_paths(data_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let mut push = |path: PathBuf| {
+    push_with_canonical(&mut paths, home_secret_paths());
+    if let Some(data_dir) = data_dir {
+        push_with_canonical(&mut paths, [data_dir.to_path_buf()]);
+    }
+    paths
+}
+
+/// Entries of the daemon data directory that hold credentials or the
+/// daemon's own database. The rest of the directory may be read like any other
+/// host path; none of it may be written.
+const SECRET_DATA_PATHS: &[&str] = &[
+    "brazier.sqlite",
+    "brazier.sqlite-wal",
+    "brazier.sqlite-shm",
+    "huggingface",
+    "remote",
+    "mcp-servers.json",
+];
+
+/// Paths agent file tools must never read or write: home credential stores and
+/// the credential entries of the daemon data directory. Writes to the rest of
+/// the data directory are refused separately.
+pub fn credential_paths(data_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    push_with_canonical(&mut paths, home_secret_paths());
+    if let Some(data_dir) = data_dir {
+        push_with_canonical(
+            &mut paths,
+            SECRET_DATA_PATHS
+                .iter()
+                .map(|relative| data_dir.join(relative)),
+        );
+    }
+    paths
+}
+
+/// The data directory in both spellings, for write refusals.
+pub fn data_dir_paths(data_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    push_with_canonical(&mut paths, [data_dir.to_path_buf()]);
+    paths
+}
+
+fn home_secret_paths() -> Vec<PathBuf> {
+    home_directory()
+        .map(|home| {
+            SECRET_HOME_PATHS
+                .iter()
+                .map(|relative| home.join(relative))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn push_with_canonical(paths: &mut Vec<PathBuf>, entries: impl IntoIterator<Item = PathBuf>) {
+    for path in entries {
         if let Ok(canonical) = std::fs::canonicalize(&path)
             && canonical != path
         {
             paths.push(canonical);
         }
         paths.push(path);
-    };
-    if let Some(home) = home_directory() {
-        for relative in SECRET_HOME_PATHS {
-            push(home.join(relative));
-        }
     }
-    if let Some(data_dir) = data_dir {
-        push(data_dir.to_path_buf());
-    }
-    paths
 }
 
 /// Git directory outside the workspace that a linked worktree checkout

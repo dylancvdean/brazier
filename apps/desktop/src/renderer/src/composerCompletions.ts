@@ -27,6 +27,7 @@ export const AGENT_SLASH_SUGGESTIONS: ComposerSuggestion[] = [
   { value: '/worktree', description: 'Toggle isolated git worktree' },
   { value: '/prompt', description: 'Edit workspace system prompt' },
   { value: '/ask', description: 'Set permissions to Ask first' },
+  { value: '/approve', description: 'Set permissions to Approve for me' },
   { value: '/sandbox', description: 'Set permissions to Sandbox only' },
   { value: '/skip', description: 'Set permissions to Skip permissions' }
 ]

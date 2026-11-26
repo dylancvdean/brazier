@@ -472,12 +472,40 @@ export class SessionCoordinator {
   // --- Submission -----------------------------------------------------------
 
   /** Typed input. Same path as voice, so both share one agent session. */
-  async submitText(text: string): Promise<string | null> {
+  /**
+   * Submit typed text. While a turn is running the text waits in the queue;
+   * `interrupt` instead stops the running turn and starts this one next,
+   * ahead of anything already queued.
+   */
+  async submitText(
+    text: string,
+    options: { interrupt?: boolean } = {}
+  ): Promise<string | null> {
     const trimmed = text.trim()
     if (!trimmed) return null
     const correlationId = this.newId('turn')
     this.emit('USER_TEXT_SUBMITTED', correlationId, 'chat', { text: trimmed })
-    return this.submitTurn({ correlationId, text: trimmed, source: 'user_text' })
+    return this.submitTurn({
+      correlationId,
+      text: trimmed,
+      source: 'user_text',
+      interrupt: options.interrupt
+    })
+  }
+
+  /** Drop every queued turn without touching the one that is running. */
+  async clearQueuedTurns(): Promise<void> {
+    const queued = this.queue.splice(0)
+    for (const turn of queued) {
+      const response = this.responses.get(turn.correlationId)
+      if (response && response.status === 'pending') {
+        response.status = 'cancelled'
+        response.cancellable = false
+      }
+      this.chat.markCancelled(turn.userMessageId)
+      await this.patchMessage(turn.userMessageId, { metadata: { queued: false, cancelled: true } })
+    }
+    this.publish()
   }
 
   /**
@@ -491,6 +519,7 @@ export class SessionCoordinator {
     source: MessageSource
     utteranceId?: string
     supersedes?: string
+    interrupt?: boolean
   }): Promise<string | null> {
     if (!this.conversationId) {
       // Nothing to write into. Say so rather than dropping what the user said.
@@ -546,17 +575,23 @@ export class SessionCoordinator {
     if (this.activeCorrelationId) {
       // One active run per conversation: the agent session is not concurrent,
       // and neither message is discarded.
-      this.queue.push({
+      const queued = {
         correlationId: input.correlationId,
         text: input.text,
         source: input.source,
         userMessageId: userMessage.id,
         queuedAt: this.now(),
         supersedes: input.supersedes
-      })
+      }
+      if (input.interrupt) this.queue.unshift(queued)
+      else this.queue.push(queued)
       this.chat.markQueued(userMessage.id)
       await this.patchMessage(userMessage.id, { metadata: { queued: true } })
       this.publish()
+      // Cancelling the active turn drains the queue, which now starts here.
+      if (input.interrupt && this.activeCorrelationId) {
+        await this.cancelCurrentResponse(this.activeCorrelationId)
+      }
       return input.correlationId
     }
 
@@ -826,13 +861,19 @@ export class SessionCoordinator {
     const trimmed = text.trim()
     let message: ConversationMessage | null = null
     if (trimmed) {
-      message = await chat.appendMessage({
-        role: 'assistant',
-        source: response.owner === 'agent' ? 'assistant_agent' : 'assistant_chat',
-        content: text,
-        correlationId,
-        status: 'final'
-      })
+      // A failed write must not leave this turn holding the active slot: every
+      // later message would queue behind it and never start.
+      try {
+        message = await chat.appendMessage({
+          role: 'assistant',
+          source: response.owner === 'agent' ? 'assistant_agent' : 'assistant_chat',
+          content: text,
+          correlationId,
+          status: 'final'
+        })
+      } catch (cause) {
+        this.report(`The answer could not be saved: ${errorText(cause)}`)
+      }
     }
     const latest = this.responses.get(correlationId)
     if (
