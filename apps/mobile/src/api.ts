@@ -323,7 +323,11 @@ export async function consumeChatStream(
         if (payload.error) throw new DaemonError(typeof payload.error === 'string' ? payload.error :
           payload.error.message ?? 'Chat generation failed.');
         if (payload.brazier?.tool_call) onToolCall?.(payload.brazier.tool_call);
-        if (payload.brazier?.transcript_message) onTranscript?.(payload.brazier.transcript_message);
+        if (payload.brazier?.transcript_message) {
+          // Text the model wrote before calling tools is saved with that round, so the reply restarts after it.
+          if (payload.brazier.transcript_message.role === 'assistant') result = '';
+          onTranscript?.(payload.brazier.transcript_message);
+        }
         const choice = payload.choices?.[0];
         if (choice?.finish_reason === 'tool_calls' && choice.delta?.tool_calls?.length) {
           const names = choice.delta.tool_calls.map((call) => call.function?.name ?? 'unknown').join(', ');
