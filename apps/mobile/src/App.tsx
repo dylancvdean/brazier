@@ -24,8 +24,8 @@ export function App() {
 
   return <ThemeContext.Provider value={palette}>
     <Screen>
-      <Shell theme={preferences.theme} onTheme={(theme) => {
-        const next = { ...preferences, theme };
+      <Shell preferences={preferences} onPreferences={(change) => {
+        const next = { ...preferences, ...change };
         setPreferences(next);
         void savePreferences(next).catch(() => undefined);
       }} />
@@ -33,7 +33,9 @@ export function App() {
   </ThemeContext.Provider>;
 }
 
-function Shell({ theme, onTheme }: { theme: Preferences['theme']; onTheme: (theme: Preferences['theme']) => void }) {
+function Shell({ preferences, onPreferences }: {
+  preferences: Preferences; onPreferences: (change: Partial<Preferences>) => void;
+}) {
   const styles = useStyles();
   const palette = useTheme();
   const [saved, setSaved] = useState<SavedHosts>({ index: emptyIndex, credentials: {} });
@@ -140,7 +142,8 @@ function Shell({ theme, onTheme }: { theme: Preferences['theme']; onTheme: (them
   const name = hostLabel(saved.index, hostId(credential), credential.origin);
 
   if (view === 'settings') {
-    return <Settings saved={saved} theme={theme} error={storageError} onTheme={onTheme}
+    return <Settings saved={saved} theme={preferences.theme} error={storageError}
+      onTheme={(theme) => onPreferences({ theme })}
       onSelect={(id) => { void applyIndex(selectHost(saved.index, id)); setView('chat'); }}
       onRename={(id, next) => void applyIndex(renameHost(saved.index, id, next))}
       onRemove={(id) => void remove(id)} onAdd={() => setView('pairing')} onClose={() => setView('chat')} />;
@@ -167,5 +170,6 @@ function Shell({ theme, onTheme }: { theme: Preferences['theme']; onTheme: (them
   }
 
   return <Chat key={hostId(credential)} credential={credential} hostName={name}
+    disabledTools={preferences.disabledTools} onDisabledTools={(disabledTools) => onPreferences({ disabledTools })}
     onUnauthorized={reportAccess} onOpenSettings={() => setView('settings')} />;
 }

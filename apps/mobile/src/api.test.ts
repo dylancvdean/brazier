@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { encodePairingInvite, parsePairingInvite } from '../../../packages/pairing/src/invite.ts';
 import {
-  chatBranch, chatContext, claimInvite, consumeChatStream, daemonClient, DaemonError,
+  chatBranch, chatContext, toolCallsOf, claimInvite, consumeChatStream, daemonClient, DaemonError,
   pairingOrigin, parseCredential, previewInvite,
 } from './api.ts';
 
@@ -223,4 +223,46 @@ test('carries the daemon certificate pin from the invite into the stored credent
   const pinned = { ...credential, certificateSha256 };
   assert.deepEqual(parseCredential(JSON.stringify(pinned)), pinned);
   assert.throws(() => parseCredential(JSON.stringify({ ...credential, certificateSha256: 'B'.repeat(64) })));
+});
+
+test('chat with tools asks the host to run them and reports each call and transcript step', async () => {
+  const frames = [
+    { brazier: { tool_call: { call_id: 'c1', name: 'web_search', arguments: '{"query":"x"}', output: 'hits', is_error: false } } },
+    { brazier: { transcript_message: { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'web_search', arguments: '{"query":"x"}' } }] } } },
+    { brazier: { transcript_message: { role: 'tool', content: 'hits', tool_call_id: 'c1' } } },
+    { choices: [{ delta: { content: 'done' } }] },
+  ];
+  const body = new Blob([frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n']).stream();
+  const calls: string[] = [];
+  const transcript: string[] = [];
+  const client = daemonClient(async (_url, init) => {
+    const sent = JSON.parse(init.body!);
+    assert.equal(sent.builtin_tools, true);
+    assert.deepEqual(sent.builtin_tool_names, ['web_search']);
+    return new Response(body);
+  }, credential);
+  const answer = await client.chat('small', [{ role: 'user', content: 'search' }], new AbortController().signal, {
+    onToken: () => undefined, onToolCall: (call) => calls.push(call.name), onTranscript: (message) => transcript.push(message.role),
+  }, ['web_search']);
+  assert.equal(answer, 'done');
+  assert.deepEqual(calls, ['web_search']);
+  assert.deepEqual(transcript, ['assistant', 'tool']);
+});
+
+test('saved tool steps are sent back to the model and shown with their results', () => {
+  const messages = [
+    { id: 'u', parent_id: null, role: 'user', content: 'search' },
+    { id: 'a', parent_id: 'u', role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'web_search', arguments: '{}' } }] },
+    { id: 't', parent_id: 'a', role: 'tool', content: 'hits', tool_call_id: 'c1' },
+    { id: 'b', parent_id: 't', role: 'assistant', content: 'done' },
+  ];
+  assert.deepEqual(chatContext(messages), [
+    { role: 'user', content: 'search' },
+    { role: 'assistant', content: '', tool_calls: messages[1].tool_calls },
+    { role: 'tool', tool_call_id: 'c1', content: 'hits' },
+    { role: 'assistant', content: 'done' },
+  ]);
+  assert.deepEqual(toolCallsOf(messages).get('a'), [
+    { call_id: 'c1', name: 'web_search', arguments: '{}', output: 'hits', is_error: false },
+  ]);
 });

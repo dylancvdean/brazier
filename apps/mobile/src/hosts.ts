@@ -3,10 +3,11 @@ import type { ThemePreference } from './theme.ts';
 
 export type HostEntry = { id: string; name: string };
 export type HostIndex = { active: string | null; hosts: HostEntry[] };
-export type Preferences = { theme: ThemePreference };
+/** Tools are on unless listed in `disabledTools`, so tools a host adds later start enabled. */
+export type Preferences = { theme: ThemePreference; disabledTools: string[] };
 
 export const emptyIndex: HostIndex = { active: null, hosts: [] };
-export const defaultPreferences: Preferences = { theme: 'system' };
+export const defaultPreferences: Preferences = { theme: 'system', disabledTools: [] };
 
 /** One saved credential per host: pairing again with the same host replaces it. */
 export function hostId(credential: Pick<Credential, 'instanceId'>): string {
@@ -55,7 +56,11 @@ export function parsePreferences(raw: string | null): Preferences {
   if (!raw) return defaultPreferences;
   try {
     const value = JSON.parse(raw) as Partial<Preferences>;
-    return { theme: value.theme === 'dark' || value.theme === 'light' ? value.theme : 'system' };
+    return {
+      theme: value.theme === 'dark' || value.theme === 'light' ? value.theme : 'system',
+      disabledTools: Array.isArray(value.disabledTools)
+        ? value.disabledTools.filter((name): name is string => typeof name === 'string') : [],
+    };
   } catch {
     return defaultPreferences;
   }

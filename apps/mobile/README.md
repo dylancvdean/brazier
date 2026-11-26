@@ -2,7 +2,9 @@
 
 An Expo SDK 54 companion for iOS and Android. Pair it with one or more Brazier
 hosts that support invite preview, then prepare a text model, open conversation
-history, and stream text chat. Conversations and completed replies are saved on
+history, and stream text chat. The tools menu in the composer chooses which of
+the host's tools (web search, page fetch, MCP servers and the rest) the model
+may call; tool calls and their results show in the conversation. Conversations and completed replies are saved on
 the host. Stopping generation keeps the user message but discards the
 unfinished reply. Settings holds the theme (system, dark, light) and the paired
 hosts; each host keeps its own credential and pinned certificate.
