@@ -9,6 +9,7 @@
  * without at least the same check a human would apply.
  */
 
+import { anySignal, timeoutSignal } from './abort'
 import type { BrokerClient, ChatCompletionMessage } from './brokerClient'
 import { parseLooseJson } from './modelCompat'
 import type { AgentApproval } from './types'
@@ -165,8 +166,8 @@ export async function reviewApproval(
   },
   context: ApprovalReviewContext
 ): Promise<ApprovalReviewVerdict> {
-  const timeout = AbortSignal.timeout(options.timeoutMs ?? APPROVAL_REVIEW_TIMEOUT_MS)
-  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
+  const timeout = timeoutSignal(options.timeoutMs ?? APPROVAL_REVIEW_TIMEOUT_MS)
+  const signal = options.signal ? anySignal([options.signal, timeout]) : timeout
   try {
     const result = await broker.streamChatCompletion(
       {

@@ -38,6 +38,9 @@ PODS:
     - ExpoModulesCore
   - ExpoKeepAwake (15.0.8):
     - ExpoModulesCore
+  - ExpoMediaLibrary (18.2.1):
+    - ExpoModulesCore
+    - React-Core
   - ExpoModulesCore (3.0.30):
     - hermes-engine
     - RCTRequired
@@ -62,6 +65,10 @@ PODS:
     - ReactNativeDependencies
     - Yoga
   - ExpoSecureStore (15.0.8):
+    - ExpoModulesCore
+  - ExpoSharing (14.0.8):
+    - ExpoModulesCore
+  - ExpoVideo (3.0.16):
     - ExpoModulesCore
   - FBLazyVector (0.81.5)
   - hermes-engine (0.81.5):
@@ -1711,8 +1718,11 @@ DEPENDENCIES:
   - "ExpoFileSystem (from `../../../node_modules/.pnpm/expo-file-system@19.0.24_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-na_59ab24987bd8a350a64622d1e790cc73/node_modules/expo-file-system/ios`)"
   - "ExpoFont (from `../../../node_modules/.pnpm/expo-font@14.0.12_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@0._af8050fec9dc3ba4eca9370f884cffb6/node_modules/expo-font/ios`)"
   - "ExpoKeepAwake (from `../../../node_modules/.pnpm/expo-keep-awake@15.0.8_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-nati_1f60f77c0d6833cf9a9f8faec9b0f373/node_modules/expo-keep-awake/ios`)"
+  - "ExpoMediaLibrary (from `../../../node_modules/.pnpm/expo-media-library@18.2.1_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-n_608abab1050de3df5fb0ba8674480902/node_modules/expo-media-library/ios`)"
   - "ExpoModulesCore (from `../../../node_modules/.pnpm/expo-modules-core@3.0.30_react-native@0.81.5_@babel+core@7.29.7_supports-color@8.1.1__@_4b8a4f4ef6547b79023c298b57d77bc8/node_modules/expo-modules-core`)"
   - "ExpoSecureStore (from `../../../node_modules/.pnpm/expo-secure-store@15.0.8_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-na_7af7a6ab2ae73fb67ca5727b1679053b/node_modules/expo-secure-store/ios`)"
+  - "ExpoSharing (from `../../../node_modules/.pnpm/expo-sharing@14.0.8_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@_b1a364c9cb80627384f7c0086b0eb9f9/node_modules/expo-sharing/ios`)"
+  - "ExpoVideo (from `../../../node_modules/.pnpm/expo-video@3.0.16_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@0._2a001439397884253d194db62287452e/node_modules/expo-video/ios`)"
   - "FBLazyVector (from `../../../node_modules/.pnpm/react-native@0.81.5_@babel+core@7.29.7_supports-color@8.1.1__@types+react@19.1.17_react@19.1.0_supports-color@8.1.1/node_modules/react-native/Libraries/FBLazyVector`)"
   - "hermes-engine (from `../../../node_modules/.pnpm/react-native@0.81.5_@babel+core@7.29.7_supports-color@8.1.1__@types+react@19.1.17_react@19.1.0_supports-color@8.1.1/node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)"
   - "RCTDeprecation (from `../../../node_modules/.pnpm/react-native@0.81.5_@babel+core@7.29.7_supports-color@8.1.1__@types+react@19.1.17_react@19.1.0_supports-color@8.1.1/node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)"
@@ -1801,10 +1811,16 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/.pnpm/expo-font@14.0.12_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@0._af8050fec9dc3ba4eca9370f884cffb6/node_modules/expo-font/ios"
   ExpoKeepAwake:
     :path: "../../../node_modules/.pnpm/expo-keep-awake@15.0.8_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-nati_1f60f77c0d6833cf9a9f8faec9b0f373/node_modules/expo-keep-awake/ios"
+  ExpoMediaLibrary:
+    :path: "../../../node_modules/.pnpm/expo-media-library@18.2.1_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-n_608abab1050de3df5fb0ba8674480902/node_modules/expo-media-library/ios"
   ExpoModulesCore:
     :path: "../../../node_modules/.pnpm/expo-modules-core@3.0.30_react-native@0.81.5_@babel+core@7.29.7_supports-color@8.1.1__@_4b8a4f4ef6547b79023c298b57d77bc8/node_modules/expo-modules-core"
   ExpoSecureStore:
     :path: "../../../node_modules/.pnpm/expo-secure-store@15.0.8_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-na_7af7a6ab2ae73fb67ca5727b1679053b/node_modules/expo-secure-store/ios"
+  ExpoSharing:
+    :path: "../../../node_modules/.pnpm/expo-sharing@14.0.8_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@_b1a364c9cb80627384f7c0086b0eb9f9/node_modules/expo-sharing/ios"
+  ExpoVideo:
+    :path: "../../../node_modules/.pnpm/expo-video@3.0.16_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@0._2a001439397884253d194db62287452e/node_modules/expo-video/ios"
   FBLazyVector:
     :path: "../../../node_modules/.pnpm/react-native@0.81.5_@babel+core@7.29.7_supports-color@8.1.1__@types+react@19.1.17_react@19.1.0_supports-color@8.1.1/node_modules/react-native/Libraries/FBLazyVector"
   hermes-engine:
@@ -1949,8 +1965,11 @@ SPEC CHECKSUMS:
   ExpoFileSystem: 8e87545aef1d8d31f244edbfdd0780df4e5bac2e
   ExpoFont: dfb7c572372b610da45b41e3b436321fd6a97215
   ExpoKeepAwake: 55f75eca6499bb9e4231ebad6f3e9cb8f99c0296
+  ExpoMediaLibrary: a3093b04365b245bb23b25b6eba84eb6ab55fecb
   ExpoModulesCore: 9e6a5514828e7dd5ded9e99d33557be2d284e660
   ExpoSecureStore: d32f751874a2ceb5aaeebeb3578e165c1ba2b24a
+  ExpoSharing: 0d983394ed4a80334bab5a0d5384f75710feb7e8
+  ExpoVideo: 8d9e8a1acd0c4c210e538b4355e34ae8ff5e04f7
   FBLazyVector: e95a291ad2dadb88e42b06e0c5fb8262de53ec12
   hermes-engine: 9f4dfe93326146a1c99eb535b1cb0b857a3cd172
   RCTDeprecation: 943572d4be82d480a48f4884f670135ae30bf990

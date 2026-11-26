@@ -78,6 +78,7 @@ const makeStyles = (p: Palette) => StyleSheet.create({
   segmentOn: { backgroundColor: p.accentSoft },
   segmentText: { fontSize: 14, fontWeight: '600', color: p.soft },
   segmentTextOn: { color: p.accent },
+  mono: { color: p.soft, fontSize: 12, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
   card: { borderRadius: 12, borderWidth: 1, borderColor: p.line, backgroundColor: p.panel, padding: 12, gap: 8 },
 });
 
