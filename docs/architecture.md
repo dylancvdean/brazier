@@ -46,8 +46,9 @@ Public compatibility endpoints are `/v1/models`, `/v1/chat/completions`, and
 Streaming uses Server-Sent Events. The daemon binds to loopback and requires a
 random key by default. External binding and CORS policy require explicit
 configuration. Keyless mode is restricted to loopback and cannot be combined
-with a remote listener; `--allow-insecure-remote` only acknowledges plaintext
-transport and does not disable authentication.
+with a remote listener. A remote listener serves other devices HTTPS with a
+pinned self-signed certificate; `--allow-insecure-remote` additionally accepts
+their plaintext HTTP and does not disable authentication.
 
 The canonical capability record separately describes input modalities, output
 modalities, streaming, reasoning, and tools. Platform support is attached to an

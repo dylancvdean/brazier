@@ -6,8 +6,10 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs'
+import { request as httpsRequest } from 'node:https'
 import { isIP } from 'node:net'
 import { networkInterfaces } from 'node:os'
+import type { TLSSocket } from 'node:tls'
 import { dirname } from 'node:path'
 
 import { normalizeShareableOrigin } from '../../../../packages/pairing/src/invite'
@@ -84,7 +86,7 @@ export type PairingPreview = {
   daemon: { instance_id: string; display_name: string }
 }
 
-export type VerifiedPairingOrigin = { hostName: string; previewReachable: boolean }
+export type VerifiedPairingOrigin = { hostName: string; previewReachable: boolean; certificateSha256?: string }
 
 export type ConnectionVerification =
   | ({ status: 'healthy' } & Omit<DaemonConnection, 'api_key'>)
@@ -689,13 +691,67 @@ export function localPairingOrigin(
   return normalizeShareableOrigin(`https://${address}${port ? `:${port}` : ''}`)
 }
 
+/**
+ * A fetch for one advertised origin that accepts either a publicly trusted
+ * certificate or exactly the pinned daemon certificate, and reports which.
+ */
+export function pinnedFetch(certificateSha256: string): { fetch: typeof fetch; pinned: () => boolean } {
+  let pinned = false
+  const pinnedFetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = new URL(input instanceof Request ? input.url : input)
+    return new Promise<Response>((resolve, reject) => {
+      const request = httpsRequest(url, {
+        method: init?.method ?? 'GET',
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+        rejectUnauthorized: false,
+        agent: false,
+        signal: init?.signal ?? undefined
+      }, (response) => {
+        const chunks: Buffer[] = []
+        let length = 0
+        response.on('data', (chunk: Buffer) => {
+          length += chunk.byteLength
+          if (length > MAX_HANDSHAKE_RESPONSE_BYTES) {
+            request.destroy(new Error('The daemon response is too large.'))
+            return
+          }
+          chunks.push(chunk)
+        })
+        response.on('end', () => {
+          const headers = new Headers()
+          for (const [name, value] of Object.entries(response.headers)) {
+            if (typeof value === 'string') headers.set(name, value)
+          }
+          const status = response.statusCode ?? 502
+          resolve(new Response([204, 205, 304].includes(status) ? null : Buffer.concat(chunks), { status, headers }))
+        })
+        response.on('error', reject)
+      })
+      request.on('socket', (socket) => {
+        socket.once('secureConnect', () => {
+          const tls = socket as TLSSocket
+          const fingerprint = tls.getPeerCertificate().fingerprint256?.replace(/:/g, '').toLowerCase()
+          if (fingerprint === certificateSha256) pinned = true
+          else if (!tls.authorized) request.destroy(new Error(`Untrusted HTTPS certificate: ${String(tls.authorizationError)}`))
+        })
+      })
+      request.on('error', reject)
+      request.end(typeof init?.body === 'string' ? init.body : undefined)
+    })
+  }
+  return { fetch: pinnedFetch as typeof fetch, pinned: () => pinned }
+}
+
 export async function verifyPairingOrigin(
   activeAddress: string,
   advertisedAddress: string,
-  fetch_: typeof fetch = fetch
-): Promise<{ previewReachable: boolean }> {
+  fetch_: typeof fetch = fetch,
+  certificateSha256?: string,
+  pinnedFetch_: typeof pinnedFetch = pinnedFetch
+): Promise<{ previewReachable: boolean; certificateSha256?: string }> {
   const activeOrigin = normalizeDaemonBaseUrl(activeAddress)
   const origin = normalizeShareableOrigin(advertisedAddress)
+  const advertised = certificateSha256 ? pinnedFetch_(certificateSha256) : undefined
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), DEFAULT_HANDSHAKE_TIMEOUT_MS)
   const options = {
@@ -705,8 +761,10 @@ export async function verifyPairingOrigin(
     signal: controller.signal
   } as const
   const previewError = 'The pairing preview route is not reachable. Check the daemon version and proxy configuration.'
+  const fetchFor = (address: string): typeof fetch =>
+    address === origin && advertised ? advertised.fetch : fetch_
   const healthBootId = async (address: string): Promise<string> => {
-    const response = await fetch_(`${address}/health`, options).catch(() => {
+    const response = await fetchFor(address)(`${address}/health`, options).catch(() => {
       throw new Error(previewError)
     })
     if (!response.ok) throw new Error(previewError)
@@ -721,7 +779,7 @@ export async function verifyPairingOrigin(
     id: string
     previewReachable: boolean
   }> => {
-    const response = await fetch_(`${address}/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview`, {
+    const response = await fetchFor(address)(`${address}/api/v1/auth/pairings/00000000-0000-0000-0000-000000000000/preview`, {
       ...options,
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -743,18 +801,21 @@ export async function verifyPairingOrigin(
     return { kind: 'boot', id: identity.boot_id, previewReachable: true }
   }
   try {
-    const [active, advertised] = await Promise.all([
+    const [active, advertisedIdentity] = await Promise.all([
       daemonIdentity(activeOrigin),
       daemonIdentity(origin)
     ])
-    const matches = active.kind === advertised.kind
-      ? active.id === advertised.id
-      : active.kind === 'instance' && !advertised.previewReachable &&
-        await healthBootId(activeOrigin) === advertised.id
+    const matches = active.kind === advertisedIdentity.kind
+      ? active.id === advertisedIdentity.id
+      : active.kind === 'instance' && !advertisedIdentity.previewReachable &&
+        await healthBootId(activeOrigin) === advertisedIdentity.id
     if (!matches) {
       throw new Error('The reachable address points to a different daemon. Check the address and try again.')
     }
-    return { previewReachable: advertised.previewReachable }
+    return {
+      previewReachable: advertisedIdentity.previewReachable,
+      ...(advertised?.pinned() ? { certificateSha256 } : {})
+    }
   } finally {
     clearTimeout(timeout)
     controller.abort()

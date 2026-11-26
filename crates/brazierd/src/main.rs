@@ -48,9 +48,9 @@ struct Args {
     jit_loading: Option<bool>,
     #[arg(long, conflicts_with_all = ["api_key", "api_keys_stdin"])]
     no_auth: bool,
-    /// Explicitly acknowledge that a non-loopback listener serves plaintext
-    /// HTTP. Prefer a loopback listener behind TLS or an encrypted private
-    /// network. Authentication does not encrypt bearer credentials.
+    /// Also accept plaintext HTTP from other devices on a non-loopback
+    /// listener. Without it, other devices must use the daemon's self-signed
+    /// HTTPS certificate. Authentication does not encrypt bearer credentials.
     #[arg(long)]
     allow_insecure_remote: bool,
     #[arg(long, env = "BRAZIER_DATA_DIR")]
@@ -91,10 +91,6 @@ fn validate_remote_transport(args: &Args) -> anyhow::Result<()> {
     anyhow::ensure!(
         !args.no_auth || args.host.is_loopback(),
         "--no-auth is only permitted on a loopback listener"
-    );
-    anyhow::ensure!(
-        args.host.is_loopback() || args.allow_insecure_remote,
-        "a non-loopback listener uses plaintext HTTP and requires --allow-insecure-remote; prefer loopback behind TLS or an encrypted private network"
     );
     Ok(())
 }
@@ -245,6 +241,22 @@ async fn main() -> anyhow::Result<()> {
         .context("bind daemon listener")?;
     let address = listener.local_addr()?;
     let address_url = format!("http://{address}");
+    // Loopback callers keep plaintext on the same port; other devices get the
+    // pinned self-signed certificate unless plaintext was explicitly allowed.
+    let certificate = if args.host.is_loopback() {
+        None
+    } else {
+        Some(brazierd::tls::load_or_create(&data_dir)?)
+    };
+    let tls_certificate_sha256 = certificate.as_ref().map(|value| value.sha256.clone());
+    if let Some(sha256) = &tls_certificate_sha256 {
+        tracing::info!(%sha256, "serving HTTPS to other devices");
+    }
+    let listener = brazierd::tls::DaemonListener::new(
+        listener,
+        certificate.map(|value| value.acceptor),
+        args.allow_insecure_remote,
+    )?;
     if args.service {
         let ready_path = args
             .ready_file
@@ -258,7 +270,10 @@ async fn main() -> anyhow::Result<()> {
         // often captured by a journal or pipe that should not see credentials.
         eprintln!(
             "BRAZIER_READY {}",
-            serde_json::to_string(&serde_json::json!({ "address": address_url }))?
+            serde_json::to_string(&serde_json::json!({
+                "address": address_url,
+                "tls_certificate_sha256": tls_certificate_sha256
+            }))?
         );
     } else {
         // Non-service mode runs bound to loopback; the desktop launcher reads
@@ -271,13 +286,14 @@ async fn main() -> anyhow::Result<()> {
                 // The desktop's internal connection uses the first key; extra keys
                 // are passed for its configured clients, not reported here.
                 "api_key": api_keys.first(),
-                "local_control_key": local_control_key
+                "local_control_key": local_control_key,
+                "tls_certificate_sha256": tls_certificate_sha256
             }))?
         );
     }
     tracing::info!(%address, data_dir = %data_dir.display(), "brazier daemon ready");
     axum::serve(
-        listener,
+        axum::serve::ListenerExt::tap_io(listener, |_| {}),
         api::router_with_origins(state, allowed_origins)
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
@@ -350,10 +366,10 @@ mod tests {
     }
 
     #[test]
-    fn non_loopback_plaintext_requires_explicit_opt_in_even_with_auth() {
+    fn non_loopback_listeners_are_allowed_because_they_serve_https() {
         let authenticated =
             Args::try_parse_from(["brazierd", "--host", "0.0.0.0", "--api-key", "secret"]).unwrap();
-        assert!(validate_remote_transport(&authenticated).is_err());
+        assert!(validate_remote_transport(&authenticated).is_ok());
 
         let acknowledged = Args::try_parse_from([
             "brazierd",

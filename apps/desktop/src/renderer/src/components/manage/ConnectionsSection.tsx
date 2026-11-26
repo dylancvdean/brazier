@@ -315,7 +315,7 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
     setCreatedPairing(null)
     try {
       const origin = normalizeShareableOrigin(originInput.trim() || localOrigin || '')
-      const { hostName, previewReachable } = await window.brazier.verifyPairingOrigin(origin)
+      const { hostName, previewReachable, certificateSha256 } = await window.brazier.verifyPairingOrigin(origin)
       const created = await createDaemonPairing({
         clientName: pairingClientName,
         scopes: pairingScopes,
@@ -330,7 +330,8 @@ export function ConnectionsSection(props: { onError: (message: string | null) =>
         pairingId: created.pairing.id,
         code: created.code,
         scopes: created.pairing.scopes,
-        expiresAt: created.pairing.expires_at
+        expiresAt: created.pairing.expires_at,
+        ...(certificateSha256 ? { certificateSha256 } : {})
       })
       await reloadTrust()
     } catch (cause) {

@@ -11,6 +11,8 @@ export type PairingInvite = {
   hostName: string
   scopes: PairingScope[]
   expiresAt: number
+  /** SHA-256 of the daemon's self-signed certificate, which clients pin. */
+  certificateSha256?: string
 }
 
 type LegacyPairingInvite = {
@@ -40,6 +42,10 @@ export function normalizeShareableOrigin(input: string): string {
   return url.origin
 }
 
+export function isCertificateSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+}
+
 export function encodePairingInvite(invite: PairingInvite): string {
   return PREFIX + JSON.stringify({ ...invite, origin: normalizeShareableOrigin(invite.origin) })
 }
@@ -60,7 +66,8 @@ export function parsePairingInvite(input: string): PairingInvite | LegacyPairing
         typeof value.hostName !== 'string' || !value.hostName.trim() || value.hostName.length > 160 ||
         !Array.isArray(value.scopes) || !value.scopes.length || value.scopes.length > PAIRING_SCOPES.length ||
         !value.scopes.every((scope) => PAIRING_SCOPES.includes(scope)) ||
-        !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0) {
+        !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0 ||
+        (value.certificateSha256 !== undefined && !isCertificateSha256(value.certificateSha256))) {
       return null
     }
     return { ...value, origin: normalizeShareableOrigin(value.origin) }

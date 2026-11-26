@@ -6195,7 +6195,7 @@ function ServerSection(props: SectionProps): React.JSX.Element {
         jitLoading: settings.jitLoading
       })
       setSettings(saved)
-      setNotice('Saved. Restart Brazier to apply server exposure, port, authentication, or JIT changes.')
+      setNotice('Saved and applied. The local daemon restarted with these settings.')
     } catch (cause) {
       props.onError(errorText(cause))
     } finally {
@@ -6224,12 +6224,10 @@ function ServerSection(props: SectionProps): React.JSX.Element {
   if (!settings) return <section><div className="manage-placeholder"><LoaderCircle className="spin" size={16} />Loading server settings…</div></section>
 
   const baseUrl = settings.enabled
-    ? `http://${settings.localhostOnly ? '127.0.0.1' : '<this-machine>'}:${settings.port}/v1`
+    ? `${settings.localhostOnly ? 'http://127.0.0.1' : 'https://<this-machine>'}:${settings.port}/v1`
     : 'Private to Brazier desktop'
   const keysMissing = settings.enabled && settings.apiKeyEnabled && settings.keys.length === 0
-  const remoteExposureUnacknowledged =
-    settings.enabled && !settings.localhostOnly && !settings.allowInsecureRemote
-  const saveDisabled = saving || keysMissing || remoteExposureUnacknowledged
+  const saveDisabled = saving || keysMissing
 
   return (
     <section>
@@ -6257,10 +6255,11 @@ function ServerSection(props: SectionProps): React.JSX.Element {
               }
             />
             <span>
-              I understand this is plaintext network access
+              Also allow plaintext HTTP from other devices
               <small>
-                API keys authenticate clients but are not encrypted in transit. Prefer localhost
-                behind TLS or an encrypted private network. Anonymous non-loopback access is never allowed.
+                Other devices use this daemon&apos;s HTTPS certificate, which pairing invites pin.
+                Turn this on only for clients that cannot use HTTPS: API keys are not encrypted over
+                plaintext. Anonymous non-loopback access is never allowed.
               </small>
             </span>
           </label>
