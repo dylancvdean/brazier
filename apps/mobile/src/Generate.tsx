@@ -33,7 +33,16 @@ export function Generate({ credential, hostName, onClose, onUnauthorized }: {
   const [error, setError] = useState('');
   const [showModels, setShowModels] = useState(false);
   const alive = useRef(true);
+  // The history as last loaded or stored. A generation that finishes after this
+  // screen is gone (the host was switched) still adds its result to the file.
+  const stored = useRef<HistoryEntry[]>([]);
   const set = (change: Partial<GenerateForm>) => setForm((previous) => ({ ...previous, ...change }));
+
+  function store(next: HistoryEntry[]) {
+    stored.current = next;
+    if (alive.current) setHistory(next);
+    try { saveHistory(credential, next); } catch { /* History is a convenience; the result is still shown. */ }
+  }
 
   function report(cause: unknown) {
     if (cause instanceof DaemonError && cause.status === 401) onUnauthorized(cause);
@@ -55,7 +64,10 @@ export function Generate({ credential, hostName, onClose, onUnauthorized }: {
   useEffect(() => {
     alive.current = true;
     void loadModels();
-    loadHistory(credential).then((saved) => { if (alive.current) setHistory(saved); }, () => undefined);
+    loadHistory(credential).then((saved) => {
+      stored.current = saved;
+      if (alive.current) setHistory(saved);
+    }, () => undefined);
     return () => { alive.current = false; };
   }, [api]);
 
@@ -89,11 +101,7 @@ export function Generate({ credential, hostName, onClose, onUnauthorized }: {
       const result = await api.generate(form.modality, body);
       const entry = historyEntry(`${Date.now()}-${result.blob.sha256.slice(0, 8)}`, form.modality, body, result,
         new Date().toISOString());
-      setHistory((previous) => {
-        const next = addHistory(previous, entry);
-        try { saveHistory(credential, next); } catch { /* History is a convenience; the result is still shown. */ }
-        return next;
-      });
+      store(addHistory(stored.current, entry));
       if (alive.current) setShown(entry);
     } catch (cause) {
       if (!alive.current) return;
@@ -116,9 +124,7 @@ export function Generate({ credential, hostName, onClose, onUnauthorized }: {
   }
 
   function remove(entry: HistoryEntry) {
-    const next = history.filter(({ id }) => id !== entry.id);
-    setHistory(next);
-    try { saveHistory(credential, next); } catch { /* Removed for this session at least. */ }
+    store(history.filter(({ id }) => id !== entry.id));
     if (shown?.id === entry.id) setShown(null);
   }
 
