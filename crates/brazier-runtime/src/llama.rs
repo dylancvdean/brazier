@@ -2242,8 +2242,17 @@ fn speculative_draft_for_model(
             path
         }
     });
-    let draft =
-        configured.or_else(|| model_path.and_then(crate::models_store::draft_model_for_model))?;
+    // Turning MTP off also covers a head that was found on its own; one the
+    // person picked explicitly is still attached.
+    let mtp_off = profile.and_then(|profile| profile.mtp) == Some(false);
+    let draft = configured.or_else(|| {
+        model_path
+            .and_then(crate::models_store::draft_model_for_model)
+            .filter(|draft| {
+                !(mtp_off
+                    && crate::models_store::speculative_draft_type(draft) == Some("draft-mtp"))
+            })
+    })?;
     let draft_type = profile
         .and_then(|profile| profile.speculative_draft_type.clone())
         .or_else(|| crate::models_store::speculative_draft_type(&draft).map(str::to_owned))
@@ -3674,6 +3683,14 @@ mod tests {
             ..TextProfile::default()
         };
         assert_eq!(speculative_draft_for_model(Some(&off), Some(&model)), None);
+        let mtp_off = TextProfile {
+            mtp: Some(false),
+            ..TextProfile::default()
+        };
+        assert_eq!(
+            speculative_draft_for_model(Some(&mtp_off), Some(&model)),
+            None
+        );
     }
 
     #[test]
