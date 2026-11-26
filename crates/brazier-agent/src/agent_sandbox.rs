@@ -1234,6 +1234,8 @@ mod tests {
         );
     }
 
+    // Only the Unix backends grant linked git directories.
+    #[cfg(unix)]
     fn git(cwd: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")
             .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
@@ -1245,6 +1247,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn linked_worktrees_expose_only_their_source_git_directory() {
         let root = tempfile::TempDir::new().unwrap();
         let root = std::fs::canonicalize(root.path()).unwrap();
