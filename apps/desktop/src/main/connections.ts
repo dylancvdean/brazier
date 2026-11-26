@@ -659,6 +659,8 @@ export async function previewPairing(
   return { pairing, daemon }
 }
 
+const VIRTUAL_INTERFACE = /^(docker|br-|veth|virbr|vmnet|vboxnet|vEthernet|cni|flannel|podman|lxc|lxd|tailscale|utun|zt)/i
+
 function isPrivateIpv4(address: string): boolean {
   const [a, b] = address.split('.').map(Number)
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
@@ -667,11 +669,13 @@ function isPrivateIpv4(address: string): boolean {
 export function localNetworkAddress(
   interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()
 ): string | null {
-  const candidates = Object.values(interfaces)
-    .flatMap((entries) => entries ?? [])
+  const candidates = Object.entries(interfaces)
+    .flatMap(([name, entries]) => (entries ?? []).map((entry) => ({ name, ...entry })))
     .filter((entry) => entry.family === 'IPv4' && !entry.internal && !entry.address.startsWith('169.254.'))
-    .map((entry) => entry.address)
-  return candidates.find(isPrivateIpv4) ?? candidates[0] ?? null
+  const physical = candidates.filter((entry) => !VIRTUAL_INTERFACE.test(entry.name))
+  return [physical, candidates]
+    .map((group) => group.find((entry) => isPrivateIpv4(entry.address)) ?? group[0])
+    .find(Boolean)?.address ?? null
 }
 
 export function localPairingOrigin(
@@ -680,7 +684,8 @@ export function localPairingOrigin(
 ): string | null {
   const address = localNetworkAddress(interfaces)
   if (!address) return null
-  const { port } = new URL(normalizeDaemonBaseUrl(activeAddress))
+  const url = new URL(normalizeDaemonBaseUrl(activeAddress))
+  const port = url.port || (url.protocol === 'http:' ? '80' : '')
   return normalizeShareableOrigin(`https://${address}${port ? `:${port}` : ''}`)
 }
 

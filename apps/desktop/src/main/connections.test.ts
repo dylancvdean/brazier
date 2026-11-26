@@ -969,6 +969,17 @@ describe('local pairing origin', () => {
     expect(localPairingOrigin('http://127.0.0.1:7614', interfaces)).toBe('https://192.168.1.23:7614')
   })
 
+  it('skips virtual bridges and keeps an HTTP default port', () => {
+    const interfaces = {
+      docker0: [entry('172.17.0.1')],
+      'br-1a2b': [entry('172.18.0.1')],
+      wlan0: [entry('192.168.1.23')]
+    }
+    expect(localNetworkAddress(interfaces)).toBe('192.168.1.23')
+    expect(localNetworkAddress({ docker0: [entry('172.17.0.1')] })).toBe('172.17.0.1')
+    expect(localPairingOrigin('http://127.0.0.1', interfaces)).toBe('https://192.168.1.23:80')
+  })
+
   it('returns null without a non-loopback IPv4 address', () => {
     expect(localPairingOrigin('http://127.0.0.1:7614', { lo: [entry('127.0.0.1', true)] })).toBeNull()
   })
