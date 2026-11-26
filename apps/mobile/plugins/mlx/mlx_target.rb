@@ -3,9 +3,8 @@ require 'xcodeproj'
 # Adds the BrazierMLX framework target to the app's Xcode project. The Podfile
 # calls this after every `pod install`; it does nothing once the target exists.
 #
-# MLX needs iOS 17 and the app supports 15.1, so the app cannot link it. The
-# framework is built with its own deployment target and only embedded; the app
-# loads it at runtime where it can run (see BrazierOnDevice.m).
+# MLX is kept in its own framework, which the app embeds and loads on first
+# use (see BrazierOnDevice.m), so starting the app does not load MLX.
 module BrazierMLX
   NAME = 'BrazierMLX'.freeze
   PACKAGES = [
