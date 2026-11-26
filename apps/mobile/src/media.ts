@@ -201,9 +201,15 @@ export function mediaByMessage(messages: readonly Message[]): { media: Map<strin
   let lastCaller: string | null = null;
   let lastAssistant: string | null = null;
   const attach = (id: string, blob: MediaBlob) => media.set(id, [...(media.get(id) ?? []), blob]);
+  let afterTool = false;
   for (const message of messages) {
     const blobs = messageBlobs(message.content);
-    if (message.role === 'user') {
+    // For a vision model the host follows a tool result with a user-role message
+    // that hands the model the media it made. It is part of the turn, not an upload.
+    const hostContext = message.role === 'user' && afterTool && blobs.length > 0;
+    afterTool = message.role === 'tool';
+    if (hostContext) moved.add(message.id);
+    else if (message.role === 'user') {
       seen = new Set(); callOwner = new Map(); lastCaller = null; lastAssistant = null;
       if (blobs.length) media.set(message.id, blobs);
       continue;
@@ -228,6 +234,7 @@ export function mediaByMessage(messages: readonly Message[]): { media: Map<strin
     }
     if (elsewhere && !media.has(message.id)) moved.add(message.id);
   }
+  for (const id of media.keys()) moved.delete(id);
   return { media, moved };
 }
 
