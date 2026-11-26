@@ -227,6 +227,7 @@ test('carries the daemon certificate pin from the invite into the stored credent
 
 test('chat with tools asks the host to run them and reports each call and transcript step', async () => {
   const frames = [
+    { choices: [{ delta: { content: 'Let me look. ' } }] },
     { brazier: { tool_call: { call_id: 'c1', name: 'web_search', arguments: '{"query":"x"}', output: 'hits', is_error: false } } },
     { brazier: { transcript_message: { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'web_search', arguments: '{"query":"x"}' } }] } } },
     { brazier: { transcript_message: { role: 'tool', content: 'hits', tool_call_id: 'c1' } } },

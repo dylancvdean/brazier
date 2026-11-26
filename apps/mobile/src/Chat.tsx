@@ -147,7 +147,10 @@ export function Chat({ credential, hostName, disabledTools, onDisabledTools, onU
       const answer = await api.chat(model, chatContext(history), turn.signal, {
         onToken: (token) => setStreamed((text) => text + token),
         onToolCall: (call) => { calls.push(call); setRunning([...calls]); },
-        onTranscript: (message) => transcript.push(message),
+        onTranscript: (message) => {
+          transcript.push(message);
+          if (message.role === 'assistant') setStreamed('');
+        },
       }, enabledTools.map(({ name }) => name));
       if (turn.signal.aborted) return;
       let parent = user.id;
