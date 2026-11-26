@@ -578,56 +578,77 @@ pub fn secret_paths(data_dir: Option<&Path>) -> Vec<PathBuf> {
     paths
 }
 
-/// Git directories outside the workspace that a linked worktree checkout
-/// (`git worktree add`) needs to read: its private git dir and the source
-/// repository's common dir. Empty for ordinary checkouts.
+/// Git directory outside the workspace that a linked worktree checkout
+/// (`git worktree add`) needs to read: the source repository's common dir,
+/// which holds the worktree's private `worktrees/<id>` dir. Empty for
+/// ordinary checkouts.
 ///
 /// The workspace's `.git` file is agent-writable, so it is only trusted when
-/// the private git dir it names lies outside the workspace and links back to
-/// this checkout. Directories overlapping a protected path are never granted.
+/// the private git dir it names lies outside the workspace, links back to this
+/// checkout, and sits directly in `<common dir>/worktrees`. Nothing is granted
+/// when either directory overlaps a protected path, which includes the
+/// agent-writable scratch directory.
 pub(crate) fn linked_git_directories(workspace: &Path, data_dir: Option<&Path>) -> Vec<PathBuf> {
-    let Some(directories) = resolve_linked_git_directories(workspace) else {
+    let Some((git_dir, common_dir)) = resolve_linked_git_directories(workspace) else {
         return Vec::new();
     };
     let protected = secret_paths(data_dir);
-    directories
-        .into_iter()
-        .filter(|directory| {
-            !protected
-                .iter()
-                .any(|secret| directory.starts_with(secret) || secret.starts_with(directory))
-        })
-        .collect()
+    let overlaps_protected = |directory: &Path| {
+        protected
+            .iter()
+            .any(|secret| directory.starts_with(secret) || secret.starts_with(directory))
+    };
+    if overlaps_protected(&git_dir) || overlaps_protected(&common_dir) {
+        return Vec::new();
+    }
+    vec![common_dir]
 }
 
-fn resolve_linked_git_directories(workspace: &Path) -> Option<Vec<PathBuf>> {
+fn resolve_linked_git_directories(workspace: &Path) -> Option<(PathBuf, PathBuf)> {
     let workspace = std::fs::canonicalize(workspace).ok()?;
     let dot_git = workspace.join(".git");
-    if !std::fs::symlink_metadata(&dot_git).ok()?.is_file() {
-        return None;
-    }
-    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let pointer = read_small_file(&dot_git)?;
     let git_dir = pointer.lines().next()?.strip_prefix("gitdir:")?.trim();
     let git_dir = std::fs::canonicalize(workspace.join(git_dir)).ok()?;
     if git_dir.starts_with(&workspace) {
         return None;
     }
-    let back_reference = std::fs::read_to_string(git_dir.join("gitdir")).ok()?;
+    let back_reference = read_small_file(&git_dir.join("gitdir"))?;
     if std::fs::canonicalize(git_dir.join(back_reference.trim())).ok()? != dot_git {
         return None;
     }
-    let common_dir = match std::fs::read_to_string(git_dir.join("commondir")) {
-        Ok(common) => std::fs::canonicalize(git_dir.join(common.trim())).ok()?,
-        Err(_) => return Some(vec![git_dir]),
-    };
-    if common_dir.starts_with(&workspace) || workspace.starts_with(&common_dir) {
-        return Some(vec![git_dir]);
+    let common_dir = read_small_file(&git_dir.join("commondir"))?;
+    let common_dir = std::fs::canonicalize(git_dir.join(common_dir.trim())).ok()?;
+    if git_dir.parent()? != common_dir.join("worktrees")
+        || common_dir.starts_with(&workspace)
+        || workspace.starts_with(&common_dir)
+    {
+        return None;
     }
-    if git_dir.starts_with(&common_dir) {
-        Some(vec![common_dir])
-    } else {
-        Some(vec![common_dir, git_dir])
+    Some((git_dir, common_dir))
+}
+
+/// Read a short regular file without following symlinks or blocking on a
+/// FIFO. Git pointer files are one line; anything larger is not trusted.
+fn read_small_file(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+
+    const LIMIT: u64 = 4096;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > LIMIT {
+        return None;
+    }
+    let mut contents = String::new();
+    file.take(LIMIT).read_to_string(&mut contents).ok()?;
+    Some(contents)
 }
 
 /// The literal and canonical spellings of a path (`/var` vs `/private/var`).
@@ -1260,11 +1281,28 @@ mod tests {
         )
         .unwrap();
         std::fs::write(elsewhere.join("commondir"), "/").unwrap();
-        // A common dir enclosing the workspace (here `/`) is never granted.
+        // A common dir that does not hold the private git dir is never granted.
+        assert!(linked_git_directories(&worktree, None).is_empty());
+        // Nor is one named from a protected (agent-writable) location.
+        let forged = root.join("data/agent/scratch/worktrees/x");
+        std::fs::create_dir_all(&forged).unwrap();
+        std::fs::write(
+            forged.join("gitdir"),
+            worktree.join(".git").display().to_string(),
+        )
+        .unwrap();
+        std::fs::write(forged.join("commondir"), "../..").unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", forged.display()),
+        )
+        .unwrap();
+        let data_dir = root.join("data");
         assert_eq!(
             linked_git_directories(&worktree, None),
-            vec![elsewhere.clone()]
+            vec![root.join("data/agent/scratch")]
         );
+        assert!(linked_git_directories(&worktree, Some(&data_dir)).is_empty());
         std::fs::create_dir(worktree.join("forged")).unwrap();
         std::fs::write(worktree.join("forged/gitdir"), "../.git").unwrap();
         std::fs::write(worktree.join(".git"), "gitdir: forged\n").unwrap();
