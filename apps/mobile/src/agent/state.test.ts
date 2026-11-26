@@ -119,10 +119,10 @@ test('restores a stored session and interleaves messages with tool calls by time
     ],
     tool_executions: [{
       id: 'e', session_id: 's', tool_call_id: 'c', tool: 'read_file', arguments: { path: 'a.txt' }, environment: 'sandbox',
-      risk: 'read', status: 'completed', output_preview: 'o', truncated: false, created_at: '2026-01-01T00:00:02Z',
+      risk: 'read', status: 'completed', output_preview: 'o', truncated: false, created_at: '2026-01-01 00:00:02',
     }, {
       id: 'e2', session_id: 's', tool: 'run_command', arguments: {}, environment: 'host', risk: 'execute',
-      status: 'error', truncated: false, created_at: '2026-01-01T00:00:05Z',
+      status: 'error', truncated: false, created_at: '2026-01-01 00:00:05',
     }],
     pending_approvals: [approval],
   });

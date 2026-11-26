@@ -333,7 +333,10 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
 
   return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
     <View style={styles.topBar}>
-      <IconButton glyph="☰" label="Tasks" onPress={() => setShowDrawer(true)} />
+      <IconButton glyph="☰" label="Tasks" onPress={() => {
+        setShowDrawer(true);
+        void api.sessions().then(setSessions).catch(() => undefined);
+      }} />
       <Text numberOfLines={1} style={styles.topTitle}>{active?.title ?? 'New task'}</Text>
       {chip(model || 'Choose model', 'Choose model', 'models')}
       <IconButton glyph="＋" label="New task" disabled={locked} onPress={newTask} />
@@ -469,7 +472,7 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
               <View style={styles.flex}>
                 <Text numberOfLines={1} style={styles.listText}>{session.title}</Text>
                 <Text numberOfLines={1} style={styles.listMeta}>
-                  {session.workspace_path ? folderName(session.workspace_path) : 'No folder'} · {session.last_run_status}</Text>
+                  {session.workspace_path ? folderName(session.workspace_path) : 'No folder'} · {session.id === active?.id && !view.running && view.summary ? 'completed' : session.last_run_status}</Text>
               </View>
               <IconButton glyph="✕" label={`Delete ${session.title}`} disabled={locked} onPress={() => removeSession(session)} />
             </Pressable>)}

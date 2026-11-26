@@ -146,7 +146,9 @@ export function transcriptRows(view: Pick<AgentView, 'messages' | 'timeline'>): 
     ...view.timeline.map((entry, index) => (
       { row: { kind: 'tool' as const, key: `t${entry.toolCallId}`, entry }, at: entry.timestamp, order: 1, index })),
   ];
-  rows.sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order || a.index - b.index);
+  // Messages carry ISO timestamps; stored tool calls carry the host database's `YYYY-MM-DD HH:MM:SS` (UTC).
+  const time = (at: string) => Date.parse(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(at) ? `${at.replace(' ', 'T')}Z` : at) || 0;
+  rows.sort((a, b) => time(a.at) - time(b.at) || a.order - b.order || a.index - b.index);
   return rows.map(({ row }) => row);
 }
 

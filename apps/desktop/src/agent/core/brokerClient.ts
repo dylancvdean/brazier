@@ -1026,6 +1026,15 @@ export class BrokerClient {
         consumeBlock(buffer)
       }
     } finally {
+      if (doneFlag && !streamEnded) {
+        // The daemon closes right after `[DONE]`. Let that close arrive rather
+        // than cancelling over it: expo/fetch (React Native) reports a close
+        // that lands on an already cancelled stream.
+        streamEnded = await Promise.race([
+          reader.read().then(({ done }) => done, () => true),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000))
+        ])
+      }
       if (!streamEnded) await reader.cancel().catch(() => undefined)
       try {
         reader.releaseLock()
