@@ -179,7 +179,7 @@ function Shell({ preferences, onPreferences }: {
     return <>
       {view === 'settings' ? settings : view === 'models' ? models : null}
       <View style={view === 'chat' ? styles.flex : { display: 'none' }}>
-        <Chat key={DEVICE_ID} backend={deviceBackend} credential={null} hostName="this device" modelsRevision={modelsRevision}
+        <Chat key={DEVICE_ID} backend={deviceBackend} credential={null} hostName="This device" modelsRevision={modelsRevision}
           disabledTools={[]} onDisabledTools={() => undefined} onUnauthorized={() => undefined}
           onOpenSettings={() => setView('settings')} onOpenModels={() => setView('models')}
           onOpenGenerate={() => undefined} onOpenAgent={() => undefined} />
