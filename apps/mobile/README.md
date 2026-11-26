@@ -144,6 +144,14 @@ Only public repositories work; there is no search.
 
 GGUF models run through llama.cpp (`llama.rn`, pinned to the latest stable
 release, 0.12.9), using Metal on an iPhone and the CPU in the iOS Simulator.
+On iOS 26 and later with Apple Intelligence turned on, **Apple Intelligence**
+(Apple's Foundation Models system model) is also listed, with nothing to
+download. It is checked at runtime and weak-linked, so the app still installs
+on iOS 15.1 and simply does not list it there. Its Swift source is
+`plugins/on-device/BrazierAppleModelEngine.swift`; `BrazierOnDevice.m` is the
+bridge the app calls, and `plugins/with-on-device.cjs` copies both into the
+Xcode project during prebuild.
+
 `src/local/engine.ts` is the interface Chat talks to; a paired host and this
 device both implement it, and each on-device runtime is a `Runtime` behind it.
 
