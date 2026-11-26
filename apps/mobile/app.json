@@ -3,10 +3,15 @@
     "name": "Brazier",
     "slug": "brazier-mobile",
     "version": "0.1.0",
+    "icon": "../desktop/build/icon.png",
     "orientation": "portrait",
     "ios": {
       "bundleIdentifier": "ai.brazier.mobile",
+      "appleTeamId": "4U2WZ7WJT4",
       "supportsTablet": true,
+      "config": {
+        "usesNonExemptEncryption": false
+      },
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "Connect to your own Brazier host on your local network."
       }

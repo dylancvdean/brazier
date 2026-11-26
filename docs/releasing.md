@@ -1,5 +1,9 @@
 # Releasing Brazier
 
+For iOS TestFlight builds from `master`, see the
+[mobile cloud build setup](../apps/mobile/README.md#testflight-with-xcode-cloud).
+Mobile builds use Xcode Cloud and are independent of the desktop release tags below.
+
 Every desktop release is created by tagging the same version recorded in the
 root and desktop manifests, for example `v0.2.2`. The GitHub Actions release
 workflow builds three updateable artifacts:

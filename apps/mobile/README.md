@@ -18,7 +18,8 @@ pnpm --filter @brazier/mobile check
 pnpm --filter @brazier/mobile test
 ```
 
-Expo generates the native projects locally. They are not committed.
+The iOS project is committed for Xcode Cloud. Expo generates the Android
+project locally; it is not committed.
 
 ### Android
 
@@ -51,6 +52,50 @@ pnpm --filter @brazier/mobile ios
 For a physical iPhone, run `pnpm --filter @brazier/mobile ios --device` and
 configure a signing team in Xcode if prompted. Paste an invite on a simulator;
 use a physical device to test camera scanning.
+
+### TestFlight with Xcode Cloud
+
+The iOS app uses Apple's Xcode Cloud, under personal team `4U2WZ7WJT4`.
+Its App Store Connect listing is [Brazier Mobile](https://appstoreconnect.apple.com/apps/6839438555/testflight)
+(`ai.brazier.mobile`); the installed app displays **Brazier**.
+No Expo account or EAS token is required.
+
+Open `apps/mobile/ios/Brazier.xcworkspace` after installing the workspace
+packages and running `pod install --deployment` in `apps/mobile/ios`.
+The shared scheme is `Brazier`. In Xcode, choose **Product → Xcode Cloud →
+Create Workflow**, select **Brazier Mobile**, and connect this GitHub repository.
+Configure the workflow as follows:
+
+- Name: **Master → TestFlight**.
+- Start condition: **Branch Changes**, with the exact branch **master**.
+- Action: **Archive**, iOS, scheme **Brazier**, configuration **Release**.
+- Distribution: **TestFlight and App Store**.
+- Post-action: **TestFlight Internal Testing**, select your internal tester group.
+- Use the latest stable Xcode/macOS image compatible with the app.
+
+Apple stores the workflow settings in Xcode Cloud, not a GitHub Actions YAML
+file. Confirm the branch condition in App Store Connect before enabling it.
+The committed `ios/ci_scripts/ci_post_clone.sh` installs Node 24 and pinned
+pnpm, checks the mobile app, and installs locked CocoaPods dependencies.
+`ci_pre_xcodebuild.sh` uses Xcode Cloud's build number so each TestFlight
+upload is unique. Apple manages cloud signing; desktop notarization secrets
+are unrelated to iOS signing.
+
+The native iOS project, shared scheme, and Podfile.lock are committed so Xcode
+Cloud can discover the app before running scripts. After changing Expo native
+configuration or native dependencies, regenerate and review the project:
+
+```sh
+pnpm --filter @brazier/mobile exec expo prebuild --platform ios --no-install
+(cd apps/mobile/ios && pod install)
+```
+
+Keep `ios/ci_scripts` and the shared scheme when regenerating; avoid
+`expo prebuild --clean`, which deletes that directory. Commit native changes
+and the updated lockfile. Do not commit `Pods`, `.xcode.env.local`, signing
+credentials, or Xcode user data. TestFlight installs include the JavaScript
+bundle and do not need Metro. External testers may require Beta App Review;
+App Store publication requires a separate App Review submission.
 
 ## Pair and chat
 
