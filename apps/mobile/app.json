@@ -41,6 +41,7 @@
         "savePhotosPermission": "Save images and videos you generate to your photo library.",
         "granularPermissions": ["photo", "video"]
       }],
+      ["llama.rn", { "enableEntitlements": false, "forceCxx20": false }],
       "./plugins/with-ios-scenes.cjs",
       "./plugins/with-tls-pinning.cjs",
       "./plugins/with-local-network.cjs"
