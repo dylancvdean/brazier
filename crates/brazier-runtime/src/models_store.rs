@@ -480,8 +480,11 @@ fn companion_directories(model_path: &Path) -> Vec<PathBuf> {
         .and_then(|name| name.to_str())
         .zip(model_path.file_stem().and_then(|stem| stem.to_str()))
         .is_some_and(|(folder, stem)| {
-            stem.to_ascii_lowercase()
-                .contains(&format!("-{}", folder.to_ascii_lowercase()))
+            // The name must end with the folder's name, shard suffix aside, so
+            // a folder such as `Instruct` is not taken for a quant folder.
+            shard_group(stem)
+                .to_ascii_lowercase()
+                .ends_with(&format!("-{}", folder.to_ascii_lowercase()))
         });
     if in_quant_folder && let Some(repository) = directory.parent() {
         directories.push(repository.to_path_buf());
@@ -727,7 +730,7 @@ pub fn draft_options_for_model(
             let value = model_directory
                 .and_then(|root| path.strip_prefix(root).ok())
                 .map(|relative| relative.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|| name.to_owned());
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
             let loadable = !is_mainline_incompatible_draft(&path);
             options.push(DraftOption {
                 value,
@@ -1656,7 +1659,10 @@ pub fn projectors_for_model(
     if !path.is_file() {
         return Vec::new();
     }
-    path.parent().map(list_projectors).unwrap_or_default()
+    companion_directories(&path)
+        .iter()
+        .flat_map(|directory| list_projectors(directory))
+        .collect()
 }
 
 /// Where an mmproj download should land so llama.cpp finds it beside `model_id`.
@@ -1736,12 +1742,12 @@ pub fn delete_projectors(
     );
     let model_path = path_for_model_id(data_dir, model_id, extra_library_paths)?;
     anyhow::ensure!(model_path.is_file(), "model file not found for {model_id}");
-    let directory = model_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("model has no directory"))?;
-    ensure_directory_in_library(data_dir, directory, extra_library_paths)?;
-    let directory = std::fs::canonicalize(directory)?;
-    let targets = match filename.map(str::trim).filter(|name| !name.is_empty()) {
+    let mut directories = Vec::new();
+    for directory in companion_directories(&model_path) {
+        ensure_directory_in_library(data_dir, &directory, extra_library_paths)?;
+        directories.push(std::fs::canonicalize(directory)?);
+    }
+    let targets: Vec<PathBuf> = match filename.map(str::trim).filter(|name| !name.is_empty()) {
         Some(name) => {
             anyhow::ensure!(
                 !name.contains('/') && !name.contains('\\'),
@@ -1751,13 +1757,19 @@ pub fn delete_projectors(
                 is_projector(Path::new(name)),
                 "only an mmproj GGUF can be removed"
             );
-            let path = directory.join(name);
-            anyhow::ensure!(path.is_file(), "projector not found beside this model");
-            vec![path]
+            let path = directories
+                .iter()
+                .map(|directory| directory.join(name))
+                .find(|path| path.is_file());
+            vec![path.ok_or_else(|| anyhow::anyhow!("projector not found beside this model"))?]
         }
-        None => list_projectors(&directory)
-            .into_iter()
-            .map(|projector| directory.join(projector.name))
+        None => directories
+            .iter()
+            .flat_map(|directory| {
+                list_projectors(directory)
+                    .into_iter()
+                    .map(move |projector| directory.join(projector.name))
+            })
             .collect(),
     };
     anyhow::ensure!(
@@ -1768,7 +1780,9 @@ pub fn delete_projectors(
         let canonical = std::fs::canonicalize(target)
             .map_err(|_| anyhow::anyhow!("projector not found: {}", target.display()))?;
         anyhow::ensure!(
-            canonical.starts_with(&directory),
+            directories
+                .iter()
+                .any(|directory| canonical.starts_with(directory)),
             "refusing to delete {} outside the model directory",
             target.display()
         );
@@ -1866,10 +1880,17 @@ pub fn delete_model(
         }
         // Drop companion mmproj files only when no other weight GGUFs remain
         // in the directory (other quants may still need the projector).
-        if let Some(directory) = path.parent() {
-            remove_orphan_projector(directory)?;
-        }
         let prune_root = library_root.unwrap_or_else(|| gguf_root(data_dir));
+        // The repository folder above a quant folder is only cleaned when it
+        // is inside the same library.
+        let boundary = std::fs::canonicalize(&prune_root).unwrap_or_else(|_| prune_root.clone());
+        for directory in companion_directories(&path) {
+            let inside = std::fs::canonicalize(&directory)
+                .is_ok_and(|directory| directory.starts_with(&boundary));
+            if inside {
+                remove_orphan_projector(&directory)?;
+            }
+        }
         prune_empty_parents(path.parent(), &prune_root);
         return Ok(path);
     }
@@ -1943,12 +1964,32 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Ok(());
     };
+    // A linked MTP folder is someone else's: it may point outside the library.
     let heads = directory.join(MTP_HEAD_DIRECTORY);
-    let head_entries = std::fs::read_dir(&heads).into_iter().flatten();
+    let heads_are_ours = std::fs::symlink_metadata(&heads).is_ok_and(|meta| meta.is_dir());
+    let head_entries = heads_are_ours
+        .then(|| std::fs::read_dir(&heads).ok())
+        .flatten()
+        .into_iter()
+        .flatten();
     let mut companions = Vec::new();
     let mut has_weight = false;
     for entry in entries.chain(head_entries).flatten() {
         let path = entry.path();
+        // Builds kept in their own quant folders share this folder's
+        // companions, so any weights below keep them.
+        if path.is_dir() && path != heads {
+            has_weight |= std::fs::read_dir(&path).is_ok_and(|entries| {
+                entries.flatten().any(|entry| {
+                    let path = entry.path();
+                    path.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+                        && !is_projector(&path)
+                        && !is_speculative_draft_file(&path)
+                })
+            });
+            continue;
+        }
         if !path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
@@ -2204,11 +2245,54 @@ mod tests {
         assert_eq!(projector_for_model(&model), Some(projector));
 
         // A folder that is not the model's quant folder is not looked above.
-        let other = dir.path().join("models");
-        std::fs::create_dir(&other).unwrap();
-        let unrelated = other.join("gemma-Q4_K_M.gguf");
-        std::fs::write(&unrelated, b"weights").unwrap();
-        assert_eq!(projector_for_model(&unrelated), None);
+        for (folder, name) in [
+            ("models", "gemma-Q4_K_M.gguf"),
+            ("Instruct", "Qwen-Instruct-Q4_K_M.gguf"),
+        ] {
+            let other = dir.path().join(folder);
+            std::fs::create_dir(&other).unwrap();
+            let unrelated = other.join(name);
+            std::fs::write(&unrelated, b"weights").unwrap();
+            assert_eq!(projector_for_model(&unrelated), None);
+        }
+    }
+
+    #[test]
+    fn repository_companions_outlive_root_builds_while_a_quant_folder_build_remains() {
+        let dir = tempdir().unwrap();
+        let repo = "unsloth/Ornith-1.5-122B-GGUF";
+        let root_build =
+            download_destination(dir.path(), repo, "Ornith-1.5-122B-UD-Q2_K_XL.gguf").unwrap();
+        let shard = "UD-Q6_K_XL/Ornith-1.5-122B-UD-Q6_K_XL-00001-of-00004.gguf";
+        let foldered = download_destination(dir.path(), repo, shard).unwrap();
+        let projector = download_destination(dir.path(), repo, "mmproj-F16.gguf").unwrap();
+        std::fs::create_dir_all(foldered.parent().unwrap()).unwrap();
+        for path in [&root_build, &foldered, &projector] {
+            std::fs::write(path, b"gguf").unwrap();
+        }
+        let foldered_id = format!("gguf:{repo}/{shard}");
+        assert_eq!(projectors_for_model(dir.path(), &foldered_id, &[]).len(), 1);
+
+        let root_id = format!("gguf:{repo}/Ornith-1.5-122B-UD-Q2_K_XL.gguf");
+        delete_model(dir.path(), &root_id, &[]).unwrap();
+        assert!(projector.exists(), "the build in its quant folder uses it");
+        delete_model(dir.path(), &foldered_id, &[]).unwrap();
+        assert!(!projector.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deleting_a_model_leaves_a_linked_mtp_folder_alone() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let head = outside.path().join("mtp-model-Q4_0.gguf");
+        std::fs::write(&head, b"head").unwrap();
+        let model = download_destination(dir.path(), "acme/model", "model-Q4_K_M.gguf").unwrap();
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"weights").unwrap();
+        std::os::unix::fs::symlink(outside.path(), model.parent().unwrap().join("MTP")).unwrap();
+        delete_model(dir.path(), "gguf:acme/model/model-Q4_K_M.gguf", &[]).unwrap();
+        assert!(head.exists());
     }
 
     #[test]
