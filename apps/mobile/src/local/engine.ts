@@ -46,11 +46,22 @@ export async function availableRuntimes(runtimes: readonly Runtime[]): Promise<R
   return runtimes.filter((_, index) => checks[index]);
 }
 
-/** On-device chat is text only: tool rounds and empty messages are left out. */
+/**
+ * On-device chat is text only: tool rounds and empty messages are left out. Neighbouring turns from the same
+ * side become one, because a stopped reply leaves two user messages in a row and many chat templates
+ * require the sides to alternate.
+ */
 export function chatTurns(messages: readonly OpenAiMessage[]): ChatTurn[] {
-  return messages.flatMap((message): ChatTurn[] =>
-    (message.role === 'system' || message.role === 'user' || message.role === 'assistant') &&
-    !message.tool_calls?.length && message.content.trim() ? [{ role: message.role, content: message.content }] : []);
+  const turns: ChatTurn[] = [];
+  for (const message of messages) {
+    const { role } = message;
+    if ((role !== 'system' && role !== 'user' && role !== 'assistant') || message.tool_calls?.length ||
+        !message.content.trim()) continue;
+    const last = turns.at(-1);
+    if (last?.role === role) last.content += `\n\n${message.content}`;
+    else turns.push({ role, content: message.content });
+  }
+  return turns;
 }
 
 /**
