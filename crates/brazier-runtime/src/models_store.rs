@@ -854,16 +854,19 @@ pub fn shard_group(path: &str) -> String {
 }
 
 fn strip_shard_suffix(stem: &str) -> Option<&str> {
-    if stem.len() <= SHARD_SUFFIX_LEN {
-        return None;
-    }
-    let tail = &stem[stem.len() - SHARD_SUFFIX_LEN..];
-    if tail.starts_with('-')
-        && tail[1..6].bytes().all(|byte| byte.is_ascii_digit())
-        && &tail[6..10] == "-of-"
-        && tail[10..].bytes().all(|byte| byte.is_ascii_digit())
+    // Checked as bytes: a name with non-ASCII characters has no shard suffix
+    // and must not be sliced inside a character.
+    let split = stem
+        .len()
+        .checked_sub(SHARD_SUFFIX_LEN)
+        .filter(|at| *at > 0)?;
+    let tail = &stem.as_bytes()[split..];
+    if tail[0] == b'-'
+        && tail[1..6].iter().all(u8::is_ascii_digit)
+        && &tail[6..10] == b"-of-"
+        && tail[10..].iter().all(u8::is_ascii_digit)
     {
-        Some(&stem[..stem.len() - SHARD_SUFFIX_LEN])
+        stem.get(..split)
     } else {
         None
     }
@@ -1659,10 +1662,18 @@ pub fn projectors_for_model(
     if !path.is_file() {
         return Vec::new();
     }
-    companion_directories(&path)
+    // The one beside the weights wins over a same-named one above, which is
+    // also the one removal picks.
+    let mut projectors: Vec<ProjectorFile> = Vec::new();
+    for projector in companion_directories(&path)
         .iter()
         .flat_map(|directory| list_projectors(directory))
-        .collect()
+    {
+        if !projectors.iter().any(|seen| seen.name == projector.name) {
+            projectors.push(projector);
+        }
+    }
+    projectors
 }
 
 /// Where an mmproj download should land so llama.cpp finds it beside `model_id`.
@@ -1743,9 +1754,14 @@ pub fn delete_projectors(
     let model_path = path_for_model_id(data_dir, model_id, extra_library_paths)?;
     anyhow::ensure!(model_path.is_file(), "model file not found for {model_id}");
     let mut directories = Vec::new();
-    for directory in companion_directories(&model_path) {
-        ensure_directory_in_library(data_dir, &directory, extra_library_paths)?;
-        directories.push(std::fs::canonicalize(directory)?);
+    for (index, directory) in companion_directories(&model_path).iter().enumerate() {
+        // The model's own folder must be in a library; the repository folder
+        // above a quant folder is simply left out when it is not.
+        match ensure_directory_in_library(data_dir, directory, extra_library_paths) {
+            Ok(()) => directories.push(std::fs::canonicalize(directory)?),
+            Err(error) if index == 0 => return Err(error),
+            Err(_) => {}
+        }
     }
     let targets: Vec<PathBuf> = match filename.map(str::trim).filter(|name| !name.is_empty()) {
         Some(name) => {
@@ -1977,7 +1993,7 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
     for entry in entries.chain(head_entries).flatten() {
         let path = entry.path();
         // Builds kept in their own quant folders share this folder's
-        // companions, so any weights below keep them.
+        // companions, so weights in one keep them.
         if path.is_dir() && path != heads {
             has_weight |= std::fs::read_dir(&path).is_ok_and(|entries| {
                 entries.flatten().any(|entry| {
@@ -1986,6 +2002,7 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
                         && !is_projector(&path)
                         && !is_speculative_draft_file(&path)
+                        && companion_directories(&path).len() > 1
                 })
             });
             continue;
@@ -2278,6 +2295,17 @@ mod tests {
         assert!(projector.exists(), "the build in its quant folder uses it");
         delete_model(dir.path(), &foldered_id, &[]).unwrap();
         assert!(!projector.exists());
+    }
+
+    #[test]
+    fn a_name_with_wide_characters_has_no_shard_suffix() {
+        assert_eq!(shard_group("模型-Model-Q4_K_M.gguf"), "模型-Model-Q4_K_M");
+        assert_eq!(
+            shard_group("模型-Q4_K_M-00001-of-00002.gguf"),
+            "模型-Q4_K_M"
+        );
+        let model = Path::new("/models/Q4_K_M/模型-模型-模型-Q4_K_M.gguf");
+        assert_eq!(companion_directories(model).len(), 2);
     }
 
     #[cfg(unix)]
