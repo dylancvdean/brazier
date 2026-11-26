@@ -98,14 +98,15 @@ export function Chat({
     return () => currentTurn.current?.abort();
   }, []);
 
-  // Models added or deleted on the Models screen while this chat stays mounted behind it.
+  // Models added or deleted on the Models screen while this chat stays mounted behind it. Opening the
+  // picker also rereads the list: a system model can become available while the app is running.
   useEffect(() => {
-    if (!modelsRevision) return;
+    if (!modelsRevision && !(local && showModels)) return;
     void api.models().then((available) => {
       setModels(available);
       setModel((current) => available.some(({ id }) => id === current) ? current : '');
     }).catch(report);
-  }, [modelsRevision]);
+  }, [modelsRevision, local && showModels]);
 
   async function chooseModel(id: string) {
     setShowModels(false);

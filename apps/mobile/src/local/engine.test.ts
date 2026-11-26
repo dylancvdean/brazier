@@ -77,6 +77,13 @@ test('only text turns reach an on-device model', () => {
   ]), [{ role: 'system', content: 'Be brief.' }, { role: 'user', content: 'hi' }, { role: 'assistant', content: 'Hello.' }]);
 });
 
+test('a prompt left unanswered by Stop is sent with the next one, keeping the sides alternating', () => {
+  assert.deepEqual(chatTurns([
+    { role: 'user', content: 'first' }, { role: 'user', content: 'second' }, { role: 'assistant', content: 'ok' },
+    { role: 'assistant', content: '', tool_calls: [{}] }, { role: 'user', content: 'third' },
+  ]), [{ role: 'user', content: 'first\n\nsecond' }, { role: 'assistant', content: 'ok' }, { role: 'user', content: 'third' }]);
+});
+
 test('streamed text leaves out the reasoning of a thinking model', () => {
   assert.equal(answerDelta('', { token: 'Hel' }), 'Hel');
   assert.equal(answerDelta('', { token: '<think>', accumulated_text: '<think>' }), '');
