@@ -1401,13 +1401,21 @@ export type PrefillProgress = {
   processed: number
   elapsed_ms: number
   context_total?: number | null
+  /** Prompt size of the previous request in the same session, if known. */
+  previous_total?: number | null
 }
 
 export function prefillProgressLabel(progress: PrefillProgress): string {
   const processed = Math.min(progress.processed, progress.total)
   const prompt = `Prefilling ${processed.toLocaleString()} / ${progress.total.toLocaleString()} tokens`
-  if (!progress.context_total) return prompt
-  return `${prompt} · context ${progress.total.toLocaleString()} / ${progress.context_total.toLocaleString()}`
+  // The prompt is rebuilt for every request, so it can shrink: earlier turns'
+  // reasoning is not resent and compaction replaces old turns with a summary.
+  const shrank =
+    progress.previous_total != null && progress.previous_total > progress.total
+      ? ` (down from ${progress.previous_total.toLocaleString()}: earlier reasoning or compacted turns are not resent)`
+      : ''
+  if (!progress.context_total) return `${prompt}${shrank}`
+  return `${prompt} · context ${progress.total.toLocaleString()} / ${progress.context_total.toLocaleString()}${shrank}`
 }
 
 function forkHintsFromPayload(payload: unknown): RuntimeForkHint[] {

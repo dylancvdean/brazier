@@ -378,17 +378,20 @@ export class NativeAgentSession implements AgentSession {
     this.approvalContext = context
   }
 
-  /** Read from the daemon so a toggle in the UI applies to the next approval. */
+  /** Read from the daemon so a mode change in the UI applies to the next approval. */
   private async approveForMeEnabled(): Promise<boolean> {
     try {
       const remote = await this.broker.session(this.approvalContext.settingsSessionId)
-      const settings = remote.session.permission_settings
       if (this.approvalContext.settingsSessionId === this.id) {
-        this.state = { ...this.state, permissionSettings: settings }
+        this.state = {
+          ...this.state,
+          permissionMode: remote.session.permission_mode,
+          permissionSettings: remote.session.permission_settings
+        }
       }
-      return settings.approve_for_me === true
+      return remote.session.permission_mode === 'approve-for-me'
     } catch {
-      return this.state.permissionSettings.approve_for_me === true
+      return this.state.permissionMode === 'approve-for-me'
     }
   }
 
@@ -713,7 +716,8 @@ export class NativeAgentSession implements AgentSession {
       throw new Error('That session is already running. Cancel it first.')
     }
     const run: ActiveRun = {
-      id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      id:
+        input.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       abort: new AbortController(),
       queue: new EventQueue(),
       summary: emptySummary()

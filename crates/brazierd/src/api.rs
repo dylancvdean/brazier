@@ -8026,7 +8026,7 @@ async fn agent_capabilities(State(state): State<AppState>) -> ApiResult<Json<Val
     Ok(Json(json!({
         "schema_version": 1,
         "sandbox": sandbox,
-        "permission_modes": ["ask", "sandbox-only", "skip-permissions"],
+        "permission_modes": ["ask", "approve-for-me", "sandbox-only", "skip-permissions"],
         // The daemon advertises stock adapters and whether they can run here.
         // Package versions are reported by the agent worker when it loads them.
         "runtimes": agent_runtime_catalog(),

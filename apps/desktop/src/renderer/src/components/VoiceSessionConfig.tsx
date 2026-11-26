@@ -87,6 +87,11 @@ const PERMISSION_LABELS: Record<AgentPermissionMode, { title: string; detail: st
     title: 'Ask first',
     detail: 'Approve writes, commands, network use, and anything outside the workspace.'
   },
+  'approve-for-me': {
+    title: 'Approve for me',
+    detail:
+      "The task's model approves sandboxed actions that stay within your instructions. Host and destructive actions still ask you."
+  },
   'sandbox-only': {
     title: 'Sandbox only',
     detail: 'Sandboxed work runs without prompts. Host access is refused outright.'

@@ -67,8 +67,11 @@ import { assertDaemonMutationAllowed } from '../daemonAvailability'
  * own: the one composer at the bottom of the window serves every mode, so this
  * is how the agent's submit, stop, and readiness reach it.
  */
+/** Whether a message sent mid-run waits its turn or stops the running one. */
+export type AgentSendMode = 'queue' | 'interrupt'
+
 export type AgentComposerControls = {
-  send: (text: string) => Promise<void>
+  send: (text: string, mode?: AgentSendMode) => Promise<void>
   stop: () => Promise<void>
   running: boolean
   /** Empty when a run can start; otherwise why it cannot. */
@@ -107,8 +110,10 @@ type Props = {
    */
   onSessionBound?: (agentSessionId: string | null) => void | Promise<void>
   /** Route the turn through the shared coordinator so voice and this view cannot double-run. */
-  onSubmitTurn?: (text: string) => Promise<string | null>
+  onSubmitTurn?: (text: string, options?: { interrupt?: boolean }) => Promise<string | null>
   onCancelTurn?: () => Promise<void>
+  /** Drop follow-ups that are waiting behind the running turn. */
+  onClearQueue?: () => Promise<void>
   onOpenModelMenu?: () => void
   onError: (message: string | null) => void
 }
@@ -153,6 +158,32 @@ type TimelineEntry = {
   }
 }
 
+/**
+ * Per-workspace memory of whether the last task ran in an isolated worktree or
+ * in the folder itself. Keyed by the source workspace path.
+ */
+const WORKTREE_PREFERENCE_KEY = 'brazier.agent.worktreePreference:'
+
+function preferredWorktree(path: string | null | undefined, isGit: boolean): boolean {
+  if (!path || !isGit) return false
+  try {
+    const stored = window.localStorage.getItem(WORKTREE_PREFERENCE_KEY + path)
+    if (stored === 'worktree') return true
+    if (stored === 'folder') return false
+  } catch {
+    // Storage unavailable: fall back to isolation.
+  }
+  return true
+}
+
+function rememberWorktreePreference(path: string, worktree: boolean): void {
+  try {
+    window.localStorage.setItem(WORKTREE_PREFERENCE_KEY + path, worktree ? 'worktree' : 'folder')
+  } catch {
+    // Ignore quota / privacy mode failures.
+  }
+}
+
 /** Remembers which agent task was open across Agent ↔ Chat mode switches. */
 const LAST_AGENT_SESSION_KEY = 'brazier.agent.lastSessionId'
 
@@ -160,6 +191,11 @@ const PERMISSION_LABELS: Record<AgentPermissionMode, { title: string; detail: st
   ask: {
     title: 'Ask first',
     detail: 'Approve writes, commands, network use, and anything outside the workspace.'
+  },
+  'approve-for-me': {
+    title: 'Approve for me',
+    detail:
+      "The task's model approves sandboxed actions that stay within your instructions. Host and destructive actions still ask you."
   },
   'sandbox-only': {
     title: 'Sandbox only',
@@ -741,7 +777,13 @@ export function AgentMode(props: Props): React.JSX.Element {
   const [pendingPermissionMode, setPendingPermissionMode] =
     useState<AgentPermissionMode>('ask')
   /** "Approve for me" for the next task, until a session exists to own it. */
-  const [pendingApproveForMe, setPendingApproveForMe] = useState(false)
+  /** Follow-ups sent mid-run, oldest first, shown until their run starts. */
+  const [queuedTurns, setQueuedTurns] = useState<Array<{ id: string; text: string }>>([])
+  /** Sends that start a run directly and have not seen `run-started` yet. */
+  const directStartsRef = useRef(0)
+  const sendChainRef = useRef<Promise<void>>(Promise.resolve())
+  /** Prompt size of the previous request, to explain when it shrinks. */
+  const lastPromptTotalRef = useRef<number | null>(null)
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false)
   const [toolDraft, setToolDraft] = useState<string[]>([])
   const [toolsSaving, setToolsSaving] = useState(false)
@@ -794,9 +836,6 @@ export function AgentMode(props: Props): React.JSX.Element {
   const confinedToWorktree = Boolean(worktree) || (!session && pendingConfineToWorktree)
   const permissionMode: AgentPermissionMode =
     session?.permission_mode ?? pendingPermissionMode
-  const approveForMe = Boolean(
-    session?.permission_settings.approve_for_me ?? pendingApproveForMe
-  )
   const activeRuntimeId = session?.runtime_id ?? defaultRuntimeId
   const powerfulMode = activeRuntimeId === 'powerful'
   /** Tools this mode exposes: power tools are hidden from Simple sessions. */
@@ -852,6 +891,21 @@ export function AgentMode(props: Props): React.JSX.Element {
   const applyEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
       case 'run-started': {
+        if (directStartsRef.current > 0) {
+          directStartsRef.current -= 1
+        } else {
+          // A queued follow-up just started: it joins the transcript now.
+          setQueuedTurns((current) => {
+            const [next, ...rest] = current
+            if (next) {
+              setMessages((messages) => [
+                ...messages,
+                { role: 'user', text: next.text, timestamp: event.timestamp }
+              ])
+            }
+            return rest
+          })
+        }
         setRunning(true)
         setSummary(null)
         setStreaming('')
@@ -861,7 +915,10 @@ export function AgentMode(props: Props): React.JSX.Element {
         return
       }
       case 'prefill-progress': {
+        const previousTotal = lastPromptTotalRef.current
+        lastPromptTotalRef.current = event.total
         setPrefill({
+          previous_total: previousTotal,
           total: event.total,
           cached: event.cached,
           processed: event.processed,
@@ -1135,6 +1192,7 @@ export function AgentMode(props: Props): React.JSX.Element {
         return
       }
       case 'compacted': {
+        lastPromptTotalRef.current = null
         const kept = (event as { keptMessages?: AgentMessage[] }).keptMessages
         setMessages((current) => [
           { role: 'system', text: event.state.summary, timestamp: event.state.compactedAt },
@@ -1229,6 +1287,8 @@ export function AgentMode(props: Props): React.JSX.Element {
         setGrants(detail.grants)
         setSummary(null)
         setStreaming('')
+        setQueuedTurns([])
+        lastPromptTotalRef.current = null
         setPendingConfineToWorktree(false)
         const path = detail.session.workspace_path
         if (path) {
@@ -1288,9 +1348,11 @@ export function AgentMode(props: Props): React.JSX.Element {
         onError('A task keeps the workspace it started with. Start a new task to use another folder.')
       } else {
         setPendingWorkspace(validated.path)
-        // Git tasks are isolated by default. The user can opt out before the
-        // task exists, but an existing task never moves behind their back.
-        setPendingConfineToWorktree(validated.git_repository)
+        // Git tasks follow what the last task in this workspace used, isolated
+        // by default. An existing task never moves behind the user's back.
+        setPendingConfineToWorktree(
+          preferredWorktree(validated.path, validated.git_repository)
+        )
       }
       setRemoteWorkspaceOpen(false)
     } catch (cause) {
@@ -1365,27 +1427,6 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }
 
-  async function changeApproveForMe(enabled: boolean): Promise<void> {
-    if (!session) {
-      setPendingApproveForMe(enabled)
-      return
-    }
-    try {
-      assertDaemonMutationAllowed({ method: 'POST' })
-      const updated = await updateAgentSession(session.id, {
-        permission_settings: {
-          ...session.permission_settings,
-          approve_for_me: enabled
-        }
-      })
-      setSession(updated)
-      setPendingApproveForMe(enabled)
-      setSessions((current) => current.map((entry) => (entry.id === updated.id ? updated : entry)))
-    } catch (cause) {
-      onError(errorText(cause))
-    }
-  }
-
   async function changePermissionMode(mode: AgentPermissionMode): Promise<void> {
     setModeMenuOpen(false)
     if (mode === 'sandbox-only' && !capabilities?.sandbox.sandboxed_execution) {
@@ -1436,12 +1477,31 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }
 
-  async function send(input: string): Promise<void> {
+  /**
+   * Sends are serialized so a message typed while the previous one is still
+   * being submitted waits for it instead of being dropped.
+   */
+  function send(input: string, mode: AgentSendMode = 'queue'): Promise<void> {
+    const next = sendChainRef.current.then(() => sendNow(input, mode))
+    sendChainRef.current = next.catch(() => undefined)
+    return next
+  }
+
+  async function sendNow(input: string, mode: AgentSendMode): Promise<void> {
     const text = input.trim()
-    if (!text || running) return
+    if (!text) return
     onError(null)
 
     const lower = text.toLowerCase()
+    if (runningRef.current && !lower.startsWith('/')) {
+      await sendFollowUp(text, mode)
+      return
+    }
+    if (runningRef.current) {
+      onError('Stop the running task before using a command.')
+      return
+    }
+
     if (lower === '/compact') {
       if (!session) {
         onError('Start an agent task before compacting.')
@@ -1470,6 +1530,10 @@ export function AgentMode(props: Props): React.JSX.Element {
       await changePermissionMode('ask')
       return
     }
+    if (lower === '/approve') {
+      await changePermissionMode('approve-for-me')
+      return
+    }
     if (lower === '/sandbox') {
       await changePermissionMode('sandbox-only')
       return
@@ -1487,8 +1551,9 @@ export function AgentMode(props: Props): React.JSX.Element {
       onError('Choose a workspace folder first. The agent works inside it.')
       return
     }
-    if (submittingRef.current || runningRef.current) return
+    if (submittingRef.current) return
     submittingRef.current = true
+    runningRef.current = true
     setRunning(true)
     try {
       assertDaemonMutationAllowed({ method: 'POST' })
@@ -1504,8 +1569,7 @@ export function AgentMode(props: Props): React.JSX.Element {
           permission_mode: pendingPermissionMode,
           permission_settings: {
             auto_approve_sandboxed_actions: true,
-            auto_approve_host_actions: false,
-            approve_for_me: pendingApproveForMe
+            auto_approve_host_actions: false
           },
           ...(pendingEnabledTools ? { enabled_tools: pendingEnabledTools } : {}),
           confine_to_worktree: requestedWorktree
@@ -1518,6 +1582,7 @@ export function AgentMode(props: Props): React.JSX.Element {
           // Ignore.
         }
         setSessions((current) => [active as AgentSessionSummary, ...current])
+        if (workspaceIsGit) rememberWorktreePreference(workspace, requestedWorktree)
         setPendingWorkspace(null)
         setPendingConfineToWorktree(false)
         setPendingEnabledTools(null)
@@ -1539,8 +1604,11 @@ export function AgentMode(props: Props): React.JSX.Element {
       }
       const submittedAt = new Date().toISOString()
       if (props.onSubmitTurn) {
+        directStartsRef.current += 1
         const correlationId = await props.onSubmitTurn(text)
         if (!correlationId) {
+          directStartsRef.current = Math.max(0, directStartsRef.current - 1)
+          runningRef.current = false
           setRunning(false)
           onError('Could not start that agent turn. Try again.')
           return
@@ -1554,10 +1622,13 @@ export function AgentMode(props: Props): React.JSX.Element {
           ...current,
           { role: 'user', text, timestamp: submittedAt }
         ])
+        directStartsRef.current += 1
         await window.brazier.agent.run(active.id, { text })
         reconcileActiveSession()
       }
     } catch (cause) {
+      directStartsRef.current = 0
+      runningRef.current = false
       setRunning(false)
       onError(errorText(cause))
     } finally {
@@ -1565,10 +1636,35 @@ export function AgentMode(props: Props): React.JSX.Element {
     }
   }
 
+  /** A message sent while the agent works: queue it, or interrupt with it. */
+  async function sendFollowUp(text: string, mode: AgentSendMode): Promise<void> {
+    if (!session || !props.onSubmitTurn) {
+      onError('Stop the running task before sending something else.')
+      return
+    }
+    try {
+      assertDaemonMutationAllowed({ method: 'POST' })
+      const correlationId = await props.onSubmitTurn(text, { interrupt: mode === 'interrupt' })
+      if (!correlationId) {
+        onError('Could not queue that message. Try again.')
+        return
+      }
+      const entry = { id: correlationId, text }
+      setQueuedTurns((current) =>
+        mode === 'interrupt' ? [entry, ...current] : [...current, entry]
+      )
+    } catch (cause) {
+      onError(errorText(cause))
+    }
+  }
+
   async function stop(): Promise<boolean> {
     if (!session) return false
     try {
       assertDaemonMutationAllowed({ method: 'POST' })
+      // Stop means stop: queued follow-ups would otherwise start right away.
+      await props.onClearQueue?.()
+      setQueuedTurns([])
       if (props.onCancelTurn) {
         await props.onCancelTurn()
       } else {
@@ -1704,9 +1800,6 @@ export function AgentMode(props: Props): React.JSX.Element {
     const nextWorkspaceIsGit = Boolean(nextWorkspace && (previousWorktree || workspaceIsGit))
     const nextEnabledTools = session?.enabled_tools ?? pendingEnabledTools
     const nextPermissionMode = session?.permission_mode ?? pendingPermissionMode
-    const nextApproveForMe = Boolean(
-      session?.permission_settings.approve_for_me ?? pendingApproveForMe
-    )
     if (session) {
       await window.brazier.agent.closeSession(session.id).catch(() => undefined)
     }
@@ -1736,8 +1829,9 @@ export function AgentMode(props: Props): React.JSX.Element {
     setWorkspaceIsGit(nextWorkspaceIsGit)
     setPendingEnabledTools(nextEnabledTools ? [...nextEnabledTools] : null)
     setPendingPermissionMode(nextPermissionMode)
-    setPendingApproveForMe(nextApproveForMe)
-    setPendingConfineToWorktree(nextWorkspaceIsGit)
+    setPendingConfineToWorktree(preferredWorktree(nextWorkspace, nextWorkspaceIsGit))
+    setQueuedTurns([])
+    lastPromptTotalRef.current = null
   }
 
   async function removeSession(id: string): Promise<void> {
@@ -1825,7 +1919,7 @@ export function AgentMode(props: Props): React.JSX.Element {
   composerActionsRef.current = { send, stop }
   useEffect(() => {
     onComposerChange?.({
-      send: (text) => composerActionsRef.current.send(text),
+      send: (text, mode) => composerActionsRef.current.send(text, mode),
       stop: async () => {
         await composerActionsRef.current.stop()
       },
@@ -1834,7 +1928,7 @@ export function AgentMode(props: Props): React.JSX.Element {
       placeholder: blockedReason
         ? blockedReason
         : running
-          ? 'The agent is working. Stop it to send something else…'
+          ? 'The agent is working. Enter queues a follow-up; Ctrl+Enter interrupts with it…'
           : `Ask ${modelLabel} to do something in ${shortPath(workspace)}…`,
       suggestions: AGENT_SLASH_SUGGESTIONS
     })
@@ -2035,16 +2129,6 @@ export function AgentMode(props: Props): React.JSX.Element {
             </div>
           )}
         </div>
-        <button
-          type="button"
-          className={approveForMe ? 'chip-button subtle active' : 'chip-button subtle'}
-          aria-pressed={approveForMe}
-          title="Let this task's model allow sandboxed actions that stay within your instructions. Host and destructive actions still ask you."
-          onClick={() => void changeApproveForMe(!approveForMe)}
-        >
-          <ShieldCheck size={13} />
-          Approve for me
-        </button>
         <div className="agent-header-spacer" />
         {grants.length > 0 && (
           <span className="agent-grants" title={grants.join('\n')}>
@@ -2272,6 +2356,15 @@ export function AgentMode(props: Props): React.JSX.Element {
             </ul>
           </section>
         )}
+        {queuedTurns.map((turn) => (
+          <article key={turn.id} className="agent-message user queued" title="Waits for the running turn">
+            <div className="avatar">You</div>
+            <div className="agent-message-body">
+              <Markdown>{turn.text}</Markdown>
+              <p className="agent-queued-label">Queued</p>
+            </div>
+          </article>
+        ))}
         <div ref={scrollAnchor} />
       </div>
 

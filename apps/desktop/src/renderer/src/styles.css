@@ -6187,6 +6187,16 @@ label.span-2 {
   overflow-wrap: anywhere;
 }
 
+.agent-message.queued {
+  opacity: 0.65;
+}
+
+.agent-queued-label {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted, #8a8a8a);
+}
+
 .agent-message-error {
   margin-top: 6px;
   color: #e8adb1;

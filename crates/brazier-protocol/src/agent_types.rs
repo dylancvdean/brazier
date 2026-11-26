@@ -74,6 +74,10 @@ impl ToolRiskLevel {
 pub enum AgentPermissionMode {
     /// Ask before anything that writes, executes, or leaves the sandbox.
     Ask,
+    /// Like `Ask`, but the session's own model first reviews each approval
+    /// against the user's instructions and may allow sandboxed, non-destructive
+    /// actions. Host and destructive actions still wait for the user.
+    ApproveForMe,
     /// Sandboxed work proceeds without prompts; host execution is refused.
     SandboxOnly,
     /// Explicit user opt-out of prompting, bounded by the settings below.
@@ -84,6 +88,7 @@ impl AgentPermissionMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ask => "ask",
+            Self::ApproveForMe => "approve-for-me",
             Self::SandboxOnly => "sandbox-only",
             Self::SkipPermissions => "skip-permissions",
         }
@@ -98,9 +103,8 @@ pub struct AgentPermissionSettings {
     pub auto_approve_sandboxed_actions: bool,
     #[serde(default)]
     pub auto_approve_host_actions: bool,
-    /// When set, the session's own model may allow a sandboxed, non-destructive
-    /// action that stays inside the user's instructions. Host and destructive
-    /// actions still wait for the user.
+    /// Storage form of `AgentPermissionMode::ApproveForMe`, kept in step with
+    /// the mode by the session store. Read the mode, not this flag.
     #[serde(default)]
     pub approve_for_me: bool,
 }

@@ -10,6 +10,7 @@ import type {
   AgentApproval,
   AgentEnvironment,
   AgentMessage,
+  AgentPermissionMode,
   AgentPermissionSettings,
   AgentToolDefinition,
   ApprovalScope,
@@ -106,7 +107,7 @@ export type DaemonSessionRecord = {
   workspace_path?: string | null
   model: string
   runtime_id: string
-  permission_mode: 'ask' | 'sandbox-only' | 'skip-permissions'
+  permission_mode: AgentPermissionMode
   permission_settings: AgentPermissionSettings
   enabled_tools?: string[] | null
   last_run_status: string

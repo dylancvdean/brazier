@@ -222,7 +222,7 @@ declare global {
        */
       agent: {
         openSession(sessionId: string): Promise<unknown>
-        run(sessionId: string, input: { text: string; images?: string[] }): Promise<unknown>
+        run(sessionId: string, input: { text: string; images?: string[]; runId?: string }): Promise<unknown>
         cancel(sessionId: string): Promise<unknown>
         compact(sessionId: string): Promise<unknown>
         setModel(

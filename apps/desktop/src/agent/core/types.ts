@@ -12,7 +12,7 @@ export type AgentEnvironment = 'sandbox' | 'host'
 /** How much damage a tool call can do. */
 export type ToolRiskLevel = 'safe' | 'read' | 'write' | 'execute' | 'destructive'
 
-export type AgentPermissionMode = 'ask' | 'sandbox-only' | 'skip-permissions'
+export type AgentPermissionMode = 'ask' | 'approve-for-me' | 'sandbox-only' | 'skip-permissions'
 
 export type AgentPermissionSettings = {
   auto_approve_sandboxed_actions: boolean
@@ -415,6 +415,8 @@ export type AgentRunSummary = {
 
 export type AgentUserInput = {
   text: string
+  /** Caller-chosen run id, so the caller can match this run's events exactly. */
+  runId?: string
   /** Data URLs for images the model can see, when it supports them. */
   images?: string[]
 }
