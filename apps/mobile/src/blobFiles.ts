@@ -9,9 +9,13 @@ import { blobFileName, mediaClient, parseHistory, type HistoryEntry, type MediaB
 // Images, the video player, Photos and the share sheet cannot send the bearer
 // key or use the host's pinned certificate. Blobs are therefore downloaded
 // through expo/fetch, which does both, and shown from the app's cache. A blob
-// is named by its hash, so a cached copy never goes stale.
-const directory = () => {
-  const cache = new Directory(Paths.cache, 'blobs');
+// is named by its hash, so a cached copy never goes stale. The bytes are not
+// checked against that hash, so each host has its own cache: a host can then
+// only supply the media shown for itself.
+const hostKey = (credential: Credential) => hostId(credential).replace(/[^A-Za-z0-9_-]/g, '_');
+
+const directory = (credential: Credential) => {
+  const cache = new Directory(Paths.cache, 'blobs', hostKey(credential));
   if (!cache.exists) cache.create({ intermediates: true, idempotent: true });
   return cache;
 };
@@ -19,9 +23,9 @@ const directory = () => {
 const downloads = new Map<string, Promise<string>>();
 
 async function download(credential: Credential, blob: MediaBlob): Promise<string> {
-  const target = new File(directory(), blobFileName(blob));
+  const target = new File(directory(credential), blobFileName(blob));
   if (target.exists) return target.uri;
-  const partial = new File(directory(), `${blob.sha256}.${Date.now()}.part`);
+  const partial = new File(directory(credential), `${blob.sha256}.${Date.now()}.part`);
   let moved = false;
   try {
     const reader = (await mediaClient(fetch, credential).blob(blob.sha256)).getReader();
@@ -49,7 +53,7 @@ async function download(credential: Credential, blob: MediaBlob): Promise<string
 
 /** URI of a local copy of the blob, downloading it from the host if needed. */
 export function blobFile(credential: Credential, blob: MediaBlob): Promise<string> {
-  const name = blobFileName(blob);
+  const name = `${hostKey(credential)}/${blobFileName(blob)}`;
   let pending = downloads.get(name);
   if (!pending) {
     pending = download(credential, blob).finally(() => downloads.delete(name));
@@ -70,7 +74,7 @@ export async function share(uri: string, mimeType: string): Promise<void> {
 }
 
 const historyFile = (credential: Credential) =>
-  new File(Paths.document, `generate-history-${hostId(credential).replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
+  new File(Paths.document, `generate-history-${hostKey(credential)}.json`);
 
 export async function loadHistory(credential: Credential): Promise<HistoryEntry[]> {
   const file = historyFile(credential);
