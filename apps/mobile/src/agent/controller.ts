@@ -18,6 +18,7 @@ export class AgentController {
   private readonly pending = new Map<string, { resolve: (data: unknown) => void; reject: (error: Error) => void }>();
   private ready: Promise<unknown> | null = null;
   private next = 0;
+  private readonly running = new Set<string>();
 
   constructor(nativeFetch: NativeFetch, private readonly credential: Credential,
     private readonly onEvent: (sessionId: string, event: AgentEvent) => void) {
@@ -56,7 +57,10 @@ export class AgentController {
   }
 
   /** Resolves when the run ends; its progress arrives through `onEvent`. */
-  run = (sessionId: string, text: string) => this.command({ type: 'run', sessionId, input: { text } });
+  run = (sessionId: string, text: string) => {
+    this.running.add(sessionId);
+    return this.command({ type: 'run', sessionId, input: { text } }).finally(() => this.running.delete(sessionId));
+  };
   /** Reload the session from the host, e.g. after its workspace changed. */
   open = (sessionId: string) => this.command({ type: 'open-session', sessionId });
   cancel = (sessionId: string) => this.command({ type: 'cancel', sessionId });
@@ -65,5 +69,12 @@ export class AgentController {
   setPermissionMode = (sessionId: string, mode: AgentPermissionMode) =>
     this.command({ type: 'set-permission-mode', sessionId, mode });
   close = (sessionId: string) => this.command({ type: 'close-session', sessionId });
-  dispose = () => { void this.send({ type: 'shutdown' }).catch(() => undefined); };
+  /**
+   * Stops every run on the host as well as here. Shutting the core down alone would leave the
+   * host holding approvals that nothing is waiting for any more.
+   */
+  dispose = () => {
+    void Promise.allSettled([...this.running].map((sessionId) => this.send({ type: 'cancel', sessionId })))
+      .then(() => this.send({ type: 'shutdown' })).catch(() => undefined);
+  };
 }
