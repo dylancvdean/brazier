@@ -133,6 +133,19 @@ test('saved media is shown once, under the message whose tool call made it', () 
   assert.deepEqual([...moved], ['t1', 'm1']);
 });
 
+test('media the host hands back to a vision model is not shown as an upload', () => {
+  const { media, moved } = mediaByMessage([
+    message('u1', 'user', 'draw a fox'),
+    message('a1', 'assistant', '', { tool_calls: [{ id: 'call-1' }] }),
+    message('t1', 'tool', 'done', { tool_call_id: 'call-1' }),
+    message('c1', 'user', [{ type: 'text', text: 'The requested media was generated.' }, part(sha('a'))]),
+    message('a2', 'assistant', 'Here is your fox.'),
+    message('m1', 'assistant', [part(sha('a'), 'call-1')]),
+  ]);
+  assert.deepEqual([...media], [['a1', [{ sha256: sha('a'), mime_type: 'image/png', name: 'out.png' }]]]);
+  assert.deepEqual([...moved], ['c1', 'm1']);
+});
+
 test('a media-only message with no tool call shows its own media', () => {
   const { media, moved } = mediaByMessage([message('u', 'user', 'hi'), message('m', 'assistant', [part(sha('a'), 'gone')])]);
   assert.deepEqual([...media.keys()], ['m']);
