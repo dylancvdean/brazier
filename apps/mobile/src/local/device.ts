@@ -20,7 +20,10 @@ const filePath = (file: File | Directory) => decodeURIComponent(file.uri.replace
 const textFiles = {
   async read(name: string) {
     const file = new File(root(), name);
-    return file.exists ? file.text() : null;
+    if (file.exists) return file.text();
+    // A write that was interrupted between removing the old file and moving the new one into place.
+    const next = new File(root(), `${name}.next`);
+    return next.exists ? next.text() : null;
   },
   // Written beside the file and then moved into place, so a write that fails (a full disk) keeps the old contents.
   async write(name: string, text: string) {

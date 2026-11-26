@@ -78,6 +78,7 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
       } },
     ]);
 
+  const percent = active?.size ? Math.min(100, active.bytes / active.size * 100) : 0;
   const accepted = usable.flatMap((runtime) => formats[runtime] ? [formats[runtime]] : []).join(' and ');
 
   return <View style={styles.container}>
@@ -88,6 +89,15 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
     <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled">
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       <Text style={styles.listMeta}>{formatBytes(free)} free on this device</Text>
+
+      {active ? <View style={styles.card}>
+        <Text style={styles.body}>Downloading {active.name}</Text>
+        <View accessibilityRole="progressbar" style={{ height: 6, borderRadius: 3, backgroundColor: palette.raised, overflow: 'hidden' }}>
+          <View style={{ height: 6, backgroundColor: palette.accent, width: `${percent}%` }} />
+        </View>
+        <Text style={styles.listMeta}>{Math.floor(percent)}%  ·  {formatBytes(active.bytes)} of {formatBytes(active.size)}</Text>
+        <View style={styles.row}><Action label="Cancel download" quiet onPress={cancelDownload} /></View>
+      </View> : null}
 
       <Text style={styles.section}>Add from Hugging Face</Text>
       <TextInput accessibilityLabel="Hugging Face model" autoCapitalize="none" autoCorrect={false} style={styles.input}
@@ -106,14 +116,8 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
           <Text style={styles.body}>{choice.name}</Text>
           <Text style={styles.listMeta}>{runtimeNames[choice.runtime]}  ·  {formatBytes(choice.size)}
             {choice.files.length > 1 ? `  ·  ${choice.files.length} files` : ''}</Text>
-          {progress ? <>
-            <View accessibilityRole="progressbar" style={{ height: 6, borderRadius: 3, backgroundColor: palette.raised, overflow: 'hidden' }}>
-              <View style={{ height: 6, backgroundColor: palette.accent, width: `${Math.min(100, progress.size ? progress.bytes / progress.size * 100 : 0)}%` }} />
-            </View>
-            <Text style={styles.listMeta}>
-              {progress.size ? Math.min(100, Math.floor(progress.bytes / progress.size * 100)) : 0}%  ·  {formatBytes(progress.bytes)} of {formatBytes(progress.size)}</Text>
-            <View style={styles.row}><Action label="Cancel download" quiet onPress={cancelDownload} /></View>
-          </> : have ? <Text style={styles.listMeta}>On this device</Text>
+          {progress ? <Text style={styles.listMeta}>Downloading…</Text>
+            : have ? <Text style={styles.listMeta}>On this device</Text>
             : tooBig ? <Text style={styles.listMeta}>Not enough free space</Text>
             : <View style={styles.row}><Action label="Download" disabled={!!active} onPress={() => void start(repository.slug, choice)} /></View>}
         </View>;
