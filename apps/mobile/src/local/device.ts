@@ -207,11 +207,13 @@ export function watchDownload(watcher: () => void): () => void {
   return () => { watchers.delete(watcher); };
 }
 
-/** Files land in a `.part` directory that becomes the model's directory only once all of them are complete. */
+/** Files land in a staging directory that becomes the model's directory only once all of them are complete. */
 export async function downloadModel(slug: string, choice: ModelChoice): Promise<InstalledModel> {
   if (active) throw new Error('Another model is still downloading.');
   const id = modelId(slug, choice);
-  const partial = new Directory(modelsRoot(), `${id}.part`);
+  // Not `${id}.part`: a repository's own name may end in `.part`, and that is another model's directory.
+  // Every model id has `--` in it, so this name is never one.
+  const partial = new Directory(modelsRoot(), 'downloading');
   let cancelled = false;
   let current: ReturnType<typeof createDownloadResumable> | null = null;
   let shown = 0;
@@ -229,14 +231,12 @@ export async function downloadModel(slug: string, choice: ModelChoice): Promise<
   };
   notify();
   try {
-    // Only one download runs at a time, so every `.part` directory here was left by an earlier one: this
-    // model's, or another's that ended with the app (closed or killed mid-download) and was never retried.
-    if (modelsRoot().exists) {
-      // A repository's own name may end in `.part`.
-      const kept = new Set((await installedModels()).map((model) => model.id));
-      for (const entry of modelsRoot().list()) {
-        if (entry instanceof Directory && entry.name.endsWith('.part') && !kept.has(entry.name)) entry.delete();
-      }
+    // Only one download runs at a time, so what is staged here was left by an earlier one that ended with the
+    // app (closed or killed mid-download). Earlier versions staged in `<id>.part`.
+    if (partial.exists) partial.delete();
+    const kept = new Set((await installedModels()).map((model) => model.id));
+    for (const entry of modelsRoot().exists ? modelsRoot().list() : []) {
+      if (entry instanceof Directory && entry.name.endsWith('.part') && !kept.has(entry.name)) entry.delete();
     }
     partial.create({ intermediates: true, idempotent: true });
     let finished = 0;
