@@ -14,6 +14,11 @@ test('probes only hosts that iOS treats as local network hosts', () => {
   assert.deepEqual(probeTarget('https://[fe80::1]:7614'), { host: 'fe80::1', port: 7614 });
   assert.equal(probeTarget('https://100.101.102.103:7614'), null);
   assert.equal(probeTarget('https://brazier.example'), null);
+  assert.deepEqual(probeTarget('https://[fd12:3456::1]:7614'), { host: 'fd12:3456::1', port: 7614 });
+  // Public names that merely start like a local IPv6 prefix are not local hosts.
+  assert.equal(probeTarget('https://fdroid.example.com'), null);
+  assert.equal(probeTarget('https://fc.example.com:7614'), null);
+  assert.equal(probeTarget('https://fe80.example.com'), null);
   assert.equal(probeTarget('not a url'), null);
 });
 

@@ -31,7 +31,7 @@ export function probeTarget(origin: string): ProbeTarget | null {
   const host = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '');
   const address = ipv4(host);
   const local = address === null
-    ? host.endsWith('.local') || /^(fe80|fc|fd)/i.test(host)
+    ? host.endsWith('.local') || (host.includes(':') && /^(fe80|fc|fd)/i.test(host))
     : privateIpv4(address);
   if (!local) return null;
   return { host, port: Number(url.port || (url.protocol === 'http:' ? 80 : 443)) };

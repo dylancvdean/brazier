@@ -100,6 +100,8 @@ function Shell({ preferences, onPreferences }: {
         const result = await daemonClient(fetch, credential).verify();
         if (!active) return;
         setVerified({ credential, host: result });
+        // A check on return to the foreground can succeed after an earlier one failed.
+        setAccess(null);
         // A host migrated from a single-host build has no name until it is first reached.
         setSaved((current) => {
           const id = hostId(credential);
