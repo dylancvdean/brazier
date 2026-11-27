@@ -138,13 +138,23 @@ export type TranscriptRow =
   | { kind: 'message'; key: string; message: AgentMessage }
   | { kind: 'tool'; key: string; entry: TimelineEntry };
 
-/** Messages and tool calls in the order they happened; a message precedes a tool call of the same instant. */
+/**
+ * Messages and tool calls in the order they happened; a message precedes a tool call of the same instant.
+ * A stored tool call's time is cut to the second, which can fall before the message that made the call (or
+ * before the user's own message), so a call takes the time of the assistant message that asked for it.
+ */
 export function transcriptRows(view: Pick<AgentView, 'messages' | 'timeline'>): TranscriptRow[] {
+  const askedAt = new Map<string, string>();
+  for (const message of view.messages) {
+    if (message.role === 'assistant') for (const call of message.toolCalls ?? []) askedAt.set(call.id, message.timestamp);
+  }
   const rows = [
     ...view.messages.flatMap((message, index) => isVisible(message)
       ? [{ row: { kind: 'message' as const, key: `m${index}`, message }, at: message.timestamp, order: 0, index }] : []),
-    ...view.timeline.map((entry, index) => (
-      { row: { kind: 'tool' as const, key: `t${entry.toolCallId}`, entry }, at: entry.timestamp, order: 1, index })),
+    ...view.timeline.map((entry, index) => ({
+      row: { kind: 'tool' as const, key: `t${entry.toolCallId}`, entry },
+      at: askedAt.get(entry.toolCallId) ?? entry.timestamp, order: 1, index,
+    })),
   ];
   // Messages carry ISO timestamps; stored tool calls carry the host database's `YYYY-MM-DD HH:MM:SS` (UTC).
   const time = (at: string) => Date.parse(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(at) ? `${at.replace(' ', 'T')}Z` : at) || 0;

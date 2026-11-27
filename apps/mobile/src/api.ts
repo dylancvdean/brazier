@@ -26,6 +26,8 @@ export type ChatEvents = {
   onToken: (token: string) => void;
   onToolCall?: (call: ToolCall) => void;
   onTranscript?: (message: TranscriptMessage) => void;
+  /** What is happening before any text arrives: the model loading, or the tool being called. */
+  onStatus?: (status: string) => void;
 };
 
 export class DaemonError extends Error {
@@ -281,7 +283,10 @@ export function toolCallsOf(messages: readonly Message[]): Map<string, ToolCall[
       byMessage.set(message.id, calls);
     } else if (message.role === 'tool' && message.tool_call_id) {
       const call = byCall.get(message.tool_call_id);
-      if (call) call.output = messageText(message.content) || wireContent(message.content);
+      if (!call) continue;
+      call.output = messageText(message.content) || wireContent(message.content);
+      // Saved results carry no flag; every tool reports a failure as text starting this way.
+      call.is_error = call.output.startsWith('Error:');
     }
   }
   return byMessage;
@@ -290,7 +295,7 @@ export function toolCallsOf(messages: readonly Message[]): Map<string, ToolCall[
 export async function consumeChatStream(
   body: ReadableStream<Uint8Array>, signal: AbortSignal, events: ChatEvents | ChatEvents['onToken'],
 ): Promise<string> {
-  const { onToken, onToolCall, onTranscript } = typeof events === 'function' ? { onToken: events } as ChatEvents : events;
+  const { onToken, onToolCall, onTranscript, onStatus } = typeof events === 'function' ? { onToken: events } as ChatEvents : events;
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let result = '';
@@ -322,10 +327,19 @@ export async function consumeChatStream(
         const payload = JSON.parse(data) as {
           error?: { message?: string } | string;
           choices?: { delta?: { content?: string; tool_calls?: { function?: { name?: string } }[] }; finish_reason?: string | null }[];
-          brazier?: { tool_call?: ToolCall; transcript_message?: TranscriptMessage };
+          brazier?: {
+            tool_call?: ToolCall; transcript_message?: TranscriptMessage;
+            load?: { message?: string }; prefill?: { total?: number; cached?: number; processed?: number };
+          };
         };
         if (payload.error) throw new DaemonError(typeof payload.error === 'string' ? payload.error :
           payload.error.message ?? 'Chat generation failed.');
+        if (payload.brazier?.load?.message) onStatus?.(payload.brazier.load.message);
+        const prefill = payload.brazier?.prefill;
+        if (prefill?.total) {
+          onStatus?.(`Reading the conversation… ${Math.min(100,
+            Math.round(100 * ((prefill.cached ?? 0) + (prefill.processed ?? 0)) / prefill.total))}%`);
+        }
         if (payload.brazier?.tool_call) onToolCall?.(payload.brazier.tool_call);
         if (payload.brazier?.transcript_message) {
           // Text the model wrote before calling tools is saved with that round, so the reply restarts after it.
@@ -337,6 +351,9 @@ export async function consumeChatStream(
           const names = choice.delta.tool_calls.map((call) => call.function?.name ?? 'unknown').join(', ');
           throw new DaemonError(`The model asked for tools this app cannot run: ${names}.`);
         }
+        // The host streams a call as the model writes it and runs it afterwards; name it while it runs.
+        const calling = choice?.finish_reason ? undefined : choice?.delta?.tool_calls?.find((call) => call.function?.name);
+        if (calling) onStatus?.(`Calling ${calling.function!.name}…`);
         const token = choice?.delta?.content;
         if (token) {
           result += token;

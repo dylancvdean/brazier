@@ -132,6 +132,25 @@ test('restores a stored session and interleaves messages with tool calls by time
   assert.equal(view.approvals.length, 1);
 });
 
+test('a stored tool call is listed after the message that made it, even when its time was cut to the second', () => {
+  const view = viewFromDetail({
+    session: {} as never,
+    messages: [
+      { payload: { role: 'user', text: 'go', timestamp: '2026-01-01T00:00:02.400Z' } },
+      { payload: { role: 'assistant', text: 'Reading.', toolCalls: [{ id: 'c', name: 'read_file', arguments: {} }], timestamp: '2026-01-01T00:00:02.700Z' } },
+      { payload: { role: 'tool', toolCallId: 'c', tool: 'read_file', output: 'o', isError: false, timestamp: '2026-01-01T00:00:02.800Z' } },
+      { payload: { role: 'assistant', text: 'Done', timestamp: '2026-01-01T00:00:02.900Z' } },
+    ],
+    tool_executions: [{
+      id: 'e', session_id: 's', tool_call_id: 'c', tool: 'read_file', arguments: {}, environment: 'sandbox',
+      risk: 'read', status: 'completed', output_preview: 'o', truncated: false, created_at: '2026-01-01 00:00:02',
+    }],
+    pending_approvals: [],
+  });
+  assert.deepEqual(transcriptRows(view).map((row) => row.kind === 'tool' ? row.entry.tool : row.message.role === 'tool' ? '' : row.message.text),
+    ['go', 'Reading.', 'read_file', 'Done']);
+});
+
 test('offers a paired device only the modes it may use', () => {
   const sandboxOf = (sandboxed_execution: boolean) => ({ backend: 'b', isolated: sandboxed_execution, sandboxed_execution, detail: '' });
   const all = ['ask', 'approve-for-me', 'sandbox-only', 'skip-permissions'] as const;

@@ -35,6 +35,30 @@ export function llamaRuntime(modelPath: (model: InstalledModel) => string): Runt
         signal.removeEventListener('abort', stop);
       }
     },
+    async generateWithTools(messages, tools, signal, onToken) {
+      const current = context;
+      if (!current) throw new Error('The model is not loaded.');
+      const stop = () => { void current.stopCompletion().catch(() => undefined); };
+      signal.addEventListener('abort', stop, { once: true });
+      let shown = '';
+      try {
+        const result = await current.completion({
+          messages, jinja: true, reasoning_format: 'auto',
+          ...(tools.length ? { tools, tool_choice: 'auto' } : {}),
+        }, (data) => {
+          const added = answerDelta(shown, data);
+          if (!added || signal.aborted) return;
+          shown += added;
+          onToken(added);
+        });
+        const calls = (result.tool_calls ?? []).flatMap((call) => call?.function?.name
+          ? [{ id: call.id, name: call.function.name, arguments: call.function.arguments ?? '' }] : []);
+        // With calls in the reply, `text` is the raw call markup rather than an answer.
+        return { content: result.content || (calls.length ? '' : shown || result.text), calls };
+      } finally {
+        signal.removeEventListener('abort', stop);
+      }
+    },
     async unload() {
       const current = context;
       context = null;

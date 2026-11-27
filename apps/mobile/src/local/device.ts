@@ -9,6 +9,7 @@ import { imageEngine } from './images.ts';
 import { fileUrl, isImageRepo, listRepoFiles, modelChoices, parseSlug, type ModelChoice, type RuntimeId } from './huggingface.ts';
 import { IMAGE_WORKING, memoryWarning, type DeviceMemory } from './memory.ts';
 import { addInstalled, installedFrom, modelId, parseInstalled, removeInstalled, type InstalledModel } from './models.ts';
+import { LOCAL_TOOLS, runLocalTool, toolDefinitions, type ToolFetch } from './tools.ts';
 import { appMemoryLimit, appleRuntime, llamaContextBytes, llamaRuntime, mlxRuntime, sdcppRuntime } from './runtimes.ts';
 
 // Everything "This device" keeps lives under one directory in the app's documents.
@@ -65,7 +66,10 @@ export const runtimes: readonly Runtime[] = [
   mlxRuntime((model) => filePath(modelDirectory(model.id))),
 ];
 
-const chatEngine = localEngine(runtimes, installedModels);
+const chatEngine = localEngine(runtimes, installedModels, {
+  definitions: toolDefinitions,
+  run: (name, args, signal) => runLocalTool(name, args, { fetch: fetch as unknown as ToolFetch }, signal),
+});
 const imageRuntime = sdcppRuntime((model) => filePath(new File(modelDirectory(model.id), model.entry)));
 
 // Generated images are kept under their hash, like a host's blobs, so history entries have the same shape.
@@ -149,7 +153,7 @@ export const deviceGenerator: Generator = {
   },
 };
 
-/** Chat on this device: local runtimes, conversations kept on the phone, and no tools. */
+/** Chat on this device: local runtimes, conversations kept on the phone, and tools that run on it. */
 /** What this device has for a model: the app's limit where iOS reports it, and physical memory. */
 export const deviceMemory = async (): Promise<DeviceMemory> => ({ limit: await appMemoryLimit(), total: Device.totalMemory });
 
@@ -168,7 +172,8 @@ export function contextMemory(model: Pick<InstalledModel, 'id' | 'runtime' | 'en
 }
 
 export const deviceBackend: ChatBackend = {
-  ...deviceEngine, ...conversationStore(textFiles, newId), tools: async () => [],
+  ...deviceEngine, ...conversationStore(textFiles, newId), tools: async () => [...LOCAL_TOOLS],
+  supportsTools: chatEngine.supportsTools,
   async loadWarning(modelId) {
     const model = (await installedModels()).find(({ id }) => id === modelId);
     return model ? memoryWarning(model.size, await deviceMemory(), await contextMemory(model)) : null;
