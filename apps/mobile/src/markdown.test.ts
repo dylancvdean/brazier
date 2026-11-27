@@ -45,3 +45,10 @@ test('links keep balanced parentheses, fences ignore inner openers, and headings
     { type: 'heading', level: 2, children: [{ type: 'text', text: 'Closed' }] },
   ]);
 });
+
+test('a line of inline code in triple backticks is not a fence opener', () => {
+  assert.deepEqual(parseMarkdown('```npm test``` runs them\n\nafter'), [
+    { type: 'paragraph', children: [{ type: 'code', text: 'npm test' }, { type: 'text', text: ' runs them' }] },
+    { type: 'paragraph', children: [{ type: 'text', text: 'after' }] },
+  ]);
+});
