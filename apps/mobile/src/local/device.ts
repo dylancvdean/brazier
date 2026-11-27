@@ -229,7 +229,15 @@ export async function downloadModel(slug: string, choice: ModelChoice): Promise<
   };
   notify();
   try {
-    if (partial.exists) partial.delete();
+    // Only one download runs at a time, so every `.part` directory here was left by an earlier one: this
+    // model's, or another's that ended with the app (closed or killed mid-download) and was never retried.
+    if (modelsRoot().exists) {
+      // A repository's own name may end in `.part`.
+      const kept = new Set((await installedModels()).map((model) => model.id));
+      for (const entry of modelsRoot().list()) {
+        if (entry instanceof Directory && entry.name.endsWith('.part') && !kept.has(entry.name)) entry.delete();
+      }
+    }
     partial.create({ intermediates: true, idempotent: true });
     let finished = 0;
     for (const file of choice.files) {
