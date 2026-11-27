@@ -2457,27 +2457,46 @@ async fn shell_run(
         .context("cannot capture command stderr")?;
     let stdout_task = tokio::spawn(read_shell_pipe(stdout, output.cloned(), None));
     let stderr_task = tokio::spawn(read_shell_pipe(stderr, output.cloned(), Some("[stderr]\n")));
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
+    let timed_out = || ToolOutcome {
+        output: format!(
+            "`{command_line}` was still running after {} ms and was terminated.",
+            timeout.as_millis()
+        ),
+        is_error: true,
+        exit_code: None,
+        changed_paths: Vec::new(),
+        images: Vec::new(),
+    };
+    #[cfg(unix)]
+    let process_group = child.id();
+    let deadline = tokio::time::Instant::now() + timeout;
+    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
         Ok(result) => result?,
         Err(_) => {
             kill_process_tree(&mut child);
             let _ = child.wait().await;
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            return Ok(ToolOutcome {
-                output: format!(
-                    "`{command_line}` was still running after {} ms and was terminated.",
-                    timeout.as_millis()
-                ),
-                is_error: true,
-                exit_code: None,
-                changed_paths: Vec::new(),
-                images: Vec::new(),
-            });
+            return Ok(timed_out());
         }
     };
-    let stdout = String::from_utf8_lossy(&stdout_task.await??).to_string();
-    let stderr = String::from_utf8_lossy(&stderr_task.await??).to_string();
+    // The shell can exit while something it left behind still holds the
+    // output pipes, so reading them falls under the same deadline.
+    let stdout_abort = stdout_task.abort_handle();
+    let stderr_abort = stderr_task.abort_handle();
+    let Ok((stdout, stderr)) =
+        tokio::time::timeout_at(deadline, async { tokio::join!(stdout_task, stderr_task) }).await
+    else {
+        #[cfg(unix)]
+        if let Some(group) = process_group {
+            unsafe { libc::killpg(group as libc::pid_t, libc::SIGKILL) };
+        }
+        stdout_abort.abort();
+        stderr_abort.abort();
+        return Ok(timed_out());
+    };
+    let stdout = String::from_utf8_lossy(&stdout??).to_string();
+    let stderr = String::from_utf8_lossy(&stderr??).to_string();
     let code = status.code();
     let mut body = String::new();
     if !stdout.is_empty() {
@@ -4895,6 +4914,30 @@ startxref
         assert!(
             started.elapsed() < Duration::from_secs(4),
             "timed-out call still waited {:?} for a child process",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_run_timeout_covers_processes_the_shell_left_behind() {
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        let started = Instant::now();
+        // The shell exits at once; `sleep` keeps the output pipes open.
+        let response = host_call(
+            &harness,
+            "shell_run",
+            json!({ "command": "sleep 6 &", "timeout_ms": 300 }),
+        )
+        .await;
+        assert!(
+            response.output.contains("terminated"),
+            "{}",
+            response.output
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "call waited {:?} for a leftover process",
             started.elapsed()
         );
     }
