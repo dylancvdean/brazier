@@ -157,29 +157,63 @@ fn read_string(file: &mut File) -> anyhow::Result<String> {
     String::from_utf8(buf).map_err(|error| anyhow::anyhow!("GGUF string is not UTF-8: {error}"))
 }
 
+/// Byte width of a fixed-size scalar value type.
+fn scalar_size(value_type: u32) -> Option<u64> {
+    match value_type {
+        GGUF_TYPE_UINT8 | GGUF_TYPE_INT8 | GGUF_TYPE_BOOL => Some(1),
+        GGUF_TYPE_UINT16 | GGUF_TYPE_INT16 => Some(2),
+        GGUF_TYPE_UINT32 | GGUF_TYPE_INT32 | GGUF_TYPE_FLOAT32 => Some(4),
+        GGUF_TYPE_UINT64 | GGUF_TYPE_INT64 | GGUF_TYPE_FLOAT64 => Some(8),
+        _ => None,
+    }
+}
+
+fn skip_string(file: &mut File) -> anyhow::Result<()> {
+    let length = read_u64(file)?;
+    skip_bytes(file, length, "string")
+}
+
 fn skip_value(file: &mut File, value_type: u32) -> anyhow::Result<()> {
-    let size = match value_type {
-        GGUF_TYPE_UINT8 | GGUF_TYPE_INT8 | GGUF_TYPE_BOOL => 1,
-        GGUF_TYPE_UINT16 | GGUF_TYPE_INT16 => 2,
-        GGUF_TYPE_UINT32 | GGUF_TYPE_INT32 | GGUF_TYPE_FLOAT32 => 4,
-        GGUF_TYPE_UINT64 | GGUF_TYPE_INT64 | GGUF_TYPE_FLOAT64 => 8,
-        GGUF_TYPE_STRING => {
-            let length = read_u64(file)?;
-            skip_bytes(file, length, "string")?;
-            return Ok(());
-        }
+    if let Some(size) = scalar_size(value_type) {
+        return skip_bytes(file, size, "value");
+    }
+    match value_type {
+        GGUF_TYPE_STRING => skip_string(file),
         GGUF_TYPE_ARRAY => {
             let element_type = read_u32(file)?;
             let count = read_u64(file)?;
-            for _ in 0..count {
-                skip_value(file, element_type)?;
+            // The element count comes from the file. Scalars are skipped with
+            // one seek so a corrupt count cannot spin for 2^64 iterations, and
+            // nested arrays (which llama.cpp does not read either) are refused
+            // rather than recursed into without bound.
+            if let Some(size) = scalar_size(element_type) {
+                let bytes = count
+                    .checked_mul(size)
+                    .ok_or_else(|| anyhow::anyhow!("GGUF array is too large to seek past"))?;
+                return skip_bytes(file, bytes, "array");
             }
-            return Ok(());
+            anyhow::ensure!(
+                element_type == GGUF_TYPE_STRING,
+                "unsupported GGUF array element type {element_type}"
+            );
+            let end = file
+                .metadata()
+                .map_err(|error| anyhow::anyhow!("stat GGUF: {error}"))?
+                .len();
+            for _ in 0..count {
+                skip_string(file)?;
+                let position = file
+                    .stream_position()
+                    .map_err(|error| anyhow::anyhow!("locate GGUF array: {error}"))?;
+                anyhow::ensure!(
+                    position <= end,
+                    "GGUF string array runs past the end of file"
+                );
+            }
+            Ok(())
         }
         other => anyhow::bail!("unsupported GGUF value type {other}"),
-    };
-    skip_bytes(file, size as u64, "value")?;
-    Ok(())
+    }
 }
 
 fn skip_bytes(file: &mut File, length: u64, kind: &str) -> anyhow::Result<()> {
@@ -260,6 +294,60 @@ mod tests {
         let bytes = write_gguf_with_context("qwen2", 98_304);
         File::create(&path).unwrap().write_all(&bytes).unwrap();
         assert_eq!(read_context_length(&path).unwrap(), Some(98_304));
+    }
+
+    fn array_header(key: &str, element_type: u32, count: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&2u64.to_le_bytes());
+        write_string(&mut bytes, key);
+        bytes.extend_from_slice(&GGUF_TYPE_ARRAY.to_le_bytes());
+        bytes.extend_from_slice(&element_type.to_le_bytes());
+        bytes.extend_from_slice(&count.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn skips_arrays_before_the_wanted_key() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        let mut bytes = array_header("tokenizer.ggml.token_type", GGUF_TYPE_INT32, 3);
+        bytes.extend_from_slice(&[0u8; 12]);
+        write_string(&mut bytes, "wanted");
+        bytes.extend_from_slice(&GGUF_TYPE_STRING.to_le_bytes());
+        write_string(&mut bytes, "value");
+        File::create(&path).unwrap().write_all(&bytes).unwrap();
+        assert_eq!(
+            read_string_kv(&path, "wanted").unwrap().as_deref(),
+            Some("value")
+        );
+    }
+
+    #[test]
+    fn a_corrupt_array_count_fails_instead_of_spinning() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        for element_type in [GGUF_TYPE_UINT8, GGUF_TYPE_STRING] {
+            let bytes = array_header("ignored", element_type, u64::MAX / 16);
+            File::create(&path).unwrap().write_all(&bytes).unwrap();
+            assert!(read_string_kv(&path, "wanted").is_err());
+        }
+    }
+
+    #[test]
+    fn deeply_nested_arrays_are_refused_without_recursing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("model.gguf");
+        let mut bytes = array_header("ignored", GGUF_TYPE_ARRAY, 1);
+        for _ in 0..200_000 {
+            bytes.extend_from_slice(&GGUF_TYPE_ARRAY.to_le_bytes());
+            bytes.extend_from_slice(&1u64.to_le_bytes());
+        }
+        File::create(&path).unwrap().write_all(&bytes).unwrap();
+        let error = read_string_kv(&path, "wanted").unwrap_err();
+        assert!(error.to_string().contains("array element type"));
     }
 
     #[test]
