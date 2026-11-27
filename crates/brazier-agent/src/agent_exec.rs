@@ -1064,9 +1064,16 @@ async fn fs_read(
         path.display(),
         size
     );
-    let mut file = tokio::fs::File::from_std(file);
+    // Devices and `/proc` files report a size that says nothing about how
+    // much they yield, so the limit is enforced on the read as well.
+    let mut file = tokio::fs::File::from_std(file).take(MAX_READ_BYTES as u64 + 1);
     let mut bytes = Vec::with_capacity(size as usize);
     file.read_to_end(&mut bytes).await?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_READ_BYTES,
+        "{} is larger than the {MAX_READ_BYTES}-byte read limit.",
+        path.display()
+    );
     let text = String::from_utf8_lossy(&bytes);
     let start_line = arguments
         .get("start_line")
@@ -1982,7 +1989,14 @@ async fn fs_read_many(
             continue;
         }
         let mut bytes = Vec::with_capacity(size as usize);
-        file.read_to_end(&mut bytes)?;
+        // The reported size does not bound what a device or `/proc` file yields.
+        std::io::Read::take(&mut file, max_bytes as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes {
+            output.push_str(&format!(
+                "[skipped: content exceeds max_bytes_each={max_bytes}]\n\n"
+            ));
+            continue;
+        }
         let text = String::from_utf8_lossy(&bytes);
         for (index, line) in text.lines().enumerate() {
             output.push_str(&format!("{:>6}\t{line}\n", index + 1));
@@ -4795,6 +4809,24 @@ startxref
             "{}",
             response.output
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn reading_an_endless_device_fails_instead_of_exhausting_memory() {
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        // A character device reports a zero size but never reaches end of file.
+        for (tool, arguments) in [
+            ("fs_read", json!({ "path": "/dev/zero" })),
+            ("fs_read_many", json!({ "paths": ["/dev/zero"] })),
+        ] {
+            let response = host_call(&harness, tool, arguments).await;
+            assert!(
+                response.output.contains("larger than") || response.output.contains("exceeds"),
+                "{tool}: {}",
+                &response.output[..response.output.len().min(200)]
+            );
+        }
     }
 
     #[cfg(unix)]
