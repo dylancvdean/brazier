@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Alert, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
-import type { HostIndex } from './hosts.ts';
+import { DEVICE_ID, type HostIndex } from './hosts.ts';
 import type { SavedHosts } from './storage.ts';
 import { useTheme, type ThemePreference } from './theme.ts';
 import { Action, IconButton, useStyles } from './ui.tsx';
@@ -13,11 +13,11 @@ export function hostLabel(index: HostIndex, id: string, origin: string): string 
   return index.hosts.find((host) => host.id === id)?.name || new URL(origin).host;
 }
 
-export function Settings({ saved, theme, error, onTheme, onSelect, onRename, onRemove, onAdd, onClose }: {
+export function Settings({ saved, theme, error, onTheme, onSelect, onRename, onRemove, onAdd, onModels, onClose }: {
   saved: SavedHosts; theme: ThemePreference; error: string;
   onTheme: (theme: ThemePreference) => void; onSelect: (id: string) => void;
   onRename: (id: string, name: string) => void; onRemove: (id: string) => void;
-  onAdd: () => void; onClose?: () => void;
+  onAdd: () => void; onModels: () => void; onClose?: () => void;
 }) {
   const styles = useStyles();
   const palette = useTheme();
@@ -40,6 +40,14 @@ export function Settings({ saved, theme, error, onTheme, onSelect, onRename, onR
       </View>
 
       <Text style={styles.section}>Hosts</Text>
+      <View style={[styles.card, saved.index.active === DEVICE_ID && { borderColor: palette.accent }]}>
+        <Text style={styles.body}>This device{saved.index.active === DEVICE_ID ? '  ·  In use' : ''}</Text>
+        <Text style={styles.listMeta}>Models run on this device. Text chat only; no host needed.</Text>
+        <View style={styles.row}>
+          {saved.index.active !== DEVICE_ID ? <Action label="Use this device" onPress={() => onSelect(DEVICE_ID)} /> : null}
+          <Action label="Models" quiet onPress={onModels} />
+        </View>
+      </View>
       {saved.index.hosts.map(({ id }) => {
         const credential = saved.credentials[id];
         if (!credential) return null;
@@ -69,7 +77,7 @@ export function Settings({ saved, theme, error, onTheme, onSelect, onRename, onR
           </>}
         </View>;
       })}
-      <Action label="Pair another host" quiet onPress={onAdd} />
+      <Action label={saved.index.hosts.length ? 'Pair another host' : 'Pair a host'} quiet onPress={onAdd} />
     </ScrollView>
   </View>;
 }

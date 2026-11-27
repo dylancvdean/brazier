@@ -7,7 +7,7 @@ export type Preview = {
   pairing: { id: string; client_name: string; scopes: PairingScope[]; expires_at: number };
 };
 export type Host = { displayName: string; scopes: PairingScope[] };
-export type Model = { id: string; engine?: string; owned_by?: string; capabilities?: { output_modalities: string[] } };
+export type Model = { id: string; name?: string; engine?: string; owned_by?: string; capabilities?: { output_modalities: string[] } };
 export type Conversation = { id: string; title: string };
 export type Message = {
   id: string; parent_id: string | null; role: string; content: unknown; status?: string;

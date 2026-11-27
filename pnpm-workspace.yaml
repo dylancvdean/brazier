@@ -18,5 +18,7 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+  # Installs skip scripts; `pnpm --filter @brazier/mobile llama:artifacts` fetches its native libraries.
+  llama.rn: false
   # Only emits version-scheme advice; no build artifacts are required.
   protobufjs: false

@@ -6,6 +6,9 @@ export type HostIndex = { active: string | null; hosts: HostEntry[] };
 /** Tools are on unless listed in `disabledTools`, so tools a host adds later start enabled. */
 export type Preferences = { theme: ThemePreference; disabledTools: string[] };
 
+/** The built-in "This device" entry. Host ids never contain "@", so it cannot collide with one. */
+export const DEVICE_ID = '@device';
+
 export const emptyIndex: HostIndex = { active: null, hosts: [] };
 export const defaultPreferences: Preferences = { theme: 'system', disabledTools: [] };
 
@@ -24,7 +27,8 @@ export function parseIndex(raw: string | null): HostIndex {
     seen.add(host.id);
     return true;
   }).map(({ id, name }) => ({ id, name }));
-  const active = hosts.some(({ id }) => id === value.active) ? value.active : hosts[0]?.id ?? null;
+  const active = value.active === DEVICE_ID || hosts.some(({ id }) => id === value.active)
+    ? value.active : hosts[0]?.id ?? null;
   return { active, hosts };
 }
 
@@ -49,7 +53,7 @@ export function renameHost(index: HostIndex, id: string, name: string): HostInde
 }
 
 export function selectHost(index: HostIndex, id: string): HostIndex {
-  return index.hosts.some((host) => host.id === id) ? { ...index, active: id } : index;
+  return id === DEVICE_ID || index.hosts.some((host) => host.id === id) ? { ...index, active: id } : index;
 }
 
 export function parsePreferences(raw: string | null): Preferences {
