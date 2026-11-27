@@ -2467,8 +2467,6 @@ async fn shell_run(
         changed_paths: Vec::new(),
         images: Vec::new(),
     };
-    #[cfg(unix)]
-    let process_group = child.id();
     let deadline = tokio::time::Instant::now() + timeout;
     let status = match tokio::time::timeout_at(deadline, child.wait()).await {
         Ok(result) => result?,
@@ -2487,13 +2485,21 @@ async fn shell_run(
     let Ok((stdout, stderr)) =
         tokio::time::timeout_at(deadline, async { tokio::join!(stdout_task, stderr_task) }).await
     else {
-        #[cfg(unix)]
-        if let Some(group) = process_group {
-            unsafe { libc::killpg(group as libc::pid_t, libc::SIGKILL) };
-        }
+        // The shell is already reaped, so its process group id may belong to
+        // something else by now: the leftover process is not signalled.
         stdout_abort.abort();
         stderr_abort.abort();
-        return Ok(timed_out());
+        return Ok(ToolOutcome {
+            output: format!(
+                "`{command_line}` exited, but a process it left running still held its output \
+                 open after {} ms. Its output was not collected.",
+                timeout.as_millis()
+            ),
+            is_error: true,
+            exit_code: status.code(),
+            changed_paths: Vec::new(),
+            images: Vec::new(),
+        });
     };
     let stdout = String::from_utf8_lossy(&stdout??).to_string();
     let stderr = String::from_utf8_lossy(&stderr??).to_string();
@@ -4931,7 +4937,7 @@ startxref
         )
         .await;
         assert!(
-            response.output.contains("terminated"),
+            response.is_error && response.output.contains("left running"),
             "{}",
             response.output
         );
