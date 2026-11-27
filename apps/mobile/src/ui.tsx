@@ -1,8 +1,11 @@
-import { useMemo, type ReactNode } from 'react';
-import { Modal, Platform, Pressable, SafeAreaView, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, type ReactNode } from 'react';
+import { Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { useTheme, type Palette } from './theme.ts';
 
 export const errorText = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong.';
+
+/** Dragging a list puts the keyboard away; on iOS it follows the finger. */
+export const dragDismiss = Platform.OS === 'ios' ? 'interactive' : 'on-drag';
 
 const androidTop = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 0;
 
@@ -114,7 +117,9 @@ export function Sheet({ title, visible, onClose, onDismiss, children }: {
   title: string; visible: boolean; onClose: () => void; onDismiss?: () => void; children: ReactNode;
 }) {
   const styles = useStyles();
+  useEffect(() => { if (visible) Keyboard.dismiss(); }, [visible]);
   return <Modal transparent visible={visible} animationType="slide" onRequestClose={onClose} onDismiss={onDismiss}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flex}>
     <Pressable style={styles.sheetBackdrop} onPress={onClose} accessibilityLabel={`Close ${title}`}>
       <Pressable style={styles.sheet} onPress={() => undefined}>
         <View style={styles.sheetHead}>
@@ -124,6 +129,7 @@ export function Sheet({ title, visible, onClose, onDismiss, children }: {
         {children}
       </Pressable>
     </Pressable>
+    </KeyboardAvoidingView>
   </Modal>;
 }
 

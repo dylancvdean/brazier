@@ -10,7 +10,7 @@ import {
 import { checkLocalNetwork } from './localNetwork';
 import { pinCertificate } from './tlsPinning';
 import { useTheme } from './theme.ts';
-import { Action, errorText, useStyles } from './ui.tsx';
+import { Action, dragDismiss, errorText, useStyles } from './ui.tsx';
 
 const androidEmulator = __DEV__ && Platform.OS === 'android';
 const emptyInvite = { origin: '', pairingId: '', code: '' };
@@ -97,7 +97,7 @@ export function Pairing({ onPaired, onCancel }: {
     }
   }
 
-  return <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled">
+  return <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
     <Text style={styles.heading}>{review ? 'Review pairing' : 'Pair with your host'}</Text>
     {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
     {review ? <>

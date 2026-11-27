@@ -9,7 +9,7 @@ import { formatBytes, type ModelChoice, type RuntimeId } from './local/huggingfa
 import { IMAGE_WORKING, memoryWarning, type DeviceMemory } from './local/memory.ts';
 import { modelId, type InstalledModel } from './local/models.ts';
 import { useTheme } from './theme.ts';
-import { Action, errorText, IconButton, useStyles } from './ui.tsx';
+import { Action, dragDismiss, errorText, IconButton, useStyles } from './ui.tsx';
 
 const runtimeNames: Record<RuntimeId, string> = { 'llama.cpp': 'llama.cpp', mlx: 'MLX', apple: 'Apple Intelligence', 'sd.cpp': 'stable-diffusion.cpp · images',
 };
@@ -100,7 +100,7 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
       <IconButton glyph="‹" label="Back" onPress={onClose} />
       <Text style={styles.topTitle}>Models on this device</Text>
     </View>
-    <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled">
+    <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       <Text style={styles.listMeta}>{formatBytes(free)} free on this device</Text>
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { DaemonError, type Model } from './api.ts';
 import { imageSizes } from './local/images.ts';
 import {
@@ -8,7 +8,7 @@ import {
 } from './media.ts';
 import { MediaThumb, MediaView } from './Media.tsx';
 import { useTheme } from './theme.ts';
-import { Action, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
+import { Action, dragDismiss, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
 
 const blank = (modality: Modality): GenerateForm => ({
   modality, modelId: '', prompt: '', negative: '', steps: '', seed: '', frames: '',
@@ -110,6 +110,7 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
     const body = generateBody(form);
     if (typeof body === 'string') { setError(body); return; }
     setError('');
+    Keyboard.dismiss();
     setRunning(true);
     try {
       const result = await api.generate(form.modality, body);
@@ -173,7 +174,7 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
         <Text numberOfLines={1} style={styles.chipText}>{form.modelId ? label(form.modelId) : 'Choose model'} ▾</Text>
       </Pressable>
     </View>
-    <ScrollView style={styles.flex} contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled">
+    <ScrollView style={styles.flex} contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
       {api.local ? null : <View style={styles.segment}>
         {(['image', 'video'] as const).map((modality) => <Pressable key={modality} accessibilityRole="button"
           accessibilityState={{ selected: form.modality === modality }} disabled={running}

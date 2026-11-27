@@ -1,7 +1,7 @@
 import { fetch } from 'expo/fetch';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, View,
+  ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, View,
 } from 'react-native';
 import { AgentController } from './agent/controller.ts';
 import { agentApi } from './agent/rest.ts';
@@ -14,7 +14,7 @@ import {
 import { daemonClient, DaemonError, type Credential, type Model } from './api.ts';
 import { Markdown } from './Markdown.tsx';
 import { useTheme } from './theme.ts';
-import { Action, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
+import { Action, dragDismiss, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
 
 type Draft = { model: string; workspace: string; mode: AgentPermissionMode; tools: string[] | null };
 
@@ -266,6 +266,7 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
     if (!prompt || locked) return;
     if (!model) return setError('Choose a model before starting a task.');
     if (!workspace) return setError('Choose a folder on the host first. The agent works inside it.');
+    Keyboard.dismiss();
     let session = active;
     if (!session) {
       const created = await attempt('Starting task…', async () => {
@@ -336,6 +337,7 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
   return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
     <View style={styles.topBar}>
       <IconButton glyph="☰" label="Tasks" onPress={() => {
+        Keyboard.dismiss();
         setShowDrawer(true);
         void api.sessions().then(setSessions).catch(() => undefined);
       }} />
@@ -350,15 +352,15 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
     </View>
     {error || view.error ? <Text accessibilityRole="alert" style={[styles.error, { marginHorizontal: 10 }]}>
       {error || view.error}</Text> : null}
-    {blank ? <View style={styles.empty}>
+    {blank ? <Pressable accessible={false} style={styles.empty} onPress={Keyboard.dismiss}>
       <Text style={styles.brand}>Agent</Text>
       <Text style={styles.emptyText}>{!model ? 'Choose a model to start.' : !workspace
         ? `Choose a folder on ${hostName} for the agent to work in.`
         : `Describe a task. It runs on ${hostName}, in ${folderName(workspace)}.`}</Text>
       {!model && !busy ? <Action label="Choose model" onPress={() => setSheet('models')} /> : null}
       {model && !workspace && !busy ? <Action label="Choose folder" onPress={() => { setFolder(''); setSheet('workspace'); }} /> : null}
-    </View> : <ScrollView style={styles.flex} contentContainerStyle={styles.messages} ref={scroll}
-      onContentSizeChange={() => scroll.current?.scrollToEnd({ animated: false })} keyboardShouldPersistTaps="handled">
+    </Pressable> : <ScrollView style={styles.flex} contentContainerStyle={styles.messages} ref={scroll}
+      onContentSizeChange={() => scroll.current?.scrollToEnd({ animated: false })} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
       {rows.map((row) => {
         if (row.kind === 'tool') return <ToolRow key={row.key} entry={row.entry} />;
         const message = row.message;
