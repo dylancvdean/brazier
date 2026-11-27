@@ -8,11 +8,10 @@ namespace {
 
 brazier::ImageEngine engine;
 
-std::string text(JNIEnv* env, jstring value) {
+std::string text(JNIEnv* env, jbyteArray value) {
     if (!value) return "";
-    const char* chars = env->GetStringUTFChars(value, nullptr);
-    std::string result(chars ? chars : "");
-    if (chars) env->ReleaseStringUTFChars(value, chars);
+    std::string result(static_cast<size_t>(env->GetArrayLength(value)), '\0');
+    env->GetByteArrayRegion(value, 0, static_cast<jsize>(result.size()), reinterpret_cast<jbyte*>(&result[0]));
     return result;
 }
 
@@ -25,7 +24,7 @@ void fail(JNIEnv* env, const char* type, const std::string& message) {
 extern "C" {
 
 JNIEXPORT void JNICALL
-Java_ai_brazier_sdcpp_BrazierSdcppModule_nativeLoad(JNIEnv* env, jobject, jstring path, jint threads) {
+Java_ai_brazier_sdcpp_BrazierSdcppModule_nativeLoad(JNIEnv* env, jobject, jbyteArray path, jint threads) {
     std::string error;
     // CPU only: stable-diffusion.cpp's GPU backends are not built for Android here.
     if (!engine.load(text(env, path), false, threads, error)) {
@@ -36,7 +35,7 @@ Java_ai_brazier_sdcpp_BrazierSdcppModule_nativeLoad(JNIEnv* env, jobject, jstrin
 // Returns ARGB pixels for android.graphics.Bitmap, or null when cancelled.
 JNIEXPORT jintArray JNICALL
 Java_ai_brazier_sdcpp_BrazierSdcppModule_nativeGenerate(
-    JNIEnv* env, jobject self, jstring prompt, jstring negative, jint width, jint height, jint steps, jdouble cfg,
+    JNIEnv* env, jobject self, jbyteArray prompt, jbyteArray negative, jint width, jint height, jint steps, jdouble cfg,
     jlong seed, jintArray size) {
     brazier::ImageRequest request;
     request.prompt = text(env, prompt);

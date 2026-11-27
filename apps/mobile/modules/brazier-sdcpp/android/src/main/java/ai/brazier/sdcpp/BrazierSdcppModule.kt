@@ -23,7 +23,7 @@ class BrazierSdcppModule(private val context: ReactApplicationContext) : ReactCo
     worker.execute {
       try {
         // Leave two cores to the rest of the app.
-        nativeLoad(path.removePrefix("file://"), maxOf(1, Runtime.getRuntime().availableProcessors() - 2))
+        nativeLoad(path.removePrefix("file://").toByteArray(), maxOf(1, Runtime.getRuntime().availableProcessors() - 2))
         promise.resolve(null)
       } catch (error: Throwable) {
         promise.reject("load", error.message ?: "Could not open the model.", error)
@@ -37,8 +37,8 @@ class BrazierSdcppModule(private val context: ReactApplicationContext) : ReactCo
       try {
         val size = IntArray(2)
         val pixels = nativeGenerate(
-          options.getString("prompt") ?: "",
-          options.getString("negative") ?: "",
+          (options.getString("prompt") ?: "").toByteArray(),
+          (options.getString("negative") ?: "").toByteArray(),
           options.getInt("width"),
           options.getInt("height"),
           if (options.hasKey("steps")) options.getInt("steps") else 0,
@@ -104,16 +104,11 @@ class BrazierSdcppModule(private val context: ReactApplicationContext) : ReactCo
     )
   }
 
-  private external fun nativeLoad(path: String, threads: Int)
+  // Text crosses as UTF-8 bytes: JNI strings are modified UTF-8, which mangles emoji.
+  private external fun nativeLoad(path: ByteArray, threads: Int)
   private external fun nativeGenerate(
-    prompt: String, negative: String, width: Int, height: Int, steps: Int, cfg: Double, seed: Long, size: IntArray,
+    prompt: ByteArray, negative: ByteArray, width: Int, height: Int, steps: Int, cfg: Double, seed: Long, size: IntArray,
   ): IntArray?
   private external fun nativeCancel()
   private external fun nativeUnload()
-
-  companion object {
-    init {
-      System.loadLibrary("brazier_sdcpp")
-    }
-  }
 }
