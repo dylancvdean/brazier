@@ -1,6 +1,6 @@
 import { fetch } from 'expo/fetch';
 import { Agent, AgentUnavailable } from './Agent.tsx';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Text, useColorScheme, View } from 'react-native';
 import { daemonClient, DaemonError, UnreachableError, type Credential, type Host } from './api.ts';
 import { Chat } from './Chat.tsx';
@@ -79,7 +79,11 @@ function Shell({ preferences, onPreferences }: {
     return () => { active = false; };
   }, []);
 
+  // A request to a host that was switched away from can still fail; that says nothing about this one.
+  const latestCredential = useRef(credential);
+  latestCredential.current = credential;
   function reportAccess(error: unknown) {
+    if (credential !== latestCredential.current) return;
     setAccess({
       message: errorText(error),
       pairAgain: error instanceof DaemonError && [401, 409].includes(error.status ?? 0),
