@@ -173,7 +173,10 @@ export async function loadRelevantMemories(
 ): Promise<Memory[]> {
   if (count <= 0) return []
   try {
-    return await listMemories(query || undefined)
+    const matches = query.trim() ? await listMemories(query) : []
+    // The daemon matches the query as one substring, which a whole sentence
+    // rarely is; without the fallback an ordinary turn would recall nothing.
+    return (matches.length > 0 ? matches : await listMemories()).slice(0, count)
   } catch {
     return []
   }
