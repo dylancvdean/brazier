@@ -17,7 +17,10 @@ export type ChatEngine = {
 
 /** The engine plus where its conversations are kept: the host, or this device. */
 export type ChatBackend = ChatEngine & {
-  conversations(): Promise<Conversation[]>;
+  /** Newest first. With a query: those whose title or messages contain it. */
+  conversations(query?: string): Promise<Conversation[]>;
+  renameConversation(id: string, title: string): Promise<Conversation>;
+  deleteConversation(id: string): Promise<void>;
   createConversation(title: string): Promise<Conversation>;
   messages(id: string): Promise<Message[]>;
   createMessage(id: string, message: NewMessage): Promise<Message>;

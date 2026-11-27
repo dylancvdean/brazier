@@ -193,6 +193,27 @@ loads one model and runs one job at a time; `Generator` in `src/media.ts` is
 what the Generate screen talks to, implemented by a paired host and by this
 device.
 
+## History
+
+**Generate** lists past generations under the form as a gallery by day, searchable by prompt and model. An entry
+opens with its media (**Save to Photos**, **Share**), prompt, negative prompt, model, settings and date; **Reuse
+settings** puts them back in the form and **Delete** removes the entry.
+
+- Paired host: the host records what its Generate endpoints produce (`GET /api/v1/generate/history`,
+  `DELETE /api/v1/generate/history/{id}`), so the phone lists what the desktop app and other phones generated as
+  well, and deleting an entry deletes it for all of them. The phone keeps a copy of the list
+  (`generate-history-<host>.json` in the app's documents) to show when the host cannot be reached. A host too old
+  to keep a history lists only what this phone generated on it. Media a chat model made with a tool is in its
+  conversation, not here.
+- This device: entries and their images are kept in the app's documents (`local/generate-history.json`,
+  `local/images/`); deleting an entry deletes its image.
+
+Both hold the newest 500. `src/history.ts` has the store and the host client, `src/Gallery.tsx` the gallery.
+
+The chat drawer (`src/Conversations.tsx`) lists conversations with the one written to last first, searches them
+by title and message text, and renames and deletes them (**⋯**), on a host through its conversation endpoints and
+on this device in `src/local/conversations.ts`.
+
 `src/local/engine.ts` is the interface Chat talks to; a paired host and this
 device both implement it, and each on-device runtime is a `Runtime` behind it.
 

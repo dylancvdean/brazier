@@ -267,3 +267,33 @@ test('saved tool steps are sent back to the model and shown with their results',
     { call_id: 'c1', name: 'web_search', arguments: '{}', output: 'hits', is_error: false },
   ]);
 });
+
+test('conversations are searched, renamed and deleted on the host', async () => {
+  const calls: string[] = [];
+  let missing = false;
+  const client = daemonClient(async (url, init) => {
+    calls.push(`${init?.method ?? 'GET'} ${url} ${init?.body ?? ''}`.trim());
+    if (init?.method === 'DELETE') {
+      return missing ? Response.json({ error: { message: 'conversation not found' } }, { status: 404 })
+        : Response.json({ deleted: true });
+    }
+    if (init?.method === 'PATCH') return Response.json({ id: 'c 1', title: 'Trip plans', updated_at: '2026-03-10 09:00:00' });
+    return Response.json({ data: [{ id: 'c 1', title: 'Old', updated_at: '2026-03-10 09:00:00' }] });
+  }, { origin: 'http://host:1', instanceId: 'i', apiKey: 'key' });
+
+  assert.equal((await client.conversations()).length, 1);
+  await client.conversations('  lisbon & more ');
+  assert.equal((await client.renameConversation('c 1', '  Trip\n plans ')).title, 'Trip plans');
+  await assert.rejects(client.renameConversation('c 1', '  '), /Enter a title/);
+  await client.deleteConversation('c 1');
+  // Deleted elsewhere in the meantime: still done.
+  missing = true;
+  await client.deleteConversation('c 1');
+  assert.deepEqual(calls, [
+    'GET http://host:1/api/v1/conversations',
+    'GET http://host:1/api/v1/conversations?q=lisbon%20%26%20more',
+    'PATCH http://host:1/api/v1/conversations/c%201 {"title":"Trip plans"}',
+    'DELETE http://host:1/api/v1/conversations/c%201',
+    'DELETE http://host:1/api/v1/conversations/c%201',
+  ]);
+});

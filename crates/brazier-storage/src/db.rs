@@ -1101,16 +1101,21 @@ impl Database {
             .await?);
         };
         let pattern = format!("%{}%", Self::escape_like(raw));
+        // Message text is stored as JSON, where quotes, backslashes and line
+        // breaks are escaped: match the query as it is written there.
+        let quoted = serde_json::to_string(raw)?;
+        let in_json = format!("%{}%", Self::escape_like(&quoted[1..quoted.len() - 1]));
         Ok(sqlx::query_as::<_, Conversation>(&format!(
             r#"SELECT DISTINCT {CONVERSATION_COLUMNS_QUALIFIED}
                FROM conversations c
                LEFT JOIN messages m ON m.conversation_id = c.id
                WHERE c.title LIKE ?1 ESCAPE '\'
-                  OR m.content_json LIKE ?1 ESCAPE '\'
+                  OR m.content_json LIKE ?2 ESCAPE '\'
                ORDER BY c.updated_at DESC
                LIMIT 80"#
         ))
         .bind(&pattern)
+        .bind(&in_json)
         .fetch_all(&self.pool)
         .await?)
     }
@@ -2028,6 +2033,32 @@ mod tests {
 
         assert_eq!(journal_mode, "wal");
         assert_eq!(busy_timeout, 5_000);
+    }
+
+    #[tokio::test]
+    async fn conversation_search_matches_quotes_and_line_breaks_in_messages() {
+        let (_dir, db) = open().await;
+        let chat = db.create_conversation("Chat").await.unwrap();
+        db.create_message(
+            &chat.id,
+            message(
+                None,
+                Role::User,
+                json!("she said \"hello\" there\nand left"),
+            ),
+        )
+        .await
+        .unwrap();
+        for query in ["said \"hello\"", "there\nand", "hello"] {
+            let found = db.list_conversations(Some(query)).await.unwrap();
+            assert_eq!(found.len(), 1, "{query}");
+        }
+        assert!(
+            db.list_conversations(Some("goodbye"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

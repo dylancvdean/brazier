@@ -5,6 +5,8 @@ export type MediaBlob = { sha256: string; mime_type: string; name?: string | nul
 export type GenerateResult = {
   blob: { sha256: string; mime_type: string; size_bytes: number; original_name?: string | null };
   metadata: unknown; engine: string;
+  /** The entry in the host's generation history, from hosts that keep one. */
+  history_id?: string | null;
 };
 /** A generation in flight on the host, including one a chat model started. */
 export type ActiveGeneration = {
@@ -23,6 +25,8 @@ export type HistoryEntry = {
   id: string; prompt: string; negativePrompt: string; modality: Modality; modelId: string;
   width: number; height: number; steps?: number; seed?: number; frames?: number; createdAt: string;
   blob: { sha256: string; mime_type: string; size_bytes: number };
+  /** Set when the paired host lists this entry in its own history; deleting it here deletes it there. */
+  hostId?: string;
 };
 
 /**
@@ -38,8 +42,11 @@ export type Generator = {
   cancel(): Promise<boolean>;
   /** URI of a local file holding the blob. */
   file(blob: MediaBlob): Promise<string>;
+  /** Past generations, newest first: this device's, or the host's whichever client started them. */
   history(): Promise<HistoryEntry[]>;
-  saveHistory(history: readonly HistoryEntry[]): void;
+  /** Both resolve to the history after the change. */
+  addHistory(entry: HistoryEntry): Promise<HistoryEntry[]>;
+  removeHistory(entry: HistoryEntry): Promise<HistoryEntry[]>;
 };
 
 // The desktop app's presets.
@@ -48,7 +55,8 @@ export const sizePresets: Record<Modality, readonly (readonly [number, number])[
   video: [[512, 512], [640, 360], [832, 480], [480, 832], [1280, 720]],
 };
 
-export const maxHistory = 100;
+// As many as a host keeps.
+export const maxHistory = 500;
 
 export function generationModels(models: readonly Model[], modality: Modality): Model[] {
   return models.filter(({ id }) => id.startsWith(`sdcpp-${modality}:`));
@@ -86,8 +94,10 @@ export function generateBody(form: GenerateForm): GenerateBody | string {
 }
 
 export function historyEntry(
-  id: string, modality: Modality, body: GenerateBody, result: GenerateResult, createdAt: string,
+  fallbackId: string, modality: Modality, body: GenerateBody, result: GenerateResult, createdAt: string,
 ): HistoryEntry {
+  const hostId = typeof result.history_id === 'string' && result.history_id ? result.history_id : undefined;
+  const id = hostId ?? fallbackId;
   const reported = result.metadata && typeof result.metadata === 'object' ? result.metadata as Record<string, unknown> : {};
   const number = (key: string, fallback?: number) => {
     const value = reported[key];
@@ -99,6 +109,7 @@ export function historyEntry(
     steps: number('steps', body.steps), seed: number('seed', body.seed), createdAt,
     ...(body.video_frames !== undefined ? { frames: body.video_frames } : {}),
     blob: { sha256: result.blob.sha256, mime_type: result.blob.mime_type, size_bytes: result.blob.size_bytes },
+    ...(hostId ? { hostId } : {}),
   };
 }
 
@@ -122,9 +133,12 @@ export function parseHistory(raw: string | null): HistoryEntry[] {
 }
 
 export function entryDetails(entry: HistoryEntry): string {
+  const kb = entry.blob.size_bytes / 1024;
   return [
-    `${entry.width}×${entry.height}`, entry.steps != null ? `${entry.steps} steps` : '',
-    entry.seed != null ? `seed ${entry.seed}` : '', `${Math.max(1, Math.round(entry.blob.size_bytes / 1024))} KB`,
+    entry.width > 0 && entry.height > 0 ? `${entry.width}×${entry.height}` : '',
+    entry.steps != null ? `${entry.steps} steps` : '', entry.seed != null ? `seed ${entry.seed}` : '',
+    entry.frames != null ? `${entry.frames} frames` : '',
+    entry.blob.size_bytes > 0 ? kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(kb))} KB` : '',
   ].filter(Boolean).join(' · ');
 }
 

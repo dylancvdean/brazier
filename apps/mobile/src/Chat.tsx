@@ -6,6 +6,7 @@ import {
   chatBranch, chatContext, DaemonError, messageText, toolCallsOf,
   type Conversation, type Credential, type Message, type Model, type Tool, type ToolCall, type TranscriptMessage,
 } from './api.ts';
+import { Conversations } from './Conversations.tsx';
 import type { ChatBackend } from './local/engine.ts';
 import { Markdown } from './Markdown.tsx';
 import { generatedMediaMessage, mediaByMessage, toolCallMedia } from './media.ts';
@@ -104,6 +105,12 @@ export function Chat({
     void refresh();
     return () => currentTurn.current?.abort();
   }, []);
+
+  // The list is read again each time the drawer opens: the last conversation written to moves to the top, and a
+  // host's list also changes from its desktop app and other phones.
+  useEffect(() => {
+    if (showDrawer) void api.conversations().then(setConversations, () => undefined);
+  }, [showDrawer]);
 
   // Models added or deleted on the Models screen while this chat stays mounted behind it. Opening the
   // picker also rereads the list: a system model can become available while the app is running.
@@ -327,16 +334,21 @@ export function Chat({
           </View>
           <View style={{ paddingHorizontal: 18 }}><Action label="New chat" disabled={!!busy} onPress={newChat} /></View>
           <Text style={[styles.section, { paddingHorizontal: 18 }]}>Conversations</Text>
-          <ScrollView style={styles.flex}>
-            {busy === 'Refreshing…' ? <ActivityIndicator color={palette.accent} /> : null}
-            {conversations.length === 0 && !busy ? <Text style={[styles.listMeta, { padding: 18 }]}>
-              No saved conversations yet.</Text> : null}
-            {conversations.map((chat) => <Pressable key={chat.id} accessibilityRole="button" disabled={!!busy}
-              style={[styles.listItem, chat.id === selected?.id && styles.listItemOn]}
-              onPress={() => void openConversation(chat)}>
-              <Text numberOfLines={1} style={styles.listText}>{chat.title}</Text>
-            </Pressable>)}
-          </ScrollView>
+          <Conversations api={api} conversations={conversations} selectedId={selected?.id} disabled={!!busy}
+            loading={busy === 'Refreshing…'} onOpen={(chat) => void openConversation(chat)}
+            onRenamed={(chat) => {
+              setConversations((current) => current.map((entry) => entry.id === chat.id ? chat : entry));
+              setSelected((current) => current?.id === chat.id ? chat : current);
+            }}
+            onDeleted={(id) => {
+              setConversations((current) => current.filter((entry) => entry.id !== id));
+              if (selected?.id === id) { setSelected(null); setMessages([]); }
+            }}
+            onUnauthorized={(cause) => {
+              if (!(cause instanceof DaemonError && cause.status === 401)) return false;
+              onUnauthorized(cause);
+              return true;
+            }} />
           {local ? <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => leave(onOpenModels!)}>
             <Text style={styles.iconText}>▤</Text><Text style={styles.listText}>Models</Text>
           </Pressable> : null}

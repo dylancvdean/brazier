@@ -3,7 +3,8 @@ import { fetch } from 'expo/fetch';
 import { Directory, File, Paths } from 'expo-file-system';
 import { createDownloadResumable } from 'expo-file-system/legacy';
 import { conversationStore } from './conversations.ts';
-import { blobFileName, parseHistory, type Generator, type HistoryEntry } from '../media.ts';
+import { historyStore } from '../history.ts';
+import { blobFileName, parseHistory, type Generator } from '../media.ts';
 import { availableRuntimes, localEngine, type ChatBackend, type LocalEngine, type Runtime } from './engine.ts';
 import { imageEngine } from './images.ts';
 import { fileUrl, isImageRepo, listRepoFiles, modelChoices, parseSlug, type ModelChoice, type RuntimeId } from './huggingface.ts';
@@ -114,7 +115,26 @@ export const deviceEngine: LocalEngine = {
 
 const historyName = 'generate-history.json';
 const listed = new Set<string>();
-let saving: Promise<void> = Promise.resolve();
+const history = historyStore({
+  async read() {
+    const text = await textFiles.read(historyName);
+    for (const { blob } of parseHistory(text)) listed.add(blobFileName(blob));
+    return text;
+  },
+  async write(text) {
+    await textFiles.write(historyName, text);
+    const kept = new Set(parseHistory(text).map(({ blob }) => blobFileName(blob)));
+    // An image that left the saved history (removed, or pushed out by newer ones) is deleted with it. Only
+    // files the history has listed are candidates, so a new image whose entry is not saved yet survives.
+    for (const name of listed) {
+      if (kept.has(name)) continue;
+      listed.delete(name);
+      const file = new File(imagesRoot(), name);
+      if (file.exists) file.delete();
+    }
+    for (const name of kept) listed.add(name);
+  },
+});
 
 /** The Generate screen for this device: images only, made and kept on the phone. */
 export const deviceGenerator: Generator = {
@@ -128,25 +148,7 @@ export const deviceGenerator: Generator = {
     if (!file.exists) throw new Error('This image is no longer on this device.');
     return file.uri;
   },
-  async history(): Promise<HistoryEntry[]> {
-    const history = parseHistory(await textFiles.read(historyName));
-    for (const { blob } of history) listed.add(blobFileName(blob));
-    return history;
-  },
-  saveHistory(history) {
-    const kept = new Set(history.map(({ blob }) => blobFileName(blob)));
-    saving = saving.then(() => textFiles.write(historyName, JSON.stringify(history))).then(() => {
-      // An image that left the saved history (removed, or pushed out by newer ones) is deleted with it. Only
-      // files the history has listed are candidates, so a new image whose entry is not saved yet survives.
-      for (const name of listed) {
-        if (kept.has(name)) continue;
-        listed.delete(name);
-        const file = new File(imagesRoot(), name);
-        if (file.exists) file.delete();
-      }
-      for (const name of kept) listed.add(name);
-    }).catch(() => undefined);
-  },
+  history: history.list, addHistory: history.add, removeHistory: history.remove,
 };
 
 /** Chat on this device: local runtimes, conversations kept on the phone, and no tools. */
