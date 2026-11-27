@@ -3841,7 +3841,8 @@ async fn resolve_repo_recommendation_inner(
 
     // Speculative draft weights are also optional companions, but they are
     // kept separate from projectors so clients can explain what they add.
-    // Prefer the smallest same-repository draft: publishers commonly expose
+    // A separate multi-token-prediction head counts as one. Prefer the
+    // smallest same-repository draft: publishers commonly expose
     // both a bf16 reference and a much smaller runtime quant. `skip_drafts`
     // opts a recommendation out entirely — some publishers ship a drafter
     // packed in a format mainline llama.cpp cannot load, and a broken optional
@@ -3851,12 +3852,8 @@ async fn resolve_repo_recommendation_inner(
             .iter()
             .filter(|(path, _)| {
                 path.rsplit('/').next().is_some_and(|name| {
-                    let name = name.to_ascii_lowercase();
-                    name.ends_with(".gguf")
-                        && !name.contains("mmproj")
-                        && (name.contains("dspark")
-                            || name.contains("dflash")
-                            || name.contains("draft"))
+                    !name.to_ascii_lowercase().contains("mmproj")
+                        && models_store::is_speculative_draft_file(std::path::Path::new(name))
                 })
             })
             .map(|(path, size)| (path.as_str(), *size))

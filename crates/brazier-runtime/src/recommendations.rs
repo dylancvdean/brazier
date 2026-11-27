@@ -338,6 +338,17 @@ fn matches_rung(candidate: &Candidate, aliases: &[&str]) -> bool {
     aliases.iter().any(|alias| lower.contains(alias))
 }
 
+/// Whether a file group names this quant as a whole token, so a pinned `Q2_0`
+/// does not select a `PQ2_0` build.
+fn names_quant(group: &str, quant: &str) -> bool {
+    let lower = group.to_ascii_lowercase();
+    let part_of_name = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    lower.match_indices(quant).any(|(start, _)| {
+        !lower[..start].ends_with(part_of_name)
+            && !lower[start + quant.len()..].starts_with(part_of_name)
+    })
+}
+
 /// Prefer Unsloth's dynamic build of a rung over the plain one.
 ///
 /// `UD-…_XL` quants spend their bits where the model is most sensitive, so at
@@ -428,11 +439,10 @@ pub fn choose_quant_with_fraction(
 
 /// Pin a named quantisation rather than choosing by memory.
 pub fn find_quant(files: &[(String, Option<u64>)], quant: &str) -> Option<QuantChoice> {
-    let aliases = [quant.to_ascii_lowercase()];
-    let aliases: Vec<&str> = aliases.iter().map(String::as_str).collect();
+    let wanted = quant.to_ascii_lowercase();
     let mut matching: Vec<Candidate> = candidates(files)
         .into_iter()
-        .filter(|candidate| matches_rung(candidate, &aliases))
+        .filter(|candidate| names_quant(&candidate.group, &wanted))
         .collect();
     matching.sort_by(dynamic_first);
     matching.into_iter().next().map(|choice| QuantChoice {
@@ -946,10 +956,31 @@ mod tests {
         assert_eq!(choice.files, vec!["Ternary-Bonsai-27B-Q2_g64.gguf"]);
     }
 
-    /// The Bonsai recommendations pin the mainline-compatible packs and skip
-    /// the PrismML drafter, whose legacy group-128 embedding mainline llama.cpp
-    /// cannot read. A recommendation that forgets the skip would offer an
-    /// optional download that can never load.
+    /// Bonsai 2.5 publishes fork-only `PQ2_0` and `PTQ1_0` packs beside the
+    /// `Q2_0` one upstream llama.cpp loads; a substring match would take the
+    /// smaller `PQ2_0`.
+    #[test]
+    fn a_pinned_quant_matches_a_whole_name_token() {
+        let files: Vec<(String, Option<u64>)> = [
+            ("Ternary-Bonsai-2.5-27B-PTQ1_0.gguf", 6_000_000_000),
+            ("Ternary-Bonsai-2.5-27B-PQ2_0.gguf", 7_300_000_000),
+            ("Ternary-Bonsai-2.5-27B-PQ2_0-mtp.gguf", 7_500_000_000),
+            ("Ternary-Bonsai-2.5-27B-Q2_0.gguf", 7_700_000_000),
+            ("Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf", 7_900_000_000),
+            ("Ternary-Bonsai-2.5-27B-mmproj-Q8_0.gguf", 600_000_000),
+        ]
+        .into_iter()
+        .map(|(name, size)| (name.to_owned(), Some(size)))
+        .collect();
+
+        let choice = find_quant(&files, "Q2_0").unwrap();
+        assert_eq!(choice.files, vec!["Ternary-Bonsai-2.5-27B-Q2_0.gguf"]);
+        assert!(find_quant(&files, "Q2").is_none());
+    }
+
+    /// The Bonsai recommendations pin the packs upstream llama.cpp loads. The
+    /// first-generation repository also ships a PrismML drafter whose legacy
+    /// group-128 embedding mainline cannot read, so it skips drafts.
     #[test]
     fn bonsai_recommendations_are_mainline_only() {
         let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
@@ -961,12 +992,182 @@ mod tests {
             one_bit.skip_drafts,
             "1-bit Bonsai must not offer the dspark drafter"
         );
-        assert_eq!(ternary.repo_id, "prism-ml/Ternary-Bonsai-27B-gguf");
-        assert_eq!(ternary.quant.as_deref(), Some("Q2_g64"));
-        assert!(
-            ternary.skip_drafts,
-            "ternary Bonsai must not offer the dspark drafter"
-        );
+        assert_eq!(ternary.repo_id, "prism-ml/Ternary-Bonsai-2.5-27B-GGUF");
+        assert_eq!(ternary.quant.as_deref(), Some("Q2_0"));
+    }
+
+    /// Inkling 2 Mini needs 32 GB to hold a 4-bit build, which is also what
+    /// its publisher recommends; below that Gemma stays the chat model.
+    #[test]
+    fn inkling_is_the_chat_model_where_a_four_bit_build_fits() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        let chat = |memory| {
+            let tier = catalog.tier_for(gb(memory)).unwrap();
+            tier.text.as_ref().unwrap().repo_id.clone()
+        };
+        assert_eq!(chat(24), "unsloth/gemma-4-26B-A4B-it-GGUF");
+        for memory in [32, 48, 64, 96] {
+            assert_eq!(chat(memory), "bartowski/Inkling-2-Mini-GGUF");
+        }
+
+        let files: Vec<(String, Option<u64>)> = [
+            ("mmproj-Inkling-2-Mini-f16.gguf", 600_000_000),
+            ("Inkling-2-Mini-Q2_K.gguf", 11_900_000_000),
+            ("Inkling-2-Mini-Q3_K_M.gguf", 14_600_000_000),
+            ("Inkling-2-Mini-Q4_K_M.gguf", 18_700_000_000),
+            ("Inkling-2-Mini-Q5_K_M.gguf", 21_200_000_000),
+            ("Inkling-2-Mini-Q6_K.gguf", 24_700_000_000),
+            ("Inkling-2-Mini-Q8_0.gguf", 27_800_000_000),
+        ]
+        .into_iter()
+        .map(|(name, size)| (name.to_owned(), Some(size)))
+        .collect();
+        let quant = |memory| choose_quant(&files, gb(memory)).unwrap().quant.unwrap();
+        assert_eq!(quant(24), "Q3_K_M");
+        assert_eq!(quant(32), "Q4_K_M");
+        assert_eq!(quant(48), "Q8_0");
+    }
+
+    fn sized(files: &[(&str, u64)]) -> Vec<(String, Option<u64>)> {
+        files
+            .iter()
+            .map(|(name, size)| ((*name).to_owned(), Some(*size)))
+            .collect()
+    }
+
+    #[test]
+    fn qwen_3_8_is_the_agent_and_its_separate_mtp_head_is_never_the_model() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        for memory in [24, 32, 48, 64] {
+            let tier = catalog.tier_for(gb(memory)).unwrap();
+            let agent = tier.agent.as_ref().unwrap();
+            assert_eq!(agent.repo_id, "unsloth/Qwen3.8-27B-GGUF");
+            assert!(!agent.skip_drafts, "the MTP head is offered as the drafter");
+        }
+
+        let files = sized(&[
+            ("BF16/Qwen3.8-27B-BF16-00001-of-00002.gguf", 49_986_159_616),
+            ("BF16/Qwen3.8-27B-BF16-00002-of-00002.gguf", 4_671_576_000),
+            ("MTP/mtp-Qwen3.8-27B-Q4_0.gguf", 1_369_590_656),
+            ("Qwen3.8-27B-Q4_0.gguf", 16_056_478_688),
+            ("Qwen3.8-27B-Q8_0.gguf", 29_047_086_048),
+            ("Qwen3.8-27B-UD-Q2_K_XL.gguf", 9_948_666_784),
+            ("Qwen3.8-27B-UD-Q3_K_XL.gguf", 13_146_393_504),
+            ("Qwen3.8-27B-UD-Q4_K_M.gguf", 16_564_259_744),
+            ("Qwen3.8-27B-UD-Q4_K_XL.gguf", 17_659_407_264),
+            ("Qwen3.8-27B-UD-Q5_K_XL.gguf", 20_976_962_464),
+            ("Qwen3.8-27B-UD-Q6_K_XL.gguf", 25_299_061_664),
+            ("imatrix_unsloth.gguf", 13_642_656),
+            ("mmproj-F16.gguf", 927_607_488),
+        ]);
+        let file = |memory| choose_quant(&files, gb(memory)).unwrap().files;
+        assert_eq!(file(24), ["Qwen3.8-27B-UD-Q3_K_XL.gguf"]);
+        assert_eq!(file(32), ["Qwen3.8-27B-UD-Q4_K_XL.gguf"]);
+        assert_eq!(file(48), ["Qwen3.8-27B-Q8_0.gguf"]);
+        assert_eq!(file(64), ["Qwen3.8-27B-Q8_0.gguf"]);
+    }
+
+    #[test]
+    fn flint_is_the_agent_option_where_more_than_a_two_bit_build_fits() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        let option = |memory| {
+            let tier = catalog.tier_for(gb(memory)).unwrap();
+            tier.agent_options[0].repo_id.clone()
+        };
+        assert_eq!(option(24), "unsloth/Qwen3.6-35B-A3B-MTP-GGUF");
+        for memory in [32, 48, 64] {
+            assert_eq!(option(memory), "unsloth/flint-GGUF");
+        }
+
+        let files = sized(&[
+            ("BF16/flint-BF16-00001-of-00003.gguf", 5_421_216),
+            ("BF16/flint-BF16-00002-of-00003.gguf", 49_945_779_296),
+            ("BF16/flint-BF16-00003-of-00003.gguf", 29_625_278_688),
+            ("flint-Q8_0.gguf", 42_301_076_928),
+            ("flint-UD-Q2_K_XL.gguf", 13_562_207_680),
+            ("flint-UD-Q3_K_XL.gguf", 18_494_977_472),
+            ("flint-UD-Q4_K_XL.gguf", 25_054_688_704),
+            ("flint-UD-Q5_K_XL.gguf", 29_919_491_520),
+            ("flint-UD-Q6_K_XL.gguf", 36_319_999_424),
+        ]);
+        let file = |memory| choose_quant(&files, gb(memory)).unwrap().files;
+        assert_eq!(file(24), ["flint-UD-Q2_K_XL.gguf"]);
+        assert_eq!(file(32), ["flint-UD-Q3_K_XL.gguf"]);
+        assert_eq!(file(48), ["flint-UD-Q5_K_XL.gguf"]);
+        assert_eq!(file(64), ["flint-UD-Q6_K_XL.gguf"]);
+    }
+
+    #[test]
+    fn ornith_is_the_largest_tier_model_and_resolves_its_sharded_builds() {
+        let catalog: Catalog = serde_json::from_str(CATALOG).unwrap();
+        let chat = |memory| {
+            let tier = catalog.tier_for(gb(memory)).unwrap();
+            tier.text.as_ref().unwrap().repo_id.clone()
+        };
+        assert_eq!(chat(192), "unsloth/Ornith-1.5-122B-GGUF");
+        assert_eq!(chat(96), "bartowski/Inkling-2-Mini-GGUF");
+
+        let files = sized(&[
+            ("Ornith-1.5-122B-UD-Q2_K_XL.gguf", 44_533_952_768),
+            ("Q8_0/Ornith-1.5-122B-Q8_0-00001-of-00004.gguf", 10_942_929),
+            (
+                "Q8_0/Ornith-1.5-122B-Q8_0-00002-of-00004.gguf",
+                49_855_668_288,
+            ),
+            (
+                "Q8_0/Ornith-1.5-122B-Q8_0-00003-of-00004.gguf",
+                49_903_347_168,
+            ),
+            (
+                "Q8_0/Ornith-1.5-122B-Q8_0-00004-of-00004.gguf",
+                32_785_752_352,
+            ),
+            (
+                "UD-Q4_K_XL/Ornith-1.5-122B-UD-Q4_K_XL-00001-of-00003.gguf",
+                10_942_929,
+            ),
+            (
+                "UD-Q4_K_XL/Ornith-1.5-122B-UD-Q4_K_XL-00002-of-00003.gguf",
+                49_971_099_680,
+            ),
+            (
+                "UD-Q4_K_XL/Ornith-1.5-122B-UD-Q4_K_XL-00003-of-00003.gguf",
+                29_731_729_056,
+            ),
+            (
+                "UD-Q5_K_XL/Ornith-1.5-122B-UD-Q5_K_XL-00001-of-00003.gguf",
+                10_942_929,
+            ),
+            (
+                "UD-Q5_K_XL/Ornith-1.5-122B-UD-Q5_K_XL-00002-of-00003.gguf",
+                49_598_966_816,
+            ),
+            (
+                "UD-Q5_K_XL/Ornith-1.5-122B-UD-Q5_K_XL-00003-of-00003.gguf",
+                45_002_029_760,
+            ),
+            (
+                "UD-Q6_K_XL/Ornith-1.5-122B-UD-Q6_K_XL-00001-of-00004.gguf",
+                10_942_929,
+            ),
+            (
+                "UD-Q6_K_XL/Ornith-1.5-122B-UD-Q6_K_XL-00002-of-00004.gguf",
+                49_676_529_056,
+            ),
+            (
+                "UD-Q6_K_XL/Ornith-1.5-122B-UD-Q6_K_XL-00003-of-00004.gguf",
+                49_911_179_808,
+            ),
+            (
+                "UD-Q6_K_XL/Ornith-1.5-122B-UD-Q6_K_XL-00004-of-00004.gguf",
+                14_623_756_160,
+            ),
+            ("mmproj-F16.gguf", 908_724_544),
+        ]);
+        let choice = choose_quant(&files, gb(192)).unwrap();
+        assert!(!choice.tight);
+        assert_eq!(choice.files.len(), 4);
+        assert!(choice.files[0].starts_with("UD-Q6_K_XL/"));
     }
 
     /// Nothing fitting is a fact worth stating, not a reason to show no model.
