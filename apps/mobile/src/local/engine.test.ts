@@ -69,6 +69,29 @@ test('a stopped reply is not returned', async () => {
   await assert.rejects(engine.chat('gguf', [{ role: 'user', content: 'hi' }], turn.signal, () => undefined), /Chat stopped/);
 });
 
+test('a model is not freed or replaced while it is writing a reply', async () => {
+  const log: string[] = [];
+  let finish = (_reply: string) => {};
+  let started = () => {};
+  const generating = new Promise<void>((resolve) => { started = resolve; });
+  const runtime: Runtime = {
+    ...fake('llama.cpp', log),
+    generate: () => new Promise<string>((resolve) => { log.push('generate'); finish = resolve; started(); }),
+  };
+  const engine = localEngine([runtime, fake('mlx', log)], async () => [model('gguf', 'llama.cpp'), model('mlx', 'mlx')]);
+  const reply = engine.chat('gguf', [{ role: 'user', content: 'hi' }], new AbortController().signal, () => undefined);
+  await generating;
+  // Deleting the model, or choosing another one, while the reply is still streaming.
+  const unloaded = engine.unload('gguf');
+  const switched = engine.prepare('mlx');
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(log, ['llama.cpp load gguf', 'generate']);
+  finish('whole reply');
+  assert.equal(await reply, 'whole reply');
+  await Promise.all([unloaded, switched]);
+  assert.deepEqual(log, ['llama.cpp load gguf', 'generate', 'llama.cpp unload', 'mlx load mlx']);
+});
+
 test('only text turns reach an on-device model', () => {
   assert.deepEqual(chatTurns([
     { role: 'system', content: 'Be brief.' }, { role: 'user', content: 'hi' },
