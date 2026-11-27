@@ -1989,22 +1989,40 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
         .into_iter()
         .flatten();
     let mut companions = Vec::new();
+    let mut linked = Vec::new();
     let mut has_weight = false;
     for entry in entries.chain(head_entries).flatten() {
         let path = entry.path();
-        // Builds kept in their own quant folders share this folder's
-        // companions, so weights in one keep them.
         if path.is_dir() && path != heads {
-            has_weight |= std::fs::read_dir(&path).is_ok_and(|entries| {
-                entries.flatten().any(|entry| {
-                    let path = entry.path();
-                    path.extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
-                        && !is_projector(&path)
-                        && !is_speculative_draft_file(&path)
-                        && companion_directories(&path).len() > 1
-                })
-            });
+            let mut links = Vec::new();
+            let mut folder_has_weight = false;
+            for path in std::fs::read_dir(&path)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+            {
+                if !path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+                {
+                    continue;
+                }
+                if is_projector(&path) || is_speculative_draft_file(&path) {
+                    if path.is_symlink() {
+                        links.extend(std::fs::canonicalize(&path));
+                    }
+                } else {
+                    folder_has_weight = true;
+                    // Builds kept in their own quant folders share this
+                    // folder's companions, so weights in one keep them.
+                    has_weight |= companion_directories(&path).len() > 1;
+                }
+            }
+            // Weights in any other folder keep the companions they link to.
+            if folder_has_weight {
+                linked.append(&mut links);
+            }
             continue;
         }
         if !path
@@ -2025,6 +2043,9 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     for path in companions {
+        if std::fs::canonicalize(&path).is_ok_and(|target| linked.contains(&target)) {
+            continue;
+        }
         std::fs::remove_file(&path)
             .map_err(|error| anyhow::anyhow!("delete {}: {error}", path.display()))?;
     }
@@ -2306,6 +2327,29 @@ mod tests {
         );
         let model = Path::new("/models/Q4_K_M/模型-模型-模型-Q4_K_M.gguf");
         assert_eq!(companion_directories(model).len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_projector_linked_from_a_surviving_model_is_kept() {
+        let dir = tempdir().unwrap();
+        let repo = "acme/model";
+        let root_build = download_destination(dir.path(), repo, "model-Q4_K_M.gguf").unwrap();
+        let nested =
+            download_destination(dir.path(), repo, "tuned/model-tuned-Q4_K_M.gguf").unwrap();
+        let projector = download_destination(dir.path(), repo, "mmproj-F16.gguf").unwrap();
+        let unused = download_destination(dir.path(), repo, "mmproj-BF16.gguf").unwrap();
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        for path in [&root_build, &nested, &projector, &unused] {
+            std::fs::write(path, b"gguf").unwrap();
+        }
+        let link = nested.parent().unwrap().join("mmproj-F16.gguf");
+        std::os::unix::fs::symlink(&projector, &link).unwrap();
+
+        delete_model(dir.path(), "gguf:acme/model/model-Q4_K_M.gguf", &[]).unwrap();
+        assert!(projector.exists(), "the nested model still loads it");
+        assert!(!unused.exists());
+        assert_eq!(projector_for_model(&nested), Some(link));
     }
 
     #[cfg(unix)]
