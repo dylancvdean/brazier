@@ -164,6 +164,8 @@ export function Chat({
     setDraft('');
     Keyboard.dismiss();
     let stored = false;
+    // Once the reply is complete, Stop no longer discards it: it is being saved.
+    let answered = false;
     try {
       const chat = selected ?? await api.createConversation(prompt);
       if (!selected) {
@@ -186,6 +188,7 @@ export function Chat({
         },
       }, enabledTools.map(({ name }) => name));
       if (turn.signal.aborted) return;
+      answered = true;
       let parent = user.id;
       const saved = [...history];
       for (const entry of transcript) {
@@ -204,10 +207,10 @@ export function Chat({
       if (generated) saved.push(await api.createMessage(chat.id, { parent_id: saved.at(-1)!.id, ...generated, model }));
       setMessages(saved);
     } catch (cause) {
-      if (!turn.signal.aborted) report(cause);
+      if (answered || !turn.signal.aborted) report(cause);
     } finally {
       if (!stored) setDraft(prompt);
-      if (turn.signal.aborted) setError('Generation stopped. Unfinished replies are not saved.');
+      if (turn.signal.aborted && !answered) setError('Generation stopped. Unfinished replies are not saved.');
       currentTurn.current = null;
       setStreamed('');
       setRunning([]);

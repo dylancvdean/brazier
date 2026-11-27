@@ -156,3 +156,14 @@ test('explains host-only refusals and previews tool arguments', () => {
   assert.equal(argsPreview('move', { from: 'a', to: 'b' }), 'a → b');
   assert.equal(argsPreview('list', {}), 'list');
 });
+
+test('a call approved by "Approve for me" keeps its note once it starts running', () => {
+  const start: AgentEvent = { ...base(), type: 'tool-started', toolCallId: 'c', tool: 't', args: {}, environment: 'sandbox', sandbox };
+  const approved: AgentEvent = { ...base(), type: 'approval-reviewed', toolCallId: 'c', approvalId: 'a', phase: 'approved', reason: 'in scope' };
+  const escalated: AgentEvent = { ...approved, phase: 'escalated' };
+  // The core announces the call again when it runs after an approval.
+  const [entry] = reduce([start, approved, start]).timeline;
+  assert.equal(entry?.status, 'running');
+  assert.equal(entry?.reviewNote, 'Approved for you: in scope');
+  assert.equal(reduce([start, escalated, start]).timeline[0]?.reviewNote, undefined);
+});

@@ -43,7 +43,8 @@ export function parseMarkdown(source: string): Block[] {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     const fence = /^\s*(`{3,}|~{3,})\s*([^\s`]*)/.exec(line);
-    if (fence) {
+    // A backtick later on the line makes it inline code, not a fence.
+    if (fence && !(fence[1].startsWith('`') && line.slice(fence[0].length).includes('`'))) {
       flush();
       // Only a bare fence at least as long as the opener closes the block.
       const closes = (text: string) => text.trim().startsWith(fence[1]) && /^(`+|~+)$/.test(text.trim());

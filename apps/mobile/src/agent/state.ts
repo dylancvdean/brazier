@@ -177,14 +177,18 @@ export function applyEvent(view: AgentView, event: AgentEvent): AgentView {
       return event.channel === 'reasoning'
         ? { ...view, progress: '', reasoning: view.reasoning + event.delta }
         : { ...view, progress: '', streaming: view.streaming + event.delta };
-    case 'tool-started':
+    case 'tool-started': {
       if (event.tool === 'spawn_subagent') return view;
+      // The call is announced again once approved; keep the note of a review that approved it.
+      const reviewed = view.timeline.find((entry) => entry.toolCallId === event.toolCallId && entry.status === 'running');
       return {
         ...view, timeline: [...view.timeline.filter((entry) => entry.toolCallId !== event.toolCallId), {
           toolCallId: event.toolCallId, tool: event.tool, args: event.args, environment: event.environment,
           status: 'running', sandbox: event.sandbox, timestamp: event.timestamp,
+          ...(reviewed?.reviewNote ? { reviewNote: reviewed.reviewNote } : {}),
         }],
       };
+    }
     case 'tool-output': {
       const entry = view.timeline.find((item) => item.toolCallId === event.toolCallId);
       return entry ? patch(view, event.toolCallId, { output: (entry.output ?? '') + event.chunk }) : view;
