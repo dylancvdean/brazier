@@ -72,9 +72,10 @@ export function parseResults(value: unknown, format: SearchFormat): SearchResult
     if (typeof model?.id !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(model.id) || model.private === true ||
         (model.gated !== undefined && model.gated !== false)) return [];
     const tags = [model.pipeline_tag, ...(Array.isArray(model.tags) ? model.tags : [])].filter((tag) => typeof tag === 'string');
-    // What a model was merged from says nothing about what it is.
-    const named = `${model.id} ${tags.filter((tag) => !tag.startsWith('base_model:')).join(' ')}`;
-    if (format === 'image' ? needsMoreFiles.test(named) || addOn.test(named)
+    const named = `${model.id} ${tags.join(' ')}`;
+    // A checkpoint merged from a LoRA is still a whole model, so what it was made from does not count here.
+    const own = `${model.id} ${tags.filter((tag) => !tag.startsWith('base_model:')).join(' ')}`;
+    if (format === 'image' ? needsMoreFiles.test(named) || addOn.test(own)
       : tags.some((tag) => notChat.has(tag) || (typeof model.pipeline_tag !== 'string' && otherKind.test(tag)))) return [];
     const files = (Array.isArray(model.siblings) ? model.siblings : []).flatMap((file) => {
       const path = (file as { rfilename?: unknown })?.rfilename;
