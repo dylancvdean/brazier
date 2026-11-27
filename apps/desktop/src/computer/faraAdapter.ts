@@ -196,6 +196,13 @@ function asNumber(value: unknown, fallback = 0): number {
   return fallback
 }
 
+/** Text to enter; a value that is all digits reaches here as a JSON number. */
+function asText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return undefined
+}
+
 function coord(
   args: Record<string, unknown>,
   keyX: string,
@@ -291,12 +298,7 @@ export function actionFromArgs(args: Record<string, unknown>): ComputerAction {
     case 'type_text':
       return {
         type: 'type',
-        text:
-          typeof args.text === 'string'
-            ? args.text
-            : typeof args.content === 'string'
-              ? args.content
-              : ''
+        text: asText(args.text) ?? asText(args.content) ?? ''
       }
     case 'keypress':
     case 'key':
@@ -360,12 +362,7 @@ export function actionFromArgs(args: Record<string, unknown>): ComputerAction {
     case 'search':
       return {
         type: 'web_search',
-        query:
-          typeof args.query === 'string'
-            ? args.query
-            : typeof args.text === 'string'
-              ? args.text
-              : ''
+        query: asText(args.query) ?? asText(args.text) ?? ''
       }
     case 'pause_and_memorize_fact':
     case 'memorize':

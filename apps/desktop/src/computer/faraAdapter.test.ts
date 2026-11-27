@@ -64,4 +64,15 @@ describe('parseFaraOutput', () => {
       expect(typeof parsed.actions[0].raw).toBe('string')
     }
   })
+
+  it('types text that is entirely a number', () => {
+    const xml = parseFaraOutput(
+      '<tool_call><function=computer_use><parameter=action>type</parameter><parameter=text>90210</parameter></function></tool_call>'
+    )
+    expect(xml.actions).toEqual([{ type: 'type', text: '90210' }])
+    const json = parseFaraOutput(
+      '<tool_call>{"name":"computer_use","arguments":{"action":"type","text":42}}</tool_call>'
+    )
+    expect(json.actions).toEqual([{ type: 'type', text: '42' }])
+  })
 })
