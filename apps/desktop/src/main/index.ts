@@ -32,6 +32,7 @@ import {
 } from './updates'
 import { runPackageSmoke, type PackageSmokeResult } from './packageSmoke'
 import { parseNvidiaSmiMemoryGib } from './qualificationHost'
+import { serverSettingsFailureIsRecoverable } from './serverSettingsFile'
 import {
   isRendererDevelopmentOrigin,
   isSafeExternalUrl,
@@ -697,6 +698,9 @@ function validApiKeys(value: unknown): { keys: StoredApiKey[]; hadPlaintext: boo
   return { keys, hadPlaintext }
 }
 
+/** Set while the saved file exists but could not be opened; see `saveServerSettings`. */
+let serverSettingsUnreadable = false
+
 function loadServerSettings(): StoredServerSettings {
   try {
     const parsed = JSON.parse(readFileSync(serverSettingsPath(), 'utf8')) as Partial<PersistedServerSettings>
@@ -717,9 +721,11 @@ function loadServerSettings(): StoredServerSettings {
       jitLoading: parsed.jitLoading !== false,
       pairedRemoteAccess: parsed.pairedRemoteAccess === true
     }
+    serverSettingsUnreadable = false
     if (loadedKeys.hadPlaintext) saveServerSettings(settings)
     return settings
   } catch (cause) {
+    serverSettingsUnreadable = serverSettingsFailureIsRecoverable(cause)
     if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') {
       report(
         `[server] Saved server settings could not be opened; server mode is disabled: ${
@@ -742,6 +748,10 @@ function publicServerSettings(settings: StoredServerSettings): ServerSettings {
 }
 
 function saveServerSettings(settings: StoredServerSettings): void {
+  if (serverSettingsUnreadable) {
+    // The defaults that stood in for the unreadable file would erase its keys.
+    throw new Error('Saved server settings could not be opened, so they were left unchanged.')
+  }
   if (settings.apiKeys.length > 0 && !credentialStorageAvailable()) {
     throw new Error('Secure credential storage is unavailable; server API keys were not saved.')
   }
