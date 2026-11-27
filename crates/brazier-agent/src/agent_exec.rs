@@ -124,7 +124,7 @@ impl AgentBroker {
         for id in ids {
             if let Some(process) = processes.remove(&id) {
                 let mut child = process.child.lock().await;
-                let _ = child.start_kill();
+                kill_process_tree(&mut child);
                 terminated += 1;
             }
         }
@@ -2350,6 +2350,9 @@ async fn build_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Lead a process group so stopping the command also stops what it forked.
+    #[cfg(unix)]
+    command.process_group(0);
     #[cfg(unix)]
     if !pinned_directories.is_empty() {
         use std::os::fd::AsRawFd as _;
@@ -2441,7 +2444,7 @@ async fn shell_run(
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(result) => result?,
         Err(_) => {
-            let _ = child.start_kill();
+            kill_process_tree(&mut child);
             let _ = child.wait().await;
             let _ = stdout_task.await;
             let _ = stderr_task.await;
@@ -2486,6 +2489,17 @@ async fn shell_run(
         changed_paths: Vec::new(),
         images: Vec::new(),
     })
+}
+
+/// Kill a command started by `build_command` together with the processes it
+/// forked, which otherwise keep running and hold its output pipes open.
+fn kill_process_tree(child: &mut tokio::process::Child) {
+    // `id` is `None` once the child is reaped, so a recycled pid is never hit.
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+    }
+    let _ = child.start_kill();
 }
 
 /// Read a child pipe without waiting for process completion, forwarding chunks
@@ -2706,7 +2720,7 @@ async fn shell_terminate(
         anyhow::bail!("process {id} belongs to another session");
     }
     let mut child = process.child.lock().await;
-    child.start_kill().ok();
+    kill_process_tree(&mut child);
     Ok(ToolOutcome::text(format!(
         "Terminated {id} (`{}`).",
         process.command
@@ -4781,6 +4795,97 @@ startxref
             "{}",
             response.output
         );
+    }
+
+    #[cfg(unix)]
+    async fn host_call(harness: &Harness, tool: &str, arguments: Value) -> ToolExecResponse {
+        let request = ToolExecRequest {
+            session_id: harness.session.id.clone(),
+            run_id: Some("run-1".to_owned()),
+            tool_call_id: Some("call-1".to_owned()),
+            tool: tool.to_owned(),
+            arguments,
+            environment: Some(AgentEnvironment::Host),
+            reason: None,
+            approval_id: None,
+        };
+        execute(&harness.context(), &request)
+            .await
+            .expect("broker call")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_run_timeout_also_stops_the_commands_children() {
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        let started = Instant::now();
+        // The shell forks `sleep`, which inherits the output pipes.
+        let response = host_call(
+            &harness,
+            "shell_run",
+            json!({ "command": "sleep 6 & wait", "timeout_ms": 300 }),
+        )
+        .await;
+        assert!(
+            response.output.contains("terminated"),
+            "{}",
+            response.output
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "timed-out call still waited {:?} for a child process",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shell_terminate_also_stops_the_commands_children() {
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        let pid_file = harness.workspace.path().join("child.pid");
+        let started = host_call(
+            &harness,
+            "shell_start",
+            json!({ "command": "sleep 60 & echo $! > child.pid; wait" }),
+        )
+        .await;
+        assert!(!started.is_error, "{}", started.output);
+        let process_id = started
+            .output
+            .split_whitespace()
+            .find(|word| word.starts_with("proc-"))
+            .expect("process id")
+            .trim_end_matches('.')
+            .to_owned();
+        let mut pid = None;
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&pid_file)
+                && let Ok(value) = text.trim().parse::<i32>()
+            {
+                pid = Some(value);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let pid = pid.expect("child pid");
+        let stopped = harness
+            .call("shell_terminate", json!({ "process_id": process_id }))
+            .await;
+        assert!(!stopped.is_error, "{}", stopped.output);
+        let mut alive = true;
+        for _ in 0..100 {
+            alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| !stat.contains(") Z "))
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if alive {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(!alive, "the command's child outlived shell_terminate");
     }
 
     #[cfg(unix)]
