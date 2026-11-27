@@ -4,6 +4,7 @@ import {
   dataDirFromManagedBinaryPath,
   fallbackRuntimeForEngine,
   isComputerUseModel,
+  withMergedCapabilities,
   mergeModelCapabilities,
   modelDisplayName,
   modelLibraryKey,
@@ -182,6 +183,14 @@ describe('isComputerUseModel and sortComputerUseModels', () => {
     expect(isComputerUseModel(qwenVl)).toBe(true)
     expect(isComputerUseModel(textOnly)).toBe(false)
     expect(isComputerUseModel(diffusion)).toBe(false)
+  })
+
+  it('keeps a vision model out of Computer Use when its profile turns that off', () => {
+    const profile = { kind: 'text', capability_computer_use: false } as ModelProfile
+    // The daemon reports computer_use: false for ordinary vision models too, so
+    // the merged capabilities alone cannot carry the override.
+    expect(isComputerUseModel(withMergedCapabilities(qwenVl, profile))).toBe(true)
+    expect(isComputerUseModel(withMergedCapabilities(qwenVl, profile), profile)).toBe(false)
   })
 
   it('sorts dedicated computer_use models ahead of general vision models', () => {
