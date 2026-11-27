@@ -613,7 +613,10 @@ function extractBalancedJsonObjects(text: string): string[] {
       continue
     }
     const end = findMatchingDelimiter(text, i, '{', '}')
-    if (end < 0) break
+    if (end < 0) {
+      i += 1
+      continue
+    }
     objects.push(text.slice(i, end + 1))
     i = end + 1
   }
