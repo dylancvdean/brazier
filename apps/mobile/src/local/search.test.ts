@@ -191,8 +191,13 @@ test('speech repositories without a pipeline tag and image repositories are not 
     gguf('a/hears', { pipeline_tag: 'image-text-to-text', tags: ['gguf', 'audio', 'speech'] }),
     gguf('a/reranker', { pipeline_tag: 'text-classification' }),
     gguf('a/audio', { pipeline_tag: 'audio-text-to-text' }),
+    gguf('a/any', { pipeline_tag: 'any-to-any' }),
   ], 'gguf');
-  assert.deepEqual(results.map(({ slug }) => slug), ['a/chat', 'a/hears']);
+  assert.deepEqual(results.map(({ slug }) => slug), ['a/chat', 'a/hears', 'a/audio', 'a/any']);
+  const mlx = (id: string, pipeline_tag: string) => ({
+    id, pipeline_tag, tags: ['mlx'], siblings: [{ rfilename: 'config.json' }, { rfilename: 'model.safetensors' }],
+  });
+  assert.deepEqual(parseResults([mlx('m/audio', 'audio-text-to-text'), mlx('m/any', 'any-to-any')], 'mlx').map(({ slug }) => slug), ['m/any']);
 });
 
 test('image results leave out add-ons and files that are only part of a model', () => {
