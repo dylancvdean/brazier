@@ -59,6 +59,8 @@ const gguf = [
   { path: 'model-Q8_0.gguf', size: 800 },
   { path: 'model-Q4_K_M.gguf', size: 400 },
   { path: 'mmproj-model-f16.gguf', size: 50 },
+  { path: 'MTP/mtp-model-Q8_0.gguf', size: 40 },
+  { path: 'mtp-model.gguf', size: 40 },
   { path: 'big/model-F16-00001-of-00002.gguf', size: 900 },
   { path: 'big/model-F16-00002-of-00002.gguf', size: 300 },
   { path: 'partial-00001-of-00003.gguf', size: 5 },

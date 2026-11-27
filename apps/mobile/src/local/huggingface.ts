@@ -85,7 +85,7 @@ const mlxFiles = /(\.safetensors|\.json|\.jinja|\.model|\.txt)$/i;
 const imagePart = /(^|[-_.])(vae|taesd|lora|clip|t5|t5xxl|text[-_]encoders?|controlnet|mmproj)([-_.]|$)/i;
 
 /**
- * What the listed files offer each runtime. A split GGUF is one choice; projector files are not chat models.
+ * What the listed files offer each runtime. A split GGUF is one choice; projector and prediction-head (`mtp-`) files are not chat models.
  * In an image repository (`image`) the single-file checkpoints, a GGUF or a `.safetensors` at the top level,
  * are image models and nothing in it is a chat model.
  */
@@ -103,7 +103,7 @@ export function modelChoices(files: readonly RepoFile[], runtimes: readonly Runt
     const parts = new Map<string, RepoFile[]>();
     for (const file of files) {
       const name = baseName(file.path);
-      if (!/\.gguf$/i.test(name) || /^mmproj/i.test(name) || /mmproj/i.test(name)) continue;
+      if (!/\.gguf$/i.test(name) || /mmproj/i.test(name) || /^mtp[-_.]/i.test(name)) continue;
       const match = split.exec(file.path);
       const key = match ? `${match[1]}|${match[3]}` : file.path;
       parts.set(key, [...parts.get(key) ?? [], file]);

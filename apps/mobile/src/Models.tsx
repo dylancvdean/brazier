@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import type { Model } from './api.ts';
 import {
   catalogue, choiceContext, fitNote, memoryFit, quantisation, recommend, suggestedChoice, type CatalogueEntry, type Recommendation,
@@ -51,6 +51,21 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
   const [opened, setOpened] = useState<Record<string, Opened>>({});
   const [active, setActive] = useState(activeDownload);
   const [error, setError] = useState('');
+  // The search field moves to the top when it is used, so its results show above the keyboard. Android does
+  // not resize this screen for the keyboard, so the list is padded by its height to stay scrollable.
+  const scroll = useRef<ScrollView>(null);
+  const searchTop = useRef(0);
+  const focused = useRef(false);
+  const [keyboard, setKeyboard] = useState(0);
+  const toSearch = () => scroll.current?.scrollTo({ y: searchTop.current, animated: true });
+  useEffect(() => {
+    const shown = Keyboard.addListener('keyboardDidShow', (event) => {
+      if (Platform.OS === 'android') setKeyboard(event.endCoordinates.height);
+      if (focused.current) setTimeout(toSearch, 50);
+    });
+    const hidden = Keyboard.addListener('keyboardDidHide', () => setKeyboard(0));
+    return () => { shown.remove(); hidden.remove(); };
+  }, []);
 
   const available = searchFormats(usable);
   const format = chosenFormat && available.includes(chosenFormat) ? chosenFormat : available[0] ?? null;
@@ -246,12 +261,12 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
     </View>;
   };
 
-  return <View style={styles.container}>
+  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
     <View style={styles.topBar}>
       <IconButton glyph="‹" label="Back" onPress={onClose} />
       <Text style={styles.topTitle}>Models on this device</Text>
     </View>
-    <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
+    <ScrollView ref={scroll} contentContainerStyle={[styles.panel, keyboard > 0 && { paddingBottom: keyboard }]} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       <Text style={styles.listMeta}>{formatBytes(free)} free on this device
         {budget ? `  ·  about ${formatBytes(budget)} of memory for a model` : ''}</Text>
@@ -278,10 +293,11 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
       })}
 
       {format ? <>
-        <Text style={styles.section}>Search Hugging Face</Text>
+        <Text style={styles.section} onLayout={(event) => { searchTop.current = event.nativeEvent.layout.y; }}>Search Hugging Face</Text>
         <TextInput accessibilityLabel="Search Hugging Face models" autoCapitalize="none" autoCorrect={false} style={styles.input}
           placeholder="Search, or paste owner/name" placeholderTextColor={palette.muted} value={query} onChangeText={setQuery}
           onSubmitEditing={() => { if (text && format) { setSearching(true); search.request({ query: text, format, sort, key }, true); } }}
+          onFocus={() => { focused.current = true; toSearch(); }} onBlur={() => { focused.current = false; }}
           returnKeyType="search" clearButtonMode="while-editing" />
         {available.length > 1
           ? <View style={styles.row}>{available.map((item) => chip(formatNames[item], item === format, () => setFormat(item)))}</View> : null}
@@ -311,5 +327,5 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
         <View style={styles.row}><Action label="Delete" danger onPress={() => remove(model)} /></View>
       </View>)}
     </ScrollView>
-  </View>;
+  </KeyboardAvoidingView>;
 }
