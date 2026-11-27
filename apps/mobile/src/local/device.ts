@@ -1,9 +1,11 @@
+import * as Device from 'expo-device';
 import { fetch } from 'expo/fetch';
 import { Directory, File, Paths } from 'expo-file-system';
 import { createDownloadResumable } from 'expo-file-system/legacy';
 import { conversationStore } from './conversations.ts';
 import { availableRuntimes, localEngine, type ChatBackend, type Runtime } from './engine.ts';
 import { fileUrl, listRepoFiles, modelChoices, parseSlug, type ModelChoice, type RuntimeId } from './huggingface.ts';
+import { memoryWarning } from './memory.ts';
 import { addInstalled, installedFrom, modelId, parseInstalled, removeInstalled, type InstalledModel } from './models.ts';
 import { appleRuntime, llamaRuntime, mlxRuntime } from './runtimes.ts';
 
@@ -64,8 +66,15 @@ export const runtimes: readonly Runtime[] = [
 export const deviceEngine = localEngine(runtimes, installedModels);
 
 /** Chat on this device: local runtimes, conversations kept on the phone, and no tools. */
+/** Physical memory in bytes, or null when the system does not say. */
+export const totalMemory = (): number | null => Device.totalMemory;
+
 export const deviceBackend: ChatBackend = {
   ...deviceEngine, ...conversationStore(textFiles, newId), tools: async () => [],
+  async loadWarning(modelId) {
+    const model = (await installedModels()).find(({ id }) => id === modelId);
+    return model ? memoryWarning(model.size, totalMemory()) : null;
+  },
 };
 
 export const freeSpace = (): number => Paths.availableDiskSpace;

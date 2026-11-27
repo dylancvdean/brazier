@@ -24,6 +24,8 @@ export type ChatBackend = ChatEngine & {
   appendUserMessage(id: string, viewedBranch: readonly Message[], content: string):
     Promise<{ user: Message; history: Message[] }>;
   tools(): Promise<Tool[]>;
+  /** On this device: a reason to ask before loading the model, such as one too large for memory. */
+  loadWarning?(modelId: string): Promise<string | null>;
 };
 
 export type ChatTurn = { role: 'system' | 'user' | 'assistant'; content: string };
