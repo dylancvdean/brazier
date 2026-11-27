@@ -390,7 +390,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\ncp \"${BUILT_PRODUCTS_DIR}/mlx-swift_Cmlx.bundle/default.metallib\" \"${TARGET_BUILD_DIR}/${WRAPPER_NAME}/mlx.metallib\"\nrsync -a --delete \"${BUILT_PRODUCTS_DIR}/swift-transformers_Hub.bundle\" \"${TARGET_BUILD_DIR}/${WRAPPER_NAME}/\"\n";
+			shellScript = "set -e\ncp \"${BUILT_PRODUCTS_DIR}/mlx-swift_Cmlx.bundle/default.metallib\" \"${TARGET_BUILD_DIR}/${WRAPPER_NAME}/mlx.metallib\"\nrsync -aL --delete \"${BUILT_PRODUCTS_DIR}/swift-transformers_Hub.bundle/\" \"${TARGET_BUILD_DIR}/${WRAPPER_NAME}/swift-transformers_Hub.bundle/\"\n";
 		};
 		7444127E90A5B706A3ACD07F /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;

@@ -61,11 +61,12 @@ module BrazierMLX
 
     # Xcode copies a package's resources into apps only. MLX looks for its Metal library next to the
     # binary, and the tokenizer package looks for its bundle in the framework that contains its code.
+    # In an archive build the bundle in BUILT_PRODUCTS_DIR is a symlink, so rsync copies what it points to.
     resources = target.new_shell_script_build_phase('Copy package resources')
     resources.shell_script = <<~SCRIPT
       set -e
       cp "${BUILT_PRODUCTS_DIR}/mlx-swift_Cmlx.bundle/default.metallib" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}/mlx.metallib"
-      rsync -a --delete "${BUILT_PRODUCTS_DIR}/swift-transformers_Hub.bundle" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}/"
+      rsync -aL --delete "${BUILT_PRODUCTS_DIR}/swift-transformers_Hub.bundle/" "${TARGET_BUILD_DIR}/${WRAPPER_NAME}/swift-transformers_Hub.bundle/"
     SCRIPT
     resources.input_paths = [
       '$(BUILT_PRODUCTS_DIR)/mlx-swift_Cmlx.bundle/default.metallib',
