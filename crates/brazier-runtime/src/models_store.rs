@@ -1923,7 +1923,18 @@ pub fn delete_model(
             }
         }
         for target in &linked {
-            if let Some(directory) = target.parent() {
+            // A head in an `MTP` folder belongs to the folder above it.
+            let owner = target.parent().and_then(|directory| {
+                let in_heads = directory
+                    .file_name()
+                    .is_some_and(|name| name == MTP_HEAD_DIRECTORY);
+                if in_heads {
+                    directory.parent()
+                } else {
+                    Some(directory)
+                }
+            });
+            if let Some(directory) = owner.filter(|directory| directory.starts_with(&boundary)) {
                 remove_orphan_projector(directory, Some(target))?;
             }
         }
@@ -2381,6 +2392,33 @@ mod tests {
         )
         .unwrap();
         assert!(!projector.exists(), "nothing is left to load it");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_mtp_head_stays_while_the_builds_beside_its_folder_remain() {
+        let dir = tempdir().unwrap();
+        let repo = "acme/model";
+        let root_build = download_destination(dir.path(), repo, "model-Q4_K_M.gguf").unwrap();
+        let nested =
+            download_destination(dir.path(), repo, "tuned/model-tuned-Q4_K_M.gguf").unwrap();
+        let head = download_destination(dir.path(), repo, "MTP/mtp-model-Q4_0.gguf").unwrap();
+        for path in [&root_build, &nested, &head] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"gguf").unwrap();
+        }
+        let link = nested.parent().unwrap().join("mtp-model-Q4_0.gguf");
+        std::os::unix::fs::symlink(&head, link).unwrap();
+
+        delete_model(
+            dir.path(),
+            "gguf:acme/model/tuned/model-tuned-Q4_K_M.gguf",
+            &[],
+        )
+        .unwrap();
+        assert!(head.exists(), "the root build still drafts with it");
+        delete_model(dir.path(), "gguf:acme/model/model-Q4_K_M.gguf", &[]).unwrap();
+        assert!(!head.exists());
     }
 
     #[cfg(unix)]
