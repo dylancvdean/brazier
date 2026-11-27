@@ -32,7 +32,7 @@ fi
 if [ "\${ELECTRON_OZONE_PLATFORM_HINT}" = "x11" ]; then
   unset WAYLAND_DISPLAY
 fi
-here=$(dirname -- "$0")
+here=$(dirname -- "$(readlink -f -- "$0")")
 exec "$here/${executableName}.bin" --class=${executableName} "$@"
 `
 }

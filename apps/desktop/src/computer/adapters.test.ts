@@ -232,3 +232,12 @@ describe('universal dialect parsing and coordinate normalization', () => {
     expect(prose.actions).toEqual([{ type: 'visit_url', url: 'https://docs.example.com' }])
   })
 })
+
+describe('parsePromptedModelOutput', () => {
+  it('finds an action that follows an unbalanced brace in prose', () => {
+    const parsed = parsePromptedModelOutput(
+      'The form shows a stray { character. {"action":"left_click","coordinate":[10,20]}'
+    )
+    expect(parsed.actions).toEqual([{ type: 'left_click', x: 10, y: 20 }])
+  })
+})

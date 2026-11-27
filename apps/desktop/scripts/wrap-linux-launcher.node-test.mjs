@@ -1,4 +1,13 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -34,5 +43,21 @@ describe('wrapLinuxExecutable', () => {
 
     assert.equal(readFileSync(join(directory, 'brazier'), 'utf8'), linuxLauncherScript('brazier'))
     assert.equal(readFileSync(join(directory, 'brazier.bin'), 'utf8'), '\x7fELFfakelinuxbinary')
+  })
+
+  it('finds the real binary when launched through a symlink on PATH', { skip: process.platform === 'win32' }, () => {
+    // The deb package links /usr/bin/brazier to /opt/Brazier/brazier.
+    const root = mkdtempSync(join(tmpdir(), 'brazier-linux-wrap-'))
+    const install = join(root, 'opt')
+    const bin = join(root, 'bin')
+    mkdirSync(install)
+    mkdirSync(bin)
+    writeFileSync(join(install, 'brazier.bin'), '#!/bin/sh\necho "real $@"\n', { mode: 0o755 })
+    writeFileSync(join(install, 'brazier'), linuxLauncherScript('brazier'), { mode: 0o755 })
+    symlinkSync(join(install, 'brazier'), join(bin, 'brazier'))
+
+    const output = execFileSync(join(bin, 'brazier'), ['--flag'], { encoding: 'utf8' })
+
+    assert.equal(output, 'real --class=brazier --flag\n')
   })
 })
