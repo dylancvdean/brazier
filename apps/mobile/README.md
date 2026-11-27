@@ -138,10 +138,22 @@ host paired. Its chats are text only: tools, web access, Agent, video and
 voice need a host and are not shown. **Generate** makes images on the phone. Conversations are saved in the app's
 documents on the phone, and so are the models.
 
-Open **Models** to add one: type a Hugging Face repository as `owner/name`,
-choose **List files**, and download a GGUF file. The screen shows each file's
-size and the free space, and lists what is stored with a **Delete** action.
-Only public repositories work; there is no search.
+Open **Models** to add one. **Recommended** lists models chosen for the
+phone: only ones a runtime on it can load, ordered by quality among those that
+fit its memory, with one best pick for chat and one for images, each with its
+size and what it is good at. **Search Hugging Face** finds others: results are
+limited to formats the phone can run (GGUF chat models, MLX repositories on
+iOS, image checkpoints), can be sorted by downloads, trend, likes or date, and
+page with **Show more results**. Tap a result to see its files with their
+quantisation, size and whether each fits the phone's memory and free space,
+and download one. Typing `owner/name` or pasting a huggingface.co link opens
+that repository directly. The screen also lists what is stored, with a
+**Delete** action. Only public, ungated repositories work.
+
+The recommendations are the catalogue in `src/local/catalogue.ts`. After
+changing it, run `pnpm --filter @brazier/mobile catalogue:verify`, which checks
+each entry against Hugging Face: the repository is public, the file exists,
+the size matches, and a GGUF's architecture is one the bundled llama.cpp loads.
 
 GGUF models run through llama.cpp (`llama.rn`, pinned to the latest stable
 release, 0.12.9), using Metal on an iPhone and the CPU in the iOS Simulator.
