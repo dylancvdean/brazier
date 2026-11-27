@@ -52,9 +52,9 @@ const notChat = new Set([
   'stable-diffusion', sdcpp, 'sd.cpp',
 ]);
 // The pipelines of models that answer a text prompt, including ones that also see or hear.
-const chat = new Set(['text-generation', 'text2text-generation', 'image-text-to-text', 'video-text-to-text', 'any-to-any']);
-// llama.cpp runs the text side of a model that hears; the MLX loader does not take one.
-const hears = 'audio-text-to-text';
+const chat = new Set(['text-generation', 'text2text-generation', 'image-text-to-text', 'video-text-to-text']);
+// llama.cpp runs the text side of a model that also hears; the MLX loader only takes language models.
+const hears = new Set(['audio-text-to-text', 'any-to-any']);
 // Speech and embedding repositories often carry no pipeline tag, only these.
 const otherKind = /^(mlx-audio|asr|stt|tts|speech|speech-to-text|speech-recognition|transcription|whisper|audio|embeddings?|reranker)$/i;
 // Add-ons to an image model, which generate nothing on their own.
@@ -81,7 +81,7 @@ export function parseResults(value: unknown, format: SearchFormat): SearchResult
     const own = `${model.id} ${tags.filter((tag) => !tag.startsWith('base_model:') || tag.startsWith('base_model:adapter:')).join(' ')}`;
     if (format === 'image' ? needsMoreFiles.test(named) || addOn.test(own)
       : (typeof model.pipeline_tag === 'string'
-        ? !chat.has(model.pipeline_tag) && !(format === 'gguf' && model.pipeline_tag === hears) : tags.some((tag) => otherKind.test(tag))) ||
+        ? !chat.has(model.pipeline_tag) && !(format === 'gguf' && hears.has(model.pipeline_tag)) : tags.some((tag) => otherKind.test(tag))) ||
         tags.some((tag) => notChat.has(tag))) return [];
     const files = (Array.isArray(model.siblings) ? model.siblings : []).flatMap((file) => {
       const path = (file as { rfilename?: unknown })?.rfilename;
