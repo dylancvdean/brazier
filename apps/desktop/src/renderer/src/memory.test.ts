@@ -13,6 +13,7 @@ const daemon = vi.hoisted(() => ({
   updated: [] as Array<{ id: string; patch: Record<string, unknown> }>,
   deleted: [] as string[],
   memories: [] as Memory[],
+  search: undefined as ((query: string) => Memory[]) | undefined,
   stream: {
     responseText: ''
   }
@@ -31,7 +32,9 @@ vi.mock('./api', () => ({
     daemon.deleted.push(id)
     return { deleted: true }
   }),
-  listMemories: vi.fn(async () => daemon.memories),
+  listMemories: vi.fn(async (query?: string) =>
+    daemon.search && query ? daemon.search(query) : daemon.memories
+  ),
   streamCompletion: vi.fn(async () => ({
     responseText: daemon.stream.responseText,
     reasoningText: '',
@@ -50,12 +53,14 @@ import {
   extractDreamProposal,
   formatDay,
   isMemoryClientTool,
+  loadRelevantMemories,
   memoryToolDefinitions,
   MEMORY_RECALL_TOOL,
   MEMORY_SAVE_TOOL,
   normalizeDreamProposal,
   renderDreamInput
 } from './memory'
+import { listMemories } from './api'
 
 function memory(id: string, text: string, pinned = false): Memory {
   return {
@@ -306,5 +311,32 @@ describe('dream pass', () => {
     expect(result).toEqual({ created: 1, updated: 1, deleted: 0 })
     expect(daemon.created[0]).toMatchObject({ text: 'User prefers tea.', kind: 'summary' })
     expect(daemon.updated[0]).toEqual({ id: '1', patch: { text: 'User likes dark mode and tea.' } })
+  })
+})
+
+describe('loadRelevantMemories', () => {
+  it('falls back to recent memories when the prompt matches nothing, bounded to count', async () => {
+    daemon.memories = [memory('1', 'User likes tea.'), memory('2', 'User lives in Oslo.'), memory('3', 'x')]
+    // The daemon matches the whole query as one substring, so a sentence finds nothing.
+    daemon.search = () => []
+    try {
+      const recalled = await loadRelevantMemories('What should I drink this morning?', 2)
+      expect(recalled.map((entry) => entry.id)).toEqual(['1', '2'])
+      // The daemon defaults to 50 rows; ask for the configured count instead.
+      expect(vi.mocked(listMemories).mock.calls.at(-1)).toEqual([undefined, 2])
+    } finally {
+      daemon.search = undefined
+    }
+  })
+
+  it('keeps keyword matches when there are some', async () => {
+    daemon.memories = [memory('1', 'User likes tea.'), memory('2', 'User lives in Oslo.')]
+    daemon.search = () => [memory('2', 'User lives in Oslo.')]
+    try {
+      const recalled = await loadRelevantMemories('Oslo', 5)
+      expect(recalled.map((entry) => entry.id)).toEqual(['2'])
+    } finally {
+      daemon.search = undefined
+    }
   })
 })

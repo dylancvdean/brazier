@@ -261,9 +261,10 @@ export type MemoryInput = {
   source_message_id?: string | null
 }
 
-export async function listMemories(query?: string): Promise<Memory[]> {
+export async function listMemories(query?: string, limit?: number): Promise<Memory[]> {
   const parameters = new URLSearchParams()
   if (query?.trim()) parameters.set('q', query.trim())
+  if (limit != null) parameters.set('limit', String(limit))
   return (
     await request<{ data: Memory[] }>(`/api/v1/memories?${parameters.toString()}`)
   ).data

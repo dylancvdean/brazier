@@ -953,9 +953,12 @@ export function App(): React.JSX.Element {
   const computerModels = useMemo(
     () =>
       sortComputerUseModels(
-        effectiveLocalModels.filter((model) => isComputerUseModel(model))
+        effectiveLocalModels.filter((model) =>
+          isComputerUseModel(model, modelProfiles[model.id])
+        ),
+        modelProfiles
       ),
-    [effectiveLocalModels]
+    [effectiveLocalModels, modelProfiles]
   )
   const generateModels = useMemo(
     () =>
@@ -2276,7 +2279,7 @@ export function App(): React.JSX.Element {
         if (workspaceModes.voice && appMode !== 'voice') switchAppMode('voice')
         return
       }
-      if (appMode === 'computer' && isComputerUseModel(model)) {
+      if (appMode === 'computer' && isComputerUseModel(model, modelProfiles[model.id])) {
         setComputerModel(model.id)
         return
       }
@@ -2286,7 +2289,7 @@ export function App(): React.JSX.Element {
         switchAppMode('chat', { skipModelPrepare: true })
       }
     },
-    [appMode, selectModel, switchAppMode, workspaceModes]
+    [appMode, selectModel, switchAppMode, workspaceModes, modelProfiles]
   )
 
   const triggerNewForActiveMode = useCallback((): void => {
@@ -2304,7 +2307,7 @@ export function App(): React.JSX.Element {
     }
     void newConversation()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appMode, agentSidebar, computerSidebar, incognito])
+  }, [appMode, agentSidebar, computerSidebar, incognito, messages.length])
 
   const openActiveModelSettings = useCallback((): void => {
     if (appMode === 'chat' || appMode === 'agent') {
