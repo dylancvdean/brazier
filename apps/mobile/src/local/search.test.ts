@@ -182,3 +182,43 @@ test('a failure is reported, and cancel drops what is pending or in flight', asy
   await settle();
   assert.deepEqual([pending.length, searched, reports.length], [0, ['a', 'b'], 1]);
 });
+
+test('speech repositories without a pipeline tag and image repositories are not chat results', () => {
+  const results = parseResults([
+    gguf('a/chat'),
+    gguf('a/asr', { pipeline_tag: undefined, tags: ['mlx-audio', 'qwen3_asr', 'speech-to-text', 'asr'] }),
+    gguf('a/sd-turbo', { pipeline_tag: undefined, tags: ['gguf', 'sd.cpp', 'stable-diffusion.cpp'] }),
+  ], 'gguf');
+  assert.deepEqual(results.map(({ slug }) => slug), ['a/chat']);
+});
+
+test('image results leave out add-ons and files that are only part of a model', () => {
+  const image = (id: string, files: string[], tags: string[] = []) => ({
+    id, pipeline_tag: 'text-to-image', tags, siblings: files.map((rfilename) => ({ rfilename })),
+  });
+  const results = parseResults([
+    image('a/checkpoint', ['model.safetensors', 'model_unet.safetensors', 'model_lora.safetensors']),
+    image('a/controlnet-depth', ['diffusion_pytorch_model.safetensors']),
+    image('a/pose', ['OpenPoseXL2.safetensors'], ['ControlNet']),
+    image('a/style-lora', ['style.safetensors'], ['lora']),
+    image('a/unet', ['diffusion_pytorch_model.safetensors', 'model_unet.safetensors']),
+    image('a/explorations', ['model.safetensors']),
+  ], 'image');
+  assert.deepEqual(results.map(({ slug, files }) => [slug, files]), [['a/checkpoint', 1], ['a/explorations', 1]]);
+});
+
+test('an image search leads with repositories made for stable-diffusion.cpp', async () => {
+  const image = (id: string, extra: object = {}) => ({ id, pipeline_tag: 'text-to-image', siblings: [{ rfilename: 'm.gguf' }], ...extra });
+  const request = { query: 'turbo', format: 'image', sort: 'downloads' } as const;
+  const next = 'https://huggingface.co/api/models?cursor=2';
+  const seen: string[] = [];
+  const fetch: Fetch = async (url) => {
+    seen.push(url);
+    if (url.includes('filter=stable-diffusion.cpp')) return reply([image('a/made', { pipeline_tag: undefined }), image('a/both')]);
+    return url === next ? reply([image('a/later')]) : reply([image('a/both'), image('a/tagged')], `<${next}>; rel="next"`);
+  };
+  const first = await searchModels(fetch, request);
+  assert.deepEqual([first.results.map(({ slug }) => slug), first.next], [['a/made', 'a/both', 'a/tagged'], next]);
+  assert.deepEqual((await searchModels(fetch, request, first.next)).results.map(({ slug }) => slug), ['a/later']);
+  assert.equal(seen.length, 3);
+});

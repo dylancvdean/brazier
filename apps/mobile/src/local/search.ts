@@ -32,22 +32,29 @@ const origin = 'https://huggingface.co';
 const pageSize = 20;
 const fields = ['siblings', 'downloads', 'likes', 'pipeline_tag', 'tags', 'lastModified', 'gated'];
 
-export function searchUrl({ query, format, sort }: SearchRequest): string {
+export function searchUrl({ query, format, sort }: SearchRequest, tag = format === 'image' ? 'text-to-image' : format): string {
   const parameters = [
     ...(query.trim() ? [`search=${encodeURIComponent(query.trim())}`] : []),
-    `filter=${format === 'image' ? 'text-to-image' : format}`,
+    `filter=${tag}`,
     `sort=${sort}`, 'direction=-1', `limit=${pageSize}`,
     ...fields.map((field) => `expand[]=${field}`),
   ];
   return `${origin}/api/models?${parameters.join('&')}`;
 }
 
+// Repositories made for stable-diffusion.cpp are tagged with it, and often not as text-to-image.
+const sdcpp = 'stable-diffusion.cpp';
 // A GGUF or MLX repository with one of these is not a chat model.
 const notChat = new Set([
   'text-to-image', 'image-to-image', 'text-to-video', 'image-to-video', 'text-to-speech', 'text-to-audio',
   'automatic-speech-recognition', 'audio-to-audio', 'feature-extraction', 'sentence-similarity', 'text-ranking',
   'image-text-to-image', 'image-text-to-video', 'image-classification', 'object-detection', 'image-segmentation',
+  'stable-diffusion', sdcpp, 'sd.cpp',
 ]);
+// Speech and embedding repositories often carry no pipeline tag, only these.
+const otherKind = /^(mlx-audio|asr|stt|tts|speech|speech-to-text|speech-recognition|transcription|whisper|audio|embeddings?|reranker)$/i;
+// Add-ons to an image model, which generate nothing on their own.
+const addOn = /controlnet|(^|[^a-z])lora([^a-z]|$)|adapter/i;
 // Image families whose checkpoints need separate text-encoder or VAE files, which this app cannot load.
 const needsMoreFiles = /flux|sd3|stable-diffusion-3|qwen-image|z-image|hunyuan|chroma|kontext|lumina|pixart|auraflow|cascade|wan\d|hidream|omnigen|sana/i;
 
@@ -65,7 +72,9 @@ export function parseResults(value: unknown, format: SearchFormat): SearchResult
     if (typeof model?.id !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(model.id) || model.private === true ||
         (model.gated !== undefined && model.gated !== false)) return [];
     const tags = [model.pipeline_tag, ...(Array.isArray(model.tags) ? model.tags : [])].filter((tag) => typeof tag === 'string');
-    if (format === 'image' ? needsMoreFiles.test(`${model.id} ${tags.join(' ')}`) : tags.some((tag) => notChat.has(tag))) return [];
+    const named = `${model.id} ${tags.join(' ')}`;
+    if (format === 'image' ? needsMoreFiles.test(named) || addOn.test(named)
+      : tags.some((tag) => notChat.has(tag) || otherKind.test(tag))) return [];
     const files = (Array.isArray(model.siblings) ? model.siblings : []).flatMap((file) => {
       const path = (file as { rfilename?: unknown })?.rfilename;
       return typeof path === 'string' ? [{ path, size: 0 }] : [];
@@ -90,9 +99,7 @@ const nextPage = (link: string | null) => {
  * repositories are all filtered out are skipped, a few at a time.
  */
 export async function searchModels(fetch: Fetch, request: SearchRequest, next?: string | null): Promise<SearchPage> {
-  let url: string | null = next ?? searchUrl(request);
-  const results: SearchResult[] = [];
-  for (let page = 0; url && page < 4 && results.length === 0; page += 1) {
+  const read = async (url: string) => {
     let response: Awaited<ReturnType<Fetch>>;
     try {
       response = await fetch(url, { headers: { accept: 'application/json' } });
@@ -101,10 +108,18 @@ export async function searchModels(fetch: Fetch, request: SearchRequest, next?: 
     }
     if (response.status === 429) throw new Error('Hugging Face is limiting searches. Wait a moment and try again.');
     if (!response.ok) throw new Error(`Hugging Face returned HTTP ${response.status}.`);
-    results.push(...parseResults(await response.json(), request.format));
-    url = nextPage(response.headers.get('link'));
+    return { results: parseResults(await response.json(), request.format), next: nextPage(response.headers.get('link')) };
+  };
+  // The first page of an image search leads with the repositories made for stable-diffusion.cpp.
+  const made = !next && request.format === 'image' ? (await read(searchUrl(request, sdcpp))).results : [];
+  let url: string | null = next ?? searchUrl(request);
+  let results: SearchResult[] = [];
+  for (let page = 0; url && page < 4 && results.length === 0; page += 1) {
+    const found = await read(url);
+    results = found.results;
+    url = found.next;
   }
-  return { results, next: url };
+  return { results: mergeResults(made, results), next: url };
 }
 
 /** Adds a page to the results shown, without repeating a repository. */

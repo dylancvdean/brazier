@@ -61,6 +61,7 @@ const gguf = [
   { path: 'mmproj-model-f16.gguf', size: 50 },
   { path: 'MTP/mtp-model-Q8_0.gguf', size: 40 },
   { path: 'mtp-model.gguf', size: 40 },
+  { path: 'model-Q4_0-MTP.gguf', size: 30 },
   { path: 'big/model-F16-00001-of-00002.gguf', size: 900 },
   { path: 'big/model-F16-00002-of-00002.gguf', size: 300 },
   { path: 'partial-00001-of-00003.gguf', size: 5 },
@@ -126,4 +127,17 @@ test('an image repository offers its single-file checkpoints to stable-diffusion
   assert.deepEqual(modelChoices(files, ['llama.cpp', 'mlx'], true), []);
   // Without the tags the same GGUFs are chat models, as before.
   assert.deepEqual(modelChoices(files, all).map(({ runtime }) => runtime), ['llama.cpp', 'llama.cpp']);
+});
+
+test('a full model that embeds a prediction head is still a chat model', () => {
+  const names = (files: { path: string; size: number }[]) => modelChoices(files, ['llama.cpp']).map(({ name }) => name);
+  assert.deepEqual(names([{ path: 'model-MTP-Q4_K_M.gguf', size: 5e9 }, { path: 'model-Q4_K_M-mtp.gguf', size: 3e8 }]), ['model-MTP-Q4_K_M.gguf']);
+  assert.deepEqual(names([{ path: 'model-MTP-Q4_K_M.gguf', size: 0 }, { path: 'mtp-model.gguf', size: 0 }]), ['model-MTP-Q4_K_M.gguf']);
+});
+
+test('ControlNet, UNet-only and adapter files are not image models', () => {
+  const files = ['sdxl_lightning_2step.safetensors', 'sdxl_lightning_2step_unet.safetensors', 'sdxl_lightning_2step_lora.safetensors',
+    'diffusion_pytorch_model.fp16.safetensors', 'control-lora-openposeXL2-rank256.safetensors', 'ip-adapter_sd15.safetensors']
+    .map((path) => ({ path, size: 1 }));
+  assert.deepEqual(modelChoices(files, ['sd.cpp'], true).map(({ name }) => name), ['sdxl_lightning_2step.safetensors']);
 });
