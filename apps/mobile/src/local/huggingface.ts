@@ -1,6 +1,6 @@
-export type RuntimeId = 'llama.cpp' | 'mlx' | 'apple';
+export type RuntimeId = 'llama.cpp' | 'mlx' | 'apple' | 'sd.cpp';
 export type RepoFile = { path: string; size: number };
-/** Something in a repository that one runtime can load: a GGUF (with its parts) or a whole MLX repository. */
+/** Something in a repository that one runtime can load: a GGUF (with its parts), a whole MLX repository or an image checkpoint. */
 export type ModelChoice = { runtime: RuntimeId; name: string; entry: string; files: RepoFile[]; size: number };
 
 type Fetch = (url: string, init?: { headers?: Record<string, string> }) => Promise<{
@@ -60,13 +60,45 @@ export async function listRepoFiles(fetch: Fetch, slug: string): Promise<RepoFil
   return files;
 }
 
+const imageTags = ['text-to-image', 'image-to-image', 'stable-diffusion', 'stable-diffusion.cpp', 'sd.cpp', 'diffusers'];
+
+/**
+ * Whether the repository holds image models, from its Hugging Face tags. A GGUF does not say in its name whether
+ * it is a chat model or an image model. False when the tags cannot be read.
+ */
+export async function isImageRepo(fetch: Fetch, slug: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${origin}/api/models/${slug}`, { headers: { accept: 'application/json' } });
+    if (!response.ok) return false;
+    const { pipeline_tag: pipeline, tags } = await response.json() as { pipeline_tag?: unknown; tags?: unknown };
+    return [pipeline, ...(Array.isArray(tags) ? tags : [])].some((tag) => imageTags.includes(tag as string));
+  } catch {
+    return false;
+  }
+}
+
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
 const split = /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i;
 const mlxFiles = /(\.safetensors|\.json|\.jinja|\.model|\.txt)$/i;
 
-/** What the listed files offer each runtime. A split GGUF is one choice; projector files are not chat models. */
-export function modelChoices(files: readonly RepoFile[], runtimes: readonly RuntimeId[]): ModelChoice[] {
+// Parts of a model that stable-diffusion.cpp cannot run on their own.
+const imagePart = /(^|[-_.])(vae|taesd|lora|clip|t5|t5xxl|text[-_]encoders?|controlnet|mmproj)([-_.]|$)/i;
+
+/**
+ * What the listed files offer each runtime. A split GGUF is one choice; projector files are not chat models.
+ * In an image repository (`image`) the single-file checkpoints, a GGUF or a `.safetensors` at the top level,
+ * are image models and nothing in it is a chat model.
+ */
+export function modelChoices(files: readonly RepoFile[], runtimes: readonly RuntimeId[], image = false): ModelChoice[] {
   const choices: ModelChoice[] = [];
+  if (image) {
+    if (!runtimes.includes('sd.cpp')) return [];
+    return files
+      .filter(({ path }) => (/\.gguf$/i.test(path) || (/\.safetensors$/i.test(path) && !path.includes('/'))) &&
+        !split.test(path) && !imagePart.test(baseName(path)))
+      .map((file): ModelChoice => ({ runtime: 'sd.cpp', entry: file.path, files: [file], name: baseName(file.path), size: file.size }))
+      .sort((a, b) => a.size - b.size || a.name.localeCompare(b.name));
+  }
   if (runtimes.includes('llama.cpp')) {
     const parts = new Map<string, RepoFile[]>();
     for (const file of files) {

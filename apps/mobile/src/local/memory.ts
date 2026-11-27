@@ -11,6 +11,12 @@ const WORKING = 0.25e9;
 // Where the system does not say how much one app may use, half of physical memory.
 const FALLBACK_SHARE = 0.5;
 
+/**
+ * What stable-diffusion.cpp needs beyond an image model's file for a 512×512 image with the decoder run in
+ * tiles. An estimate from desktop runs; passed as `context` for image models.
+ */
+export const IMAGE_WORKING = 0.75e9;
+
 const positive = (value: unknown): value is number => typeof value === 'number' && value > 0 && Number.isFinite(value);
 
 /**

@@ -3,11 +3,13 @@ import { fetch } from 'expo/fetch';
 import { Directory, File, Paths } from 'expo-file-system';
 import { createDownloadResumable } from 'expo-file-system/legacy';
 import { conversationStore } from './conversations.ts';
-import { availableRuntimes, localEngine, type ChatBackend, type Runtime } from './engine.ts';
-import { fileUrl, listRepoFiles, modelChoices, parseSlug, type ModelChoice, type RuntimeId } from './huggingface.ts';
-import { memoryWarning, type DeviceMemory } from './memory.ts';
+import { blobFileName, parseHistory, type Generator, type HistoryEntry } from '../media.ts';
+import { availableRuntimes, localEngine, type ChatBackend, type LocalEngine, type Runtime } from './engine.ts';
+import { imageEngine } from './images.ts';
+import { fileUrl, isImageRepo, listRepoFiles, modelChoices, parseSlug, type ModelChoice, type RuntimeId } from './huggingface.ts';
+import { IMAGE_WORKING, memoryWarning, type DeviceMemory } from './memory.ts';
 import { addInstalled, installedFrom, modelId, parseInstalled, removeInstalled, type InstalledModel } from './models.ts';
-import { appMemoryLimit, appleRuntime, llamaContextBytes, llamaRuntime, mlxRuntime } from './runtimes.ts';
+import { appMemoryLimit, appleRuntime, llamaContextBytes, llamaRuntime, mlxRuntime, sdcppRuntime } from './runtimes.ts';
 
 // Everything "This device" keeps lives under one directory in the app's documents.
 const root = () => {
@@ -63,7 +65,64 @@ export const runtimes: readonly Runtime[] = [
   mlxRuntime((model) => filePath(modelDirectory(model.id))),
 ];
 
-export const deviceEngine = localEngine(runtimes, installedModels);
+const chatEngine = localEngine(runtimes, installedModels);
+const imageRuntime = sdcppRuntime((model) => filePath(new File(modelDirectory(model.id), model.entry)));
+
+// Generated images are kept under their hash, like a host's blobs, so history entries have the same shape.
+const imagesRoot = () => {
+  const directory = new Directory(root(), 'images');
+  if (!directory.exists) directory.create({ intermediates: true, idempotent: true });
+  return directory;
+};
+const imageFile = (sha256: string) => new File(imagesRoot(), blobFileName({ sha256, mime_type: 'image/png' }));
+
+const images = imageEngine(imageRuntime, {
+  installed: installedModels,
+  output: () => filePath(new File(imagesRoot(), `${newId()}.part`)),
+  keep(output, { sha256 }) {
+    const written = new File(imagesRoot(), output.slice(output.lastIndexOf('/') + 1));
+    const target = imageFile(sha256);
+    if (target.exists) written.delete();
+    else written.move(target);
+  },
+  // Phones rarely have memory for a chat model and an image model together.
+  beforeLoad: () => chatEngine.unload(),
+  now: Date.now,
+  random: Math.random,
+});
+
+/** Chat models on this device. Loading one frees the image model, and the other way round. */
+export const deviceEngine: LocalEngine = {
+  ...chatEngine,
+  async prepare(modelId, signal) { await images.unload(); return chatEngine.prepare(modelId, signal); },
+  async chat(...request) { await images.unload(); return chatEngine.chat(...request); },
+  async unload(modelId) { await Promise.all([chatEngine.unload(modelId), images.unload(modelId)]); },
+};
+
+const historyName = 'generate-history.json';
+
+/** The Generate screen for this device: images only, made and kept on the phone. */
+export const deviceGenerator: Generator = {
+  local: true,
+  models: images.models,
+  generate: (_modality, body) => images.generate(body),
+  active: async () => images.active(),
+  cancel: async () => images.cancel(),
+  async file(blob) {
+    const file = imageFile(blob.sha256);
+    if (!file.exists) throw new Error('This image is no longer on this device.');
+    return file.uri;
+  },
+  history: async (): Promise<HistoryEntry[]> => parseHistory(await textFiles.read(historyName)),
+  saveHistory(history) {
+    void textFiles.write(historyName, JSON.stringify(history)).catch(() => undefined);
+    // An image that left the history (removed, or pushed out by newer ones) is deleted with it.
+    const kept = new Set(history.map(({ blob }) => blobFileName(blob)));
+    for (const entry of imagesRoot().list()) {
+      if (entry instanceof File && !kept.has(entry.name) && !entry.name.endsWith('.part')) entry.delete();
+    }
+  },
+};
 
 /** Chat on this device: local runtimes, conversations kept on the phone, and no tools. */
 /** What this device has for a model: the app's limit where iOS reports it, and physical memory. */
@@ -72,7 +131,8 @@ export const deviceMemory = async (): Promise<DeviceMemory> => ({ limit: await a
 const contexts = new Map<string, Promise<number | null>>();
 
 /** The context cache an installed model needs, read from its file once; null when unknown (MLX, unreadable). */
-export function contextMemory(model: InstalledModel): Promise<number | null> {
+export function contextMemory(model: Pick<InstalledModel, 'id' | 'runtime' | 'entry'>): Promise<number | null> {
+  if (model.runtime === 'sd.cpp') return Promise.resolve(IMAGE_WORKING);
   if (model.runtime !== 'llama.cpp') return Promise.resolve(null);
   let known = contexts.get(model.id);
   if (!known) {
@@ -93,7 +153,7 @@ export const deviceBackend: ChatBackend = {
 export const freeSpace = (): number => Paths.availableDiskSpace;
 
 export async function usableRuntimes(): Promise<RuntimeId[]> {
-  return (await availableRuntimes(runtimes)).map(({ id }) => id);
+  return [...(await availableRuntimes(runtimes)).map(({ id }) => id), ...(await imageRuntime.available() ? [imageRuntime.id] : [])];
 }
 
 export async function builtInModels() {
@@ -102,7 +162,8 @@ export async function builtInModels() {
 
 export async function repositoryChoices(input: string): Promise<{ slug: string; choices: ModelChoice[] }> {
   const slug = parseSlug(input);
-  return { slug, choices: modelChoices(await listRepoFiles(fetch, slug), await usableRuntimes()) };
+  const [files, image] = await Promise.all([listRepoFiles(fetch, slug), isImageRepo(fetch, slug)]);
+  return { slug, choices: modelChoices(files, await usableRuntimes(), image) };
 }
 
 export type ActiveDownload = { id: string; name: string; size: number; bytes: number };

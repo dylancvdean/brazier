@@ -1,0 +1,51 @@
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+def safeExtGet = { name, fallback -> rootProject.ext.has(name) ? rootProject.ext.get(name) : fallback }
+
+// stable-diffusion.cpp is compiled from source at the commit in SDCPP_COMMIT.
+def fetchSdcpp = tasks.register('fetchSdcpp', Exec) {
+  commandLine 'bash', file('../scripts/fetch.sh').absolutePath
+}
+
+android {
+  namespace 'ai.brazier.sdcpp'
+  compileSdkVersion safeExtGet('compileSdkVersion', 36)
+  ndkVersion safeExtGet('ndkVersion', '27.1.12297006')
+
+  defaultConfig {
+    minSdkVersion safeExtGet('minSdkVersion', 24)
+    externalNativeBuild {
+      cmake {
+        arguments '-DANDROID_STL=c++_shared', '-DCMAKE_BUILD_TYPE=Release'
+        // 64-bit only: image models do not fit a 32-bit address space.
+        abiFilters 'arm64-v8a', 'x86_64'
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path 'src/main/cpp/CMakeLists.txt'
+      version '3.22.1'
+    }
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+  kotlinOptions {
+    jvmTarget = '17'
+  }
+}
+
+tasks.configureEach { task ->
+  if (task.name.startsWith('configureCMake') || task.name.startsWith('generateJsonModel')) {
+    task.dependsOn(fetchSdcpp)
+  }
+}
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+}

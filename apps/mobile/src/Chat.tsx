@@ -29,7 +29,7 @@ function ToolCalls({ calls }: { calls: readonly ToolCall[] }) {
 
 /**
  * `backend` is a paired host or this device. With `onOpenModels` set the chat is on this device: text only,
- * so the host-only entry points (tools, Generate, Agent) are not shown.
+ * so the host-only entry points (tools, Agent) are not shown.
  */
 export function Chat({
   backend: api, credential, hostName, modelsRevision = 0, disabledTools, onDisabledTools, onUnauthorized, onOpenSettings,
@@ -338,10 +338,11 @@ export function Chat({
           </ScrollView>
           {local ? <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => leave(onOpenModels!)}>
             <Text style={styles.iconText}>▤</Text><Text style={styles.listText}>Models</Text>
-          </Pressable> : <>
-            <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => leave(onOpenGenerate)}>
-              <Text style={styles.iconText}>✦</Text><Text style={styles.listText}>Generate</Text>
-            </Pressable>
+          </Pressable> : null}
+          <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => leave(onOpenGenerate)}>
+            <Text style={styles.iconText}>✦</Text><Text style={styles.listText}>Generate</Text>
+          </Pressable>
+          {local ? null : <>
             <Pressable accessibilityRole="button" style={styles.listItem} onPress={() => leave(onOpenAgent)}>
               <Text style={styles.iconText}>🛠</Text><Text style={styles.listText}>Agent</Text>
             </Pressable>

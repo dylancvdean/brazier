@@ -20,6 +20,10 @@ platform :ios, podfile_properties['ios.deploymentTarget'] || '15.1'
 
 prepare_react_native_project!
 
+# stable-diffusion.cpp for on-device images is built from its pinned commit;
+# this does nothing once the xcframework for that commit exists.
+system('bash', File.join(__dir__, '../modules/brazier-sdcpp/scripts/build-ios.sh')) or raise 'Building stable-diffusion.cpp failed.'
+
 target 'Brazier' do
   use_expo_modules!
 

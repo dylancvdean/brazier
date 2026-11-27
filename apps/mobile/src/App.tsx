@@ -4,9 +4,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Text, useColorScheme, View } from 'react-native';
 import { daemonClient, DaemonError, UnreachableError, type Credential, type Host } from './api.ts';
 import { Chat } from './Chat.tsx';
+import { hostGenerator } from './blobFiles.ts';
 import { Generate } from './Generate.tsx';
 import { defaultPreferences, DEVICE_ID, hostId, renameHost, selectHost, type Preferences } from './hosts.ts';
-import { deviceBackend, deviceEngine } from './local/device.ts';
+import { deviceBackend, deviceEngine, deviceGenerator } from './local/device.ts';
 import { Models } from './Models.tsx';
 import { checkLocalNetwork } from './localNetwork';
 import { Pairing } from './Pairing.tsx';
@@ -58,6 +59,7 @@ function Shell({ preferences, onPreferences }: {
   const onDevice = activeId === DEVICE_ID;
   const credential: Credential | null = activeId ? saved.credentials[activeId] ?? null : null;
   const hostBackend = useMemo(() => credential ? daemonClient(fetch, credential) : null, [credential]);
+  const generator = useMemo(() => credential ? hostGenerator(credential) : null, [credential]);
   const [modelsRevision, setModelsRevision] = useState(0);
 
   // A model loaded for "This device" is not kept in memory while a host is in use.
@@ -174,14 +176,18 @@ function Shell({ preferences, onPreferences }: {
 
 
   // Chat stays mounted behind Settings and Models so a draft or a running reply survives the visit.
-  if (onDevice || !credential || !hostBackend) {
+  if (onDevice || !credential || !hostBackend || !generator) {
     return <>
       {view === 'settings' ? settings : view === 'models' ? models : null}
+      {generateOpened ? <View style={view === 'generate' ? styles.flex : { display: 'none' }}>
+        <Generate key={DEVICE_ID} generator={deviceGenerator} hostName="This device" visible={view === 'generate'}
+          onUnauthorized={() => undefined} onClose={() => setView('chat')} onOpenModels={() => setView('models')} />
+      </View> : null}
       <View style={view === 'chat' ? styles.flex : { display: 'none' }}>
         <Chat key={DEVICE_ID} backend={deviceBackend} credential={null} hostName="This device" modelsRevision={modelsRevision}
           disabledTools={[]} onDisabledTools={() => undefined} onUnauthorized={() => undefined}
           onOpenSettings={() => setView('settings')} onOpenModels={() => setView('models')}
-          onOpenGenerate={() => undefined} onOpenAgent={() => undefined} />
+          onOpenGenerate={() => { setGenerateOpened(true); setView('generate'); }} onOpenAgent={() => undefined} />
       </View>
     </>;
   }
@@ -215,7 +221,7 @@ function Shell({ preferences, onPreferences }: {
     {view === 'settings' ? settings : view === 'models' ? models : null}
     {/* Stays mounted once opened so a running generation is not lost on returning to the chat. */}
     {generateOpened ? <View style={view === 'generate' ? styles.flex : { display: 'none' }}>
-      <Generate key={hostId(credential)} credential={credential} hostName={name} visible={view === 'generate'}
+      <Generate key={hostId(credential)} generator={generator} hostName={name} visible={view === 'generate'}
         onUnauthorized={reportAccess} onClose={() => setView('chat')} />
     </View> : null}
     <View style={main === 'chat' ? styles.flex : { display: 'none' }}>

@@ -4,7 +4,7 @@ import * as MediaLibrary from 'expo-media-library';
 import * as Sharing from 'expo-sharing';
 import type { Credential } from './api.ts';
 import { hostId } from './hosts.ts';
-import { blobFileName, mediaClient, parseHistory, type HistoryEntry, type MediaBlob } from './media.ts';
+import { blobFileName, mediaClient, parseHistory, type Generator, type HistoryEntry, type MediaBlob } from './media.ts';
 
 // Images, the video player, Photos and the share sheet cannot send the bearer
 // key or use the host's pinned certificate. Blobs are therefore downloaded
@@ -85,4 +85,15 @@ export function saveHistory(credential: Credential, history: readonly HistoryEnt
   const file = historyFile(credential);
   if (!file.exists) file.create({ intermediates: true });
   file.write(JSON.stringify(history));
+}
+
+/** The Generate screen for a paired host. */
+export function hostGenerator(credential: Credential): Generator {
+  const api = mediaClient(fetch, credential);
+  return {
+    local: false, models: api.models, generate: api.generate, active: api.active, cancel: api.cancel,
+    file: (blob) => blobFile(credential, blob),
+    history: () => loadHistory(credential),
+    saveHistory: (history) => saveHistory(credential, history),
+  };
 }

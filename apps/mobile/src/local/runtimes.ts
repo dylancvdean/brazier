@@ -2,6 +2,7 @@ import type { LlamaContext } from 'llama.rn';
 import { NativeEventEmitter, NativeModules, Platform, type NativeModule } from 'react-native';
 import { answerDelta, type ChatTurn, type Runtime } from './engine.ts';
 import { CONTEXT_TOKENS, contextBytes } from './memory.ts';
+import { ImageCancelled, type ImageFile, type ImageProgress, type ImageRequest, type ImageRuntime } from './images.ts';
 import type { InstalledModel } from './models.ts';
 
 /** llama.cpp through llama.rn: GGUF files, Metal on iOS. */
@@ -118,5 +119,41 @@ export function mlxRuntime(modelDirectory: (model: InstalledModel) => string): R
     },
     generate: native.generate,
     unload: native.unload,
+  };
+}
+
+type Sdcpp = NativeModule & {
+  load(path: string): Promise<void>;
+  generate(request: ImageRequest): Promise<ImageFile>;
+  cancel(): void;
+  unload(): Promise<void>;
+};
+
+/**
+ * stable-diffusion.cpp, linked into the app (modules/brazier-sdcpp): single-file image checkpoints, Metal on
+ * iPhones with an A14 or newer and the CPU elsewhere. Absent in builds made before the module was added.
+ */
+export function sdcppRuntime(modelPath: (model: InstalledModel) => string): ImageRuntime {
+  const native = NativeModules.BrazierSdcpp as Sdcpp | undefined;
+  return {
+    id: 'sd.cpp',
+    available: async () => !!native,
+    load: async (model) => { await native!.load(modelPath(model)); },
+    async generate(request, signal, onProgress) {
+      const events = new NativeEventEmitter(native!).addListener('BrazierSdcppProgress',
+        (event: ImageProgress) => { if (!signal.aborted) onProgress(event); });
+      const stop = () => native!.cancel();
+      signal.addEventListener('abort', stop, { once: true });
+      try {
+        return await native!.generate(request);
+      } catch (cause) {
+        if (signal.aborted || (cause as { code?: string })?.code === 'cancelled') throw new ImageCancelled();
+        throw cause;
+      } finally {
+        signal.removeEventListener('abort', stop);
+        events.remove();
+      }
+    },
+    unload: async () => { await native?.unload(); },
   };
 }

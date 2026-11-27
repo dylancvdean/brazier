@@ -77,6 +77,9 @@ importers:
 
   apps/mobile:
     dependencies:
+      brazier-sdcpp:
+        specifier: link:./modules/brazier-sdcpp
+        version: link:modules/brazier-sdcpp
       expo:
         specifier: 54.0.38
         version: 54.0.38(@babel/core@7.29.7(supports-color@8.1.1))(react-native@0.81.5(@babel/core@7.29.7(supports-color@8.1.1))(@types/react@19.1.17)(react@19.1.0)(supports-color@8.1.1))(react@19.1.0)(supports-color@8.1.1)(typescript@5.9.3)

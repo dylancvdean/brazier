@@ -25,6 +25,23 @@ export type HistoryEntry = {
   blob: { sha256: string; mime_type: string; size_bytes: number };
 };
 
+/**
+ * Where the Generate screen's models, jobs, files and history come from: a paired host, or this device
+ * (`local`: images only, with its own sizes and model names).
+ */
+export type Generator = {
+  local: boolean;
+  models(): Promise<Model[]>;
+  /** Resolves when the job finishes; it can run for minutes. */
+  generate(modality: Modality, body: GenerateBody): Promise<GenerateResult>;
+  active(): Promise<ActiveGeneration | null>;
+  cancel(): Promise<boolean>;
+  /** URI of a local file holding the blob. */
+  file(blob: MediaBlob): Promise<string>;
+  history(): Promise<HistoryEntry[]>;
+  saveHistory(history: readonly HistoryEntry[]): void;
+};
+
 // The desktop app's presets.
 export const sizePresets: Record<Modality, readonly (readonly [number, number])[]> = {
   image: [[512, 512], [768, 768], [1024, 1024], [1024, 768], [768, 1024], [1280, 720]],
