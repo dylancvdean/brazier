@@ -1454,22 +1454,41 @@ impl Database {
         let messages = self.list_messages(id).await?;
         let run_snapshots = self.list_run_snapshots(id).await?;
         let mut blob_ids = Vec::new();
+        // Attachment rows are shared by every conversation holding the same
+        // bytes, so the type and name come from this conversation's messages.
+        let mut declared: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
         for message in &messages {
             blob_ids.extend(blob_store::blob_refs_in_content(&message.content));
+            for part in message.content.as_array().into_iter().flatten() {
+                let Some(blob) = part.get("brazier_blob") else {
+                    continue;
+                };
+                let field = |key: &str| {
+                    blob.get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                };
+                if let Some(sha256) = field("sha256") {
+                    let entry = declared.entry(sha256).or_default();
+                    entry.0 = entry.0.take().or_else(|| field("mime_type"));
+                    entry.1 = entry.1.take().or_else(|| field("name"));
+                }
+            }
         }
         blob_ids.sort();
         blob_ids.dedup();
         let mut blobs = Vec::new();
         for sha256 in blob_ids {
             let (bytes, sniffed_mime_type) = blob_store::read_blob(data_dir, &sha256).await?;
-            // Blob files carry no extension, so only the attachment row knows
-            // the type of a document or other format without magic bytes.
-            let recorded: Option<(String, Option<String>)> =
-                sqlx::query_as("SELECT mime_type, original_name FROM attachments WHERE sha256 = ?")
-                    .bind(&sha256)
-                    .fetch_optional(&self.pool)
-                    .await?;
-            let (mime_type, original_name) = recorded.unwrap_or((sniffed_mime_type, None));
+            let (declared_mime_type, original_name) = declared.remove(&sha256).unwrap_or_default();
+            // Blob files carry no extension, so a document or other format
+            // without magic bytes is only typed by the message that holds it.
+            let mime_type = if sniffed_mime_type == "application/octet-stream" {
+                declared_mime_type.unwrap_or(sniffed_mime_type)
+            } else {
+                sniffed_mime_type
+            };
             blobs.push(ExportBlob {
                 sha256: sha256.clone(),
                 mime_type,
@@ -2656,9 +2675,18 @@ mod tests {
         let conversation = db.create_conversation("With a document").await.unwrap();
         let content = json!([{
             "type": "brazier_blob",
-            "brazier_blob": { "sha256": stored.sha256, "mime_type": "text/plain" }
+            "brazier_blob": {
+                "sha256": stored.sha256,
+                "mime_type": "text/plain",
+                "name": "notes.txt"
+            }
         }]);
         db.create_message(&conversation.id, message(None, Role::User, content))
+            .await
+            .unwrap();
+        // The same bytes attached elsewhere under another name and type must
+        // not leak into this conversation's export.
+        db.upsert_attachment(&stored.sha256, "text/markdown", 11, Some("private.md"))
             .await
             .unwrap();
 
