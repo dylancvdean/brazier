@@ -3,7 +3,7 @@ export type RepoFile = { path: string; size: number };
 /** Something in a repository that one runtime can load: a GGUF (with its parts), a whole MLX repository or an image checkpoint. */
 export type ModelChoice = { runtime: RuntimeId; name: string; entry: string; files: RepoFile[]; size: number };
 
-type Fetch = (url: string, init?: { headers?: Record<string, string> }) => Promise<{
+export type Fetch = (url: string, init?: { headers?: Record<string, string> }) => Promise<{
   ok: boolean; status: number; json(): Promise<unknown>; headers: { get(name: string): string | null };
 }>;
 
