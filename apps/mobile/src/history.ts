@@ -41,8 +41,7 @@ const time = (entry: HistoryEntry) => Date.parse(entry.createdAt) || 0;
  */
 export function mergeHistory(host: readonly HistoryEntry[], phone: readonly HistoryEntry[]): HistoryEntry[] {
   const ids = new Set(host.map(({ id }) => id));
-  const files = new Set(host.map(({ blob }) => blob.sha256));
-  const own = phone.filter((entry) => !entry.hostId && !ids.has(entry.id) && !files.has(entry.blob.sha256));
+  const own = phone.filter((entry) => !entry.hostId && !ids.has(entry.id));
   return [...host, ...own].sort((a, b) => time(b) - time(a));
 }
 

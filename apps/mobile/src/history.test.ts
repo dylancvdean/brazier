@@ -74,10 +74,10 @@ test('the host’s list wins; the phone adds only what the host never listed', (
     hostEntry('h0', { blob: { sha256: sha('d'), mime_type: 'image/png', size_bytes: 1 } }),
     // Made before the host kept a history, and still only known here.
     entry('p1', { createdAt: '2026-03-11T00:00:00.000Z', blob: { sha256: sha('e'), mime_type: 'image/png', size_bytes: 1 } }),
-    // The same file the host lists as h1.
-    entry('p2'),
+    // An earlier run that made the same file as h1: another generation, so it stays.
+    entry('p2', { createdAt: '2026-03-09T00:00:00.000Z' }),
   ];
-  assert.deepEqual(mergeHistory(host, phone).map(({ id }) => id), ['h2', 'p1', 'h1']);
+  assert.deepEqual(mergeHistory(host, phone).map(({ id }) => id), ['h2', 'p1', 'h1', 'p2']);
   assert.equal(mergeHistory(host, phone)[0]!.prompt, 'prompt h2');
   assert.deepEqual(mergeHistory([], phone).map(({ id }) => id), ['p1', 'p2']);
 });
