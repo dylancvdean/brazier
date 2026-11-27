@@ -1454,14 +1454,41 @@ impl Database {
         let messages = self.list_messages(id).await?;
         let run_snapshots = self.list_run_snapshots(id).await?;
         let mut blob_ids = Vec::new();
+        // Attachment rows are shared by every conversation holding the same
+        // bytes, so the type and name come from this conversation's messages.
+        let mut declared: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
         for message in &messages {
             blob_ids.extend(blob_store::blob_refs_in_content(&message.content));
+            for part in message.content.as_array().into_iter().flatten() {
+                let Some(blob) = part.get("brazier_blob") else {
+                    continue;
+                };
+                let field = |key: &str| {
+                    blob.get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                };
+                if let Some(sha256) = field("sha256") {
+                    let entry = declared.entry(sha256).or_default();
+                    entry.0 = entry.0.take().or_else(|| field("mime_type"));
+                    entry.1 = entry.1.take().or_else(|| field("name"));
+                }
+            }
         }
         blob_ids.sort();
         blob_ids.dedup();
         let mut blobs = Vec::new();
         for sha256 in blob_ids {
-            let (bytes, mime_type) = blob_store::read_blob(data_dir, &sha256).await?;
+            let (bytes, sniffed_mime_type) = blob_store::read_blob(data_dir, &sha256).await?;
+            let (declared_mime_type, original_name) = declared.remove(&sha256).unwrap_or_default();
+            // Blob files carry no extension, so a document or other format
+            // without magic bytes is only typed by the message that holds it.
+            let mime_type = if sniffed_mime_type == "application/octet-stream" {
+                declared_mime_type.unwrap_or(sniffed_mime_type)
+            } else {
+                sniffed_mime_type
+            };
             blobs.push(ExportBlob {
                 sha256: sha256.clone(),
                 mime_type,
@@ -1469,7 +1496,7 @@ impl Database {
                     &base64::engine::general_purpose::STANDARD,
                     &bytes,
                 ),
-                original_name: None,
+                original_name,
             });
         }
         Ok(ConversationExport {
@@ -2628,5 +2655,48 @@ mod tests {
             snapshots[0].tool_calls,
             Some(json!([{ "name": "calculator" }]))
         );
+    }
+
+    #[tokio::test]
+    async fn exported_documents_keep_their_type_and_import_again() {
+        let (dir, db) = open().await;
+        let stored =
+            blob_store::store_bytes(dir.path(), b"plain notes", "text/plain", Some("notes.txt"))
+                .await
+                .unwrap();
+        db.upsert_attachment(
+            &stored.sha256,
+            &stored.mime_type,
+            stored.size_bytes as i64,
+            stored.original_name.as_deref(),
+        )
+        .await
+        .unwrap();
+        let conversation = db.create_conversation("With a document").await.unwrap();
+        let content = json!([{
+            "type": "brazier_blob",
+            "brazier_blob": {
+                "sha256": stored.sha256,
+                "mime_type": "text/plain",
+                "name": "notes.txt"
+            }
+        }]);
+        db.create_message(&conversation.id, message(None, Role::User, content))
+            .await
+            .unwrap();
+        // The same bytes attached elsewhere under another name and type must
+        // not leak into this conversation's export.
+        db.upsert_attachment(&stored.sha256, "text/markdown", 11, Some("private.md"))
+            .await
+            .unwrap();
+
+        let export = db
+            .export_conversation(dir.path(), &conversation.id)
+            .await
+            .unwrap();
+        assert_eq!(export.blobs[0].mime_type, "text/plain");
+        assert_eq!(export.blobs[0].original_name.as_deref(), Some("notes.txt"));
+        let imported = db.import_conversation(dir.path(), export).await.unwrap();
+        assert_eq!(db.list_messages(&imported.id).await.unwrap().len(), 1);
     }
 }

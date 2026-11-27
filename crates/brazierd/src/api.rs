@@ -263,6 +263,10 @@ pub fn parse_origins(origins: &[String]) -> anyhow::Result<Vec<HeaderValue>> {
     Ok(values)
 }
 
+/// An export embeds every attachment as base64, so an import is far larger
+/// than the default request body limit as soon as it carries one photo.
+const CONVERSATION_IMPORT_MAX_BYTES: usize = 256 * 1024 * 1024;
+
 pub fn router(state: AppState) -> Router {
     router_with_origins(
         state,
@@ -305,7 +309,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/conversations/{id}/export",
             get(export_conversation),
         )
-        .route("/api/v1/conversations/import", post(import_conversation))
+        .route(
+            "/api/v1/conversations/import",
+            post(import_conversation).layer(DefaultBodyLimit::max(CONVERSATION_IMPORT_MAX_BYTES)),
+        )
         .route(
             "/api/v1/conversations/{id}/runs",
             get(list_run_snapshots).post(create_run_snapshot),
@@ -1448,6 +1455,11 @@ async fn update_message(
     Path((id, message_id)): Path<(String, String)>,
     Json(request): Json<crate::types::UpdateMessage>,
 ) -> ApiResult<Json<Value>> {
+    if let Some(content) = request.content.as_ref() {
+        register_message_blobs(&state, content)
+            .await
+            .map_err(ApiError::bad_request)?;
+    }
     let message = state
         .db
         .update_message(&id, &message_id, request)
@@ -9610,6 +9622,89 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, parsed)
+    }
+
+    #[tokio::test]
+    async fn finalizing_a_message_registers_its_tool_generated_blob() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let app = router(state.clone());
+        let conversation = state.db.create_conversation("Streamed").await.unwrap();
+        let (status, message) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/conversations/{}/messages", conversation.id),
+            json!({ "parent_id": null, "role": "assistant", "content": "", "model": null }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        // Written straight to the blob store, as generation tools do.
+        let stored = blob_store::store_bytes(
+            dir.path(),
+            b"\x89PNG\r\n\x1a\nfinal image",
+            "image/png",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (status, updated) = json_request(
+            &app,
+            "PATCH",
+            &format!(
+                "/api/v1/conversations/{}/messages/{}",
+                conversation.id,
+                message["id"].as_str().unwrap()
+            ),
+            json!({ "content": [{
+                "type": "brazier_blob",
+                "brazier_blob": { "sha256": stored.sha256, "mime_type": "image/png" }
+            }] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert_eq!(
+            updated["content"][0]["brazier_blob"]["sha256"],
+            stored.sha256
+        );
+    }
+
+    #[tokio::test]
+    async fn an_export_with_a_large_attachment_can_be_imported() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let app = router(state.clone());
+        let mut image = b"\x89PNG\r\n\x1a\n".to_vec();
+        image.resize(3 * 1024 * 1024, 7);
+        let stored = blob_store::store_bytes(dir.path(), &image, "image/png", None)
+            .await
+            .unwrap();
+        let conversation = state.db.create_conversation("Photo").await.unwrap();
+        let (status, _) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/conversations/{}/messages", conversation.id),
+            json!({ "parent_id": null, "role": "user", "model": null, "content": [{
+                "type": "brazier_blob",
+                "brazier_blob": { "sha256": stored.sha256, "mime_type": "image/png" }
+            }] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let export = state
+            .db
+            .export_conversation(dir.path(), &conversation.id)
+            .await
+            .unwrap();
+
+        let (status, imported) = json_request(
+            &app,
+            "POST",
+            "/api/v1/conversations/import",
+            serde_json::to_value(export).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{imported}");
     }
 
     #[tokio::test]
