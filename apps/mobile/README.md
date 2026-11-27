@@ -134,14 +134,40 @@ bash apps/mobile/scripts/smoke-ios.sh <simulator-udid> <path-to-Brazier.app>
 ## Models on this device
 
 **This device** sits next to the paired hosts in Settings and works with no
-host paired. Its chats are text only: tools, web access, Agent, video and
-voice need a host and are not shown. **Generate** makes images on the phone. Conversations are saved in the app's
+host paired. Its chats are text; Agent, video and voice need a host and are
+not shown. **Generate** makes images on the phone. Conversations are saved in the app's
 documents on the phone, and so are the models.
 
 Open **Models** to add one: type a Hugging Face repository as `owner/name`,
 choose **List files**, and download a GGUF file. The screen shows each file's
 size and the free space, and lists what is stored with a **Delete** action.
 Only public repositories work; there is no search.
+
+### Tools on this device
+
+A GGUF model chatting on this device can call three tools that run on the
+phone, with no host involved (`src/local/tools.ts`):
+
+- **Web search** asks DuckDuckGo's HTML endpoint, which needs no account or
+  API key, and falls back to its lite endpoint. DuckDuckGo limits how often one
+  network may search; the tool then reports that instead of results.
+- **Web fetch** reads one public page and returns its readable text: the
+  article or main part, without scripts, styles and navigation. It reads at
+  most 512 KB, waits at most 15 seconds, and returns the first 3,000 characters,
+  because a phone model's context is small. Only `http` and `https` URLs to
+  public names are fetched: loopback, private, link-local and other reserved
+  addresses, local-network names and URLs with credentials are refused, and so
+  is a redirect that ends at one. A public name that resolves to a private
+  address is not detected.
+- **Current time** reads the phone's clock.
+
+The tools menu in the composer turns each one on or off; the choice is kept
+apart from the host tools of the same name. With every tool off, nothing but
+the model runs. A search query or page address leaves the phone only when the
+model calls a tool. Tool calls and results show in the conversation and are
+saved with it, as with a host. A reply makes at most three rounds of calls.
+Apple Intelligence and MLX models chat without tools, and the menu is hidden
+for them.
 
 GGUF models run through llama.cpp (`llama.rn`, pinned to the latest stable
 release, 0.12.9), using Metal on an iPhone and the CPU in the iOS Simulator.

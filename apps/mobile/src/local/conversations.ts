@@ -40,6 +40,8 @@ export function parseMessages(raw: string | null): Message[] {
     return [{
       id: message.id, role: message.role, content: message.content ?? '',
       parent_id: typeof message.parent_id === 'string' ? message.parent_id : null,
+      ...(Array.isArray(message.tool_calls) && message.tool_calls.length ? { tool_calls: message.tool_calls } : {}),
+      ...(typeof message.tool_call_id === 'string' ? { tool_call_id: message.tool_call_id } : {}),
     }];
   });
 }
@@ -60,7 +62,11 @@ export function conversationStore(files: TextFiles, newId: () => string) {
   const messages = async (id: string) => validId(id) ? parseMessages(await files.read(messagesFile(id))) : [];
   const createMessage = (id: string, message: NewMessage): Promise<Message> => serial(async () => {
     if (!(await list()).some((chat) => chat.id === id)) throw new Error('This conversation is no longer on this device.');
-    const saved: Message = { id: newId(), parent_id: message.parent_id, role: message.role, content: message.content };
+    const saved: Message = {
+      id: newId(), parent_id: message.parent_id, role: message.role, content: message.content,
+      ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}),
+      ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+    };
     await files.write(messagesFile(id), JSON.stringify([...await messages(id), saved]));
     return saved;
   });

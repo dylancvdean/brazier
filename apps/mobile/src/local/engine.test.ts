@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { answerDelta, chatTurns, localEngine, type Runtime } from './engine.ts';
+import { answerDelta, chatTurns, localEngine, toolTurns, type Runtime } from './engine.ts';
 import { addInstalled, installedFrom, modelId, parseInstalled, removeInstalled, type InstalledModel } from './models.ts';
 
 const model = (id: string, runtime: InstalledModel['runtime']): InstalledModel =>
@@ -109,4 +109,87 @@ test('the installed list keeps one entry per model and drops damaged ones', () =
   assert.deepEqual(parseInstalled(JSON.stringify([
     { ...installed, id: '../x' }, { ...installed, runtime: 'apple' }, { ...installed, files: ['../../x'] },
   ])), []);
+});
+
+function toolRuntime(rounds: { content: string; calls?: { name: string; arguments: string }[] }[], seen: { roles: string; tools: number }[]): Runtime {
+  return {
+    ...fake('llama.cpp', []),
+    generateWithTools: async (messages, tools, _signal, onToken) => {
+      seen.push({ roles: messages.map(({ role }) => role).join(','), tools: tools.length });
+      const round = rounds.shift()!;
+      if (round.content) onToken(round.content);
+      return { content: round.content, calls: round.calls ?? [] };
+    },
+  };
+}
+const localTools = (ran: string[]) => ({
+  definitions: (names: readonly string[]) => names.map((name) => ({ type: 'function', function: { name } })),
+  run: async (name: string, args: string) => {
+    ran.push(`${name} ${args}`);
+    return name === 'fetch_url' ? { output: 'Error: HTTP 500', is_error: true } : { output: 'x'.repeat(5000), is_error: false };
+  },
+});
+
+test('a reply runs the tools the model calls and reports each round as a host does', async () => {
+  const seen: { roles: string; tools: number }[] = [];
+  const ran: string[] = [];
+  const engine = localEngine([toolRuntime([
+    { content: 'Looking.', calls: [{ name: 'web_search', arguments: '{"query":"tea"}' }, { name: 'fetch_url', arguments: '' }] },
+    { content: '', calls: [{ name: 'get_current_time', arguments: '{}' }] },
+    { content: 'Done.' },
+  ], seen)], async () => [model('gguf', 'llama.cpp')], localTools(ran));
+  assert.equal(await engine.supportsTools('gguf'), true);
+  const events: string[] = [];
+  const answer = await engine.chat('gguf', [{ role: 'user', content: 'Hello' }], new AbortController().signal, {
+    onToken: (token) => events.push(`token ${token}`),
+    onToolCall: (call) => events.push(`call ${call.name} ${call.is_error} ${call.output.length}`),
+    onTranscript: (message) => events.push(`${message.role} ${message.tool_call_id ? 'result' : (message.tool_calls ?? []).length}`),
+  }, ['web_search', 'fetch_url']);
+  assert.equal(answer, 'Done.');
+  assert.deepEqual(ran, ['web_search {"query":"tea"}', 'fetch_url {}']);
+  assert.deepEqual(seen, [
+    { roles: 'user', tools: 2 }, { roles: 'user,assistant,tool,tool', tools: 2 },
+    { roles: 'user,assistant,tool,tool,assistant,tool', tools: 2 },
+  ]);
+  assert.deepEqual(events, [
+    'token Looking.', 'assistant 2', 'call web_search false 4013', 'tool result', 'call fetch_url true 15', 'tool result',
+    // A tool that is turned off is refused without running.
+    'assistant 1', 'call get_current_time true 50', 'tool result', 'token Done.',
+  ]);
+});
+
+test('the last round is asked without tools, and no tools means a plain chat', async () => {
+  const seen: { roles: string; tools: number }[] = [];
+  const call = { content: '', calls: [{ name: 'web_search', arguments: '{}' }] };
+  const engine = localEngine([toolRuntime([call, call, call, { content: 'Answer.', calls: [call.calls[0]] }], seen)],
+    async () => [model('gguf', 'llama.cpp')], localTools([]));
+  assert.equal(await engine.chat('gguf', [{ role: 'user', content: 'Hi' }], new AbortController().signal, () => undefined, ['web_search']), 'Answer.');
+  assert.deepEqual(seen.map(({ tools }) => tools), [1, 1, 1, 0]);
+  assert.equal(await engine.chat('gguf', [{ role: 'user', content: 'Hi' }], new AbortController().signal, () => undefined), 'Hi');
+  // A runtime that cannot call tools chats without them.
+  const log: string[] = [];
+  const plain = localEngine([fake('mlx', log)], async () => [model('m', 'mlx')], localTools([]));
+  assert.equal(await plain.supportsTools('m'), false);
+  assert.equal(await plain.chat('m', [{ role: 'user', content: 'Hi' }], new AbortController().signal, () => undefined, ['web_search']), 'Hi');
+});
+
+test('saved tool rounds are sent back whole, and broken ones are left out', () => {
+  const call = (id: string) => ({ id, type: 'function', function: { name: 'web_search', arguments: { query: 'x' } } });
+  assert.deepEqual(toolTurns([
+    { role: 'user', content: 'One' },
+    { role: 'assistant', content: '', tool_calls: [call('a')] },
+    { role: 'tool', content: 'result', tool_call_id: 'a' },
+    { role: 'assistant', content: 'Answer' },
+    { role: 'user', content: 'Two' },
+    { role: 'assistant', content: 'Partly', tool_calls: [call('b')] },
+    { role: 'user', content: 'Three' },
+  ]), [
+    { role: 'user', content: 'One' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'a', type: 'function', function: { name: 'web_search', arguments: '{"query":"x"}' } }] },
+    { role: 'tool', content: 'result', tool_call_id: 'a' },
+    { role: 'assistant', content: 'Answer' },
+    { role: 'user', content: 'Two' },
+    { role: 'assistant', content: 'Partly' },
+    { role: 'user', content: 'Three' },
+  ]);
 });

@@ -35,10 +35,10 @@ test('a stored index drops malformed and duplicate entries and repairs the activ
 
 test('host ids are safe storage keys and preferences fall back to the system theme', () => {
   assert.equal(hostId({ instanceId: 'ab:cd/ef-1' }), 'ab_cd_ef-1');
-  assert.deepEqual(parsePreferences('{"theme":"light"}'), { theme: 'light', disabledTools: [] });
-  assert.deepEqual(parsePreferences('{"theme":"neon","disabledTools":["web_search",3]}'),
-    { theme: 'system', disabledTools: ['web_search'] });
-  assert.deepEqual(parsePreferences('not json'), { theme: 'system', disabledTools: [] });
+  assert.deepEqual(parsePreferences('{"theme":"light"}'), { theme: 'light', disabledTools: [], disabledLocalTools: [] });
+  assert.deepEqual(parsePreferences('{"theme":"neon","disabledTools":["web_search",3],"disabledLocalTools":["fetch_url",null]}'),
+    { theme: 'system', disabledTools: ['web_search'], disabledLocalTools: ['fetch_url'] });
+  assert.deepEqual(parsePreferences('not json'), { theme: 'system', disabledTools: [], disabledLocalTools: [] });
 });
 
 test('"This device" can be the active entry with or without paired hosts', () => {

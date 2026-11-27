@@ -28,8 +28,8 @@ function ToolCalls({ calls }: { calls: readonly ToolCall[] }) {
 }
 
 /**
- * `backend` is a paired host or this device. With `onOpenModels` set the chat is on this device: text only,
- * so the host-only entry points (tools, Agent) are not shown.
+ * `backend` is a paired host or this device. With `onOpenModels` set the chat is on this device: its tools
+ * run on the phone, and the host-only entry point (Agent) is not shown.
  */
 export function Chat({
   backend: api, credential, hostName, modelsRevision = 0, disabledTools, onDisabledTools, onUnauthorized, onOpenSettings,
@@ -55,7 +55,11 @@ export function Chat({
   const [tools, setTools] = useState<Tool[]>([]);
   const [showTools, setShowTools] = useState(false);
   const [running, setRunning] = useState<ToolCall[]>([]);
-  const enabledTools = tools.filter(({ name }) => !disabledTools.includes(name));
+  // On this device only some runtimes can call tools; a host decides for itself.
+  const [toolsUsable, setToolsUsable] = useState(true);
+  const [status, setStatus] = useState('');
+  const offeredTools = toolsUsable ? tools : [];
+  const enabledTools = offeredTools.filter(({ name }) => !disabledTools.includes(name));
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const currentTurn = useRef<AbortController | null>(null);
@@ -114,6 +118,13 @@ export function Chat({
       setModel((current) => available.some(({ id }) => id === current) ? current : '');
     }).catch(report);
   }, [modelsRevision, local && showModels]);
+
+  useEffect(() => {
+    let current = true;
+    if (!api.supportsTools || !model) setToolsUsable(!api.supportsTools);
+    else void api.supportsTools(model).then((usable) => { if (current) setToolsUsable(usable); }, () => undefined);
+    return () => { current = false; };
+  }, [model]);
 
   async function chooseModel(id: string) {
     // Asked while the picker is still open: iOS drops an alert raised while a sheet is closing.
@@ -178,11 +189,17 @@ export function Chat({
       const transcript: TranscriptMessage[] = [];
       const calls: ToolCall[] = [];
       const answer = await api.chat(model, chatContext(history), turn.signal, {
-        onToken: (token) => setStreamed((text) => text + token),
-        onToolCall: (call) => { calls.push(call); setRunning([...calls]); },
+        onToken: (token) => { setStatus(''); setStreamed((text) => text + token); },
+        onToolCall: (call) => { calls.push(call); setRunning([...calls]); setStatus(''); },
+        onStatus: setStatus,
         onTranscript: (message) => {
           transcript.push(message);
-          if (message.role === 'assistant') setStreamed('');
+          if (message.role === 'assistant') {
+            setStreamed('');
+            // A device runs the calls itself, one after another; a host names its calls as they stream.
+            if (local) setStatus(`Calling ${toolCallsOf([{ ...message, id: '', parent_id: null }]).get('')
+              ?.map(({ name }) => name).join(', ') ?? 'a tool'}…`);
+          }
         },
       }, enabledTools.map(({ name }) => name));
       if (turn.signal.aborted) return;
@@ -211,6 +228,7 @@ export function Chat({
       currentTurn.current = null;
       setStreamed('');
       setRunning([]);
+      setStatus('');
       setBusy('');
     }
   }
@@ -221,7 +239,8 @@ export function Chat({
   const savedMedia = useMemo(() => mediaByMessage(messages), [messages]);
   const toggleTool = (name: string) => onDisabledTools(disabledTools.includes(name)
     ? disabledTools.filter((other) => other !== name) : [...disabledTools, name]);
-  const toolGroups = [...new Set(tools.map((tool) => tool.server_name ?? 'Built in'))];
+  const groupOf = (tool: Tool) => tool.server_name ?? (local ? 'On this device' : 'Built in');
+  const toolGroups = [...new Set(offeredTools.map(groupOf))];
 
   return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
     <View style={styles.topBar}>
@@ -266,10 +285,10 @@ export function Chat({
       </View> : null}
       {streamed ? <View style={styles.assistant}><Markdown text={streamed} /></View> : null}
     </ScrollView>}
-    {busy ? <Text accessibilityRole="progressbar" style={styles.status}>{busy}</Text> : null}
+    {busy ? <Text accessibilityRole="progressbar" style={styles.status}>{generating && status ? status : busy}</Text> : null}
     <View style={styles.composer}>
-      {tools.length ? <IconButton glyph={enabledTools.length ? '⚙' : '⊘'}
-        label={`Tools, ${enabledTools.length} of ${tools.length} on`} onPress={() => setShowTools(true)} /> : null}
+      {offeredTools.length ? <IconButton glyph={enabledTools.length ? '⚙' : '⊘'}
+        label={`Tools, ${enabledTools.length} of ${offeredTools.length} on`} onPress={() => setShowTools(true)} /> : null}
       <TextInput accessibilityLabel="Message" placeholder={local ? 'Message a model on this device' : `Message ${hostName}`} placeholderTextColor={palette.muted}
         style={styles.composeInput} value={draft} onChangeText={setDraft} editable={!busy} multiline />
       {generating
@@ -295,15 +314,17 @@ export function Chat({
       </ScrollView>
     </Sheet>
 
-    <Sheet title={`Tools · ${enabledTools.length} of ${tools.length} on`} visible={showTools} onClose={() => setShowTools(false)}>
+    <Sheet title={`Tools · ${enabledTools.length} of ${offeredTools.length} on`} visible={showTools} onClose={() => setShowTools(false)}>
       <ScrollView>
+        {local ? <Text style={[styles.listMeta, { paddingHorizontal: 18, paddingBottom: 8 }]}>
+          These run on this phone. Tools marked 🌐 send the search or the address to the web when the model uses them.</Text> : null}
         <View style={[styles.row, { paddingHorizontal: 18, paddingBottom: 8 }]}>
           <Action label="All" quiet onPress={() => onDisabledTools([])} />
-          <Action label="None" quiet onPress={() => onDisabledTools(tools.map(({ name }) => name))} />
+          <Action label="None" quiet onPress={() => onDisabledTools(offeredTools.map(({ name }) => name))} />
         </View>
         {toolGroups.map((group) => <View key={group}>
           <Text style={[styles.section, { paddingHorizontal: 18 }]}>{group}</Text>
-          {tools.filter((tool) => (tool.server_name ?? 'Built in') === group).map((tool) => {
+          {offeredTools.filter((tool) => groupOf(tool) === group).map((tool) => {
             const on = !disabledTools.includes(tool.name);
             return <Pressable key={tool.name} accessibilityRole="switch" accessibilityState={{ checked: on }}
               style={styles.listItem} onPress={() => toggleTool(tool.name)}>

@@ -227,7 +227,11 @@ test('carries the daemon certificate pin from the invite into the stored credent
 
 test('chat with tools asks the host to run them and reports each call and transcript step', async () => {
   const frames = [
+    { choices: [{ delta: {} }], brazier: { load: { phase: 'loading', message: 'Loading small…' } } },
+    { choices: [{ delta: {} }], brazier: { prefill: { total: 200, cached: 50, processed: 50 } } },
     { choices: [{ delta: { content: 'Let me look. ' } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'web_search', arguments: '' } }] }, finish_reason: null }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"query":"x"}' } }] }, finish_reason: null }] },
     { brazier: { tool_call: { call_id: 'c1', name: 'web_search', arguments: '{"query":"x"}', output: 'hits', is_error: false } } },
     { brazier: { transcript_message: { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'web_search', arguments: '{"query":"x"}' } }] } } },
     { brazier: { transcript_message: { role: 'tool', content: 'hits', tool_call_id: 'c1' } } },
@@ -236,6 +240,7 @@ test('chat with tools asks the host to run them and reports each call and transc
   const body = new Blob([frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n']).stream();
   const calls: string[] = [];
   const transcript: string[] = [];
+  const statuses: string[] = [];
   const client = daemonClient(async (_url, init) => {
     const sent = JSON.parse(init.body!);
     assert.equal(sent.builtin_tools, true);
@@ -244,8 +249,10 @@ test('chat with tools asks the host to run them and reports each call and transc
   }, credential);
   const answer = await client.chat('small', [{ role: 'user', content: 'search' }], new AbortController().signal, {
     onToken: () => undefined, onToolCall: (call) => calls.push(call.name), onTranscript: (message) => transcript.push(message.role),
+    onStatus: (status) => statuses.push(status),
   }, ['web_search']);
   assert.equal(answer, 'done');
+  assert.deepEqual(statuses, ['Loading small…', 'Reading the conversation… 50%', 'Calling web_search…']);
   assert.deepEqual(calls, ['web_search']);
   assert.deepEqual(transcript, ['assistant', 'tool']);
 });
@@ -266,4 +273,7 @@ test('saved tool steps are sent back to the model and shown with their results',
   assert.deepEqual(toolCallsOf(messages).get('a'), [
     { call_id: 'c1', name: 'web_search', arguments: '{}', output: 'hits', is_error: false },
   ]);
+  // A saved result has no error flag of its own; a failed call is recognised by its text.
+  const failed = [messages[1], { ...messages[2], content: 'Error: rate limited' }];
+  assert.equal(toolCallsOf(failed).get('a')?.[0].is_error, true);
 });

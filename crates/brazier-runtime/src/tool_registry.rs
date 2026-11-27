@@ -305,6 +305,11 @@ pub fn combined_catalog(data_dir: &Path) -> Value {
     }
     if let Some(mcp_items) = mcp::catalog(data_dir).get("data").and_then(Value::as_array) {
         for server in mcp_items {
+            // A turned-off server's tools are never offered to a model, so a
+            // client must not list them as choices.
+            if server.get("enabled").and_then(Value::as_bool) != Some(true) {
+                continue;
+            }
             if let Some(tools) = server.get("tools").and_then(Value::as_array) {
                 entries.extend(tools.iter().cloned());
             }
@@ -436,6 +441,41 @@ mod tests {
             brazier_mode: None,
         };
         assert!(merge_definitions(dir.path(), &request, false).is_none());
+    }
+
+    #[test]
+    fn the_catalog_lists_mcp_tools_of_enabled_servers_only() {
+        let dir = tempdir().unwrap();
+        let server = |id: &str, enabled: bool| crate::mcp::McpServerConfig {
+            id: id.into(),
+            name: id.into(),
+            command: "true".into(),
+            args: Vec::new(),
+            env: Default::default(),
+            enabled,
+            tools: vec![crate::mcp::McpToolEntry {
+                name: "lookup".into(),
+                description: None,
+                input_schema: Value::Null,
+            }],
+        };
+        let config = crate::mcp::McpConfig {
+            servers: vec![server("on", true), server("off", false)],
+        };
+        std::fs::write(
+            crate::mcp::config_path(dir.path()),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let catalog = combined_catalog(dir.path());
+        let names: Vec<&str> = catalog["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(names.contains(&"mcp/on/lookup"), "{names:?}");
+        assert!(!names.contains(&"mcp/off/lookup"), "{names:?}");
     }
 
     #[test]

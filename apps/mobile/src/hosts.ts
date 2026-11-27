@@ -4,13 +4,17 @@ import type { ThemePreference } from './theme.ts';
 export type HostEntry = { id: string; name: string };
 export type HostIndex = { active: string | null; hosts: HostEntry[] };
 /** Tools are on unless listed in `disabledTools`, so tools a host adds later start enabled. */
-export type Preferences = { theme: ThemePreference; disabledTools: string[] };
+export type Preferences = {
+  theme: ThemePreference; disabledTools: string[];
+  /** The same for the tools that run on this device, kept apart because they share the hosts' tool names. */
+  disabledLocalTools: string[];
+};
 
 /** The built-in "This device" entry. Host ids never contain "@", so it cannot collide with one. */
 export const DEVICE_ID = '@device';
 
 export const emptyIndex: HostIndex = { active: null, hosts: [] };
-export const defaultPreferences: Preferences = { theme: 'system', disabledTools: [] };
+export const defaultPreferences: Preferences = { theme: 'system', disabledTools: [], disabledLocalTools: [] };
 
 /** One saved credential per host: pairing again with the same host replaces it. */
 export function hostId(credential: Pick<Credential, 'instanceId'>): string {
@@ -60,7 +64,10 @@ export function parsePreferences(raw: string | null): Preferences {
   if (!raw) return defaultPreferences;
   try {
     const value = JSON.parse(raw) as Partial<Preferences>;
+    const names = (list: unknown) => Array.isArray(list)
+      ? list.filter((name): name is string => typeof name === 'string') : [];
     return {
+      disabledLocalTools: names(value.disabledLocalTools),
       theme: value.theme === 'dark' || value.theme === 'light' ? value.theme : 'system',
       disabledTools: Array.isArray(value.disabledTools)
         ? value.disabledTools.filter((name): name is string => typeof name === 'string') : [],
