@@ -1900,11 +1900,31 @@ pub fn delete_model(
         // The repository folder above a quant folder is only cleaned when it
         // is inside the same library.
         let boundary = std::fs::canonicalize(&prune_root).unwrap_or_else(|_| prune_root.clone());
+        // Companions this model's folder links to, kept in the repository
+        // folder for it, go once the folder's own links are gone.
+        let linked: Vec<PathBuf> = path
+            .parent()
+            .and_then(|directory| std::fs::read_dir(directory).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|link| {
+                link.is_symlink() && (is_projector(link) || is_speculative_draft_file(link))
+            })
+            .filter_map(|link| std::fs::canonicalize(link).ok())
+            .filter(|target| target.starts_with(&boundary))
+            .collect();
         for directory in companion_directories(&path) {
             let inside = std::fs::canonicalize(&directory)
                 .is_ok_and(|directory| directory.starts_with(&boundary));
             if inside {
-                remove_orphan_projector(&directory)?;
+                remove_orphan_projector(&directory, None)?;
+            }
+        }
+        for target in &linked {
+            if let Some(directory) = target.parent() {
+                remove_orphan_projector(directory, Some(target))?;
             }
         }
         prune_empty_parents(path.parent(), &prune_root);
@@ -1976,7 +1996,9 @@ pub fn delete_model(
 }
 
 /// Remove sibling mmproj files when the directory has no remaining weight GGUFs.
-fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
+///
+/// With `only`, nothing but that companion is removed.
+fn remove_orphan_projector(directory: &Path, only: Option<&Path>) -> anyhow::Result<()> {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Ok(());
     };
@@ -2043,7 +2065,8 @@ fn remove_orphan_projector(directory: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     for path in companions {
-        if std::fs::canonicalize(&path).is_ok_and(|target| linked.contains(&target)) {
+        let target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if linked.contains(&target) || only.is_some_and(|only| only != target) {
             continue;
         }
         std::fs::remove_file(&path)
@@ -2350,6 +2373,14 @@ mod tests {
         assert!(projector.exists(), "the nested model still loads it");
         assert!(!unused.exists());
         assert_eq!(projector_for_model(&nested), Some(link));
+
+        delete_model(
+            dir.path(),
+            "gguf:acme/model/tuned/model-tuned-Q4_K_M.gguf",
+            &[],
+        )
+        .unwrap();
+        assert!(!projector.exists(), "nothing is left to load it");
     }
 
     #[cfg(unix)]
