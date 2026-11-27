@@ -41,7 +41,7 @@ export function llamaRuntime(modelPath: (model: InstalledModel) => string): Runt
   };
 }
 
-type NativeEngine = 'apple';
+type NativeEngine = 'apple' | 'mlx';
 type OnDevice = NativeModule & {
   availability(engine: NativeEngine): Promise<{ available: boolean; reason: string }>;
   load(engine: NativeEngine, directory: string): Promise<void>;
@@ -83,6 +83,21 @@ export function appleRuntime(): Runtime {
     available: native.available,
     builtIn: async () => [{ id: 'apple-intelligence', name: 'Apple Intelligence', engine: 'apple' }],
     load: async () => undefined,
+    generate: native.generate,
+    unload: native.unload,
+  };
+}
+
+/** MLX on Apple silicon: iOS 17 on a real device. The model is a directory of files from an MLX repository. */
+export function mlxRuntime(modelDirectory: (model: InstalledModel) => string): Runtime {
+  const native = nativeEngine('mlx');
+  return {
+    id: 'mlx',
+    available: native.available,
+    async load(model) {
+      if (!model) throw new Error('MLX needs a downloaded model.');
+      await native.load(modelDirectory(model));
+    },
     generate: native.generate,
     unload: native.unload,
   };

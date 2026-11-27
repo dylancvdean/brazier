@@ -46,9 +46,24 @@ RCT_EXPORT_MODULE()
   _listening = NO;
 }
 
+// MLX lives in an embedded framework that the app does not link, because it
+// needs iOS 17. It is loaded on first use, and only where the system can.
+static Class BrazierMLXClass(void)
+{
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    if (@available(iOS 17.0, *)) {
+      NSString *path = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"BrazierMLX.framework"];
+      [[NSBundle bundleWithPath:path] load];
+    }
+  });
+  return NSClassFromString(@"BrazierMLXEngine");
+}
+
 static Class BrazierEngineClass(NSString *name)
 {
   if ([name isEqualToString:@"apple"]) return NSClassFromString(@"BrazierAppleModelEngine");
+  if ([name isEqualToString:@"mlx"]) return BrazierMLXClass();
   return Nil;
 }
 

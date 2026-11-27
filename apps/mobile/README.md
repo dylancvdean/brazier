@@ -147,10 +147,21 @@ release, 0.12.9), using Metal on an iPhone and the CPU in the iOS Simulator.
 On iOS 26 and later with Apple Intelligence turned on, **Apple Intelligence**
 (Apple's Foundation Models system model) is also listed, with nothing to
 download. It is checked at runtime and weak-linked, so the app still installs
-on iOS 15.1 and simply does not list it there. Its Swift source is
+on earlier versions and simply does not list it there. Its Swift source is
 `plugins/on-device/BrazierAppleModelEngine.swift`; `BrazierOnDevice.m` is the
 bridge the app calls, and `plugins/with-on-device.cjs` copies both into the
 Xcode project during prebuild.
+
+On an iPhone or iPad with iOS 17 or later, MLX repositories (for example from
+`mlx-community`) can be downloaded too and run through Apple's
+[mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm). MLX cannot run in
+the iOS Simulator, so it is not offered there. MLX needs iOS 17, which is why
+the app's minimum iOS version is 17.0. It is built as a separate framework
+target, `BrazierMLX` (`plugins/mlx/BrazierMLXEngine.swift`), which the app
+embeds without linking and loads the first time it is needed. `plugins/mlx/mlx_target.rb` creates the target and its Swift package
+references (pinned to exact versions); the Podfile runs it after `pod install`
+and it does nothing once the target exists. Package versions are locked in
+`ios/Brazier.xcworkspace/xcshareddata/swiftpm/Package.resolved`.
 
 `src/local/engine.ts` is the interface Chat talks to; a paired host and this
 device both implement it, and each on-device runtime is a `Runtime` behind it.
