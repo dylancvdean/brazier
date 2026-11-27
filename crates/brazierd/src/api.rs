@@ -1448,6 +1448,11 @@ async fn update_message(
     Path((id, message_id)): Path<(String, String)>,
     Json(request): Json<crate::types::UpdateMessage>,
 ) -> ApiResult<Json<Value>> {
+    if let Some(content) = request.content.as_ref() {
+        register_message_blobs(&state, content)
+            .await
+            .map_err(ApiError::bad_request)?;
+    }
     let message = state
         .db
         .update_message(&id, &message_id, request)
@@ -9610,6 +9615,51 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let parsed = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, parsed)
+    }
+
+    #[tokio::test]
+    async fn finalizing_a_message_registers_its_tool_generated_blob() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let app = router(state.clone());
+        let conversation = state.db.create_conversation("Streamed").await.unwrap();
+        let (status, message) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/conversations/{}/messages", conversation.id),
+            json!({ "parent_id": null, "role": "assistant", "content": "", "model": null }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        // Written straight to the blob store, as generation tools do.
+        let stored = blob_store::store_bytes(
+            dir.path(),
+            b"\x89PNG\r\n\x1a\nfinal image",
+            "image/png",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (status, updated) = json_request(
+            &app,
+            "PATCH",
+            &format!(
+                "/api/v1/conversations/{}/messages/{}",
+                conversation.id,
+                message["id"].as_str().unwrap()
+            ),
+            json!({ "content": [{
+                "type": "brazier_blob",
+                "brazier_blob": { "sha256": stored.sha256, "mime_type": "image/png" }
+            }] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert_eq!(
+            updated["content"][0]["brazier_blob"]["sha256"],
+            stored.sha256
+        );
     }
 
     #[tokio::test]
