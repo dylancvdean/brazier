@@ -40,6 +40,19 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
   const [showModels, setShowModels] = useState(false);
   const alive = useRef(true);
   const scroll = useRef<ScrollView>(null);
+  // Android does not move the history search above the keyboard by itself: leave room under the list and bring
+  // the field to the top while it is being typed in.
+  const galleryTop = useRef(0);
+  const searching = useRef(false);
+  const [keyboard, setKeyboard] = useState(0);
+  const showSearch = () => { if (searching.current) scroll.current?.scrollTo({ y: galleryTop.current, animated: true }); };
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const shown = Keyboard.addListener('keyboardDidShow', (event) => setKeyboard(event.endCoordinates.height));
+    const hidden = Keyboard.addListener('keyboardDidHide', () => setKeyboard(0));
+    return () => { shown.remove(); hidden.remove(); };
+  }, []);
+  useEffect(() => { if (keyboard) requestAnimationFrame(showSearch); }, [keyboard]);
   const set = (change: Partial<GenerateForm>) => setForm((previous) => ({ ...previous, ...change }));
 
   function report(cause: unknown) {
@@ -187,7 +200,7 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
         <Text numberOfLines={1} style={styles.chipText}>{form.modelId ? label(form.modelId) : 'Choose model'} ▾</Text>
       </Pressable>
     </View>
-    <ScrollView ref={scroll} style={styles.flex} contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
+    <ScrollView ref={scroll} style={styles.flex} contentContainerStyle={[styles.panel, keyboard ? { paddingBottom: keyboard } : null]} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
       {api.local ? null : <View style={styles.segment}>
         {(['image', 'video'] as const).map((modality) => <Pressable key={modality} accessibilityRole="button"
           accessibilityState={{ selected: form.modality === modality }} disabled={running}
@@ -245,8 +258,9 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
           {[label(shown.modelId), entryDetails(shown), whenLabel(shown.createdAt)].filter(Boolean).join(' · ')}
         </Text>
       </View> : null}
-      <Text style={styles.section}>History</Text>
+      <Text style={styles.section} onLayout={(event) => { galleryTop.current = event.nativeEvent.layout.y; }}>History</Text>
       <Gallery source={api} history={history} label={label} reuseDisabled={running} onReuse={reuse} onRemove={remove}
+        onSearchFocus={(focused) => { searching.current = focused; showSearch(); }}
         emptyText={api.local ? 'Images you generate here are kept on this phone.'
           : `Images and videos generated on ${hostName} are listed here, whichever device started them.`} />
     </ScrollView>

@@ -15,9 +15,11 @@ const filters: readonly (readonly [HistoryFilter, string])[] = [['all', 'All'], 
  * Past generations as a grid by day, searchable by prompt and model. An entry opens with its media (save and
  * share), prompt, model, settings and date, and can be reused in the form or deleted.
  */
-export function Gallery({ source, history, label, emptyText, reuseDisabled, onReuse, onRemove }: {
+export function Gallery({ source, history, label, emptyText, reuseDisabled, onReuse, onRemove, onSearchFocus }: {
   source: MediaSource; history: readonly HistoryEntry[]; label: (modelId: string) => string; emptyText: string;
   reuseDisabled?: boolean; onReuse: (entry: HistoryEntry) => void;
+  /** The search field took or lost focus, so the screen can keep it above the keyboard. */
+  onSearchFocus?: (focused: boolean) => void;
   /** Rejects when the entry could not be deleted. */
   onRemove: (entry: HistoryEntry) => Promise<void>;
 }) {
@@ -69,6 +71,7 @@ export function Gallery({ source, history, label, emptyText, reuseDisabled, onRe
 
   return <View style={{ gap: 10 }}>
     <TextInput accessibilityLabel="Search history" style={styles.input} value={query} onChangeText={setQuery}
+      onFocus={() => onSearchFocus?.(true)} onBlur={() => onSearchFocus?.(false)}
       placeholder="Search prompts and models" placeholderTextColor={palette.muted} autoCapitalize="none"
       autoCorrect={false} clearButtonMode="while-editing" returnKeyType="search" />
     {mixed ? <View style={styles.row}>
