@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, View,
+  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, View,
 } from 'react-native';
 import {
   chatBranch, chatContext, DaemonError, messageText, toolCallsOf,
@@ -116,6 +116,13 @@ export function Chat({
   }, [modelsRevision, local && showModels]);
 
   async function chooseModel(id: string) {
+    // Asked while the picker is still open: iOS drops an alert raised while a sheet is closing.
+    const warning = await api.loadWarning?.(id).catch(() => null);
+    if (warning && !await new Promise<boolean>((resolve) => Alert.alert('Load this model?',
+      `${warning}. Loading it may close the app.`, [
+        { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+        { text: 'Load anyway', onPress: () => resolve(true) },
+      ], { cancelable: true, onDismiss: () => resolve(false) }))) return;
     setShowModels(false);
     setBusy('Preparing chat model…');
     setError('');

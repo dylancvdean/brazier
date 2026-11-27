@@ -1,11 +1,13 @@
+import * as Device from 'expo-device';
 import { fetch } from 'expo/fetch';
 import { Directory, File, Paths } from 'expo-file-system';
 import { createDownloadResumable } from 'expo-file-system/legacy';
 import { conversationStore } from './conversations.ts';
 import { availableRuntimes, localEngine, type ChatBackend, type Runtime } from './engine.ts';
 import { fileUrl, listRepoFiles, modelChoices, parseSlug, type ModelChoice, type RuntimeId } from './huggingface.ts';
+import { memoryWarning, type DeviceMemory } from './memory.ts';
 import { addInstalled, installedFrom, modelId, parseInstalled, removeInstalled, type InstalledModel } from './models.ts';
-import { appleRuntime, llamaRuntime, mlxRuntime } from './runtimes.ts';
+import { appMemoryLimit, appleRuntime, llamaContextBytes, llamaRuntime, mlxRuntime } from './runtimes.ts';
 
 // Everything "This device" keeps lives under one directory in the app's documents.
 const root = () => {
@@ -64,8 +66,28 @@ export const runtimes: readonly Runtime[] = [
 export const deviceEngine = localEngine(runtimes, installedModels);
 
 /** Chat on this device: local runtimes, conversations kept on the phone, and no tools. */
+/** What this device has for a model: the app's limit where iOS reports it, and physical memory. */
+export const deviceMemory = async (): Promise<DeviceMemory> => ({ limit: await appMemoryLimit(), total: Device.totalMemory });
+
+const contexts = new Map<string, Promise<number | null>>();
+
+/** The context cache an installed model needs, read from its file once; null when unknown (MLX, unreadable). */
+export function contextMemory(model: InstalledModel): Promise<number | null> {
+  if (model.runtime !== 'llama.cpp') return Promise.resolve(null);
+  let known = contexts.get(model.id);
+  if (!known) {
+    known = llamaContextBytes(filePath(new File(modelDirectory(model.id), model.entry)));
+    contexts.set(model.id, known);
+  }
+  return known;
+}
+
 export const deviceBackend: ChatBackend = {
   ...deviceEngine, ...conversationStore(textFiles, newId), tools: async () => [],
+  async loadWarning(modelId) {
+    const model = (await installedModels()).find(({ id }) => id === modelId);
+    return model ? memoryWarning(model.size, await deviceMemory(), await contextMemory(model)) : null;
+  },
 };
 
 export const freeSpace = (): number => Paths.availableDiskSpace;

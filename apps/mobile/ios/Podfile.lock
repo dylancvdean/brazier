@@ -32,6 +32,8 @@ PODS:
     - ExpoModulesCore
     - ZXingObjC/OneD
     - ZXingObjC/PDF417
+  - ExpoDevice (8.0.10):
+    - ExpoModulesCore
   - ExpoFileSystem (19.0.24):
     - ExpoModulesCore
   - ExpoFont (14.0.12):
@@ -1739,6 +1741,7 @@ DEPENDENCIES:
   - "Expo (from `../../../node_modules/.pnpm/expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@0.81.5_@babel+core@7_f9b0ff39cdb80eb9871f003c58c39f7c/node_modules/expo`)"
   - "ExpoAsset (from `../../../node_modules/.pnpm/expo-asset@12.0.14_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@0_adf93616e0913aaee8b67be618ec6991/node_modules/expo-asset/ios`)"
   - "ExpoCamera (from `../../../node_modules/.pnpm/expo-camera@17.0.10_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@_2ed5a2135c02c75847fee99e5c7a60b6/node_modules/expo-camera/ios`)"
+  - "ExpoDevice (from `../../../node_modules/.pnpm/expo-device@8.0.10_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@0_0aa2c92677101388314a4cd5868fd7ff/node_modules/expo-device/ios`)"
   - "ExpoFileSystem (from `../../../node_modules/.pnpm/expo-file-system@19.0.24_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-na_59ab24987bd8a350a64622d1e790cc73/node_modules/expo-file-system/ios`)"
   - "ExpoFont (from `../../../node_modules/.pnpm/expo-font@14.0.12_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@0._af8050fec9dc3ba4eca9370f884cffb6/node_modules/expo-font/ios`)"
   - "ExpoKeepAwake (from `../../../node_modules/.pnpm/expo-keep-awake@15.0.8_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-nati_1f60f77c0d6833cf9a9f8faec9b0f373/node_modules/expo-keep-awake/ios`)"
@@ -1830,6 +1833,8 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/.pnpm/expo-asset@12.0.14_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@0_adf93616e0913aaee8b67be618ec6991/node_modules/expo-asset/ios"
   ExpoCamera:
     :path: "../../../node_modules/.pnpm/expo-camera@17.0.10_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@_2ed5a2135c02c75847fee99e5c7a60b6/node_modules/expo-camera/ios"
+  ExpoDevice:
+    :path: "../../../node_modules/.pnpm/expo-device@8.0.10_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-native@0_0aa2c92677101388314a4cd5868fd7ff/node_modules/expo-device/ios"
   ExpoFileSystem:
     :path: "../../../node_modules/.pnpm/expo-file-system@19.0.24_expo@54.0.38_@babel+core@7.29.7_supports-color@8.1.1__react-na_59ab24987bd8a350a64622d1e790cc73/node_modules/expo-file-system/ios"
   ExpoFont:
@@ -1989,6 +1994,7 @@ SPEC CHECKSUMS:
   Expo: 661f5120ab5f917b1a4e4c4141a3977eb5946046
   ExpoAsset: 23ffde82c60d84b9e610c7569fba7f2f11e94950
   ExpoCamera: 6a326deb45ba840749652e4c15198317aa78497e
+  ExpoDevice: 6327c3c200816795708885adf540d26ecab83d1a
   ExpoFileSystem: 8e87545aef1d8d31f244edbfdd0780df4e5bac2e
   ExpoFont: dfb7c572372b610da45b41e3b436321fd6a97215
   ExpoKeepAwake: 55f75eca6499bb9e4231ebad6f3e9cb8f99c0296

@@ -13,6 +13,9 @@
       "config": {
         "usesNonExemptEncryption": false
       },
+      "entitlements": {
+        "com.apple.developer.kernel.increased-memory-limit": true
+      },
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "Connect to your own Brazier host on your local network.",
         "UIApplicationSceneManifest": {
