@@ -134,6 +134,11 @@ from `/v1/chat/completions` modalities:
 - Invoke via `POST /api/v1/generate/image|video`, bundled chat tools, or the
   Generate workspace mode. Defaults live in runtime settings
   (`default_image_gen_model`, `default_video_gen_model`).
+- Each finished `POST /api/v1/generate/image|video` job is recorded in
+  `generations.json` in the data directory (blob reference, settings, time;
+  newest 500) and its response carries the entry's `history_id`.
+  `GET /api/v1/generate/history` lists the entries for any client and
+  `DELETE /api/v1/generate/history/{id}` removes one, leaving the blob.
 
 Unsupported modalities fail in `brazierd` before inference.
 

@@ -4,7 +4,8 @@ import * as MediaLibrary from 'expo-media-library';
 import * as Sharing from 'expo-sharing';
 import type { Credential } from './api.ts';
 import { hostId } from './hosts.ts';
-import { blobFileName, mediaClient, parseHistory, type Generator, type HistoryEntry, type MediaBlob } from './media.ts';
+import { historyClient, historyStore } from './history.ts';
+import { blobFileName, mediaClient, type Generator, type MediaBlob } from './media.ts';
 
 // Images, the video player, Photos and the share sheet cannot send the bearer
 // key or use the host's pinned certificate. Blobs are therefore downloaded
@@ -76,24 +77,34 @@ export async function share(uri: string, mimeType: string): Promise<void> {
 const historyFile = (credential: Credential) =>
   new File(Paths.document, `generate-history-${hostKey(credential)}.json`);
 
-export async function loadHistory(credential: Credential): Promise<HistoryEntry[]> {
-  const file = historyFile(credential);
-  return file.exists ? parseHistory(await file.text()) : [];
-}
-
-export function saveHistory(credential: Credential, history: readonly HistoryEntry[]): void {
-  const file = historyFile(credential);
-  if (!file.exists) file.create({ intermediates: true });
-  file.write(JSON.stringify(history));
-}
-
 /** The Generate screen for a paired host. */
 export function hostGenerator(credential: Credential): Generator {
   const api = mediaClient(fetch, credential);
+  const history = historyStore({
+    async read() {
+      const file = historyFile(credential);
+      return file.exists ? file.text() : null;
+    },
+    async write(text) {
+      const file = historyFile(credential);
+      if (!file.exists) file.create({ intermediates: true });
+      file.write(text);
+    },
+  }, historyClient(fetch, credential));
   return {
     local: false, models: api.models, generate: api.generate, active: api.active, cancel: api.cancel,
     file: (blob) => blobFile(credential, blob),
-    history: () => loadHistory(credential),
-    saveHistory: (history) => saveHistory(credential, history),
+    history: history.list, addHistory: history.add,
+    async removeHistory(entry) {
+      const left = await history.remove(entry);
+      // The phone's copy goes with the entry, unless another entry shows the same file.
+      if (!left.some(({ blob }) => blob.sha256 === entry.blob.sha256)) {
+        try {
+          const cached = new File(directory(credential), blobFileName(entry.blob));
+          if (cached.exists) cached.delete();
+        } catch { /* a cache file; the system clears it eventually */ }
+      }
+      return left;
+    },
   };
 }

@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { DaemonError, type Model } from './api.ts';
+import { Gallery } from './Gallery.tsx';
+import { whenLabel } from './history.ts';
 import { imageSizes } from './local/images.ts';
 import {
-  addHistory, entryDetails, generateBody, generationModels, generationProgress, historyEntry, isCancellation,
+  entryDetails, generateBody, generationModels, generationProgress, historyEntry, isCancellation,
   modelLabel, sizePresets, type ActiveGeneration, type GenerateForm, type Generator, type HistoryEntry, type Modality,
 } from './media.ts';
-import { MediaThumb, MediaView } from './Media.tsx';
+import { MediaView } from './Media.tsx';
 import { useTheme } from './theme.ts';
 import { Action, dragDismiss, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
 
@@ -37,21 +39,8 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
   const [error, setError] = useState('');
   const [showModels, setShowModels] = useState(false);
   const alive = useRef(true);
+  const scroll = useRef<ScrollView>(null);
   const set = (change: Partial<GenerateForm>) => setForm((previous) => ({ ...previous, ...change }));
-
-  // Changes are applied to the saved file, not to what this screen loaded. A
-  // generation can outlive its screen (the host was switched) and save its result
-  // from there, and a later change here must not write an older list over it.
-  async function changeHistory(change: (saved: HistoryEntry[]) => HistoryEntry[]) {
-    try {
-      const next = change(await api.history());
-      api.saveHistory(next);
-      if (alive.current) setHistory(next);
-    } catch {
-      // History is a convenience; the change still shows for this session.
-      if (alive.current) setHistory(change);
-    }
-  }
 
   function report(cause: unknown) {
     if (cause instanceof DaemonError && cause.status === 401) onUnauthorized(cause);
@@ -73,9 +62,15 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
 
   useEffect(() => {
     alive.current = true;
-    api.history().then((saved) => { if (alive.current) setHistory(saved); }, () => undefined);
     return () => { alive.current = false; };
   }, [api]);
+
+  // Read again whenever the screen is shown, and when a job that was not started here ends: a host also lists
+  // what its desktop app and other phones made.
+  useEffect(() => {
+    if (!visible || active) return;
+    api.history().then((saved) => { if (alive.current) setHistory(saved); }, () => undefined);
+  }, [api, visible, !!active]);
 
   // The screen stays mounted behind the chat, so models installed on the host
   // since it was last open are picked up when it is shown again.
@@ -116,8 +111,11 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
       const result = await api.generate(form.modality, body);
       const entry = historyEntry(`${Date.now()}-${result.blob.sha256.slice(0, 8)}`, form.modality, body, result,
         new Date().toISOString());
-      await changeHistory((saved) => addHistory(saved, entry));
-      if (alive.current) setShown(entry);
+      // The history is a convenience; a result that could not be listed is still shown.
+      const saved = await api.addHistory(entry).catch(() => null);
+      if (!alive.current) return;
+      if (saved) setHistory(saved);
+      setShown(entry);
     } catch (cause) {
       if (!alive.current) return;
       if (isCancellation(cause)) setError('Generation stopped.');
@@ -140,14 +138,27 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
     }
   }
 
-  function remove(entry: HistoryEntry) {
-    void changeHistory((saved) => saved.filter(({ id }) => id !== entry.id));
-    if (shown?.id === entry.id) setShown(null);
+  async function remove(entry: HistoryEntry) {
+    try {
+      const saved = await api.removeHistory(entry);
+      if (!alive.current) return;
+      setHistory(saved);
+      setShown((current) => current?.id === entry.id ? null : current);
+    } catch (cause) {
+      if (cause instanceof DaemonError && cause.status === 401) onUnauthorized(cause);
+      throw cause;
+    }
   }
 
   function reuse(entry: HistoryEntry) {
+    // An entry a host recorded without a size keeps the size already chosen, unless the kind changes.
+    const [width, height] = entry.width > 0 && entry.height > 0 ? [entry.width, entry.height]
+      : entry.modality === form.modality ? [form.width, form.height] : sizePresets[entry.modality][0]!;
+    setError('');
+    setShown(null);
+    scroll.current?.scrollTo({ y: 0, animated: true });
     setForm({
-      modality: entry.modality, prompt: entry.prompt, negative: entry.negativePrompt, width: entry.width, height: entry.height,
+      modality: entry.modality, prompt: entry.prompt, negative: entry.negativePrompt, width, height,
       modelId: generationModels(models ?? [], entry.modality).some(({ id }) => id === entry.modelId)
         ? entry.modelId : generationModels(models ?? [], entry.modality)[0]?.id ?? '',
       steps: entry.steps != null ? String(entry.steps) : '', seed: entry.seed != null ? String(entry.seed) : '',
@@ -156,7 +167,9 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
   }
 
   // A host's models are named by their ids; this device's ids are directory names.
-  const label = (id: string) => (api.local ? models?.find((model) => model.id === id)?.name : undefined) ?? modelLabel(id);
+  const label = useCallback(
+    (id: string) => (api.local ? models?.find((model) => model.id === id)?.name : undefined) ?? modelLabel(id),
+    [api, models]);
 
   const field = (label: string, value: string, onChange: (text: string) => void, placeholder: string) =>
     <View style={[styles.flex, { gap: 4 }]}>
@@ -174,7 +187,7 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
         <Text numberOfLines={1} style={styles.chipText}>{form.modelId ? label(form.modelId) : 'Choose model'} ▾</Text>
       </Pressable>
     </View>
-    <ScrollView style={styles.flex} contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
+    <ScrollView ref={scroll} style={styles.flex} contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
       {api.local ? null : <View style={styles.segment}>
         {(['image', 'video'] as const).map((modality) => <Pressable key={modality} accessibilityRole="button"
           accessibilityState={{ selected: form.modality === modality }} disabled={running}
@@ -228,22 +241,14 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
       {shown ? <View style={{ gap: 8 }}>
         <MediaView credential={api} blob={shown.blob} />
         <Text selectable style={styles.body}>{shown.prompt}</Text>
-        <Text style={styles.listMeta}>{label(shown.modelId)} · {entryDetails(shown)}</Text>
-        <View style={styles.row}>
-          <Action label="Reuse settings" quiet disabled={running} onPress={() => reuse(shown)} />
-          <Action label="Remove" danger onPress={() => remove(shown)} />
-        </View>
+        <Text style={styles.listMeta}>
+          {[label(shown.modelId), entryDetails(shown), whenLabel(shown.createdAt)].filter(Boolean).join(' · ')}
+        </Text>
       </View> : null}
       <Text style={styles.section}>History</Text>
-      {history.length ? <View style={styles.row}>
-        {history.map((entry) => <Pressable key={entry.id} accessibilityRole="button"
-          accessibilityLabel={`${entry.modality}: ${entry.prompt}`} onPress={() => setShown(entry)}
-          style={shown?.id === entry.id ? { borderRadius: 10, borderWidth: 2, borderColor: palette.accent } : { padding: 2 }}>
-          <MediaThumb credential={api} blob={entry.blob} size={74} />
-        </Pressable>)}
-      </View> : <Text style={styles.listMeta}>
-        {api.local ? 'Images you generate here are kept on this phone.' : 'Images and videos you generate here are listed on this phone.'}
-      </Text>}
+      <Gallery source={api} history={history} label={label} reuseDisabled={running} onReuse={reuse} onRemove={remove}
+        emptyText={api.local ? 'Images you generate here are kept on this phone.'
+          : `Images and videos generated on ${hostName} are listed here, whichever device started them.`} />
     </ScrollView>
     <Sheet title={form.modality === 'image' ? 'Image model' : 'Video model'} visible={showModels}
       onClose={() => setShowModels(false)}>

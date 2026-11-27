@@ -1,4 +1,4 @@
-import type { Conversation, Message } from '../api.ts';
+import { conversationTitle, type Conversation, type Message } from '../api.ts';
 
 /** Named text files; the app keeps them in its documents directory. */
 export type TextFiles = {
@@ -22,10 +22,10 @@ export function parseConversations(raw: string | null): Conversation[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
   return value.flatMap((entry): Conversation[] => {
-    const { id, title } = entry as Partial<Conversation>;
+    const { id, title, updated_at } = (entry ?? {}) as Partial<Conversation>;
     if (!validId(id) || typeof title !== 'string' || seen.has(id)) return [];
     seen.add(id);
-    return [{ id, title }];
+    return [{ id, title, ...(typeof updated_at === 'string' ? { updated_at } : {}) }];
   });
 }
 
@@ -44,11 +44,24 @@ export function parseMessages(raw: string | null): Message[] {
   });
 }
 
+/** The words a person would search a message for: its text, not the structure around it. */
+export function messageText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.flatMap((part) => typeof part?.text === 'string' ? [part.text] : []).join('\n');
+}
+
+const searchWords = (query: string) => query.toLowerCase().split(/\s+/).filter(Boolean);
+const hasWords = (text: string, words: readonly string[]) => {
+  const lower = text.toLowerCase();
+  return words.every((word) => lower.includes(word));
+};
+
 /**
  * Conversations kept on the phone, with the same calls Chat makes to a host.
- * The newest conversation is listed first, as hosts do.
+ * The conversation written to last is listed first, as hosts do.
  */
-export function conversationStore(files: TextFiles, newId: () => string) {
+export function conversationStore(files: TextFiles, newId: () => string, now: () => string = () => new Date().toISOString()) {
   // Writes to one file are whole-file replacements, so they run one at a time.
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
@@ -62,12 +75,38 @@ export function conversationStore(files: TextFiles, newId: () => string) {
     if (!(await list()).some((chat) => chat.id === id)) throw new Error('This conversation is no longer on this device.');
     const saved: Message = { id: newId(), parent_id: message.parent_id, role: message.role, content: message.content };
     await files.write(messagesFile(id), JSON.stringify([...await messages(id), saved]));
+    const chats = await list();
+    const chat = chats.find((entry) => entry.id === id)!;
+    await files.write(indexFile, JSON.stringify([{ ...chat, updated_at: now() }, ...chats.filter((entry) => entry !== chat)]));
     return saved;
   });
   return {
-    conversations: list,
+    /** With a query: the conversations whose title, or one message, contains every word of it. */
+    async conversations(query = ''): Promise<Conversation[]> {
+      const words = searchWords(query);
+      const chats = await list();
+      if (!words.length) return chats;
+      const found: Conversation[] = [];
+      for (const chat of chats) {
+        if (hasWords(chat.title, words) ||
+            (await messages(chat.id)).some(({ role, content }) => role !== 'tool' && hasWords(messageText(content), words))) {
+          found.push(chat);
+        }
+      }
+      return found;
+    },
+    renameConversation: (id: string, title: string): Promise<Conversation> => serial(async () => {
+      const next = conversationTitle(title);
+      if (!next) throw new Error('Enter a title.');
+      const chats = await list();
+      const chat = chats.find((entry) => entry.id === id);
+      if (!chat) throw new Error('This conversation is no longer on this device.');
+      const renamed = { ...chat, title: next };
+      await files.write(indexFile, JSON.stringify(chats.map((entry) => entry === chat ? renamed : entry)));
+      return renamed;
+    }),
     createConversation: (title: string): Promise<Conversation> => serial(async () => {
-      const chat = { id: newId(), title: Array.from(title).slice(0, 72).join('') };
+      const chat = { id: newId(), title: Array.from(title).slice(0, 72).join(''), updated_at: now() };
       await files.write(indexFile, JSON.stringify([chat, ...await list()]));
       return chat;
     }),

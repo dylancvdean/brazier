@@ -4,5 +4,6 @@ pub mod agent_store;
 pub mod blob_store;
 pub mod client_auth;
 pub mod db;
+pub mod generation_log;
 pub mod license_store;
 pub mod memory_store;

@@ -40,6 +40,7 @@ use crate::{
     download::{self},
     engine::{Engine, StreamEvent},
     fork_hints::{self, ModelLoadError, RuntimeForkHint},
+    generation_log,
     hf::{self, SearchQuery},
     hf_auth, llama, mcp, media, model_bindings, model_settings, models_store,
     progress::ProgressEvent,
@@ -483,6 +484,11 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
         .route("/api/v1/generate/video", post(generate_video))
         .route("/api/v1/generate/active", get(active_generation))
         .route("/api/v1/generate/cancel", post(cancel_generation))
+        .route("/api/v1/generate/history", get(list_generation_history))
+        .route(
+            "/api/v1/generate/history/{id}",
+            delete(delete_generation_history),
+        )
         .route(
             "/api/v1/voice/sessions",
             get(list_voice_session).post(create_voice_session),
@@ -5364,11 +5370,65 @@ async fn generate_image(
         .await
         .map_err(ApiError::internal)?;
     let _ = tokio::fs::remove_file(&result.output_path).await;
+    let history_id = record_generation(&state, "image", &blob, &result.metadata).await;
     Ok(Json(json!({
         "blob": blob,
         "metadata": result.metadata,
         "engine": "stable-diffusion.cpp",
+        "history_id": history_id,
     })))
+}
+
+/// List a finished Generate job in the host's history. The job succeeded
+/// either way, so a log that cannot be written only costs the entry.
+async fn record_generation(
+    state: &AppState,
+    modality: &'static str,
+    blob: &blob_store::StoredBlob,
+    metadata: &Value,
+) -> Option<String> {
+    let data_dir = state.data_dir.clone();
+    let (blob, metadata) = (blob.clone(), metadata.clone());
+    let recorded = tokio::task::spawn_blocking(move || {
+        generation_log::record(&data_dir, modality, &blob, &metadata)
+    })
+    .await;
+    match recorded {
+        Ok(Ok(entry)) => Some(entry.id),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "could not record the generation in history");
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+/// What the Generate endpoints have produced on this host, newest first, for
+/// every client: a phone lists what the desktop made and the other way round.
+/// Media a chat model made with a tool is kept in its conversation instead.
+async fn list_generation_history(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let data_dir = state.data_dir.clone();
+    let entries = tokio::task::spawn_blocking(move || generation_log::list(&data_dir))
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(json!({ "data": entries })))
+}
+
+/// Remove one entry. The blob stays: a conversation may reference it too.
+async fn delete_generation_history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let data_dir = state.data_dir.clone();
+    let deleted = tokio::task::spawn_blocking(move || generation_log::delete(&data_dir, &id))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    if deleted {
+        Ok(Json(json!({ "deleted": true })))
+    } else {
+        Err(ApiError::not_found("generation not found"))
+    }
 }
 
 /// The generation running right now, if any.
@@ -5577,10 +5637,12 @@ async fn generate_video(
     .await
     .map_err(ApiError::internal)?;
     let _ = tokio::fs::remove_file(&result.output_path).await;
+    let history_id = record_generation(&state, "video", &blob, &result.metadata).await;
     Ok(Json(json!({
         "blob": blob,
         "metadata": result.metadata,
         "engine": "stable-diffusion.cpp",
+        "history_id": history_id,
     })))
 }
 
@@ -9998,6 +10060,58 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{parsed}");
         assert_eq!(parsed["actions"][0]["type"], "visit_url");
+    }
+
+    #[tokio::test]
+    async fn generation_history_lists_and_deletes_recorded_jobs() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let blob = blob_store::store_bytes(
+            dir.path(),
+            b"\x89PNG\r\n\x1a\nfake image",
+            "image/png",
+            Some("generated.png"),
+        )
+        .await
+        .unwrap();
+        let metadata =
+            json!({ "prompt": "a lighthouse", "model_id": "sdcpp-image:test", "seed": 7 });
+        let id = record_generation(&state, "image", &blob, &metadata)
+            .await
+            .expect("history id");
+        let app = router(state);
+
+        let (status, listed) = get_request(&app, "/api/v1/generate/history").await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+        let entry = &listed["data"][0];
+        assert_eq!(entry["id"], id);
+        assert_eq!(entry["modality"], "image");
+        assert_eq!(entry["blob"]["sha256"], blob.sha256);
+        assert_eq!(entry["metadata"]["prompt"], "a lighthouse");
+
+        let delete = |app: Router, id: String| async move {
+            app.oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/generate/history/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        };
+        assert_eq!(delete(app.clone(), id.clone()).await, StatusCode::OK);
+        assert_eq!(delete(app.clone(), id).await, StatusCode::NOT_FOUND);
+        let (_, listed) = get_request(&app, "/api/v1/generate/history").await;
+        assert_eq!(listed["data"], json!([]));
+        // The media outlives its history entry.
+        assert!(
+            blob_store::blob_path(dir.path(), &blob.sha256)
+                .unwrap()
+                .exists()
+        );
     }
 
     async fn get_request(app: &Router, uri: &str) -> (StatusCode, Value) {

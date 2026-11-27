@@ -18,7 +18,9 @@ pub use brazier_runtime::{
     runtime_settings, runtimes, sdcpp, sdcpp_arch, sdcpp_catalog, streaming_asr, tool_registry,
     toolchain_hints, tools, voice, whisper, whisperkit,
 };
-pub use brazier_storage::{agent_store, blob_store, client_auth, db, license_store};
+pub use brazier_storage::{
+    agent_store, blob_store, client_auth, db, generation_log, license_store,
+};
 
 use std::{path::PathBuf, sync::Arc};
 

@@ -8,7 +8,11 @@ export type Preview = {
 };
 export type Host = { displayName: string; scopes: PairingScope[] };
 export type Model = { id: string; name?: string; engine?: string; owned_by?: string; capabilities?: { output_modalities: string[] } };
-export type Conversation = { id: string; title: string };
+/** `updated_at` is the time of the last message: ISO 8601 on this device, SQLite's UTC `YYYY-MM-DD HH:MM:SS` on a host. */
+export type Conversation = { id: string; title: string; updated_at?: string };
+
+/** A conversation's title as it is saved: one line, at most 72 characters. */
+export const conversationTitle = (title: string) => Array.from(title.replace(/\s+/g, ' ').trim()).slice(0, 72).join('');
 export type Message = {
   id: string; parent_id: string | null; role: string; content: unknown; status?: string;
   tool_calls?: unknown[] | null; tool_call_id?: string | null;
@@ -190,11 +194,28 @@ export function daemonClient(fetch: Request, credential: Credential) {
     },
     prepare: (modelId: string, signal?: AbortSignal) =>
       json('/api/v1/models/prepare', post({ model_id: modelId, mode: 'chat' }, signal)),
-    async conversations(): Promise<Conversation[]> {
-      return (await json<{ data: Conversation[] }>('/api/v1/conversations')).data;
+    /** Newest first. With a query: those whose title or messages contain it. */
+    async conversations(query = ''): Promise<Conversation[]> {
+      const search = query.trim();
+      return (await json<{ data: Conversation[] }>(
+        `/api/v1/conversations${search ? `?q=${encodeURIComponent(search)}` : ''}`)).data;
     },
     createConversation: (title: string) => json<Conversation>(
       '/api/v1/conversations', post({ title: Array.from(title).slice(0, 72).join('') })),
+    async renameConversation(id: string, title: string): Promise<Conversation> {
+      const next = conversationTitle(title);
+      if (!next) throw new DaemonError('Enter a title.');
+      return json<Conversation>(`/api/v1/conversations/${encodeURIComponent(id)}`,
+        { method: 'PATCH', body: JSON.stringify({ title: next }) });
+    },
+    async deleteConversation(id: string): Promise<void> {
+      try {
+        await json(`/api/v1/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      } catch (cause) {
+        // Already deleted from the desktop app or another phone.
+        if (!(cause instanceof DaemonError && cause.status === 404)) throw cause;
+      }
+    },
     async messages(id: string): Promise<Message[]> {
       return (await json<{ data: Message[] }>(messagesPath(id))).data;
     },
