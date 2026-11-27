@@ -1461,7 +1461,15 @@ impl Database {
         blob_ids.dedup();
         let mut blobs = Vec::new();
         for sha256 in blob_ids {
-            let (bytes, mime_type) = blob_store::read_blob(data_dir, &sha256).await?;
+            let (bytes, sniffed_mime_type) = blob_store::read_blob(data_dir, &sha256).await?;
+            // Blob files carry no extension, so only the attachment row knows
+            // the type of a document or other format without magic bytes.
+            let recorded: Option<(String, Option<String>)> =
+                sqlx::query_as("SELECT mime_type, original_name FROM attachments WHERE sha256 = ?")
+                    .bind(&sha256)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            let (mime_type, original_name) = recorded.unwrap_or((sniffed_mime_type, None));
             blobs.push(ExportBlob {
                 sha256: sha256.clone(),
                 mime_type,
@@ -1469,7 +1477,7 @@ impl Database {
                     &base64::engine::general_purpose::STANDARD,
                     &bytes,
                 ),
-                original_name: None,
+                original_name,
             });
         }
         Ok(ConversationExport {
@@ -2628,5 +2636,39 @@ mod tests {
             snapshots[0].tool_calls,
             Some(json!([{ "name": "calculator" }]))
         );
+    }
+
+    #[tokio::test]
+    async fn exported_documents_keep_their_type_and_import_again() {
+        let (dir, db) = open().await;
+        let stored =
+            blob_store::store_bytes(dir.path(), b"plain notes", "text/plain", Some("notes.txt"))
+                .await
+                .unwrap();
+        db.upsert_attachment(
+            &stored.sha256,
+            &stored.mime_type,
+            stored.size_bytes as i64,
+            stored.original_name.as_deref(),
+        )
+        .await
+        .unwrap();
+        let conversation = db.create_conversation("With a document").await.unwrap();
+        let content = json!([{
+            "type": "brazier_blob",
+            "brazier_blob": { "sha256": stored.sha256, "mime_type": "text/plain" }
+        }]);
+        db.create_message(&conversation.id, message(None, Role::User, content))
+            .await
+            .unwrap();
+
+        let export = db
+            .export_conversation(dir.path(), &conversation.id)
+            .await
+            .unwrap();
+        assert_eq!(export.blobs[0].mime_type, "text/plain");
+        assert_eq!(export.blobs[0].original_name.as_deref(), Some("notes.txt"));
+        let imported = db.import_conversation(dir.path(), export).await.unwrap();
+        assert_eq!(db.list_messages(&imported.id).await.unwrap().len(), 1);
     }
 }
