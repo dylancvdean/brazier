@@ -71,6 +71,21 @@ export type LocalTools = {
 export const MAX_TOOL_ROUNDS = 4;
 /** A result this long would crowd the question out of a phone model's context. */
 const MAX_RESULT_CHARS = 4_000;
+/**
+ * What is kept of a result from an earlier turn. The model has already answered from it, and whole pages
+ * from several turns would not fit the context together.
+ */
+const OLD_RESULT_CHARS = 500;
+
+let callCount = 0;
+/**
+ * Nine letters and digits, which is all some chat templates (Mistral's) accept as a call id; new for every
+ * call, because some models would otherwise reuse the same id in every round.
+ */
+function callId(): string {
+  callCount += 1;
+  return (Date.now() * 1000 + callCount % 1000).toString(36).padStart(9, '0').slice(-9);
+}
 
 export async function availableRuntimes(runtimes: readonly Runtime[]): Promise<Runtime[]> {
   const checks = await Promise.all(runtimes.map((runtime) => runtime.available().catch(() => false)));
@@ -98,9 +113,11 @@ export function chatTurns(messages: readonly OpenAiMessage[]): ChatTurn[] {
 /**
  * The conversation for a runtime that calls tools. A tool round is kept only when it is whole (every call
  * has its result), because chat templates reject a call without one; a stopped reply can leave such a round.
+ * Results from before the latest user message are cut short.
  */
 export function toolTurns(messages: readonly OpenAiMessage[]): ToolTurn[] {
   const turns: ToolTurn[] = [];
+  const latestUser = messages.findLastIndex(({ role }) => role === 'user');
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (message.role === 'assistant' && message.tool_calls?.length) {
@@ -117,7 +134,11 @@ export function toolTurns(messages: readonly OpenAiMessage[]): ToolTurn[] {
         index += 1;
         const result = messages[index];
         if (calls.some(({ id }) => id === result.tool_call_id)) {
-          results.push({ role: 'tool', content: result.content, tool_call_id: result.tool_call_id! });
+          const old = index < latestUser && result.content.length > OLD_RESULT_CHARS;
+          results.push({
+            role: 'tool', tool_call_id: result.tool_call_id!,
+            content: old ? `${result.content.slice(0, OLD_RESULT_CHARS)}\n[Cut short.]` : result.content,
+          });
         }
       }
       if (calls.length && calls.length === message.tool_calls.length && results.length === calls.length) {
@@ -212,15 +233,13 @@ export function localEngine(
         return answer;
       }
       const turns = toolTurns(messages);
-      let made = 0;
       for (let round = 1; ; round += 1) {
         const { content, calls } = await runtime.generateWithTools!(
           turns, round < MAX_TOOL_ROUNDS ? definitions : [], signal, onToken);
         stopped();
         if (!calls.length || round === MAX_TOOL_ROUNDS) return content;
         const wire = calls.map((call): WireCall => ({
-          // Ids are made unique within the conversation: some models reuse `call_0` in every round.
-          id: `call-${Date.now().toString(36)}-${made += 1}`, type: 'function',
+          id: callId(), type: 'function',
           function: { name: call.name, arguments: call.arguments || '{}' },
         }));
         turns.push({ role: 'assistant', content, tool_calls: wire });

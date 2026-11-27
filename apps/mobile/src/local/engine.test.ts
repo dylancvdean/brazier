@@ -140,13 +140,18 @@ test('a reply runs the tools the model calls and reports each round as a host do
   ], seen)], async () => [model('gguf', 'llama.cpp')], localTools(ran));
   assert.equal(await engine.supportsTools('gguf'), true);
   const events: string[] = [];
+  const ids: string[] = [];
   const answer = await engine.chat('gguf', [{ role: 'user', content: 'Hello' }], new AbortController().signal, {
     onToken: (token) => events.push(`token ${token}`),
-    onToolCall: (call) => events.push(`call ${call.name} ${call.is_error} ${call.output.length}`),
+    onToolCall: (call) => { ids.push(call.call_id); events.push(`call ${call.name} ${call.is_error} ${call.output.length}`); },
     onTranscript: (message) => events.push(`${message.role} ${message.tool_call_id ? 'result' : (message.tool_calls ?? []).length}`),
   }, ['web_search', 'fetch_url']);
   assert.equal(answer, 'Done.');
   assert.deepEqual(ran, ['web_search {"query":"tea"}', 'fetch_url {}']);
+  assert.equal(ids.length, 3);
+  assert.equal(new Set(ids).size, 3);
+  // Mistral's chat template accepts nothing but nine letters and digits as a call id.
+  for (const id of ids) assert.match(id, /^[a-z0-9]{9}$/);
   assert.deepEqual(seen, [
     { roles: 'user', tools: 2 }, { roles: 'user,assistant,tool,tool', tools: 2 },
     { roles: 'user,assistant,tool,tool,assistant,tool', tools: 2 },
@@ -192,4 +197,17 @@ test('saved tool rounds are sent back whole, and broken ones are left out', () =
     { role: 'assistant', content: 'Partly' },
     { role: 'user', content: 'Three' },
   ]);
+  // A page read in an earlier turn is cut short; one read for the question being answered is whole.
+  const page = 'p'.repeat(2000);
+  const [, , old, , , , current] = toolTurns([
+    { role: 'user', content: 'One' },
+    { role: 'assistant', content: '', tool_calls: [call('a')] },
+    { role: 'tool', content: page, tool_call_id: 'a' },
+    { role: 'assistant', content: 'Answer' },
+    { role: 'user', content: 'Two' },
+    { role: 'assistant', content: '', tool_calls: [call('b')] },
+    { role: 'tool', content: page, tool_call_id: 'b' },
+  ]);
+  assert.equal(old.content, `${'p'.repeat(500)}\n[Cut short.]`);
+  assert.equal(current.content, page);
 });
