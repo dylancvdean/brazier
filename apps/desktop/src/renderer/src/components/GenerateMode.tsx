@@ -357,6 +357,8 @@ export function GenerateMode(props: Props): React.JSX.Element {
     setPrompt(entry.prompt)
     setNegative(entry.negativePrompt)
     setResults([entry.result])
+    // The session gallery is gone, so reselecting its newest item must load it.
+    lastGeneratedHistoryIdRef.current = null
   }, [props.activeHistoryId, props.history])
 
   useEffect(() => {
