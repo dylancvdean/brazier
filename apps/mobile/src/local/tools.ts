@@ -20,7 +20,7 @@ export const LOCAL_TOOLS: readonly Tool[] = [
   },
   {
     name: 'fetch_url', title: 'Web fetch', network: true, source: 'device',
-    description: `Reads the text of a public web page from this phone (max ${FETCH_MAX_BYTES / 1024} KB, ${FETCH_TIMEOUT_MS / 1000}s). Local and private addresses are blocked.`,
+    description: `Reads the text of a public web page from this phone over https (max ${FETCH_MAX_BYTES / 1024} KB, ${FETCH_TIMEOUT_MS / 1000}s). Local and private addresses are blocked.`,
   },
   {
     name: 'get_current_time', title: 'Current time', network: false, source: 'device',
@@ -35,7 +35,7 @@ const DEFINITIONS: Record<string, { description: string; parameters: object }> =
   },
   fetch_url: {
     description: 'Fetch a public web page and return its readable text. Use it to read a search result.',
-    parameters: { type: 'object', properties: { url: { type: 'string', description: 'An http or https URL.' } }, required: ['url'] },
+    parameters: { type: 'object', properties: { url: { type: 'string', description: 'An https URL.' } }, required: ['url'] },
   },
   get_current_time: {
     description: 'Get the current date and time.',
@@ -174,11 +174,12 @@ export function parseSearchResults(html: string, limit = SEARCH_RESULTS): Search
 
 type Body = { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<unknown> } };
 type FetchResponse = {
-  ok: boolean; status: number; url?: string; headers: { get(name: string): string | null };
+  ok: boolean; status: number; headers: { get(name: string): string | null };
   body?: Body | null; text(): Promise<string>;
 };
 export type ToolFetch = (url: string, init: {
   method?: string; body?: string; headers?: Record<string, string>; signal?: AbortSignal; credentials?: 'omit';
+  redirect?: 'manual';
 }) => Promise<FetchResponse>;
 export type ToolEnvironment = { fetch: ToolFetch; now?: () => Date; timeoutMs?: number };
 export type ToolResult = { output: string; is_error: boolean };
@@ -206,10 +207,26 @@ async function limitedText(response: FetchResponse, limit: number): Promise<{ te
   }
 }
 
-/** One request with the tool's time limit; stopping the reply stops it too. */
+const MAX_REDIRECTS = 5;
+
+/**
+ * A safe URL as it is requested: always over https. iOS refuses plain http to the internet, and a page
+ * read for a private chat should not cross the network in the clear.
+ */
+function publicUrl(input: string): URL {
+  const url = safeUrl(input);
+  if (url.protocol === 'http:') url.protocol = 'https:';
+  return url;
+}
+
+/**
+ * One request with the tool's time limit; stopping the reply stops it too. Redirects are followed here
+ * rather than by the platform, so each address is checked before the phone contacts it. `read` gets the
+ * response and the URL it came from; when it returns or throws, whatever is left of the download is dropped.
+ */
 async function request<T>(
-  environment: ToolEnvironment, signal: AbortSignal, url: string, init: { method?: string; body?: string; headers?: Record<string, string> },
-  read: (response: FetchResponse) => Promise<T>,
+  environment: ToolEnvironment, signal: AbortSignal, start: string, init: { method?: string; body?: string; headers?: Record<string, string> },
+  read: (response: FetchResponse, url: URL) => Promise<T>,
 ): Promise<T> {
   const limit = new AbortController();
   const stop = () => limit.abort();
@@ -218,10 +235,20 @@ async function request<T>(
   const timer = setTimeout(() => { timedOut = true; limit.abort(); }, environment.timeoutMs ?? FETCH_TIMEOUT_MS);
   try {
     if (signal.aborted) throw new ToolError('Stopped.');
-    return await read(await environment.fetch(url, {
-      ...init, signal: limit.signal, credentials: 'omit',
-      headers: { 'user-agent': USER_AGENT, 'accept-language': 'en-US,en;q=0.8', ...init.headers },
-    }));
+    let url = publicUrl(start);
+    let sent = init;
+    for (let hop = 0; ; hop += 1) {
+      const response = await environment.fetch(url.href, {
+        ...sent, signal: limit.signal, credentials: 'omit', redirect: 'manual',
+        headers: { 'user-agent': USER_AGENT, 'accept-language': 'en-US,en;q=0.8', ...sent.headers },
+      });
+      const location = response.status >= 300 && response.status < 400 ? response.headers.get('location') : null;
+      if (!location) return await read(response, url);
+      if (hop === MAX_REDIRECTS) throw new ToolError('The site redirects too many times.');
+      url = publicUrl(new URL(location, url).href);
+      // As browsers do, a redirected form post becomes a plain read of the new address.
+      sent = { headers: Object.fromEntries(Object.entries(init.headers ?? {}).filter(([name]) => name !== 'content-type')) };
+    }
   } catch (cause) {
     if (timedOut) throw new ToolError(`No answer within ${(environment.timeoutMs ?? FETCH_TIMEOUT_MS) / 1000} seconds.`);
     if (signal.aborted) throw new ToolError('Stopped.');
@@ -230,16 +257,16 @@ async function request<T>(
   } finally {
     clearTimeout(timer);
     signal.removeEventListener('abort', stop);
+    // A refused or cut-short response would otherwise keep downloading into memory.
+    limit.abort();
   }
 }
 
 async function fetchUrl(args: Record<string, unknown>, environment: ToolEnvironment, signal: AbortSignal): Promise<string> {
   if (typeof args.url !== 'string' || !args.url.trim()) throw new ToolError('fetch_url needs a "url".');
-  const url = safeUrl(/^[a-z][a-z0-9+.-]*:/i.test(args.url.trim()) ? args.url : `https://${args.url.trim()}`);
-  return request(environment, signal, url.href, { headers: { accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.1' } },
-    async (response) => {
-      // Redirects are followed by the platform, so where they ended is checked before anything is read.
-      if (response.url) safeUrl(response.url);
+  const start = /^[a-z][a-z0-9+.-]*:/i.test(args.url.trim()) ? args.url : `https://${args.url.trim()}`;
+  return request(environment, signal, start, { headers: { accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.1' } },
+    async (response, url) => {
       if (!response.ok) throw new ToolError(`HTTP ${response.status} from ${url.hostname}.`);
       const type = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
       const html = !type || type.includes('html');
@@ -251,7 +278,7 @@ async function fetchUrl(args: Record<string, unknown>, environment: ToolEnvironm
       if (!page.text) throw new ToolError('The page has no readable text. It may need JavaScript to show its content.');
       const cut = page.text.length > FETCH_MAX_CHARS;
       return [
-        page.title ? `Title: ${page.title}` : '', `URL: ${response.url || url.href}`, '',
+        page.title ? `Title: ${page.title}` : '', `URL: ${url.href}`, '',
         cut ? page.text.slice(0, FETCH_MAX_CHARS) : page.text,
         cut || truncated ? '\n[The page continues; only its beginning is shown.]' : '',
       ].filter((line, index) => line || index === 2).join('\n');

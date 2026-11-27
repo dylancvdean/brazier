@@ -6,9 +6,10 @@ import {
 } from './tools.ts';
 
 const never = new AbortController().signal;
-const page = (body: string, init: { status?: number; type?: string; url?: string } = {}) => ({
-  ok: (init.status ?? 200) < 400, status: init.status ?? 200, url: init.url,
-  headers: { get: (name: string) => name === 'content-type' ? init.type ?? 'text/html; charset=utf-8' : null },
+const page = (body: string, init: { status?: number; type?: string; location?: string } = {}) => ({
+  ok: (init.status ?? 200) < 300, status: init.status ?? 200,
+  headers: { get: (name: string) => name === 'content-type' ? init.type ?? 'text/html; charset=utf-8'
+    : name === 'location' ? init.location ?? null : null },
   body: new Response(body).body, text: async () => body,
 });
 const serving = (body: string, init?: Parameters<typeof page>[1]): ToolFetch => async () => page(body, init);
@@ -80,7 +81,7 @@ test('web_search posts the query to DuckDuckGo and lists the results', async () 
 
 test('fetch_url returns the page text, cut to what a phone model can read', async () => {
   const result = await runLocalTool('fetch_url', '{"url":"example.com/a"}',
-    { fetch: serving(`<title>Long</title><p>${'word '.repeat(2000)}</p>`, { url: 'https://example.com/a' }) }, never);
+    { fetch: serving(`<title>Long</title><p>${'word '.repeat(2000)}</p>`) }, never);
   assert.equal(result.is_error, false);
   assert.match(result.output, /^Title: Long\nURL: https:\/\/example\.com\/a\n\nword /);
   assert.match(result.output, /\[The page continues; only its beginning is shown\.\]$/);
@@ -97,7 +98,21 @@ test('fetch_url refuses unsafe addresses, redirects into a private network, file
     /^Error: Local and private addresses/);
   assert.equal(called, 0);
   const run = (fetch: ToolFetch) => runLocalTool('fetch_url', '{"url":"https://example.com"}', { fetch, timeoutMs: 20 }, never);
-  assert.match((await run(serving('secret', { url: 'http://127.0.0.1:8080/' }))).output, /^Error: Local and private addresses/);
+  // A redirect is followed here, one checked address at a time, and never into a private network.
+  const asked: string[] = [];
+  const redirecting = (location: string): ToolFetch => async (url, init) => {
+    asked.push(`${init.redirect} ${url}`);
+    return url === 'https://example.com/' ? page('', { status: 302, location }) : page('<p>Moved here.</p>');
+  };
+  assert.match((await run(redirecting('http://127.0.0.1:8080/admin'))).output, /^Error: Local and private addresses/);
+  assert.deepEqual(asked.splice(0), ['manual https://example.com/']);
+  assert.equal((await run(redirecting('/new'))).output, 'URL: https://example.com/new\n\nMoved here.');
+  assert.deepEqual(asked.splice(0), ['manual https://example.com/', 'manual https://example.com/new']);
+  assert.match((await run(async () => page('', { status: 301, location: 'https://example.com/loop' }))).output,
+    /^Error: The site redirects too many times/);
+  // Plain http is not used: the page is asked for over https.
+  await runLocalTool('fetch_url', '{"url":"http://example.com/"}', { fetch: redirecting('/new') }, never);
+  assert.equal(asked[0], 'manual https://example.com/');
   assert.match((await run(serving('', { status: 404 }))).output, /^Error: HTTP 404 from example\.com/);
   assert.match((await run(serving('%PDF', { type: 'application/pdf' }))).output, /^Error: This is a application\/pdf file/);
   assert.match((await run(async () => { throw new TypeError('Network request failed'); })).output, /^Error: Could not reach the site/);
@@ -109,6 +124,13 @@ test('fetch_url refuses unsafe addresses, redirects into a private network, file
   const pending = runLocalTool('fetch_url', '{"url":"https://example.com"}', { fetch: hanging }, stop.signal);
   stop.abort();
   assert.deepEqual(await pending, { output: 'Error: Stopped.', is_error: true });
+});
+
+test('a refused download is cancelled instead of left running', async () => {
+  let signal: AbortSignal | undefined;
+  const fetch: ToolFetch = async (_url, init) => { signal = init.signal; return page('%PDF', { type: 'application/pdf' }); };
+  assert.equal((await runLocalTool('fetch_url', '{"url":"https://example.com/a.pdf"}', { fetch }, never)).is_error, true);
+  assert.equal(signal?.aborted, true);
 });
 
 test('fetch_url stops reading a page at the size limit', async () => {

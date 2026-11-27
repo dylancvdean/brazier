@@ -154,18 +154,22 @@ phone, with no host involved (`src/local/tools.ts`):
 - **Web fetch** reads one public page and returns its readable text: the
   article or main part, without scripts, styles and navigation. It reads at
   most 512 KB, waits at most 15 seconds, and returns the first 3,000 characters,
-  because a phone model's context is small. Only `http` and `https` URLs to
-  public names are fetched: loopback, private, link-local and other reserved
-  addresses, local-network names and URLs with credentials are refused, and so
-  is a redirect that ends at one. A public name that resolves to a private
-  address is not detected.
+  because a phone model's context is small. Pages are requested over `https`
+  only (an `http` address is upgraded) and only from public names: loopback,
+  private, link-local and other reserved addresses, local-network names and
+  URLs with credentials are refused. Redirects are followed by the tool, at
+  most five, and each address is checked before it is contacted. A public name
+  that resolves to a private address is not detected.
 - **Current time** reads the phone's clock.
 
 The tools menu in the composer turns each one on or off; the choice is kept
 apart from the host tools of the same name. With every tool off, nothing but
 the model runs. A search query or page address leaves the phone only when the
 model calls a tool. Tool calls and results show in the conversation and are
-saved with it, as with a host. A reply makes at most three rounds of calls.
+saved with it, as with a host. A reply makes at most three rounds of calls,
+and results from earlier turns are sent back to the model shortened. A page
+can contain text written to steer the model; turn the web tools off for a
+conversation that should stay on the phone.
 Apple Intelligence and MLX models chat without tools, and the menu is hidden
 for them.
 
