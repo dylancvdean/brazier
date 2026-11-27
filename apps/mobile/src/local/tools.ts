@@ -238,12 +238,16 @@ async function request<T>(
     let url = publicUrl(start);
     let sent = init;
     for (let hop = 0; ; hop += 1) {
+      // Each address gets its own request to cancel, so the body of a redirect is dropped when it is left.
+      const step = new AbortController();
+      limit.signal.addEventListener('abort', () => step.abort(), { once: true });
       const response = await environment.fetch(url.href, {
-        ...sent, signal: limit.signal, credentials: 'omit', redirect: 'manual',
+        ...sent, signal: step.signal, credentials: 'omit', redirect: 'manual',
         headers: { 'user-agent': USER_AGENT, 'accept-language': 'en-US,en;q=0.8', ...sent.headers },
       });
       const location = response.status >= 300 && response.status < 400 ? response.headers.get('location') : null;
       if (!location) return await read(response, url);
+      step.abort();
       if (hop === MAX_REDIRECTS) throw new ToolError('The site redirects too many times.');
       url = publicUrl(new URL(location, url).href);
       // As browsers do, a redirected form post becomes a plain read of the new address.

@@ -100,14 +100,18 @@ test('fetch_url refuses unsafe addresses, redirects into a private network, file
   const run = (fetch: ToolFetch) => runLocalTool('fetch_url', '{"url":"https://example.com"}', { fetch, timeoutMs: 20 }, never);
   // A redirect is followed here, one checked address at a time, and never into a private network.
   const asked: string[] = [];
+  const left: AbortSignal[] = [];
   const redirecting = (location: string): ToolFetch => async (url, init) => {
     asked.push(`${init.redirect} ${url}`);
+    if (url === 'https://example.com/') left.push(init.signal!);
     return url === 'https://example.com/' ? page('', { status: 302, location }) : page('<p>Moved here.</p>');
   };
   assert.match((await run(redirecting('http://127.0.0.1:8080/admin'))).output, /^Error: Local and private addresses/);
   assert.deepEqual(asked.splice(0), ['manual https://example.com/']);
   assert.equal((await run(redirecting('/new'))).output, 'URL: https://example.com/new\n\nMoved here.');
   assert.deepEqual(asked.splice(0), ['manual https://example.com/', 'manual https://example.com/new']);
+  // The redirect's own body is not left downloading while the next address is read.
+  assert.ok(left.every((signal) => signal.aborted));
   assert.match((await run(async () => page('', { status: 301, location: 'https://example.com/loop' }))).output,
     /^Error: The site redirects too many times/);
   // Plain http is not used: the page is asked for over https.
