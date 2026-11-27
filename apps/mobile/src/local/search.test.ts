@@ -189,6 +189,8 @@ test('speech repositories without a pipeline tag and image repositories are not 
     gguf('a/asr', { pipeline_tag: undefined, tags: ['mlx-audio', 'qwen3_asr', 'speech-to-text', 'asr'] }),
     gguf('a/sd-turbo', { pipeline_tag: undefined, tags: ['gguf', 'sd.cpp', 'stable-diffusion.cpp'] }),
     gguf('a/hears', { pipeline_tag: 'image-text-to-text', tags: ['gguf', 'audio', 'speech'] }),
+    gguf('a/reranker', { pipeline_tag: 'text-classification' }),
+    gguf('a/audio', { pipeline_tag: 'audio-text-to-text' }),
   ], 'gguf');
   assert.deepEqual(results.map(({ slug }) => slug), ['a/chat', 'a/hears']);
 });
@@ -206,6 +208,7 @@ test('image results leave out add-ons and files that are only part of a model', 
     image('a/explorations', ['model.safetensors']),
     image('a/upscalers', ['4x.safetensors'], ['upscaler']),
     image('a/merged', ['model.gguf'], ['base_model:merge:latent-consistency/lcm-lora-sdv1-5']),
+    image('a/embedding', ['style.safetensors'], ['base_model:adapter:x/sd-1.5']),
   ], 'image');
   assert.deepEqual(results.map(({ slug, files }) => [slug, files]), [['a/checkpoint', 1], ['a/explorations', 1], ['a/merged', 1]]);
 });

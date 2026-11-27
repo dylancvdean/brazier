@@ -51,7 +51,9 @@ const notChat = new Set([
   'image-text-to-image', 'image-text-to-video', 'image-classification', 'object-detection', 'image-segmentation',
   'stable-diffusion', sdcpp, 'sd.cpp',
 ]);
-// Speech and embedding repositories often carry no pipeline tag, only these. A chat model that also hears has a pipeline tag.
+// The pipelines of models that chat; one that also hears or sees is still tagged with one of these.
+const chat = new Set(['text-generation', 'text2text-generation', 'image-text-to-text', 'video-text-to-text']);
+// Speech and embedding repositories often carry no pipeline tag, only these.
 const otherKind = /^(mlx-audio|asr|stt|tts|speech|speech-to-text|speech-recognition|transcription|whisper|audio|embeddings?|reranker)$/i;
 // Add-ons to an image model, which generate nothing on their own.
 const addOn = /controlnet|(^|[^a-z])lora([^a-z]|$)|adapter|upscal|esrgan|super-resolution/i;
@@ -73,10 +75,11 @@ export function parseResults(value: unknown, format: SearchFormat): SearchResult
         (model.gated !== undefined && model.gated !== false)) return [];
     const tags = [model.pipeline_tag, ...(Array.isArray(model.tags) ? model.tags : [])].filter((tag) => typeof tag === 'string');
     const named = `${model.id} ${tags.join(' ')}`;
-    // A checkpoint merged from a LoRA is still a whole model, so what it was made from does not count here.
-    const own = `${model.id} ${tags.filter((tag) => !tag.startsWith('base_model:')).join(' ')}`;
+    // A checkpoint merged from a LoRA is still a whole model, so what it was made from does not count here, unless it is an adapter for it.
+    const own = `${model.id} ${tags.filter((tag) => !tag.startsWith('base_model:') || tag.startsWith('base_model:adapter:')).join(' ')}`;
     if (format === 'image' ? needsMoreFiles.test(named) || addOn.test(own)
-      : tags.some((tag) => notChat.has(tag) || (typeof model.pipeline_tag !== 'string' && otherKind.test(tag)))) return [];
+      : (typeof model.pipeline_tag === 'string' ? !chat.has(model.pipeline_tag) : tags.some((tag) => otherKind.test(tag))) ||
+        tags.some((tag) => notChat.has(tag))) return [];
     const files = (Array.isArray(model.siblings) ? model.siblings : []).flatMap((file) => {
       const path = (file as { rfilename?: unknown })?.rfilename;
       return typeof path === 'string' ? [{ path, size: 0 }] : [];
