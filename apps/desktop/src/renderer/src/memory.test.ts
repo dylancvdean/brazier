@@ -60,6 +60,7 @@ import {
   normalizeDreamProposal,
   renderDreamInput
 } from './memory'
+import { listMemories } from './api'
 
 function memory(id: string, text: string, pinned = false): Memory {
   return {
@@ -321,6 +322,8 @@ describe('loadRelevantMemories', () => {
     try {
       const recalled = await loadRelevantMemories('What should I drink this morning?', 2)
       expect(recalled.map((entry) => entry.id)).toEqual(['1', '2'])
+      // The daemon defaults to 50 rows; ask for the configured count instead.
+      expect(vi.mocked(listMemories).mock.calls.at(-1)).toEqual([undefined, 2])
     } finally {
       daemon.search = undefined
     }
