@@ -2304,7 +2304,7 @@ export function App(): React.JSX.Element {
     }
     void newConversation()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appMode, agentSidebar, computerSidebar, incognito])
+  }, [appMode, agentSidebar, computerSidebar, incognito, messages.length])
 
   const openActiveModelSettings = useCallback((): void => {
     if (appMode === 'chat' || appMode === 'agent') {
