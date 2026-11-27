@@ -3,7 +3,7 @@ import { Alert, Pressable, ScrollView, Text, TextInput, View } from 'react-nativ
 import { DEVICE_ID, type HostIndex } from './hosts.ts';
 import type { SavedHosts } from './storage.ts';
 import { useTheme, type ThemePreference } from './theme.ts';
-import { Action, IconButton, useStyles } from './ui.tsx';
+import { Action, dragDismiss, IconButton, useStyles } from './ui.tsx';
 
 const themes: { value: ThemePreference; label: string }[] = [
   { value: 'system', label: 'System' }, { value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' },
@@ -28,7 +28,7 @@ export function Settings({ saved, theme, error, onTheme, onSelect, onRename, onR
       {onClose ? <IconButton glyph="‹" label="Back" onPress={onClose} /> : null}
       <Text style={[styles.topTitle, !onClose && { paddingLeft: 10 }]}>Settings</Text>
     </View>
-    <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled">
+    <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       <Text style={styles.section}>Appearance</Text>
       <View style={styles.segment}>

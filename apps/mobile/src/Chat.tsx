@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, View,
+  ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, View,
 } from 'react-native';
 import {
   chatBranch, chatContext, DaemonError, messageText, toolCallsOf,
@@ -11,7 +11,7 @@ import { Markdown } from './Markdown.tsx';
 import { generatedMediaMessage, mediaByMessage, toolCallMedia } from './media.ts';
 import { MediaList } from './Media.tsx';
 import { useTheme } from './theme.ts';
-import { Action, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
+import { Action, dragDismiss, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
 
 function ToolCalls({ calls }: { calls: readonly ToolCall[] }) {
   const styles = useStyles();
@@ -162,6 +162,7 @@ export function Chat({
     setBusy('Generating…');
     setError('');
     setDraft('');
+    Keyboard.dismiss();
     let stored = false;
     try {
       const chat = selected ?? await api.createConversation(prompt);
@@ -224,7 +225,7 @@ export function Chat({
 
   return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
     <View style={styles.topBar}>
-      <IconButton glyph="☰" label="Conversations" onPress={() => setShowDrawer(true)} />
+      <IconButton glyph="☰" label="Conversations" onPress={() => { Keyboard.dismiss(); setShowDrawer(true); }} />
       <Text numberOfLines={1} style={styles.topTitle}>{selected?.title ?? 'New chat'}</Text>
       <Pressable accessibilityRole="button" accessibilityLabel="Choose model" disabled={!!busy}
         style={[styles.chip, !!busy && styles.disabled]} onPress={() => setShowModels(true)}>
@@ -233,15 +234,15 @@ export function Chat({
       <IconButton glyph="＋" label="New chat" disabled={!!busy} onPress={newChat} />
     </View>
     {error ? <Text accessibilityRole="alert" style={[styles.error, { margin: 10 }]}>{error}</Text> : null}
-    {visible.length === 0 && !streamed && !running.length ? <View style={styles.empty}>
+    {visible.length === 0 && !streamed && !running.length ? <Pressable accessible={false} style={styles.empty} onPress={Keyboard.dismiss}>
       <Text style={styles.brand}>Brazier</Text>
       <Text style={styles.emptyText}>{model ? (local ? 'Replies are generated on this device.' : `Connected to ${hostName}.`)
         : local && !models.length && !busy ? 'Add a model to chat on this device.' : 'Choose a chat model to start.'}</Text>
       {!model && !busy ? (local && !models.length
         ? <Action label="Add a model" onPress={onOpenModels!} />
         : <Action label="Choose model" onPress={() => setShowModels(true)} />) : null}
-    </View> : <ScrollView style={styles.flex} contentContainerStyle={styles.messages} ref={scroll}
-      onContentSizeChange={() => scroll.current?.scrollToEnd({ animated: false })} keyboardShouldPersistTaps="handled">
+    </Pressable> : <ScrollView style={styles.flex} contentContainerStyle={styles.messages} ref={scroll}
+      onContentSizeChange={() => scroll.current?.scrollToEnd({ animated: false })} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
       {visible.map((message) => {
         const calls = savedCalls.get(message.id);
         const media = savedMedia.media.get(message.id);
