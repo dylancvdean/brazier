@@ -607,7 +607,10 @@ async fn looks_like_lfs_pointer(path: &Path) -> bool {
 
 /// Whether an on-disk file matches the Hub's expected size, when available.
 fn size_matches_expected(actual: u64, expected: Option<u64>) -> bool {
-    let Some(expected) = expected.filter(|value| *value > 0) else {
+    // A known size of zero is a real empty file (snapshots carry empty
+    // `.json`/`.txt` placeholders); only an unknown size falls back to
+    // "received something".
+    let Some(expected) = expected else {
         return actual > 0;
     };
     // The Hub tree API reports the exact byte count. Do not accept a partially
@@ -1659,6 +1662,56 @@ mod tests {
                 .to_string_lossy()
                 .contains("acme__demo")
         );
+    }
+
+    /// Serve one canned HTTP response on a loopback port.
+    async fn serve_once(response: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 4096];
+            let _ = socket.read(&mut buffer).await;
+            let _ = socket.write_all(response).await;
+            let _ = socket.shutdown().await;
+        });
+        format!("http://{address}/file")
+    }
+
+    #[tokio::test]
+    async fn an_empty_snapshot_file_installs_instead_of_failing_forever() {
+        let dir = tempdir().unwrap();
+        let destination = dir.path().join("model").join("added_tokens.txt");
+        let url =
+            serve_once(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+        let client = reqwest::Client::new();
+        let request = || FileDownload {
+            client: &client,
+            data_dir: dir.path(),
+            repo_id: "acme/demo",
+            revision: "main",
+            filename: "added_tokens.txt",
+            source_url: Some(&url),
+            destination: &destination,
+            job: None,
+            cancel: None,
+            expected_size: Some(0),
+            expected_sha256: None,
+            snapshot: None,
+        };
+        let mut progress: ProgressCallback = Box::new(|_| {});
+        let written = download_file_to_with_opts(request(), &mut progress)
+            .await
+            .expect("an empty file is a complete download");
+        assert_eq!(written, 0);
+        assert!(destination.is_file());
+
+        // The listener is gone: a second pass must accept the file on disk.
+        let again = download_file_to_with_opts(request(), &mut progress)
+            .await
+            .expect("an installed empty file is not re-downloaded");
+        assert_eq!(again, 0);
     }
 
     #[test]

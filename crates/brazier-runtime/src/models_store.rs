@@ -89,6 +89,15 @@ fn validate_library_relative_key(key: &str) -> anyhow::Result<()> {
             .any(|part| part.is_empty() || part == "." || part == ".."),
         "invalid model key"
     );
+    // Keys are `/`-separated, but the path they are joined into is parsed by
+    // the platform: on Windows `..\..\x.gguf` walks out of the store and
+    // `C:/x.gguf` replaces it outright.
+    anyhow::ensure!(
+        Path::new(key)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_))),
+        "invalid model key"
+    );
     Ok(())
 }
 
@@ -2136,6 +2145,21 @@ pub fn prefer_gguf_filename(filenames: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_key_cannot_leave_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(path_for_gguf_id(dir.path(), "acme/demo/model.gguf").is_ok());
+        for key in ["../model.gguf", "/model.gguf", "acme/../../model.gguf"] {
+            assert!(path_for_gguf_id(dir.path(), key).is_err(), "{key}");
+        }
+        // Separators and drive prefixes only Windows path parsing honours.
+        #[cfg(windows)]
+        for key in ["..\\..\\model.gguf", "C:/model.gguf", "C:model.gguf"] {
+            assert!(path_for_gguf_id(dir.path(), key).is_err(), "{key}");
+        }
+    }
+
     use tempfile::tempdir;
 
     fn write_gguf_string(out: &mut Vec<u8>, value: &str) {
