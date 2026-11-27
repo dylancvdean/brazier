@@ -263,6 +263,10 @@ pub fn parse_origins(origins: &[String]) -> anyhow::Result<Vec<HeaderValue>> {
     Ok(values)
 }
 
+/// An export embeds every attachment as base64, so an import is far larger
+/// than the default request body limit as soon as it carries one photo.
+const CONVERSATION_IMPORT_MAX_BYTES: usize = 256 * 1024 * 1024;
+
 pub fn router(state: AppState) -> Router {
     router_with_origins(
         state,
@@ -305,7 +309,10 @@ pub fn router_with_origins(state: AppState, origins: Vec<HeaderValue>) -> Router
             "/api/v1/conversations/{id}/export",
             get(export_conversation),
         )
-        .route("/api/v1/conversations/import", post(import_conversation))
+        .route(
+            "/api/v1/conversations/import",
+            post(import_conversation).layer(DefaultBodyLimit::max(CONVERSATION_IMPORT_MAX_BYTES)),
+        )
         .route(
             "/api/v1/conversations/{id}/runs",
             get(list_run_snapshots).post(create_run_snapshot),
@@ -9660,6 +9667,44 @@ mod tests {
             updated["content"][0]["brazier_blob"]["sha256"],
             stored.sha256
         );
+    }
+
+    #[tokio::test]
+    async fn an_export_with_a_large_attachment_can_be_imported() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        let app = router(state.clone());
+        let mut image = b"\x89PNG\r\n\x1a\n".to_vec();
+        image.resize(3 * 1024 * 1024, 7);
+        let stored = blob_store::store_bytes(dir.path(), &image, "image/png", None)
+            .await
+            .unwrap();
+        let conversation = state.db.create_conversation("Photo").await.unwrap();
+        let (status, _) = json_request(
+            &app,
+            "POST",
+            &format!("/api/v1/conversations/{}/messages", conversation.id),
+            json!({ "parent_id": null, "role": "user", "model": null, "content": [{
+                "type": "brazier_blob",
+                "brazier_blob": { "sha256": stored.sha256, "mime_type": "image/png" }
+            }] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let export = state
+            .db
+            .export_conversation(dir.path(), &conversation.id)
+            .await
+            .unwrap();
+
+        let (status, imported) = json_request(
+            &app,
+            "POST",
+            "/api/v1/conversations/import",
+            serde_json::to_value(export).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{imported}");
     }
 
     #[tokio::test]
