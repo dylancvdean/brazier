@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Keyboard, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { DaemonError, type Model } from './api.ts';
 import { imageSizes } from './local/images.ts';
 import {
@@ -8,7 +8,7 @@ import {
 } from './media.ts';
 import { MediaThumb, MediaView } from './Media.tsx';
 import { useTheme } from './theme.ts';
-import { Action, dragDismiss, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
+import { Action, dragDismiss, errorText, IconButton, KeyboardScreen, Sheet, useStyles } from './ui.tsx';
 
 const blank = (modality: Modality): GenerateForm => ({
   modality, modelId: '', prompt: '', negative: '', steps: '', seed: '', frames: '',
@@ -165,7 +165,7 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
         placeholder={placeholder} placeholderTextColor={palette.muted} keyboardType="number-pad" editable={!running} />
     </View>;
 
-  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
+  return <KeyboardScreen>
     <View style={styles.topBar}>
       <IconButton glyph="‹" label="Back to chat" onPress={onClose} />
       <Text numberOfLines={1} style={styles.topTitle}>Generate</Text>
@@ -259,5 +259,5 @@ export function Generate({ generator: api, hostName, visible, onClose, onUnautho
         </Text> : null}
       </ScrollView>
     </Sheet>
-  </KeyboardAvoidingView>;
+  </KeyboardScreen>;
 }

@@ -1,7 +1,7 @@
 import { fetch } from 'expo/fetch';
 import { Agent, AgentUnavailable } from './Agent.tsx';
 import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Text, useColorScheme, View } from 'react-native';
+import { Alert, AppState, BackHandler, ScrollView, Text, useColorScheme, View } from 'react-native';
 import { daemonClient, DaemonError, UnreachableError, type Credential, type Host } from './api.ts';
 import { Chat } from './Chat.tsx';
 import { hostGenerator } from './blobFiles.ts';
@@ -9,15 +9,16 @@ import { Generate } from './Generate.tsx';
 import { defaultPreferences, DEVICE_ID, hostId, renameHost, selectHost, type Preferences } from './hosts.ts';
 import { deviceBackend, deviceEngine, deviceGenerator } from './local/device.ts';
 import { Models } from './Models.tsx';
+import { backStep, type AppView } from './navigation.ts';
 import { checkLocalNetwork } from './localNetwork';
 import { Pairing } from './Pairing.tsx';
 import { hostLabel, Settings } from './Settings.tsx';
 import {
   deleteHost, emptyIndex, loadHosts, loadPreferences, saveHost, saveIndex, savePreferences, type SavedHosts,
 } from './storage.ts';
-import { resolvePalette, ThemeContext, useTheme } from './theme.ts';
+import { resolvePalette, ThemeContext } from './theme.ts';
 import { pinCertificate } from './tlsPinning';
-import { Action, errorText, Screen, useStyles } from './ui.tsx';
+import { Action, Busy, ErrorText, errorText, KeyboardScreen, Screen, useStyles } from './ui.tsx';
 
 type Access = { message: string; pairAgain: boolean };
 
@@ -42,10 +43,9 @@ function Shell({ preferences, onPreferences }: {
   preferences: Preferences; onPreferences: (change: Partial<Preferences>) => void;
 }) {
   const styles = useStyles();
-  const palette = useTheme();
   const [saved, setSaved] = useState<SavedHosts>({ index: emptyIndex, credentials: {} });
   const [starting, setStarting] = useState(true);
-  const [view, setView] = useState<'chat' | 'settings' | 'pairing' | 'generate' | 'models'>('chat');
+  const [view, setView] = useState<AppView>('chat');
   const [generateOpened, setGenerateOpened] = useState(false);
   // Agent is mounted on first use and then kept, so a running task survives a visit to Chat.
   const [agent, setAgent] = useState<'unopened' | 'shown' | 'hidden'>('unopened');
@@ -122,6 +122,20 @@ function Shell({ preferences, onPreferences }: {
     return () => { active = false; listener.remove(); };
   }, [credential, revision]);
 
+  // Android's back button and gesture follow the on-screen back buttons instead of closing the app.
+  const agentShown = agent === 'shown';
+  const hasHost = !!credential;
+  useEffect(() => {
+    const listener = BackHandler.addEventListener('hardwareBackPress', () => {
+      const step = backStep({ view, agentShown, onDevice, hasHost });
+      if (!step) return false;
+      if ('view' in step) setView(step.view);
+      else setAgent(step.agent);
+      return true;
+    });
+    return () => listener.remove();
+  }, [view, agentShown, onDevice, hasHost]);
+
   async function update(change: () => Promise<SavedHosts>, failure: string) {
     setStorageError('');
     try {
@@ -142,24 +156,23 @@ function Shell({ preferences, onPreferences }: {
     return { ...saved, index };
   }, 'Could not save the host list.');
 
-  if (starting) return <View style={styles.empty}><ActivityIndicator color={palette.accent} /></View>;
+  if (starting) return <View style={styles.empty}><Busy label="Starting…" /></View>;
 
   if (view === 'pairing' || (!credential && !onDevice)) {
-    return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
-      <View style={styles.header}><Text style={styles.brand}>Brazier</Text>
-        <Text style={styles.subtitle}>Your own AI, on the go</Text></View>
-      {storageError ? <Text accessibilityRole="alert" style={[styles.error, { marginHorizontal: 18 }]}>{storageError}</Text> : null}
-      <Pairing onCancel={credential || onDevice ? () => setView('settings') : undefined} onPaired={async (issued, name) => {
+    return <KeyboardScreen>
+      <Pairing header={<>
+        <View><Text accessibilityRole="header" style={styles.brand}>Brazier</Text>
+          <Text style={styles.subtitle}>Your own AI, on the go</Text></View>
+        {storageError ? <ErrorText message={storageError} /> : null}
+      </>} footer={!credential && !onDevice ? <Action label="Use models on this device instead" quiet
+        onPress={() => { void applyIndex(selectHost(saved.index, DEVICE_ID)); setView('chat'); }} /> : null}
+        onCancel={credential || onDevice ? () => setView('settings') : undefined} onPaired={async (issued, name) => {
         const index = await saveHost(saved.index, issued, name);
         setSaved({ index, credentials: { ...saved.credentials, [hostId(issued)]: issued } });
         setStorageError('');
         setView('chat');
       }} />
-      {!credential && !onDevice ? <View style={{ paddingHorizontal: 18, paddingBottom: 12 }}>
-        <Action label="Use models on this device instead" quiet
-          onPress={() => { void applyIndex(selectHost(saved.index, DEVICE_ID)); setView('chat'); }} />
-      </View> : null}
-    </KeyboardAvoidingView>;
+    </KeyboardScreen>;
   }
 
   const host = credential && verified?.credential === credential ? verified.host : null;
@@ -196,22 +209,26 @@ function Shell({ preferences, onPreferences }: {
   if (view === 'models' && (access || !host)) return models;
 
   if (access) {
-    return <View style={styles.panel}>
+    return <ScrollView contentContainerStyle={[styles.panel, styles.accessPanel]}>
       <Text style={styles.brand}>Brazier</Text>
-      <Text style={styles.heading}>{access.pairAgain ? 'Pair again' : `${name} is unavailable`}</Text>
-      <Text style={styles.body}>{access.message}</Text>
-      {storageError ? <Text accessibilityRole="alert" style={styles.error}>{storageError}</Text> : null}
+      <Text accessibilityRole="header" style={styles.heading}>
+        {access.pairAgain ? `Pair with ${name} again` : `Can’t reach ${name}`}</Text>
+      <Text accessibilityRole="alert" style={styles.body}>{access.message}</Text>
+      {storageError ? <ErrorText message={storageError} /> : null}
       {access.pairAgain
         ? <Action label="Pair again" onPress={() => setView('pairing')} />
         : <Action label="Retry connection" onPress={() => setRevision((value) => value + 1)} />}
       <Action label="Hosts and settings" quiet onPress={() => setView('settings')} />
-      <Action label="Forget this host" danger onPress={() => void remove(hostId(credential))} />
-    </View>;
+      <Action label="Forget this host" danger onPress={() => Alert.alert(
+        `Forget ${name}?`, 'This device forgets the host. Revoke the device on the host to end its access.',
+        [{ text: 'Cancel', style: 'cancel' },
+          { text: 'Forget', style: 'destructive', onPress: () => void remove(hostId(credential)) }],
+      )} />
+    </ScrollView>;
   }
 
   if (!host) {
-    return <View style={styles.empty}><ActivityIndicator color={palette.accent} />
-      <Text style={styles.emptyText}>Verifying {name}…</Text>
+    return <View style={styles.empty}><Busy label={`Connecting to ${name}…`} />
       <Action label="Hosts and settings" quiet onPress={() => setView('settings')} /></View>;
   }
 

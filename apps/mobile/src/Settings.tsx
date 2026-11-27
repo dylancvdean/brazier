@@ -1,9 +1,9 @@
-import { useState } from 'react';
-import { Alert, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { Alert, BackHandler, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { DEVICE_ID, type HostIndex } from './hosts.ts';
 import type { SavedHosts } from './storage.ts';
 import { useTheme, type ThemePreference } from './theme.ts';
-import { Action, dragDismiss, IconButton, useStyles } from './ui.tsx';
+import { Action, barTextScale, dragDismiss, ErrorText, IconButton, KeyboardScreen, useStyles } from './ui.tsx';
 
 const themes: { value: ThemePreference; label: string }[] = [
   { value: 'system', label: 'System' }, { value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' },
@@ -23,26 +23,35 @@ export function Settings({ saved, theme, error, onTheme, onSelect, onRename, onR
   const palette = useTheme();
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
 
-  return <View style={styles.container}>
+  // Back leaves a rename before it leaves Settings.
+  const editing = renaming !== null;
+  useEffect(() => {
+    if (!editing) return undefined;
+    const listener = BackHandler.addEventListener('hardwareBackPress', () => { setRenaming(null); return true; });
+    return () => listener.remove();
+  }, [editing]);
+
+  return <KeyboardScreen>
     <View style={styles.topBar}>
       {onClose ? <IconButton glyph="‹" label="Back" onPress={onClose} /> : null}
-      <Text style={[styles.topTitle, !onClose && { paddingLeft: 10 }]}>Settings</Text>
+      <Text accessibilityRole="header" numberOfLines={1} maxFontSizeMultiplier={barTextScale}
+        style={[styles.topTitle, !onClose && { paddingLeft: 10 }]}>Settings</Text>
     </View>
     <ScrollView contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled" keyboardDismissMode={dragDismiss}>
-      {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
-      <Text style={styles.section}>Appearance</Text>
-      <View style={styles.segment}>
-        {themes.map(({ value, label }) => <Pressable key={value} accessibilityRole="button"
-          accessibilityState={{ selected: theme === value }}
+      {error ? <ErrorText message={error} /> : null}
+      <Text accessibilityRole="header" style={styles.section}>Appearance</Text>
+      <View accessibilityRole="radiogroup" accessibilityLabel="Appearance" style={styles.segment}>
+        {themes.map(({ value, label }) => <Pressable key={value} accessibilityRole="radio"
+          accessibilityState={{ checked: theme === value }}
           style={[styles.segmentItem, theme === value && styles.segmentOn]} onPress={() => onTheme(value)}>
           <Text style={[styles.segmentText, theme === value && styles.segmentTextOn]}>{label}</Text>
         </Pressable>)}
       </View>
 
-      <Text style={styles.section}>Hosts</Text>
+      <Text accessibilityRole="header" style={styles.section}>Hosts</Text>
       <View style={[styles.card, saved.index.active === DEVICE_ID && { borderColor: palette.accent }]}>
         <Text style={styles.body}>This device{saved.index.active === DEVICE_ID ? '  ·  In use' : ''}</Text>
-        <Text style={styles.listMeta}>Models run on this device. Text chat only; no host needed.</Text>
+        <Text style={styles.listMeta}>Models run on this phone, with no host needed.</Text>
         <View style={styles.row}>
           {saved.index.active !== DEVICE_ID ? <Action label="Use this device" onPress={() => onSelect(DEVICE_ID)} /> : null}
           <Action label="Models" quiet onPress={onModels} />
@@ -55,8 +64,10 @@ export function Settings({ saved, theme, error, onTheme, onSelect, onRename, onR
         const label = hostLabel(saved.index, id, credential.origin);
         return <View key={id} style={[styles.card, active && { borderColor: palette.accent }]}>
           {renaming?.id === id ? <>
-            <TextInput accessibilityLabel="Host name" autoFocus style={styles.input} value={renaming.name}
-              placeholderTextColor={palette.muted} onChangeText={(name) => setRenaming({ id, name })} />
+            <TextInput accessibilityLabel="Host name" autoFocus selectTextOnFocus style={styles.input} value={renaming.name}
+              placeholder="Host name" placeholderTextColor={palette.muted} keyboardAppearance={palette.dark ? 'dark' : 'light'}
+              returnKeyType="done" maxLength={60} onChangeText={(name) => setRenaming({ id, name })}
+              onSubmitEditing={() => { if (renaming.name.trim()) { onRename(id, renaming.name); setRenaming(null); } }} />
             <View style={styles.row}>
               <Action label="Save" disabled={!renaming.name.trim()} onPress={() => {
                 onRename(id, renaming.name); setRenaming(null);
@@ -64,8 +75,8 @@ export function Settings({ saved, theme, error, onTheme, onSelect, onRename, onR
               <Action label="Cancel" quiet onPress={() => setRenaming(null)} />
             </View>
           </> : <>
-            <Text style={styles.body}>{label}{active ? '  ·  Connected' : ''}</Text>
-            <Text style={styles.listMeta}>{credential.origin}</Text>
+            <Text style={styles.body}>{label}{active ? '  ·  In use' : ''}</Text>
+            <Text selectable style={styles.listMeta}>{credential.origin}</Text>
             <View style={styles.row}>
               {!active ? <Action label="Use this host" onPress={() => onSelect(id)} /> : null}
               <Action label="Rename" quiet onPress={() => setRenaming({ id, name: label })} />
@@ -79,5 +90,5 @@ export function Settings({ saved, theme, error, onTheme, onSelect, onRename, onR
       })}
       <Action label={saved.index.hosts.length ? 'Pair another host' : 'Pair a host'} quiet onPress={onAdd} />
     </ScrollView>
-  </View>;
+  </KeyboardScreen>;
 }

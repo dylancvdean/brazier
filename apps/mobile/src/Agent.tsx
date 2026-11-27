@@ -1,7 +1,7 @@
 import { fetch } from 'expo/fetch';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, View,
+  ActivityIndicator, Alert, Keyboard, Modal, Pressable, SafeAreaView, ScrollView, Text, TextInput, View,
 } from 'react-native';
 import { AgentController } from './agent/controller.ts';
 import { agentApi } from './agent/rest.ts';
@@ -14,7 +14,7 @@ import {
 import { daemonClient, DaemonError, type Credential, type Model } from './api.ts';
 import { Markdown } from './Markdown.tsx';
 import { useTheme } from './theme.ts';
-import { Action, dragDismiss, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
+import { Action, barTextScale, Busy, dragDismiss, ErrorText, errorText, IconButton, KeyboardScreen, Sheet, useStyles } from './ui.tsx';
 
 type Draft = { model: string; workspace: string; mode: AgentPermissionMode; tools: string[] | null };
 
@@ -330,18 +330,18 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
   const blank = rows.length === 0 && !view.running;
   const chip = (label: string, hint: string, target: NonNullable<typeof sheet>) =>
     <Pressable accessibilityRole="button" accessibilityLabel={hint} disabled={locked}
-      style={[styles.chip, locked && styles.disabled]} onPress={() => { setFolder(workspace); setSheet(target); }}>
-      <Text numberOfLines={1} style={styles.chipText}>{label} ▾</Text>
+      hitSlop={6} style={[styles.chip, locked && styles.disabled]} onPress={() => { setFolder(workspace); setSheet(target); }}>
+      <Text numberOfLines={1} maxFontSizeMultiplier={barTextScale} style={styles.chipText}>{label} ▾</Text>
     </Pressable>;
 
-  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
+  return <KeyboardScreen>
     <View style={styles.topBar}>
       <IconButton glyph="☰" label="Tasks" onPress={() => {
         Keyboard.dismiss();
         setShowDrawer(true);
         void api.sessions().then(setSessions).catch(() => undefined);
       }} />
-      <Text numberOfLines={1} style={styles.topTitle}>{active?.title ?? 'New task'}</Text>
+      <Text accessibilityRole="header" numberOfLines={1} maxFontSizeMultiplier={barTextScale} style={styles.topTitle}>{active?.title ?? 'New task'}</Text>
       {chip(model || 'Choose model', 'Choose model', 'models')}
       <IconButton glyph="＋" label="New task" disabled={locked} onPress={newTask} />
     </View>
@@ -350,8 +350,7 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
       {chip(PERMISSION_LABELS[mode].title, 'Permissions', 'mode')}
       {chip(`⚙ ${enabledCount}`, `Tools, ${enabledCount} of ${offered.length} on`, 'tools')}
     </View>
-    {error || view.error ? <Text accessibilityRole="alert" style={[styles.error, { marginHorizontal: 10 }]}>
-      {error || view.error}</Text> : null}
+    {error || view.error ? <ErrorText message={error || view.error || ''} style={{ marginHorizontal: 10 }} /> : null}
     {blank ? <Pressable accessible={false} style={styles.empty} onPress={Keyboard.dismiss}>
       <Text style={styles.brand}>Agent</Text>
       <Text style={styles.emptyText}>{!model ? 'Choose a model to start.' : !workspace
@@ -381,14 +380,14 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
         <ApprovalCard key={approval.id} approval={approval} busy={deciding} onDecide={(...args) => void decide(...args)} />)}
       {view.summary && !view.running ? <Text style={styles.listMeta}>Done · {summaryLine(view.summary)}</Text> : null}
     </ScrollView>}
-    {status ? <Text accessibilityRole="progressbar" style={styles.status}>{status}</Text> : null}
+    {status ? <Busy inline label={status} /> : null}
     <View style={styles.composer}>
       <TextInput accessibilityLabel="Task" placeholder={`Give ${hostName} a task`} placeholderTextColor={palette.muted}
-        style={styles.composeInput} value={text} onChangeText={setText} editable={!locked} multiline />
+        style={styles.composeInput} keyboardAppearance={palette.dark ? 'dark' : 'light'} value={text} onChangeText={setText} editable={!locked} multiline />
       {view.running
-        ? <Pressable accessibilityRole="button" accessibilityLabel="Stop" style={styles.send} onPress={() => void stop()}>
+        ? <Pressable accessibilityRole="button" accessibilityLabel="Stop" hitSlop={6} style={styles.send} onPress={() => void stop()}>
           <Text style={styles.sendText}>■</Text></Pressable>
-        : <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!text.trim() || locked}
+        : <Pressable accessibilityRole="button" accessibilityLabel="Send" hitSlop={6} disabled={!text.trim() || locked}
           style={[styles.send, (!text.trim() || locked) && styles.disabled]} onPress={() => void send()}>
           <Text style={styles.sendText}>↑</Text></Pressable>}
     </View>
@@ -491,5 +490,5 @@ export function Agent({ credential, hostName, onUnauthorized, onOpenChat, onOpen
         <Pressable style={styles.flex} accessibilityLabel="Close tasks" onPress={() => setShowDrawer(false)} />
       </View>
     </Modal>
-  </KeyboardAvoidingView>;
+  </KeyboardScreen>;
 }

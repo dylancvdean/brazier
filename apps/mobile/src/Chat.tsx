@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Modal, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, View,
+  ActivityIndicator, Alert, Keyboard, Modal, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, View,
 } from 'react-native';
 import {
   chatBranch, chatContext, DaemonError, messageText, toolCallsOf,
@@ -11,7 +11,7 @@ import { Markdown } from './Markdown.tsx';
 import { generatedMediaMessage, mediaByMessage, toolCallMedia } from './media.ts';
 import { MediaList } from './Media.tsx';
 import { useTheme } from './theme.ts';
-import { Action, dragDismiss, errorText, IconButton, Sheet, useStyles } from './ui.tsx';
+import { Action, barTextScale, Busy, dragDismiss, ErrorText, errorText, IconButton, KeyboardScreen, Sheet, useStyles } from './ui.tsx';
 
 function ToolCalls({ calls }: { calls: readonly ToolCall[] }) {
   const styles = useStyles();
@@ -223,17 +223,17 @@ export function Chat({
     ? disabledTools.filter((other) => other !== name) : [...disabledTools, name]);
   const toolGroups = [...new Set(tools.map((tool) => tool.server_name ?? 'Built in'))];
 
-  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
+  return <KeyboardScreen>
     <View style={styles.topBar}>
       <IconButton glyph="☰" label="Conversations" onPress={() => { Keyboard.dismiss(); setShowDrawer(true); }} />
-      <Text numberOfLines={1} style={styles.topTitle}>{selected?.title ?? 'New chat'}</Text>
+      <Text accessibilityRole="header" numberOfLines={1} maxFontSizeMultiplier={barTextScale} style={styles.topTitle}>{selected?.title ?? 'New chat'}</Text>
       <Pressable accessibilityRole="button" accessibilityLabel="Choose model" disabled={!!busy}
-        style={[styles.chip, !!busy && styles.disabled]} onPress={() => setShowModels(true)}>
-        <Text numberOfLines={1} style={styles.chipText}>{modelName(model) || 'Choose model'} ▾</Text>
+        hitSlop={6} style={[styles.chip, !!busy && styles.disabled]} onPress={() => setShowModels(true)}>
+        <Text numberOfLines={1} maxFontSizeMultiplier={barTextScale} style={styles.chipText}>{modelName(model) || 'Choose model'} ▾</Text>
       </Pressable>
       <IconButton glyph="＋" label="New chat" disabled={!!busy} onPress={newChat} />
     </View>
-    {error ? <Text accessibilityRole="alert" style={[styles.error, { margin: 10 }]}>{error}</Text> : null}
+    {error ? <ErrorText message={error} style={{ margin: 10 }} /> : null}
     {visible.length === 0 && !streamed && !running.length ? <Pressable accessible={false} style={styles.empty} onPress={Keyboard.dismiss}>
       <Text style={styles.brand}>Brazier</Text>
       <Text style={styles.emptyText}>{model ? (local ? 'Replies are generated on this device.' : `Connected to ${hostName}.`)
@@ -266,16 +266,16 @@ export function Chat({
       </View> : null}
       {streamed ? <View style={styles.assistant}><Markdown text={streamed} /></View> : null}
     </ScrollView>}
-    {busy ? <Text accessibilityRole="progressbar" style={styles.status}>{busy}</Text> : null}
+    {busy ? <Busy inline label={busy} /> : null}
     <View style={styles.composer}>
       {tools.length ? <IconButton glyph={enabledTools.length ? '⚙' : '⊘'}
         label={`Tools, ${enabledTools.length} of ${tools.length} on`} onPress={() => setShowTools(true)} /> : null}
       <TextInput accessibilityLabel="Message" placeholder={local ? 'Message a model on this device' : `Message ${hostName}`} placeholderTextColor={palette.muted}
-        style={styles.composeInput} value={draft} onChangeText={setDraft} editable={!busy} multiline />
+        style={styles.composeInput} keyboardAppearance={palette.dark ? 'dark' : 'light'} value={draft} onChangeText={setDraft} editable={!busy} multiline />
       {generating
-        ? <Pressable accessibilityRole="button" accessibilityLabel="Stop" style={styles.send}
+        ? <Pressable accessibilityRole="button" accessibilityLabel="Stop" hitSlop={6} style={styles.send}
           onPress={() => currentTurn.current?.abort()}><Text style={styles.sendText}>■</Text></Pressable>
-        : <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!draft.trim() || !model || !!busy}
+        : <Pressable accessibilityRole="button" accessibilityLabel="Send" hitSlop={6} disabled={!draft.trim() || !model || !!busy}
           style={[styles.send, (!draft.trim() || !model || !!busy) && styles.disabled]} onPress={() => void send()}>
           <Text style={styles.sendText}>↑</Text></Pressable>}
     </View>
@@ -284,7 +284,7 @@ export function Chat({
       <ScrollView>
         {models.length === 0 ? <Text style={[styles.emptyText, { padding: 18 }]}>
           {local ? 'No models on this device yet.' : 'No chat models on this host. Add one on the host, then refresh.'}</Text> : null}
-        {models.map(({ id }) => <Pressable key={id} accessibilityRole="button"
+        {models.map(({ id }) => <Pressable key={id} accessibilityRole="button" accessibilityState={{ selected: id === model }}
           style={[styles.listItem, id === model && styles.listItemOn]} onPress={() => void chooseModel(id)}>
           <Text style={styles.check}>{id === model ? '✓' : ''}</Text>
           <Text style={styles.listText}>{modelName(id)}</Text>
@@ -332,6 +332,7 @@ export function Chat({
             {conversations.length === 0 && !busy ? <Text style={[styles.listMeta, { padding: 18 }]}>
               No saved conversations yet.</Text> : null}
             {conversations.map((chat) => <Pressable key={chat.id} accessibilityRole="button" disabled={!!busy}
+              accessibilityState={{ selected: chat.id === selected?.id, disabled: !!busy }}
               style={[styles.listItem, chat.id === selected?.id && styles.listItemOn]}
               onPress={() => void openConversation(chat)}>
               <Text numberOfLines={1} style={styles.listText}>{chat.title}</Text>
@@ -355,5 +356,5 @@ export function Chat({
         <Pressable style={styles.flex} accessibilityLabel="Close conversations" onPress={() => setShowDrawer(false)} />
       </View>
     </Modal>
-  </KeyboardAvoidingView>;
+  </KeyboardScreen>;
 }
