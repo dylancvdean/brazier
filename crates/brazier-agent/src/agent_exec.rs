@@ -124,7 +124,7 @@ impl AgentBroker {
         for id in ids {
             if let Some(process) = processes.remove(&id) {
                 let mut child = process.child.lock().await;
-                let _ = child.start_kill();
+                kill_process_tree(&mut child);
                 terminated += 1;
             }
         }
@@ -1064,9 +1064,16 @@ async fn fs_read(
         path.display(),
         size
     );
-    let mut file = tokio::fs::File::from_std(file);
+    // Devices and `/proc` files report a size that says nothing about how
+    // much they yield, so the limit is enforced on the read as well.
+    let mut file = tokio::fs::File::from_std(file).take(MAX_READ_BYTES as u64 + 1);
     let mut bytes = Vec::with_capacity(size as usize);
     file.read_to_end(&mut bytes).await?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_READ_BYTES,
+        "{} is larger than the {MAX_READ_BYTES}-byte read limit.",
+        path.display()
+    );
     let text = String::from_utf8_lossy(&bytes);
     let start_line = arguments
         .get("start_line")
@@ -1176,7 +1183,9 @@ fn unix_open_file(path: &Path, flags: i32, create_parents: bool) -> std::io::Res
         libc::openat(
             parent.as_raw_fd(),
             leaf.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            // Non-blocking, so opening a named pipe nobody writes to returns
+            // instead of blocking the caller forever.
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             0o666,
         )
     };
@@ -1982,7 +1991,14 @@ async fn fs_read_many(
             continue;
         }
         let mut bytes = Vec::with_capacity(size as usize);
-        file.read_to_end(&mut bytes)?;
+        // The reported size does not bound what a device or `/proc` file yields.
+        std::io::Read::take(&mut file, max_bytes as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes {
+            output.push_str(&format!(
+                "[skipped: content exceeds max_bytes_each={max_bytes}]\n\n"
+            ));
+            continue;
+        }
         let text = String::from_utf8_lossy(&bytes);
         for (index, line) in text.lines().enumerate() {
             output.push_str(&format!("{:>6}\t{line}\n", index + 1));
@@ -2350,6 +2366,9 @@ async fn build_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Lead a process group so stopping the command also stops what it forked.
+    #[cfg(unix)]
+    command.process_group(0);
     #[cfg(unix)]
     if !pinned_directories.is_empty() {
         use std::os::fd::AsRawFd as _;
@@ -2438,27 +2457,52 @@ async fn shell_run(
         .context("cannot capture command stderr")?;
     let stdout_task = tokio::spawn(read_shell_pipe(stdout, output.cloned(), None));
     let stderr_task = tokio::spawn(read_shell_pipe(stderr, output.cloned(), Some("[stderr]\n")));
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
+    let timed_out = || ToolOutcome {
+        output: format!(
+            "`{command_line}` was still running after {} ms and was terminated.",
+            timeout.as_millis()
+        ),
+        is_error: true,
+        exit_code: None,
+        changed_paths: Vec::new(),
+        images: Vec::new(),
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
         Ok(result) => result?,
         Err(_) => {
-            let _ = child.start_kill();
+            kill_process_tree(&mut child);
             let _ = child.wait().await;
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            return Ok(ToolOutcome {
-                output: format!(
-                    "`{command_line}` was still running after {} ms and was terminated.",
-                    timeout.as_millis()
-                ),
-                is_error: true,
-                exit_code: None,
-                changed_paths: Vec::new(),
-                images: Vec::new(),
-            });
+            return Ok(timed_out());
         }
     };
-    let stdout = String::from_utf8_lossy(&stdout_task.await??).to_string();
-    let stderr = String::from_utf8_lossy(&stderr_task.await??).to_string();
+    // The shell can exit while something it left behind still holds the
+    // output pipes, so reading them falls under the same deadline.
+    let stdout_abort = stdout_task.abort_handle();
+    let stderr_abort = stderr_task.abort_handle();
+    let Ok((stdout, stderr)) =
+        tokio::time::timeout_at(deadline, async { tokio::join!(stdout_task, stderr_task) }).await
+    else {
+        // The shell is already reaped, so its process group id may belong to
+        // something else by now: the leftover process is not signalled.
+        stdout_abort.abort();
+        stderr_abort.abort();
+        return Ok(ToolOutcome {
+            output: format!(
+                "`{command_line}` exited, but a process it left running still held its output \
+                 open after {} ms. Its output was not collected.",
+                timeout.as_millis()
+            ),
+            is_error: true,
+            exit_code: status.code(),
+            changed_paths: Vec::new(),
+            images: Vec::new(),
+        });
+    };
+    let stdout = String::from_utf8_lossy(&stdout??).to_string();
+    let stderr = String::from_utf8_lossy(&stderr??).to_string();
     let code = status.code();
     let mut body = String::new();
     if !stdout.is_empty() {
@@ -2486,6 +2530,17 @@ async fn shell_run(
         changed_paths: Vec::new(),
         images: Vec::new(),
     })
+}
+
+/// Kill a command started by `build_command` together with the processes it
+/// forked, which otherwise keep running and hold its output pipes open.
+fn kill_process_tree(child: &mut tokio::process::Child) {
+    // `id` is `None` once the child is reaped, so a recycled pid is never hit.
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+    }
+    let _ = child.start_kill();
 }
 
 /// Read a child pipe without waiting for process completion, forwarding chunks
@@ -2706,7 +2761,7 @@ async fn shell_terminate(
         anyhow::bail!("process {id} belongs to another session");
     }
     let mut child = process.child.lock().await;
-    child.start_kill().ok();
+    kill_process_tree(&mut child);
     Ok(ToolOutcome::text(format!(
         "Terminated {id} (`{}`).",
         process.command
@@ -4781,6 +4836,166 @@ startxref
             "{}",
             response.output
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn reading_an_endless_device_fails_instead_of_exhausting_memory() {
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        // A character device reports a zero size but never reaches end of file.
+        for (tool, arguments) in [
+            ("fs_read", json!({ "path": "/dev/zero" })),
+            ("fs_read_many", json!({ "paths": ["/dev/zero"] })),
+        ] {
+            let response = host_call(&harness, tool, arguments).await;
+            assert!(
+                response.output.contains("larger than") || response.output.contains("exceeds"),
+                "{tool}: {}",
+                &response.output[..response.output.len().min(200)]
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_named_pipe_in_the_workspace_does_not_hang_file_tools() {
+        let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        std::fs::write(harness.workspace.path().join("note.txt"), "needle\n").expect("write");
+        let fifo = std::ffi::CString::new(
+            harness
+                .workspace
+                .path()
+                .join("pipe")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .expect("fifo path");
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        // Opening a pipe for reading blocks until a writer appears.
+        let listed = harness.call("fs_list", json!({ "path": "." })).await;
+        assert!(listed.output.contains("note.txt"), "{}", listed.output);
+        let found = harness
+            .call("fs_search", json!({ "query": "needle" }))
+            .await;
+        assert!(found.output.contains("note.txt"), "{}", found.output);
+        let read = harness.call("fs_read", json!({ "path": "pipe" })).await;
+        assert!(!read.output.contains("needle"), "{}", read.output);
+    }
+
+    #[cfg(unix)]
+    async fn host_call(harness: &Harness, tool: &str, arguments: Value) -> ToolExecResponse {
+        let request = ToolExecRequest {
+            session_id: harness.session.id.clone(),
+            run_id: Some("run-1".to_owned()),
+            tool_call_id: Some("call-1".to_owned()),
+            tool: tool.to_owned(),
+            arguments,
+            environment: Some(AgentEnvironment::Host),
+            reason: None,
+            approval_id: None,
+        };
+        execute(&harness.context(), &request)
+            .await
+            .expect("broker call")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_run_timeout_also_stops_the_commands_children() {
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        let started = Instant::now();
+        // The shell forks `sleep`, which inherits the output pipes.
+        let response = host_call(
+            &harness,
+            "shell_run",
+            json!({ "command": "sleep 6 & wait", "timeout_ms": 300 }),
+        )
+        .await;
+        assert!(
+            response.output.contains("terminated"),
+            "{}",
+            response.output
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "timed-out call still waited {:?} for a child process",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_run_timeout_covers_processes_the_shell_left_behind() {
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        let started = Instant::now();
+        // The shell exits at once; `sleep` keeps the output pipes open.
+        let response = host_call(
+            &harness,
+            "shell_run",
+            json!({ "command": "sleep 6 &", "timeout_ms": 300 }),
+        )
+        .await;
+        assert!(
+            response.is_error && response.output.contains("left running"),
+            "{}",
+            response.output
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "call waited {:?} for a leftover process",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shell_terminate_also_stops_the_commands_children() {
+        let harness = Harness::new_host(AgentPermissionMode::SkipPermissions).await;
+        let pid_file = harness.workspace.path().join("child.pid");
+        let started = host_call(
+            &harness,
+            "shell_start",
+            json!({ "command": "sleep 60 & echo $! > child.pid; wait" }),
+        )
+        .await;
+        assert!(!started.is_error, "{}", started.output);
+        let process_id = started
+            .output
+            .split_whitespace()
+            .find(|word| word.starts_with("proc-"))
+            .expect("process id")
+            .trim_end_matches('.')
+            .to_owned();
+        let mut pid = None;
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(&pid_file)
+                && let Ok(value) = text.trim().parse::<i32>()
+            {
+                pid = Some(value);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let pid = pid.expect("child pid");
+        let stopped = harness
+            .call("shell_terminate", json!({ "process_id": process_id }))
+            .await;
+        assert!(!stopped.is_error, "{}", stopped.output);
+        let mut alive = true;
+        for _ in 0..100 {
+            alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| !stat.contains(") Z "))
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if alive {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(!alive, "the command's child outlived shell_terminate");
     }
 
     #[cfg(unix)]

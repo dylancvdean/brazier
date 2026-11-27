@@ -580,8 +580,8 @@ fn summarize(
                 })
                 .unwrap_or_else(|| "(no prompt)".to_owned());
             let trimmed = detail.trim();
-            let preview = if trimmed.len() > 80 {
-                format!("{}…", &trimmed[..80])
+            let preview = if trimmed.chars().count() > 80 {
+                format!("{}…", trimmed.chars().take(80).collect::<String>())
             } else {
                 trimmed.to_owned()
             };
@@ -933,6 +933,31 @@ mod tests {
                             }])
                         )
                     )
+                );
+            }
+            other => panic!("expected approval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_long_non_ascii_subagent_prompt_is_summarized_without_panicking() {
+        let backend = backend();
+        // Byte 80 falls inside a multi-byte character.
+        let prompt = "日".repeat(100);
+        let arguments = json!({ "prompt": prompt });
+        let request = base(
+            "spawn_subagent",
+            &arguments,
+            Path::new("/ws"),
+            &backend,
+            Path::new("/data"),
+            &[],
+        );
+        match decide(&request) {
+            PolicyDecision::RequireApproval { summary, .. } => {
+                assert!(
+                    summary.ends_with(&format!("{}…", "日".repeat(80))),
+                    "{summary}"
                 );
             }
             other => panic!("expected approval, got {other:?}"),
