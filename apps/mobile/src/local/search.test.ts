@@ -188,8 +188,9 @@ test('speech repositories without a pipeline tag and image repositories are not 
     gguf('a/chat'),
     gguf('a/asr', { pipeline_tag: undefined, tags: ['mlx-audio', 'qwen3_asr', 'speech-to-text', 'asr'] }),
     gguf('a/sd-turbo', { pipeline_tag: undefined, tags: ['gguf', 'sd.cpp', 'stable-diffusion.cpp'] }),
+    gguf('a/hears', { pipeline_tag: 'image-text-to-text', tags: ['gguf', 'audio', 'speech'] }),
   ], 'gguf');
-  assert.deepEqual(results.map(({ slug }) => slug), ['a/chat']);
+  assert.deepEqual(results.map(({ slug }) => slug), ['a/chat', 'a/hears']);
 });
 
 test('image results leave out add-ons and files that are only part of a model', () => {
@@ -203,8 +204,10 @@ test('image results leave out add-ons and files that are only part of a model', 
     image('a/style-lora', ['style.safetensors'], ['lora']),
     image('a/unet', ['diffusion_pytorch_model.safetensors', 'model_unet.safetensors']),
     image('a/explorations', ['model.safetensors']),
+    image('a/upscalers', ['4x.safetensors'], ['upscaler']),
+    image('a/merged', ['model.gguf'], ['base_model:merge:latent-consistency/lcm-lora-sdv1-5']),
   ], 'image');
-  assert.deepEqual(results.map(({ slug, files }) => [slug, files]), [['a/checkpoint', 1], ['a/explorations', 1]]);
+  assert.deepEqual(results.map(({ slug, files }) => [slug, files]), [['a/checkpoint', 1], ['a/explorations', 1], ['a/merged', 1]]);
 });
 
 test('an image search leads with repositories made for stable-diffusion.cpp', async () => {

@@ -51,10 +51,10 @@ const notChat = new Set([
   'image-text-to-image', 'image-text-to-video', 'image-classification', 'object-detection', 'image-segmentation',
   'stable-diffusion', sdcpp, 'sd.cpp',
 ]);
-// Speech and embedding repositories often carry no pipeline tag, only these.
+// Speech and embedding repositories often carry no pipeline tag, only these. A chat model that also hears has a pipeline tag.
 const otherKind = /^(mlx-audio|asr|stt|tts|speech|speech-to-text|speech-recognition|transcription|whisper|audio|embeddings?|reranker)$/i;
 // Add-ons to an image model, which generate nothing on their own.
-const addOn = /controlnet|(^|[^a-z])lora([^a-z]|$)|adapter/i;
+const addOn = /controlnet|(^|[^a-z])lora([^a-z]|$)|adapter|upscal|esrgan|super-resolution/i;
 // Image families whose checkpoints need separate text-encoder or VAE files, which this app cannot load.
 const needsMoreFiles = /flux|sd3|stable-diffusion-3|qwen-image|z-image|hunyuan|chroma|kontext|lumina|pixart|auraflow|cascade|wan\d|hidream|omnigen|sana/i;
 
@@ -72,9 +72,10 @@ export function parseResults(value: unknown, format: SearchFormat): SearchResult
     if (typeof model?.id !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(model.id) || model.private === true ||
         (model.gated !== undefined && model.gated !== false)) return [];
     const tags = [model.pipeline_tag, ...(Array.isArray(model.tags) ? model.tags : [])].filter((tag) => typeof tag === 'string');
-    const named = `${model.id} ${tags.join(' ')}`;
+    // What a model was merged from says nothing about what it is.
+    const named = `${model.id} ${tags.filter((tag) => !tag.startsWith('base_model:')).join(' ')}`;
     if (format === 'image' ? needsMoreFiles.test(named) || addOn.test(named)
-      : tags.some((tag) => notChat.has(tag) || otherKind.test(tag))) return [];
+      : tags.some((tag) => notChat.has(tag) || (typeof model.pipeline_tag !== 'string' && otherKind.test(tag)))) return [];
     const files = (Array.isArray(model.siblings) ? model.siblings : []).flatMap((file) => {
       const path = (file as { rfilename?: unknown })?.rfilename;
       return typeof path === 'string' ? [{ path, size: 0 }] : [];
