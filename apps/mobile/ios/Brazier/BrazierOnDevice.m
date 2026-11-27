@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <React/RCTBridgeModule.h>
 #import <React/RCTEventEmitter.h>
+#import <mach/mach.h>
+#import <os/proc.h>
 
 // What a native on-device engine implements. The engines are looked up by class
 // name so that one that this iOS version cannot load is simply absent.
@@ -88,6 +90,21 @@ RCT_EXPORT_METHOD(availability:(NSString *)name
   Class type = BrazierEngineClass(name);
   NSString *reason = type ? [type unavailableReason] : @"This build does not include this engine.";
   resolve(@{ @"available": @(reason == nil), @"reason": reason ?: @"" });
+}
+
+// What iOS lets this app use before ending it: what it holds now plus what it may still take.
+// Null where the system does not say, such as the Simulator.
+RCT_EXPORT_METHOD(memoryLimit:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+  size_t available = os_proc_available_memory();
+  task_vm_info_data_t info;
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  if (available == 0 || task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
+    resolve([NSNull null]);
+    return;
+  }
+  resolve(@((double)available + (double)info.phys_footprint));
 }
 
 RCT_EXPORT_METHOD(load:(NSString *)name

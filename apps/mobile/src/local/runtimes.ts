@@ -1,6 +1,7 @@
 import type { LlamaContext } from 'llama.rn';
 import { NativeEventEmitter, NativeModules, Platform, type NativeModule } from 'react-native';
 import { answerDelta, type ChatTurn, type Runtime } from './engine.ts';
+import { CONTEXT_TOKENS, contextBytes } from './memory.ts';
 import type { InstalledModel } from './models.ts';
 
 /** llama.cpp through llama.rn: GGUF files, Metal on iOS. */
@@ -13,7 +14,7 @@ export function llamaRuntime(modelPath: (model: InstalledModel) => string): Runt
       if (!model) throw new Error('llama.cpp needs a downloaded model.');
       const { initLlama } = await import('llama.rn');
       // llama.rn falls back to the CPU where the GPU cannot be used, such as the iOS Simulator.
-      context = await initLlama({ model: modelPath(model), n_ctx: 4096, n_gpu_layers: 99 });
+      context = await initLlama({ model: modelPath(model), n_ctx: CONTEXT_TOKENS, n_gpu_layers: 99 });
     },
     async generate(messages, signal, onToken) {
       const current = context;
@@ -41,6 +42,16 @@ export function llamaRuntime(modelPath: (model: InstalledModel) => string): Runt
   };
 }
 
+/** The context (KV) cache a GGUF file will need, from its header; null when it cannot be read. */
+export async function llamaContextBytes(path: string): Promise<number | null> {
+  try {
+    const { loadLlamaModelInfo } = await import('llama.rn');
+    return contextBytes(await loadLlamaModelInfo(path) as Record<string, unknown>);
+  } catch {
+    return null;
+  }
+}
+
 type NativeEngine = 'apple' | 'mlx';
 type OnDevice = NativeModule & {
   availability(engine: NativeEngine): Promise<{ available: boolean; reason: string }>;
@@ -48,7 +59,14 @@ type OnDevice = NativeModule & {
   generate(engine: NativeEngine, request: string, messages: ChatTurn[]): Promise<string>;
   stop(engine: NativeEngine): void;
   unload(engine: NativeEngine): Promise<void>;
+  memoryLimit?(): Promise<number | null>;
 };
+
+/** Bytes iOS lets this app use before ending it; null on Android, in the Simulator and in older builds. */
+export async function appMemoryLimit(): Promise<number | null> {
+  const native = Platform.OS === 'ios' ? NativeModules.BrazierOnDevice as OnDevice | undefined : undefined;
+  return await native?.memoryLimit?.().catch(() => null) ?? null;
+}
 
 let requests = 0;
 

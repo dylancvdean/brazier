@@ -3,10 +3,10 @@ import { Alert, ScrollView, Text, TextInput, View } from 'react-native';
 import type { Model } from './api.ts';
 import {
   activeDownload, builtInModels, cancelDownload, deleteModel, DownloadCancelled, downloadModel, freeSpace, installedModels,
-  repositoryChoices, totalMemory, usableRuntimes, watchDownload,
+  contextMemory, deviceMemory, repositoryChoices, usableRuntimes, watchDownload,
 } from './local/device.ts';
 import { formatBytes, type ModelChoice, type RuntimeId } from './local/huggingface.ts';
-import { memoryWarning } from './local/memory.ts';
+import { memoryWarning, type DeviceMemory } from './local/memory.ts';
 import { modelId, type InstalledModel } from './local/models.ts';
 import { useTheme } from './theme.ts';
 import { Action, errorText, IconButton, useStyles } from './ui.tsx';
@@ -22,6 +22,8 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
   const [builtIn, setBuiltIn] = useState<Model[]>([]);
   const [usable, setUsable] = useState<RuntimeId[]>([]);
   const [free, setFree] = useState(0);
+  const [memory, setMemory] = useState<DeviceMemory>({});
+  const [contexts, setContexts] = useState<Record<string, number | null>>({});
   const [slug, setSlug] = useState('');
   const [repository, setRepository] = useState<{ slug: string; choices: ModelChoice[] } | null>(null);
   const [listing, setListing] = useState(false);
@@ -30,7 +32,11 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
 
   async function refresh() {
     try {
-      setInstalled(await installedModels());
+      const models = await installedModels();
+      setInstalled(models);
+      setMemory(await deviceMemory());
+      setContexts(Object.fromEntries(await Promise.all(
+        models.map(async (model) => [model.id, await contextMemory(model)] as const))));
       setFree(freeSpace());
     } catch (cause) {
       setError(errorText(cause));
@@ -80,9 +86,8 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
     ]);
 
   const percent = active?.size ? Math.min(100, active.bytes / active.size * 100) : 0;
-  const memory = totalMemory();
-  const tooLarge = (size: number) => {
-    const warning = memoryWarning(size, memory);
+  const tooLarge = (size: number, context?: number | null) => {
+    const warning = memoryWarning(size, memory, context);
     return warning ? <Text style={[styles.listMeta, { color: palette.danger }]}>{warning}</Text> : null;
   };
   const accepted = usable.flatMap((runtime) => formats[runtime] ? [formats[runtime]] : []).join(' and ');
@@ -142,7 +147,7 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
         <Text style={styles.listMeta}>{model.slug}</Text>
         <Text style={styles.listMeta}>{runtimeNames[model.runtime]}  ·  {formatBytes(model.size)}
           {usable.length && !usable.includes(model.runtime) ? '  ·  cannot run on this device' : ''}</Text>
-        {tooLarge(model.size)}
+        {tooLarge(model.size, contexts[model.id])}
         <View style={styles.row}><Action label="Delete" danger onPress={() => remove(model)} /></View>
       </View>)}
     </ScrollView>
