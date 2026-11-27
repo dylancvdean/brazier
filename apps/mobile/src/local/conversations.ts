@@ -75,9 +75,12 @@ export function conversationStore(files: TextFiles, newId: () => string, now: ()
     if (!(await list()).some((chat) => chat.id === id)) throw new Error('This conversation is no longer on this device.');
     const saved: Message = { id: newId(), parent_id: message.parent_id, role: message.role, content: message.content };
     await files.write(messagesFile(id), JSON.stringify([...await messages(id), saved]));
-    const chats = await list();
-    const chat = chats.find((entry) => entry.id === id)!;
-    await files.write(indexFile, JSON.stringify([{ ...chat, updated_at: now() }, ...chats.filter((entry) => entry !== chat)]));
+    // The message is saved: failing to move its conversation to the top must not report it as unsent.
+    try {
+      const chats = await list();
+      const chat = chats.find((entry) => entry.id === id);
+      if (chat) await files.write(indexFile, JSON.stringify([{ ...chat, updated_at: now() }, ...chats.filter((entry) => entry !== chat)]));
+    } catch { /* the next message puts the order right */ }
     return saved;
   });
   return {

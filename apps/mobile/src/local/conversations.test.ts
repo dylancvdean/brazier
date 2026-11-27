@@ -115,3 +115,21 @@ test('conversations are searched by title and by what was said in them', async (
   assert.deepEqual(await titles('text'), []);
   assert.deepEqual(await titles('   '), ['Rust lifetimes', 'Trip plans']);
 });
+
+test('a message is saved even when its conversation cannot be moved to the top', async () => {
+  const data = new Map<string, string>();
+  let failIndex = false;
+  let next = 0;
+  const local = conversationStore({
+    read: async (name) => data.get(name) ?? null,
+    write: async (name, text) => {
+      if (failIndex && name === 'conversations.json') throw new Error('disk full');
+      data.set(name, text);
+    },
+    remove: async (name) => { data.delete(name); },
+  }, () => `id-${next += 1}`);
+  const chat = await local.createConversation('Chat');
+  failIndex = true;
+  const { user } = await local.appendUserMessage(chat.id, [], 'hello');
+  assert.deepEqual((await local.messages(chat.id)).map(({ id }) => id), [user.id]);
+});
