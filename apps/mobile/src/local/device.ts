@@ -76,6 +76,7 @@ const imagesRoot = () => {
 };
 const imageFile = (sha256: string) => new File(imagesRoot(), blobFileName({ sha256, mime_type: 'image/png' }));
 
+let replying = 0;
 const images = imageEngine(imageRuntime, {
   installed: installedModels,
   output: () => filePath(new File(imagesRoot(), `${newId()}.part`)),
@@ -86,7 +87,11 @@ const images = imageEngine(imageRuntime, {
     else written.move(target);
   },
   // Phones rarely have memory for a chat model and an image model together.
-  beforeLoad: () => chatEngine.unload(),
+  async beforeLoad() {
+    // Unloading under a reply would end it early and save the partial text as the answer.
+    if (replying > 0) throw new Error('Wait for the chat reply to finish, or stop it, before generating an image.');
+    await chatEngine.unload();
+  },
   now: Date.now,
   random: Math.random,
 });
@@ -95,11 +100,21 @@ const images = imageEngine(imageRuntime, {
 export const deviceEngine: LocalEngine = {
   ...chatEngine,
   async prepare(modelId, signal) { await images.unload(); return chatEngine.prepare(modelId, signal); },
-  async chat(...request) { await images.unload(); return chatEngine.chat(...request); },
+  async chat(...request) {
+    replying += 1;
+    try {
+      await images.unload();
+      return await chatEngine.chat(...request);
+    } finally {
+      replying -= 1;
+    }
+  },
   async unload(modelId) { await Promise.all([chatEngine.unload(modelId), images.unload(modelId)]); },
 };
 
 const historyName = 'generate-history.json';
+const listed = new Set<string>();
+let saving: Promise<void> = Promise.resolve();
 
 /** The Generate screen for this device: images only, made and kept on the phone. */
 export const deviceGenerator: Generator = {
@@ -113,14 +128,24 @@ export const deviceGenerator: Generator = {
     if (!file.exists) throw new Error('This image is no longer on this device.');
     return file.uri;
   },
-  history: async (): Promise<HistoryEntry[]> => parseHistory(await textFiles.read(historyName)),
+  async history(): Promise<HistoryEntry[]> {
+    const history = parseHistory(await textFiles.read(historyName));
+    for (const { blob } of history) listed.add(blobFileName(blob));
+    return history;
+  },
   saveHistory(history) {
-    void textFiles.write(historyName, JSON.stringify(history)).catch(() => undefined);
-    // An image that left the history (removed, or pushed out by newer ones) is deleted with it.
     const kept = new Set(history.map(({ blob }) => blobFileName(blob)));
-    for (const entry of imagesRoot().list()) {
-      if (entry instanceof File && !kept.has(entry.name) && !entry.name.endsWith('.part')) entry.delete();
-    }
+    saving = saving.then(() => textFiles.write(historyName, JSON.stringify(history))).then(() => {
+      // An image that left the saved history (removed, or pushed out by newer ones) is deleted with it. Only
+      // files the history has listed are candidates, so a new image whose entry is not saved yet survives.
+      for (const name of listed) {
+        if (kept.has(name)) continue;
+        listed.delete(name);
+        const file = new File(imagesRoot(), name);
+        if (file.exists) file.delete();
+      }
+      for (const name of kept) listed.add(name);
+    }).catch(() => undefined);
   },
 };
 
