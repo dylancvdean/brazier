@@ -35,8 +35,11 @@ jobs:
       - run: pnpm --filter @brazier/mobile --fail-if-no-match test
       # Installs skip package scripts, so llama.rn's checksum-verified native libraries are fetched here.
       - run: pnpm --filter @brazier/mobile --fail-if-no-match llama:artifacts
+      # The Podfile builds stable-diffusion.cpp; only the simulator slice is needed here.
       - run: pod install --deployment
         working-directory: apps/mobile/ios
+        env:
+          SDCPP_IOS_SLICES: simulator
       - name: Build Release with embedded JavaScript
         run: >-
           xcodebuild -workspace apps/mobile/ios/Brazier.xcworkspace

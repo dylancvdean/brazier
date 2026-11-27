@@ -8,14 +8,16 @@ import { useTheme } from './theme.ts';
 import { errorText, useStyles } from './ui.tsx';
 
 type Loaded = { uri?: string; error?: string; retry: () => void };
+/** Where a blob's file comes from: a paired host, or something that already has the files. */
+export type MediaSource = Credential | { file(blob: MediaBlob): Promise<string> };
 
-export function useBlobFile(credential: Credential, blob: MediaBlob): Loaded {
+export function useBlobFile(credential: MediaSource, blob: MediaBlob): Loaded {
   const [state, setState] = useState<{ uri?: string; error?: string }>({});
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let current = true;
     setState({});
-    blobFile(credential, blob).then(
+    ('file' in credential ? credential.file(blob) : blobFile(credential, blob)).then(
       (uri) => { if (current) setState({ uri }); },
       (error) => { if (current) setState({ error: errorText(error) }); },
     );
@@ -43,7 +45,7 @@ function Video({ uri, label }: { uri: string; label: string }) {
 
 /** One generated image or video with its Save and Share actions. */
 export function MediaView({ credential, blob, actions = true }: {
-  credential: Credential; blob: MediaBlob; actions?: boolean;
+  credential: MediaSource; blob: MediaBlob; actions?: boolean;
 }) {
   const styles = useStyles();
   const palette = useTheme();
@@ -91,12 +93,12 @@ export function MediaView({ credential, blob, actions = true }: {
   </View>;
 }
 
-export function MediaList({ credential, blobs }: { credential: Credential; blobs: readonly MediaBlob[] }) {
+export function MediaList({ credential, blobs }: { credential: MediaSource; blobs: readonly MediaBlob[] }) {
   return <>{blobs.map((blob) => <MediaView key={`${blob.sha256}:${blob.mime_type}`} credential={credential} blob={blob} />)}</>;
 }
 
 /** Square preview for the history grid. Videos show a play mark instead of a frame. */
-export function MediaThumb({ credential, blob, size }: { credential: Credential; blob: MediaBlob; size: number }) {
+export function MediaThumb({ credential, blob, size }: { credential: MediaSource; blob: MediaBlob; size: number }) {
   const palette = useTheme();
   const video = mediaKind(blob.mime_type) === 'video';
   const box = {
@@ -107,7 +109,7 @@ export function MediaThumb({ credential, blob, size }: { credential: Credential;
   return <View style={box}><Thumb credential={credential} blob={blob} size={size} /></View>;
 }
 
-function Thumb({ credential, blob, size }: { credential: Credential; blob: MediaBlob; size: number }) {
+function Thumb({ credential, blob, size }: { credential: MediaSource; blob: MediaBlob; size: number }) {
   const palette = useTheme();
   const { uri, error } = useBlobFile(credential, blob);
   if (uri) return <Image source={{ uri }} style={{ width: size, height: size }} />;

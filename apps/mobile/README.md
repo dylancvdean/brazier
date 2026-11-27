@@ -33,7 +33,8 @@ project locally; it is not committed.
 
 ### Android
 
-Install JDK 17 or 21, Android SDK Platform 36, and Android Build Tools 36.0.0.
+Install JDK 17 or 21, Android SDK Platform 36, Android Build Tools 36.0.0,
+NDK 27.1.12297006 and CMake 3.22.1.
 Set `ANDROID_HOME` and start an API 35+ emulator or connect a USB-debuggable
 device. From the repo root:
 
@@ -133,8 +134,8 @@ bash apps/mobile/scripts/smoke-ios.sh <simulator-udid> <path-to-Brazier.app>
 ## Models on this device
 
 **This device** sits next to the paired hosts in Settings and works with no
-host paired. Its chats are text only: tools, web access, Generate, Agent and
-voice need a host and are not shown. Conversations are saved in the app's
+host paired. Its chats are text only: tools, web access, Agent, video and
+voice need a host and are not shown. **Generate** makes images on the phone. Conversations are saved in the app's
 documents on the phone, and so are the models.
 
 Open **Models** to add one: type a Hugging Face repository as `owner/name`,
@@ -162,6 +163,35 @@ embeds without linking and loads the first time it is needed. `plugins/mlx/mlx_t
 references (pinned to exact versions); the Podfile runs it after `pod install`
 and it does nothing once the target exists. Package versions are locked in
 `ios/Brazier.xcworkspace/xcshareddata/swiftpm/Package.resolved`.
+
+### Images on this device
+
+A repository that Hugging Face tags as an image model (`text-to-image`,
+`stable-diffusion`, `sd.cpp`, `diffusers`) lists its single-file checkpoints
+instead: any GGUF, or a `.safetensors` at the top level. They run through
+[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) and
+appear in **Generate**, not in Chat. Models that need separate text-encoder or
+VAE files (FLUX, SD3 and later) are not supported. Loading an image model
+frees the chat model, and the other way round.
+
+`modules/brazier-sdcpp` is the native module, autolinked on both platforms.
+`SDCPP_COMMIT` pins the upstream commit; `scripts/fetch.sh` checks it out into
+`vendor/` (not committed). `cpp/brazier_sd.cpp` is the shared wrapper around
+the library's C API, with a thin bridge per platform (`ios/BrazierSdcpp.mm`,
+`android/`).
+
+- iOS: the Podfile runs `scripts/build-ios.sh`, which needs `cmake` and builds
+  a static `sdcpp.xcframework` with Metal for arm64 devices and arm64
+  simulators (a few minutes, once per pinned commit). Intel simulators are
+  excluded. Metal is used on an A14 or newer; older chips and the Simulator
+  use the CPU.
+- Android: Gradle compiles the library from source with the NDK for
+  `arm64-v8a` and `x86_64`, CPU only.
+
+`src/local/images.ts` holds the `ImageRuntime` interface and the engine that
+loads one model and runs one job at a time; `Generator` in `src/media.ts` is
+what the Generate screen talks to, implemented by a paired host and by this
+device.
 
 `src/local/engine.ts` is the interface Chat talks to; a paired host and this
 device both implement it, and each on-device runtime is a `Runtime` behind it.

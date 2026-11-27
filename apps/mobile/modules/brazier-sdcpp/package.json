@@ -1,0 +1,6 @@
+{
+  "name": "brazier-sdcpp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "stable-diffusion.cpp linked into the Brazier mobile app for on-device image generation."
+}

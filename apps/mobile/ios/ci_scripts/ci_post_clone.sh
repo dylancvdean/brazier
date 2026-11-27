@@ -49,4 +49,9 @@ printf 'export NODE_BINARY="%s"\n' "$(command -v node)" > .xcode.env.local
 if ! command -v pod >/dev/null 2>&1; then
   brew install cocoapods
 fi
-pod install --deployment
+# The Podfile builds stable-diffusion.cpp from source. Archives need only the device slice.
+if ! command -v cmake >/dev/null 2>&1; then
+  brew install cmake || python3 -m pip install --user cmake
+  export PATH="$(python3 -m site --user-base)/bin:$PATH"
+fi
+SDCPP_IOS_SLICES=device pod install --deployment

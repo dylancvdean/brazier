@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
-import { fetch } from 'expo/fetch';
-import { DaemonError, type Credential, type Model } from './api.ts';
-import { loadHistory, saveHistory } from './blobFiles.ts';
+import { DaemonError, type Model } from './api.ts';
+import { imageSizes } from './local/images.ts';
 import {
   addHistory, entryDetails, generateBody, generationModels, generationProgress, historyEntry, isCancellation,
-  mediaClient, modelLabel, sizePresets, type ActiveGeneration, type GenerateForm, type HistoryEntry, type Modality,
+  modelLabel, sizePresets, type ActiveGeneration, type GenerateForm, type Generator, type HistoryEntry, type Modality,
 } from './media.ts';
 import { MediaThumb, MediaView } from './Media.tsx';
 import { useTheme } from './theme.ts';
@@ -16,13 +15,18 @@ const blank = (modality: Modality): GenerateForm => ({
   width: sizePresets[modality][0]![0], height: sizePresets[modality][0]![1],
 });
 
-/** Image and video generation on the host, the mobile form of the desktop's Generate mode. */
-export function Generate({ credential, hostName, visible, onClose, onUnauthorized }: {
-  credential: Credential; hostName: string; visible: boolean; onClose: () => void; onUnauthorized: (error: unknown) => void;
+/**
+ * Image and video generation on a paired host, the mobile form of the desktop's Generate mode, and image
+ * generation on this device.
+ */
+export function Generate({ generator: api, hostName, visible, onClose, onUnauthorized, onOpenModels }: {
+  generator: Generator; hostName: string; visible: boolean; onClose: () => void; onUnauthorized: (error: unknown) => void;
+  /** On this device: where image models are added. */
+  onOpenModels?: () => void;
 }) {
   const styles = useStyles();
   const palette = useTheme();
-  const api = useMemo(() => mediaClient(fetch, credential), [credential]);
+  const sizes = api.local ? imageSizes : null;
   const [models, setModels] = useState<Model[] | null>(null);
   const [form, setForm] = useState(() => blank('image'));
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -40,8 +44,8 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
   // from there, and a later change here must not write an older list over it.
   async function changeHistory(change: (saved: HistoryEntry[]) => HistoryEntry[]) {
     try {
-      const next = change(await loadHistory(credential));
-      saveHistory(credential, next);
+      const next = change(await api.history());
+      api.saveHistory(next);
       if (alive.current) setHistory(next);
     } catch {
       // History is a convenience; the change still shows for this session.
@@ -59,7 +63,8 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
       const found = await api.models();
       if (!alive.current) return;
       setModels(found);
-      setForm((previous) => previous.modelId ? previous
+      // A model on this device can have been deleted in Models since it was chosen.
+      setForm((previous) => previous.modelId && !(api.local && !found.some(({ id }) => id === previous.modelId)) ? previous
         : { ...previous, modelId: generationModels(found, previous.modality)[0]?.id ?? '' });
     } catch (cause) {
       if (alive.current) { setModels((previous) => previous ?? []); report(cause); }
@@ -68,7 +73,7 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
 
   useEffect(() => {
     alive.current = true;
-    loadHistory(credential).then((saved) => { if (alive.current) setHistory(saved); }, () => undefined);
+    api.history().then((saved) => { if (alive.current) setHistory(saved); }, () => undefined);
     return () => { alive.current = false; };
   }, [api]);
 
@@ -79,8 +84,10 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
   }, [api, visible]);
 
   // The host runs one generation at a time, so this also shows one started
-  // from a chat or another device, and lets it be cancelled here.
+  // from a chat or another device, and lets it be cancelled here. This device
+  // only runs what this screen started.
   useEffect(() => {
+    if (api.local && !running) return undefined;
     let current = true;
     const poll = () => api.active().then((found) => { if (current) setActive(found); }, () => undefined);
     void poll();
@@ -147,6 +154,9 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
     });
   }
 
+  // A host's models are named by their ids; this device's ids are directory names.
+  const label = (id: string) => (api.local ? models?.find((model) => model.id === id)?.name : undefined) ?? modelLabel(id);
+
   const field = (label: string, value: string, onChange: (text: string) => void, placeholder: string) =>
     <View style={[styles.flex, { gap: 4 }]}>
       <Text style={styles.label}>{label}</Text>
@@ -160,11 +170,11 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
       <Text numberOfLines={1} style={styles.topTitle}>Generate</Text>
       <Pressable accessibilityRole="button" accessibilityLabel="Choose generation model" disabled={running}
         style={[styles.chip, running && styles.disabled]} onPress={() => setShowModels(true)}>
-        <Text numberOfLines={1} style={styles.chipText}>{form.modelId ? modelLabel(form.modelId) : 'Choose model'} ▾</Text>
+        <Text numberOfLines={1} style={styles.chipText}>{form.modelId ? label(form.modelId) : 'Choose model'} ▾</Text>
       </Pressable>
     </View>
     <ScrollView style={styles.flex} contentContainerStyle={styles.panel} keyboardShouldPersistTaps="handled">
-      <View style={styles.segment}>
+      {api.local ? null : <View style={styles.segment}>
         {(['image', 'video'] as const).map((modality) => <Pressable key={modality} accessibilityRole="button"
           accessibilityState={{ selected: form.modality === modality }} disabled={running}
           style={[styles.segmentItem, form.modality === modality && styles.segmentOn]} onPress={() => switchModality(modality)}>
@@ -172,10 +182,12 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
             {modality === 'image' ? 'Image' : 'Video'}
           </Text>
         </Pressable>)}
-      </View>
+      </View>}
       {models && !choices.length ? <Text style={styles.emptyText}>
-        No {form.modality} model is installed on {hostName}. Add one in the desktop app’s Models view.
+        {api.local ? 'No image model is on this device. Add one in Models from a Hugging Face repository.'
+          : `No ${form.modality} model is installed on ${hostName}. Add one in the desktop app’s Models view.`}
       </Text> : null}
+      {models && !choices.length && onOpenModels ? <Action label="Add a model" onPress={onOpenModels} /> : null}
       <TextInput accessibilityLabel="Prompt" style={[styles.input, styles.invite]} multiline value={form.prompt}
         onChangeText={(prompt) => set({ prompt })} editable={!running} placeholderTextColor={palette.muted}
         placeholder={form.modality === 'image' ? 'Describe the image' : 'Describe the video'} />
@@ -184,7 +196,7 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
         placeholder="Negative prompt (optional)" />
       <Text style={styles.label}>Size</Text>
       <View style={styles.row}>
-        {sizePresets[form.modality].map(([width, height]) => {
+        {(sizes ?? sizePresets[form.modality]).map(([width, height]) => {
           const on = form.width === width && form.height === height;
           return <Pressable key={`${width}x${height}`} accessibilityRole="button" accessibilityState={{ selected: on }}
             disabled={running} style={[styles.chip, on && { backgroundColor: palette.accentSoft, borderColor: palette.accent }]}
@@ -213,9 +225,9 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
       </View> : <Action label={form.modality === 'image' ? 'Generate image' : 'Generate video'}
         disabled={!form.modelId || !form.prompt.trim()} onPress={() => void generate()} />}
       {shown ? <View style={{ gap: 8 }}>
-        <MediaView credential={credential} blob={shown.blob} />
+        <MediaView credential={api} blob={shown.blob} />
         <Text selectable style={styles.body}>{shown.prompt}</Text>
-        <Text style={styles.listMeta}>{modelLabel(shown.modelId)} · {entryDetails(shown)}</Text>
+        <Text style={styles.listMeta}>{label(shown.modelId)} · {entryDetails(shown)}</Text>
         <View style={styles.row}>
           <Action label="Reuse settings" quiet disabled={running} onPress={() => reuse(shown)} />
           <Action label="Remove" danger onPress={() => remove(shown)} />
@@ -226,9 +238,11 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
         {history.map((entry) => <Pressable key={entry.id} accessibilityRole="button"
           accessibilityLabel={`${entry.modality}: ${entry.prompt}`} onPress={() => setShown(entry)}
           style={shown?.id === entry.id ? { borderRadius: 10, borderWidth: 2, borderColor: palette.accent } : { padding: 2 }}>
-          <MediaThumb credential={credential} blob={entry.blob} size={74} />
+          <MediaThumb credential={api} blob={entry.blob} size={74} />
         </Pressable>)}
-      </View> : <Text style={styles.listMeta}>Images and videos you generate here are listed on this phone.</Text>}
+      </View> : <Text style={styles.listMeta}>
+        {api.local ? 'Images you generate here are kept on this phone.' : 'Images and videos you generate here are listed on this phone.'}
+      </Text>}
     </ScrollView>
     <Sheet title={form.modality === 'image' ? 'Image model' : 'Video model'} visible={showModels}
       onClose={() => setShowModels(false)}>
@@ -237,7 +251,7 @@ export function Generate({ credential, hostName, visible, onClose, onUnauthorize
           style={[styles.listItem, id === form.modelId && styles.listItemOn]}
           onPress={() => { set({ modelId: id }); setShowModels(false); }}>
           <Text style={styles.check}>{id === form.modelId ? '✓' : ''}</Text>
-          <Text style={styles.listText}>{modelLabel(id)}</Text>
+          <Text style={styles.listText}>{label(id)}</Text>
         </Pressable>)}
         {!choices.length ? <Text style={[styles.emptyText, { padding: 18 }]}>
           {models ? `No ${form.modality} model is installed on ${hostName}.` : 'Loading models…'}

@@ -6,13 +6,15 @@ import {
   contextMemory, deviceMemory, repositoryChoices, usableRuntimes, watchDownload,
 } from './local/device.ts';
 import { formatBytes, type ModelChoice, type RuntimeId } from './local/huggingface.ts';
-import { memoryWarning, type DeviceMemory } from './local/memory.ts';
+import { IMAGE_WORKING, memoryWarning, type DeviceMemory } from './local/memory.ts';
 import { modelId, type InstalledModel } from './local/models.ts';
 import { useTheme } from './theme.ts';
 import { Action, errorText, IconButton, useStyles } from './ui.tsx';
 
-const runtimeNames: Record<RuntimeId, string> = { 'llama.cpp': 'llama.cpp', mlx: 'MLX', apple: 'Apple Intelligence' };
-const formats: Partial<Record<RuntimeId, string>> = { 'llama.cpp': 'GGUF files (llama.cpp)', mlx: 'MLX repositories' };
+const runtimeNames: Record<RuntimeId, string> = { 'llama.cpp': 'llama.cpp', mlx: 'MLX', apple: 'Apple Intelligence', 'sd.cpp': 'stable-diffusion.cpp · images',
+};
+const formats: Partial<Record<RuntimeId, string>> = { 'llama.cpp': 'GGUF files (llama.cpp)', mlx: 'MLX repositories', 'sd.cpp': 'image checkpoints (stable-diffusion.cpp)',
+};
 
 /** Models for "This device": add one from a Hugging Face repository, see what is stored, delete. */
 export function Models({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }) {
@@ -90,7 +92,8 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
     const warning = memoryWarning(size, memory, context);
     return warning ? <Text style={[styles.listMeta, { color: palette.danger }]}>{warning}</Text> : null;
   };
-  const accepted = usable.flatMap((runtime) => formats[runtime] ? [formats[runtime]] : []).join(' and ');
+  const accepted = usable.flatMap((runtime) => formats[runtime] ? [formats[runtime]] : [])
+    .join(', ').replace(/, ([^,]*)$/, ' and $1');
 
   return <View style={styles.container}>
     <View style={styles.topBar}>
@@ -127,7 +130,7 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
           <Text style={styles.body}>{choice.name}</Text>
           <Text style={styles.listMeta}>{runtimeNames[choice.runtime]}  ·  {formatBytes(choice.size)}
             {choice.files.length > 1 ? `  ·  ${choice.files.length} files` : ''}</Text>
-          {tooLarge(choice.size, contexts[id])}
+          {tooLarge(choice.size, choice.runtime === 'sd.cpp' ? IMAGE_WORKING : contexts[id])}
           {progress ? <Text style={styles.listMeta}>Downloading…</Text>
             : have ? <Text style={styles.listMeta}>On this device</Text>
             : tooBig ? <Text style={styles.listMeta}>Not enough free space</Text>
@@ -141,7 +144,7 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
         <Text style={styles.listMeta}>Built in  ·  no download</Text>
       </View>)}
       {installed.length === 0 && builtIn.length === 0
-        ? <Text style={styles.emptyText}>No models yet. Add one above to chat on this device.</Text> : null}
+        ? <Text style={styles.emptyText}>No models yet. Add one above to chat or make images on this device.</Text> : null}
       {installed.map((model) => <View key={model.id} style={styles.card}>
         <Text style={styles.body}>{model.name}</Text>
         <Text style={styles.listMeta}>{model.slug}</Text>

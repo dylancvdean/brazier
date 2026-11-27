@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fileUrl, formatBytes, listRepoFiles, modelChoices, parseSlug, parseTree } from './huggingface.ts';
+import { fileUrl, formatBytes, isImageRepo, listRepoFiles, modelChoices, parseSlug, parseTree } from './huggingface.ts';
 
 test('a slug is owner/name, typed or pasted as a link', () => {
   assert.equal(parseSlug(' unsloth/Qwen3-0.6B-GGUF '), 'unsloth/Qwen3-0.6B-GGUF');
@@ -89,4 +89,39 @@ test('an MLX repository is one choice, only where MLX can run', () => {
 
 test('sizes read in decimal units', () => {
   assert.deepEqual([0, 999, 1500, 484_000_000, 4_920_000_000].map(formatBytes), ['0 B', '999 B', '1.5 KB', '484 MB', '4.9 GB']);
+});
+
+test('a repository is an image repository by its Hugging Face tags', async () => {
+  const info = (body: unknown, status = 200) => async (url: string) => {
+    assert.equal(url, 'https://huggingface.co/api/models/o/n');
+    return { ok: status === 200, status, json: async () => body, headers: { get: () => null } };
+  };
+  assert.equal(await isImageRepo(info({ pipeline_tag: 'text-to-image', tags: ['gguf'] }), 'o/n'), true);
+  assert.equal(await isImageRepo(info({ tags: ['gguf', 'sd.cpp'] }), 'o/n'), true);
+  assert.equal(await isImageRepo(info({ pipeline_tag: 'text-generation', tags: ['gguf', 'llama'] }), 'o/n'), false);
+  assert.equal(await isImageRepo(info({}), 'o/n'), false);
+  assert.equal(await isImageRepo(info({}, 500), 'o/n'), false);
+  assert.equal(await isImageRepo(async () => { throw new Error('offline'); }, 'o/n'), false);
+});
+
+test('an image repository offers its single-file checkpoints to stable-diffusion.cpp only', () => {
+  const files = [
+    { path: 'sd_turbo-f16.gguf', size: 2_500 },
+    { path: 'old/sd_turbo-q8_0.gguf', size: 2_000 },
+    { path: 'v1-5-pruned-emaonly.safetensors', size: 4_000 },
+    { path: 'unet/diffusion_pytorch_model.safetensors', size: 3_000 },
+    { path: 'vae-ft-mse.safetensors', size: 300 },
+    { path: 'big-00001-of-00002.gguf', size: 10 },
+    { path: 'model_index.json', size: 1 },
+  ];
+  const all = ['llama.cpp', 'mlx', 'sd.cpp'] as const;
+  assert.deepEqual(modelChoices(files, all, true).map(({ runtime, name, entry, size }) => [runtime, name, entry, size]), [
+    ['sd.cpp', 'sd_turbo-q8_0.gguf', 'old/sd_turbo-q8_0.gguf', 2_000],
+    ['sd.cpp', 'sd_turbo-f16.gguf', 'sd_turbo-f16.gguf', 2_500],
+    ['sd.cpp', 'v1-5-pruned-emaonly.safetensors', 'v1-5-pruned-emaonly.safetensors', 4_000],
+  ]);
+  // A build without the image runtime offers nothing from it, and never loads its GGUFs as chat models.
+  assert.deepEqual(modelChoices(files, ['llama.cpp', 'mlx'], true), []);
+  // Without the tags the same GGUFs are chat models, as before.
+  assert.deepEqual(modelChoices(files, all).map(({ runtime }) => runtime), ['llama.cpp', 'llama.cpp']);
 });
