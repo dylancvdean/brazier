@@ -3,7 +3,7 @@ export type RepoFile = { path: string; size: number };
 /** Something in a repository that one runtime can load: a GGUF (with its parts), a whole MLX repository or an image checkpoint. */
 export type ModelChoice = { runtime: RuntimeId; name: string; entry: string; files: RepoFile[]; size: number };
 
-type Fetch = (url: string, init?: { headers?: Record<string, string> }) => Promise<{
+export type Fetch = (url: string, init?: { headers?: Record<string, string> }) => Promise<{
   ok: boolean; status: number; json(): Promise<unknown>; headers: { get(name: string): string | null };
 }>;
 
@@ -82,10 +82,14 @@ const split = /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i;
 const mlxFiles = /(\.safetensors|\.json|\.jinja|\.model|\.txt)$/i;
 
 // Parts of a model that stable-diffusion.cpp cannot run on their own.
-const imagePart = /(^|[-_.])(vae|taesd|lora|clip|t5|t5xxl|text[-_]encoders?|controlnet|mmproj)([-_.]|$)/i;
+const imagePart = /(^|[-_.])(vae|taesd|lora|clip|t5|t5xxl|text[-_]encoders?|control|controlnet|unet|adapter|mmproj)([-_.]|$)|^diffusion_pytorch_model/i;
+// A prediction head for speculative decoding: a small file that only works beside its base model. A full model
+// that embeds one can carry the same word in its name, so only a file led by it or under 1 GB is taken for a head.
+const head = /(^|[-_.])mtp([-_.]|$)/i;
+const isHead = (name: string, size: number) => head.test(name) && (/^mtp/i.test(name) || (size > 0 && size < 1e9));
 
 /**
- * What the listed files offer each runtime. A split GGUF is one choice; projector files are not chat models.
+ * What the listed files offer each runtime. A split GGUF is one choice; projector and prediction-head files are not chat models.
  * In an image repository (`image`) the single-file checkpoints, a GGUF or a `.safetensors` at the top level,
  * are image models and nothing in it is a chat model.
  */
@@ -103,7 +107,7 @@ export function modelChoices(files: readonly RepoFile[], runtimes: readonly Runt
     const parts = new Map<string, RepoFile[]>();
     for (const file of files) {
       const name = baseName(file.path);
-      if (!/\.gguf$/i.test(name) || /^mmproj/i.test(name) || /mmproj/i.test(name)) continue;
+      if (!/\.gguf$/i.test(name) || /mmproj/i.test(name) || isHead(name, file.size)) continue;
       const match = split.exec(file.path);
       const key = match ? `${match[1]}|${match[3]}` : file.path;
       parts.set(key, [...parts.get(key) ?? [], file]);
