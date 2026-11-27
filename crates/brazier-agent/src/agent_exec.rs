@@ -1183,7 +1183,9 @@ fn unix_open_file(path: &Path, flags: i32, create_parents: bool) -> std::io::Res
         libc::openat(
             parent.as_raw_fd(),
             leaf.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            // Non-blocking, so opening a named pipe nobody writes to returns
+            // instead of blocking the caller forever.
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             0o666,
         )
     };
@@ -4827,6 +4829,33 @@ startxref
                 &response.output[..response.output.len().min(200)]
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_named_pipe_in_the_workspace_does_not_hang_file_tools() {
+        let harness = Harness::new(AgentPermissionMode::SkipPermissions).await;
+        std::fs::write(harness.workspace.path().join("note.txt"), "needle\n").expect("write");
+        let fifo = std::ffi::CString::new(
+            harness
+                .workspace
+                .path()
+                .join("pipe")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .expect("fifo path");
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        // Opening a pipe for reading blocks until a writer appears.
+        let listed = harness.call("fs_list", json!({ "path": "." })).await;
+        assert!(listed.output.contains("note.txt"), "{}", listed.output);
+        let found = harness
+            .call("fs_search", json!({ "query": "needle" }))
+            .await;
+        assert!(found.output.contains("note.txt"), "{}", found.output);
+        let read = harness.call("fs_read", json!({ "path": "pipe" })).await;
+        assert!(!read.output.contains("needle"), "{}", read.output);
     }
 
     #[cfg(unix)]
