@@ -179,7 +179,10 @@ function coerceParameterValue(raw: string): unknown {
     /^-?\d+(?:\.\d+)?$/.test(raw)
   ) {
     try {
-      return JSON.parse(raw)
+      const parsed: unknown = JSON.parse(raw)
+      // Keep digits a number cannot hold exactly (long identifiers, "1.50").
+      if (typeof parsed === 'number' && String(parsed) !== raw) return raw
+      return parsed
     } catch {
       return raw
     }

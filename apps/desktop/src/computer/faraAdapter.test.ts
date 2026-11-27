@@ -74,5 +74,11 @@ describe('parseFaraOutput', () => {
       '<tool_call>{"name":"computer_use","arguments":{"action":"type","text":42}}</tool_call>'
     )
     expect(json.actions).toEqual([{ type: 'type', text: '42' }])
+    for (const text of ['4111111111111111111', '1.50']) {
+      const parsed = parseFaraOutput(
+        `<tool_call><function=computer_use><parameter=action>type</parameter><parameter=text>${text}</parameter></function></tool_call>`
+      )
+      expect(parsed.actions).toEqual([{ type: 'type', text }])
+    }
   })
 })
