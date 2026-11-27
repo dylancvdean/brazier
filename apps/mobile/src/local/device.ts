@@ -5,7 +5,7 @@ import { conversationStore } from './conversations.ts';
 import { availableRuntimes, localEngine, type ChatBackend, type Runtime } from './engine.ts';
 import { fileUrl, listRepoFiles, modelChoices, parseSlug, type ModelChoice, type RuntimeId } from './huggingface.ts';
 import { addInstalled, installedFrom, modelId, parseInstalled, removeInstalled, type InstalledModel } from './models.ts';
-import { llamaRuntime } from './runtimes.ts';
+import { appleRuntime, llamaRuntime, mlxRuntime } from './runtimes.ts';
 
 // Everything "This device" keeps lives under one directory in the app's documents.
 const root = () => {
@@ -57,6 +57,8 @@ const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).sli
 
 export const runtimes: readonly Runtime[] = [
   llamaRuntime((model) => filePath(new File(modelDirectory(model.id), model.entry))),
+  appleRuntime(),
+  mlxRuntime((model) => filePath(modelDirectory(model.id))),
 ];
 
 export const deviceEngine = localEngine(runtimes, installedModels);

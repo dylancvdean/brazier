@@ -44,7 +44,8 @@
       ["llama.rn", { "enableEntitlements": false, "forceCxx20": false }],
       "./plugins/with-ios-scenes.cjs",
       "./plugins/with-tls-pinning.cjs",
-      "./plugins/with-local-network.cjs"
+      "./plugins/with-local-network.cjs",
+      "./plugins/with-on-device.cjs"
     ]
   }
 }

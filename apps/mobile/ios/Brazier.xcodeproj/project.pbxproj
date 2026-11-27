@@ -7,30 +7,68 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		10F9ABB09E274B5CE52292D5 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = 29A92A1806721A8D7EFA806B /* MLX */; };
 		1282DBE98B6AFDC2C1990522 /* libPods-Brazier.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 36E57AA6BFC1FE87AF05BDF3 /* libPods-Brazier.a */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
+		5A47598BFA01D4C0BD8863EF /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 93ACA3318D784E5C78B1DD71 /* Foundation.framework */; };
+		63CCFE218408D2372D76C7E2 /* BrazierMLX.framework in Embed MLX */ = {isa = PBXBuildFile; fileRef = AF8C8FE87DD33A5A3AB53D3F /* BrazierMLX.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		74A4197A1ED298F2D98524CF /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 5474997074E34D43C05F6913 /* PrivacyInfo.xcprivacy */; };
+		80F16FACE83B95136DA121E6 /* BrazierMLXEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10BAA758828E9AD2D0087E77 /* BrazierMLXEngine.swift */; };
 		97590E5CD8B7C59F0F94B76F /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EF1A9E5B04B3F37F6FC741B /* ExpoModulesProvider.swift */; };
-		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
+		9DF93B2DD4AC8C71A8BB6EA3 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = BB6D20ADA58FAA04EAB5C042 /* Tokenizers */; };
 		B7A1C0DE2E00000000000001 /* BrazierTLSPinning.m in Sources */ = {isa = PBXBuildFile; fileRef = B7A1C0DE2E00000000000002 /* BrazierTLSPinning.m */; };
 		B7A1C0DE2E00000000000003 /* BrazierLocalNetwork.m in Sources */ = {isa = PBXBuildFile; fileRef = B7A1C0DE2E00000000000004 /* BrazierLocalNetwork.m */; };
+		B7A1C0DE2E00000000000005 /* BrazierOnDevice.m in Sources */ = {isa = PBXBuildFile; fileRef = B7A1C0DE2E00000000000006 /* BrazierOnDevice.m */; };
+		B7A1C0DE2E00000000000007 /* BrazierAppleModelEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7A1C0DE2E00000000000008 /* BrazierAppleModelEngine.swift */; };
+		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
+		E8B01653CB7C4497CBEC329E /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = D3CD716690BFFBE56C6D96BB /* MLXLLM */; };
 		F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11748412D0307B40044C1D9 /* AppDelegate.swift */; };
+		F40D222A3224D012401A0634 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 220CE0BDFA82E380F94FE7EA /* MLXLMCommon */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		7BE15409D30E145C2E634864 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 83CBB9F71A601CBA00E9B192 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3CA86579B90E431BCE6BB95F;
+			remoteInfo = BrazierMLX;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		D06E27E9DA06AA092B5B1E0E /* Embed MLX */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				63CCFE218408D2372D76C7E2 /* BrazierMLX.framework in Embed MLX */,
+			);
+			name = "Embed MLX";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		10BAA758828E9AD2D0087E77 /* BrazierMLXEngine.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BrazierMLXEngine.swift; sourceTree = "<group>"; };
 		13B07F961A680F5B00A75B9A /* Brazier.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Brazier.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = Brazier/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = Brazier/Info.plist; sourceTree = "<group>"; };
 		36E57AA6BFC1FE87AF05BDF3 /* libPods-Brazier.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-Brazier.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		4EF1A9E5B04B3F37F6FC741B /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-Brazier/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
 		5474997074E34D43C05F6913 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; name = PrivacyInfo.xcprivacy; path = Brazier/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		93ACA3318D784E5C78B1DD71 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		9D4476C03584D88F791E8A20 /* Pods-Brazier.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Brazier.release.xcconfig"; path = "Target Support Files/Pods-Brazier/Pods-Brazier.release.xcconfig"; sourceTree = "<group>"; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = Brazier/SplashScreen.storyboard; sourceTree = "<group>"; };
-		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
-		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
+		AF8C8FE87DD33A5A3AB53D3F /* BrazierMLX.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = BrazierMLX.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B7A1C0DE2E00000000000002 /* BrazierTLSPinning.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = BrazierTLSPinning.m; path = Brazier/BrazierTLSPinning.m; sourceTree = "<group>"; };
 		B7A1C0DE2E00000000000004 /* BrazierLocalNetwork.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = BrazierLocalNetwork.m; path = Brazier/BrazierLocalNetwork.m; sourceTree = "<group>"; };
+		B7A1C0DE2E00000000000006 /* BrazierOnDevice.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = BrazierOnDevice.m; path = Brazier/BrazierOnDevice.m; sourceTree = "<group>"; };
+		B7A1C0DE2E00000000000008 /* BrazierAppleModelEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = BrazierAppleModelEngine.swift; path = Brazier/BrazierAppleModelEngine.swift; sourceTree = "<group>"; };
+		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
+		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = Brazier/AppDelegate.swift; sourceTree = "<group>"; };
 		F11748442D0722820044C1D9 /* Brazier-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "Brazier-Bridging-Header.h"; path = "Brazier/Brazier-Bridging-Header.h"; sourceTree = "<group>"; };
 		F510F0B83BEDA9F2F58938C0 /* Pods-Brazier.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Brazier.debug.xcconfig"; path = "Target Support Files/Pods-Brazier/Pods-Brazier.debug.xcconfig"; sourceTree = "<group>"; };
@@ -45,15 +83,37 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		932B49A42EC1A982E6C6E525 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5A47598BFA01D4C0BD8863EF /* Foundation.framework in Frameworks */,
+				E8B01653CB7C4497CBEC329E /* MLXLLM in Frameworks */,
+				F40D222A3224D012401A0634 /* MLXLMCommon in Frameworks */,
+				10F9ABB09E274B5CE52292D5 /* MLX in Frameworks */,
+				9DF93B2DD4AC8C71A8BB6EA3 /* Tokenizers in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		011B949F49A1B9C4A9F7BCC0 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				93ACA3318D784E5C78B1DD71 /* Foundation.framework */,
+			);
+			name = iOS;
+			sourceTree = "<group>";
+		};
 		13B07FAE1A68108700A75B9A /* Brazier */ = {
 			isa = PBXGroup;
 			children = (
 				F11748412D0307B40044C1D9 /* AppDelegate.swift */,
 				B7A1C0DE2E00000000000002 /* BrazierTLSPinning.m */,
 				B7A1C0DE2E00000000000004 /* BrazierLocalNetwork.m */,
+				B7A1C0DE2E00000000000006 /* BrazierOnDevice.m */,
+				B7A1C0DE2E00000000000008 /* BrazierAppleModelEngine.swift */,
 				F11748442D0722820044C1D9 /* Brazier-Bridging-Header.h */,
 				BB2F792B24A3F905000567C9 /* Supporting */,
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
@@ -69,6 +129,7 @@
 			children = (
 				ED297162215061F000B7C4FE /* JavaScriptCore.framework */,
 				36E57AA6BFC1FE87AF05BDF3 /* libPods-Brazier.a */,
+				011B949F49A1B9C4A9F7BCC0 /* iOS */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -115,6 +176,7 @@
 				2D16E6871FA4F8E400B85C8A /* Frameworks */,
 				30C94118FA1F85E4D5999809 /* Pods */,
 				6901B4A0515E522CF867486B /* ExpoModulesProviders */,
+				8538C5B3DABE23FEB5C59898 /* BrazierMLX */,
 			);
 			indentWidth = 2;
 			sourceTree = "<group>";
@@ -125,8 +187,18 @@
 			isa = PBXGroup;
 			children = (
 				13B07F961A680F5B00A75B9A /* Brazier.app */,
+				AF8C8FE87DD33A5A3AB53D3F /* BrazierMLX.framework */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		8538C5B3DABE23FEB5C59898 /* BrazierMLX */ = {
+			isa = PBXGroup;
+			children = (
+				10BAA758828E9AD2D0087E77 /* BrazierMLXEngine.swift */,
+			);
+			name = BrazierMLX;
+			path = ../plugins/mlx;
 			sourceTree = "<group>";
 		};
 		BB2F792B24A3F905000567C9 /* Supporting */ = {
@@ -139,6 +211,16 @@
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		F35D2A519E4C778069035FC5 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
 
 /* Begin PBXNativeTarget section */
 		13B07F861A680F5B00A75B9A /* Brazier */ = {
@@ -153,15 +235,42 @@
 				00DD1BFF1BD5951E006B06BC /* Bundle React Native code and images */,
 				800E24972A6A228C8D4807E9 /* [CP] Copy Pods Resources */,
 				7444127E90A5B706A3ACD07F /* [CP] Embed Pods Frameworks */,
+				D06E27E9DA06AA092B5B1E0E /* Embed MLX */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				E088DA00CE4C7A4CD26A580F /* PBXTargetDependency */,
 			);
 			name = Brazier;
 			productName = Brazier;
 			productReference = 13B07F961A680F5B00A75B9A /* Brazier.app */;
 			productType = "com.apple.product-type.application";
+		};
+		3CA86579B90E431BCE6BB95F /* BrazierMLX */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C4AB3EF0190D94D19B93B03A /* Build configuration list for PBXNativeTarget "BrazierMLX" */;
+			buildPhases = (
+				F35D2A519E4C778069035FC5 /* Headers */,
+				B01C0A28AC62E4127E4454A5 /* Sources */,
+				932B49A42EC1A982E6C6E525 /* Frameworks */,
+				4C2906BC9CC2759CB9B3E686 /* Resources */,
+				424AB131872D7027DF5BD90B /* Copy package resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BrazierMLX;
+			packageProductDependencies = (
+				D3CD716690BFFBE56C6D96BB /* MLXLLM */,
+				220CE0BDFA82E380F94FE7EA /* MLXLMCommon */,
+				29A92A1806721A8D7EFA806B /* MLX */,
+				BB6D20ADA58FAA04EAB5C042 /* Tokenizers */,
+			);
+			productName = BrazierMLX;
+			productReference = AF8C8FE87DD33A5A3AB53D3F /* BrazierMLX.framework */;
+			productType = "com.apple.product-type.framework";
 		};
 /* End PBXNativeTarget section */
 
@@ -185,11 +294,17 @@
 				Base,
 			);
 			mainGroup = 83CBB9F61A601CBA00E9B192;
+			packageReferences = (
+				E86A53C26052104298AD67B4 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
+				CF80B816A97302C62AC39F64 /* XCRemoteSwiftPackageReference "mlx-swift" */,
+				D7271C5261D43F38CAFA16F1 /* XCRemoteSwiftPackageReference "swift-transformers" */,
+			);
 			productRefGroup = 83CBBA001A601CBA00E9B192 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				13B07F861A680F5B00A75B9A /* Brazier */,
+				3CA86579B90E431BCE6BB95F /* BrazierMLX */,
 			);
 		};
 /* End PBXProject section */
@@ -203,6 +318,13 @@
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */,
 				74A4197A1ED298F2D98524CF /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		4C2906BC9CC2759CB9B3E686 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -247,6 +369,28 @@
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
+		};
+		424AB131872D7027DF5BD90B /* Copy package resources */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/mlx-swift_Cmlx.bundle/default.metallib",
+				"$(BUILT_PRODUCTS_DIR)/swift-transformers_Hub.bundle",
+			);
+			name = "Copy package resources";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/mlx.metallib",
+				"$(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/swift-transformers_Hub.bundle",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\ncp \"${BUILT_PRODUCTS_DIR}/mlx-swift_Cmlx.bundle/default.metallib\" \"${TARGET_BUILD_DIR}/${WRAPPER_NAME}/mlx.metallib\"\nrsync -a --delete \"${BUILT_PRODUCTS_DIR}/swift-transformers_Hub.bundle\" \"${TARGET_BUILD_DIR}/${WRAPPER_NAME}/\"\n";
 		};
 		7444127E90A5B706A3ACD07F /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -334,11 +478,30 @@
 				F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */,
 				B7A1C0DE2E00000000000001 /* BrazierTLSPinning.m in Sources */,
 				B7A1C0DE2E00000000000003 /* BrazierLocalNetwork.m in Sources */,
+				B7A1C0DE2E00000000000005 /* BrazierOnDevice.m in Sources */,
+				B7A1C0DE2E00000000000007 /* BrazierAppleModelEngine.swift in Sources */,
 				97590E5CD8B7C59F0F94B76F /* ExpoModulesProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B01C0A28AC62E4127E4454A5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				80F16FACE83B95136DA121E6 /* BrazierMLXEngine.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E088DA00CE4C7A4CD26A580F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = BrazierMLX;
+			target = 3CA86579B90E431BCE6BB95F /* BrazierMLX */;
+			targetProxy = 7BE15409D30E145C2E634864 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		13B07F941A680F5B00A75B9A /* Debug */ = {
@@ -356,7 +519,7 @@
 					"FB_SONARKIT_ENABLED=1",
 				);
 				INFOPLIST_FILE = Brazier/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -388,7 +551,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 4U2WZ7WJT4;
 				INFOPLIST_FILE = Brazier/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -406,6 +569,75 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
+		};
+		6888EE2AF5CD4E5FAEF9985C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = 4U2WZ7WJT4;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_DEBUG";
+				PRODUCT_BUNDLE_IDENTIFIER = ai.brazier.mobile.mlx;
+				PRODUCT_NAME = BrazierMLX;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Debug;
+		};
+		7CB7AB656E6520BB9363B3E3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = 4U2WZ7WJT4;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GENERATE_INFOPLIST_FILE = YES;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_RELEASE";
+				PRODUCT_BUNDLE_IDENTIFIER = ai.brazier.mobile.mlx;
+				PRODUCT_NAME = BrazierMLX;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
 			};
 			name = Release;
 		};
@@ -456,7 +688,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					/usr/lib/swift,
 					"$(inherited)",
@@ -512,7 +744,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					/usr/lib/swift,
 					"$(inherited)",
@@ -548,7 +780,66 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		C4AB3EF0190D94D19B93B03A /* Build configuration list for PBXNativeTarget "BrazierMLX" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7CB7AB656E6520BB9363B3E3 /* Release */,
+				6888EE2AF5CD4E5FAEF9985C /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		CF80B816A97302C62AC39F64 /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift";
+			requirement = {
+				kind = exactVersion;
+				version = 0.33.0;
+			};
+		};
+		D7271C5261D43F38CAFA16F1 /* XCRemoteSwiftPackageReference "swift-transformers" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/huggingface/swift-transformers";
+			requirement = {
+				kind = exactVersion;
+				version = 1.4.0;
+			};
+		};
+		E86A53C26052104298AD67B4 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
+			requirement = {
+				kind = exactVersion;
+				version = 3.33.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		220CE0BDFA82E380F94FE7EA /* MLXLMCommon */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E86A53C26052104298AD67B4 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLMCommon;
+		};
+		29A92A1806721A8D7EFA806B /* MLX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CF80B816A97302C62AC39F64 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLX;
+		};
+		BB6D20ADA58FAA04EAB5C042 /* Tokenizers */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D7271C5261D43F38CAFA16F1 /* XCRemoteSwiftPackageReference "swift-transformers" */;
+			productName = Tokenizers;
+		};
+		D3CD716690BFFBE56C6D96BB /* MLXLLM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E86A53C26052104298AD67B4 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLLM;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 83CBB9F71A601CBA00E9B192 /* Project object */;
 }

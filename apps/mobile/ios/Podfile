@@ -60,4 +60,10 @@ target 'Brazier' do
       :ccache_enabled => ccache_enabled?(podfile_properties),
     )
   end
+
+  # MLX comes from Swift packages and needs iOS 17, so it is its own framework target.
+  post_integrate do |_installer|
+    require_relative '../plugins/mlx/mlx_target'
+    BrazierMLX.ensure_target(File.join(__dir__, 'Brazier.xcodeproj'))
+  end
 end
