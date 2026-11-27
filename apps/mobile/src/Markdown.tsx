@@ -44,7 +44,8 @@ export function Markdown({ text }: { text: string }) {
       }
       if (block.type === 'heading') {
         const size = [22, 20, 18, 17, 16, 16][block.level - 1];
-        return <Text key={key} selectable style={[styles.body, { fontSize: size, lineHeight: size + 8, fontWeight: '700' }]}>
+        return <Text key={key} selectable accessibilityRole="header"
+          style={[styles.body, { fontSize: size, lineHeight: size + 8, fontWeight: '700' }]}>
           {inline(block.children, key)}
         </Text>;
       }

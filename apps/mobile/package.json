@@ -9,7 +9,7 @@
     "ios": "expo run:ios",
     "check": "tsc --noEmit",
     "llama:artifacts": "node node_modules/llama.rn/install/download-native-artifacts.js",
-    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/api.test.ts src/reachability.test.ts src/hosts.test.ts src/markdown.test.ts src/media.test.ts src/agent/state.test.ts src/agent/rest.test.ts src/local/huggingface.test.ts src/local/conversations.test.ts src/local/engine.test.ts src/local/memory.test.ts src/local/images.test.ts"
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/api.test.ts src/reachability.test.ts src/hosts.test.ts src/navigation.test.ts src/markdown.test.ts src/media.test.ts src/agent/state.test.ts src/agent/rest.test.ts src/local/huggingface.test.ts src/local/conversations.test.ts src/local/engine.test.ts src/local/memory.test.ts src/local/images.test.ts"
   },
   "dependencies": {
     "brazier-sdcpp": "link:./modules/brazier-sdcpp",
