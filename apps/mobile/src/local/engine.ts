@@ -79,7 +79,7 @@ export function answerDelta(shown: string, data: { token: string; content?: stri
 
 /** The local engine: picks the runtime for a model and keeps at most one model loaded. */
 export type LocalEngine = ChatEngine & {
-  /** Frees the loaded model; with an id, only if that model is the one loaded. */
+  /** Frees the loaded model; with an id, only if that model is the one loaded. Waits for a reply being written. */
   unload(modelId?: string): Promise<void>;
 };
 
@@ -99,19 +99,23 @@ export function localEngine(runtimes: readonly Runtime[], installed: () => Promi
     return { runtime, model };
   }
 
-  function prepare(modelId: string, signal?: AbortSignal): Promise<void> {
-    const next = loading.catch(() => undefined).then(async () => {
-      if (loaded?.id === modelId) return;
-      const { runtime, model } = await resolve(modelId);
-      // Phones rarely have memory for two models, so the previous one goes first.
-      const previous = loaded;
-      loaded = null;
-      await previous?.runtime.unload().catch(() => undefined);
-      await runtime.load(model, signal);
-      loaded = { id: modelId, runtime };
-    });
+  // Loads, replies and unloads run one at a time: a model freed or replaced under a reply ends it early,
+  // and the cut-off text would be kept as the answer.
+  function queued<T>(work: () => Promise<T>): Promise<T> {
+    const next = loading.catch(() => undefined).then(work);
     loading = next;
     return next;
+  }
+
+  async function load(modelId: string, signal?: AbortSignal): Promise<void> {
+    if (loaded?.id === modelId) return;
+    const { runtime, model } = await resolve(modelId);
+    // Phones rarely have memory for two models, so the previous one goes first.
+    const previous = loaded;
+    loaded = null;
+    await previous?.runtime.unload().catch(() => undefined);
+    await runtime.load(model, signal);
+    loaded = { id: modelId, runtime };
   }
 
   return {
@@ -122,26 +126,24 @@ export function localEngine(runtimes: readonly Runtime[], installed: () => Promi
         .map((model): Model => ({ id: model.id, name: model.name, engine: model.runtime }));
       return [...builtIn, ...downloaded];
     },
-    prepare,
-    async chat(model, messages, signal, events) {
+    prepare: (modelId, signal) => queued(() => load(modelId, signal)),
+    chat(model, messages, signal, events) {
       const onToken = typeof events === 'function' ? events : events.onToken;
-      await prepare(model, signal);
-      if (signal.aborted) throw new DaemonError('Chat stopped.');
-      const current = loaded;
-      if (current?.id !== model) throw new DaemonError('The model was changed before it could reply.');
-      const answer = await current.runtime.generate(chatTurns(messages), signal, onToken);
-      if (signal.aborted) throw new DaemonError('Chat stopped.');
-      return answer;
+      return queued(async () => {
+        await load(model, signal);
+        if (signal.aborted) throw new DaemonError('Chat stopped.');
+        const answer = await loaded!.runtime.generate(chatTurns(messages), signal, onToken);
+        if (signal.aborted) throw new DaemonError('Chat stopped.');
+        return answer;
+      });
     },
     unload(modelId) {
-      const next = loading.catch(() => undefined).then(async () => {
+      return queued(async () => {
         if (!loaded || (modelId && loaded.id !== modelId)) return;
         const previous = loaded;
         loaded = null;
         await previous.runtime.unload();
       });
-      loading = next;
-      return next;
     },
   };
 }
