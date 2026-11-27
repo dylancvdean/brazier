@@ -127,7 +127,7 @@ export function Models({ onClose, onChanged }: { onClose: () => void; onChanged:
           <Text style={styles.body}>{choice.name}</Text>
           <Text style={styles.listMeta}>{runtimeNames[choice.runtime]}  ·  {formatBytes(choice.size)}
             {choice.files.length > 1 ? `  ·  ${choice.files.length} files` : ''}</Text>
-          {tooLarge(choice.size)}
+          {tooLarge(choice.size, contexts[id])}
           {progress ? <Text style={styles.listMeta}>Downloading…</Text>
             : have ? <Text style={styles.listMeta}>On this device</Text>
             : tooBig ? <Text style={styles.listMeta}>Not enough free space</Text>
