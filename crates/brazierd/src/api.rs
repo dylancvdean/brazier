@@ -5370,7 +5370,14 @@ async fn generate_image(
         .await
         .map_err(ApiError::internal)?;
     let _ = tokio::fs::remove_file(&result.output_path).await;
-    let history_id = record_generation(&state, "image", &blob, &result.metadata).await;
+    let history_id = record_generation(
+        &state,
+        "image",
+        &blob,
+        &result.metadata,
+        (&job.prompt, job.negative_prompt.as_deref()),
+    )
+    .await;
     Ok(Json(json!({
         "blob": blob,
         "metadata": result.metadata,
@@ -5386,9 +5393,20 @@ async fn record_generation(
     modality: &'static str,
     blob: &blob_store::StoredBlob,
     metadata: &Value,
+    (prompt, negative_prompt): (&str, Option<&str>),
 ) -> Option<String> {
     let data_dir = state.data_dir.clone();
-    let (blob, metadata) = (blob.clone(), metadata.clone());
+    let (blob, mut metadata) = (blob.clone(), metadata.clone());
+    // The engine reports the prompts it ran, with the model's own prompt
+    // defaults and LoRA tags merged in. The history keeps what was asked for,
+    // so reusing an entry does not apply those a second time.
+    if let Some(reported) = metadata.as_object_mut() {
+        reported.insert("prompt".to_owned(), json!(prompt));
+        reported.insert(
+            "negative_prompt".to_owned(),
+            json!(negative_prompt.unwrap_or_default()),
+        );
+    }
     let recorded = tokio::task::spawn_blocking(move || {
         generation_log::record(&data_dir, modality, &blob, &metadata)
     })
@@ -5637,7 +5655,14 @@ async fn generate_video(
     .await
     .map_err(ApiError::internal)?;
     let _ = tokio::fs::remove_file(&result.output_path).await;
-    let history_id = record_generation(&state, "video", &blob, &result.metadata).await;
+    let history_id = record_generation(
+        &state,
+        "video",
+        &blob,
+        &result.metadata,
+        (&job.prompt, job.negative_prompt.as_deref()),
+    )
+    .await;
     Ok(Json(json!({
         "blob": blob,
         "metadata": result.metadata,
@@ -10074,9 +10099,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let metadata =
-            json!({ "prompt": "a lighthouse", "model_id": "sdcpp-image:test", "seed": 7 });
-        let id = record_generation(&state, "image", &blob, &metadata)
+        let metadata = json!({
+            "prompt": "a lighthouse <lora:style:1>",
+            "negative_prompt": "blurry, model default",
+            "model_id": "sdcpp-image:test",
+            "seed": 7
+        });
+        let id = record_generation(&state, "image", &blob, &metadata, ("a lighthouse", None))
             .await
             .expect("history id");
         let app = router(state);
@@ -10088,7 +10117,10 @@ mod tests {
         assert_eq!(entry["id"], id);
         assert_eq!(entry["modality"], "image");
         assert_eq!(entry["blob"]["sha256"], blob.sha256);
+        // What was asked for, not what the model's defaults turned it into.
         assert_eq!(entry["metadata"]["prompt"], "a lighthouse");
+        assert_eq!(entry["metadata"]["negative_prompt"], "");
+        assert_eq!(entry["metadata"]["seed"], 7);
 
         let delete = |app: Router, id: String| async move {
             app.oneshot(
